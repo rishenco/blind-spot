@@ -17,6 +17,7 @@ export const enum PKind {
   Objective = 3,// artifact returns
   Phantom = 4,  // decoy-generated false contact (looks like Ghost to the observer)
   Device = 5,   // deployed gadget returns
+  Beacon = 6,   // the extraction pillar: a landmark for looking at from across the map
 }
 
 const VERT = /* glsl */ `
@@ -68,6 +69,10 @@ const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you bu
     vFlash = flash;
 
     vec3 col; float alpha; float px;
+    // Splat ceiling. Structural points may legitimately grow large up close — that is what
+    // makes a near wall read as a wall. Everything else stands for a *feature*, not a patch
+    // of surface, and must not balloon into screen-filling blobs when you walk up to it.
+    float maxPx = 24.0;
 
     if (kind == 1 || kind == 4) {
       // ── LIFE: an entity contact. Cools for 10s, then holds forever. A ghost is
@@ -79,6 +84,7 @@ const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you bu
       // white and the silhouette loses the one colour that says "this is a person".
       alpha = mix(0.78, 0.30, t);
       px    = 3.1;   // a ghost's 560 points stand in for a much coarser sampling of a body
+      maxPx = 13.0;
     } else if (kind == 2) {
       // ── SOUND / IMPACT: transient. Dies completely, leaving no memory.
       float t = clamp(age / uLifeTransient, 0.0, 1.0);
@@ -86,18 +92,29 @@ const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you bu
       col   = C_SOUND;
       alpha = 0.95 * (1.0 - t) * (1.0 - t);
       px    = mix(4.2, 1.6, t);
+      maxPx = 10.0;
     } else if (kind == 3) {
       // ── OBJECTIVE: gold, dims but never dies.
       float t = clamp(age / uAgeStructMemory, 0.0, 1.0);
       col   = mix(C_GOLD, C_GOLD * 0.45, t);
       alpha = mix(0.95, 0.46, t);
       px    = 2.6;
+      maxPx = 9.0;
+    } else if (kind == 6) {
+      // ── BEACON: a pillar of light meant to be read from across the map. It fades out as
+      // you approach, because the carrier has to stand inside it to win and must still be
+      // able to see the person coming to stop them.
+      col   = C_GOLD;
+      alpha = 0.95;
+      px    = 2.4;
+      maxPx = 9.0;
     } else if (kind == 5) {
       // ── DEVICE: a faint glint. Reads as matter, but colder and smaller.
       float t = clamp(age / uAgeStructMemory, 0.0, 1.0);
       col   = mix(C_COOL_NEAR, C_MEM_FAR, t);
       alpha = mix(0.85, 0.34, t);
       px    = 1.8;
+      maxPx = 8.0;
     } else {
       // ── MATTER: fresh -> cool -> permanent navy memory. Never culled by age;
       // only ring-buffer pressure evicts structure, so the map you have walked
@@ -124,6 +141,7 @@ const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you bu
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mv;
     float dist = -mv.z;
+    if (kind == 6) alpha *= smoothstep(0.4, 2.6, dist);
     // Deliberately flatter than 1/d perspective: near returns must not blow out into
     // white slabs, and distant ones must stay legible. Depth is carried by density
     // and hue, not by sprite size.
@@ -136,7 +154,7 @@ const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you bu
     float sv = fract(sin(dot(position.xz + position.y, vec2(12.9898, 78.233))) * 43758.5453);
     float splat = uVoxProj / max(dist, 0.30);
     float sz = px * splat * uPointScale * (0.76 + 0.48 * sv);
-    sz = clamp(sz * (1.0 + flash * 0.7), 1.05 * uDpr, 26.0 * uDpr);
+    sz = clamp(sz * (1.0 + flash * 0.7), 1.05 * uDpr, maxPx * uDpr);
     gl_PointSize = sz;
     // Energy conservation: a big near splat spreads the same return over more pixels, so
     // it must be correspondingly dimmer or close geometry burns out to white.

@@ -18,6 +18,7 @@ run "movement"         npx tsx tools/test-move.ts
 run "STALE INFORMATION ACCEPTANCE TEST" npx tsx tools/test-stale.ts
 run "gameplay"         npx tsx tools/test-gameplay.ts
 run "full match"       npx tsx tools/test-match.ts
+run "soak"             npx tsx tools/test-soak.ts
 printf '\n===================\n'
 [ "$fails" -eq 0 ] && echo "ALL SUITES PASSED" || echo "$fails SUITE(S) FAILED"
 exit "$fails"

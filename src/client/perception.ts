@@ -9,7 +9,7 @@ import * as THREE from 'three';
 import { PointField, PKind } from './pointfield.ts';
 import { GhostField } from './ghost.ts';
 import { PulseQueue } from './scan.ts';
-import { POOL, AGE, TOUCH, Res } from '../shared/config.ts';
+import { POOL, AGE, TOUCH, RELIC, Res } from '../shared/config.ts';
 import type { Ev } from '../shared/proto.ts';
 import type { World } from '../shared/world.ts';
 
@@ -154,22 +154,29 @@ export class Perception {
   private beaconAt = -1;
   /**
    * The extraction beacon. Once the relic has been picked up once, both players know where
-   * extraction is — that is the point of it, so this is drawn from public match state
-   * rather than from an observation. It is the only landmark in the game that never decays.
+   * extraction is — that is the entire point of it — so this is drawn from public match
+   * state rather than from an observation. Two parts, for two jobs:
+   *   a low ring, which tells the carrier exactly where they must stand; and
+   *   a column starting above head height and continuing up through the ceiling, which is
+   *   the landmark everyone navigates by. Starting it high keeps it out of the carrier's
+   *   eyeline during the one moment they most need to see who is coming.
    */
   beacon(x: number, y: number, z: number, now: number) {
     if (now < this.beaconAt) return;
-    this.beaconAt = now + 1.2;
-    for (let i = 0; i < 260; i++) {
-      const t = i / 260;
-      const a = t * Math.PI * 12;
-      const r = 2.0 * (1 - t * 0.55) + (Math.random() - 0.5) * 0.18;
-      this.aux.push(
-        x + Math.cos(a) * r,
-        y + t * 5.2,
-        z + Math.sin(a) * r,
-        now + t * 0.5, 0, 0.9, PKind.Objective,
-      );
+    this.beaconAt = now + 1.4;
+    for (let i = 0; i < 90; i++) {
+      const a = (i / 90) * Math.PI * 2;
+      const r = RELIC.ringRadius + (Math.random() - 0.5) * 0.12;
+      this.aux.push(x + Math.cos(a) * r, y + 0.06 + Math.random() * 0.05, z + Math.sin(a) * r,
+                    now + (i / 90) * 0.3, 0, 0.7, PKind.Beacon);
+    }
+    const n = 170;
+    for (let i = 0; i < n; i++) {
+      const t = i / n;
+      const a = t * Math.PI * 9;
+      const r = 0.30 + (Math.random() - 0.5) * 0.1;
+      this.aux.push(x + Math.cos(a) * r, y + 2.35 + t * 8.6, z + Math.sin(a) * r,
+                    now + t * 0.55, 0, 0.95, PKind.Beacon);
     }
   }
 
