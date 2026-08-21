@@ -35,7 +35,7 @@ export const PULSE = {
   range: 28,
   cooldownS: 4.0,
   waveSpeed: 60,         // metres/sec reveal propagation
-  rays: 7000,
+  rays: 46000,
   flashRadius: 35,       // enemy learns you pulsed within this radius
 };
 
@@ -115,7 +115,7 @@ export const AGE = {
 };
 
 export const POOL = {
-  structural: 240_000,
+  structural: 260_000,
   transient: 30_000,
   entity: 12_000,
 };

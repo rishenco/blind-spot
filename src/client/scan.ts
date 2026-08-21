@@ -47,6 +47,7 @@ export class PulseJob {
   private rng: () => number;
   private bx = { x: 1, y: 0, z: 0 };
   private by = { x: 0, y: 1, z: 0 };
+  private jitter = 0;
   done = false;
 
   constructor(spec: PulseSpec) {
@@ -63,6 +64,12 @@ export class PulseJob {
       y: spec.dz * bx.x - spec.dx * bx.z,
       z: spec.dx * bx.y - spec.dy * bx.x,
     };
+    // A deterministic lattice of rays produces visible spokes. Jitter each ray by ~one
+    // ray-spacing so the return reads as a measurement, not as a pattern.
+    const solid = spec.halfAngle >= Math.PI
+      ? 4 * Math.PI * Math.sin(spec.elevMax ?? 1.0)
+      : 2 * Math.PI * (1 - Math.cos(spec.halfAngle));
+    this.jitter = 1.35 * Math.sqrt(solid / (Math.PI * Math.max(1, spec.rays)));
   }
 
   /** Cast up to `budget` rays. Returns rays actually cast. */
@@ -80,6 +87,7 @@ export class PulseJob {
       const i = this.i++;
       cast++;
       let dx: number, dy: number, dz: number;
+      let u = 0; // normalised angular position within the cone (0 = axis, 1 = rim)
 
       if (omni) {
         const yy = yLo + ySpan * ((i + 0.5) / s.rays);
@@ -87,14 +95,25 @@ export class PulseJob {
         const th = i * GOLDEN;
         dx = r * Math.cos(th); dy = yy; dz = r * Math.sin(th);
       } else {
-        // Uniform within the cone, in the axis-aligned frame, then rotated onto the axis.
-        const cz = 1 - ((i + 0.5) / s.rays) * (1 - cosHalf);
+        // Biased toward the cone axis, so the beam falls off instead of ending in a
+        // hard-edged circle. u also feeds an edge density fade below.
+        u = (i + 0.5) / s.rays;
+        const uu = Math.pow(u, 1.55);
+        const cz = 1 - uu * (1 - cosHalf);
         const sr = Math.sqrt(Math.max(0, 1 - cz * cz));
         const th = i * GOLDEN;
         const lx = sr * Math.cos(th), ly = sr * Math.sin(th);
         dx = this.bx.x * lx + this.by.x * ly + s.dx * cz;
         dy = this.bx.y * lx + this.by.y * ly + s.dy * cz;
         dz = this.bx.z * lx + this.by.z * ly + s.dz * cz;
+      }
+
+      // Per-ray angular jitter.
+      {
+        const j = this.jitter;
+        dx += (this.rng() - 0.5) * j; dy += (this.rng() - 0.5) * j; dz += (this.rng() - 0.5) * j;
+        const il = 1 / (Math.hypot(dx, dy, dz) || 1);
+        dx *= il; dy *= il; dz *= il;
       }
 
       // March, allowing partially transparent materials to let the ray continue.
@@ -109,21 +128,44 @@ export class PulseJob {
         const resp = RESP[h.mat] ?? RESP[Mat.Concrete]!;
 
         // Grazing incidence returns less energy.
+        const rimT = omni ? 1 : 1 - smooth01((u - 0.42) / 0.58);
         const inc = Math.abs(h.nx * dx + h.ny * dy + h.nz * dz);
-        let strength = resp.gain * (0.30 + 0.70 * inc);
+        let strength = resp.gain * (0.30 + 0.70 * inc) * (omni ? 1 : 0.35 + 0.65 * rimT);
         // Inverse-ish falloff: far surfaces come back thin and dim.
         const dn = d / s.range;
         strength *= 1 - 0.55 * dn * dn;
 
         // Density thinning with range keeps the point budget on nearby, useful geometry.
-        const keep = (1 - dn * 0.75 * s.densityFalloff) * (resp.gain > 0.1 ? 1 : 0.35);
+        // Range thinning keeps the budget on useful nearby geometry; the rim fade
+        // dissolves the cone edge into darkness rather than cutting it off.
+        const rim = omni ? 1 : 0.02 + 0.98 * rimT * rimT;
+        // Thin the near field, but only where it is *splatter*: the floor underfoot and
+        // the ceiling overhead, hit face-on from a metre away, are the least informative
+        // returns a pulse can give and at full density they fog everything worth seeing.
+        // Surfaces at grazing incidence are the opposite — they are the receding walls
+        // that make a corridor read as a corridor — so incidence gates the penalty.
+        const nearPenalty = smooth01((4.8 - d) / 3.8) * inc;
+        const nearFade = 1 - 0.9 * nearPenalty;
+        const keep = (1 - dn * 0.35 * s.densityFalloff) * rim * nearFade * (resp.gain > 0.1 ? 1 : 0.35);
         if (this.rng() < keep && strength > 0.02) {
-          const nz2 = resp.noise * (0.004 + 0.012 * dn);
-          const px = ox + dx * h.t + (this.rng() - 0.5) * nz2 * 6;
-          const py = oy + dy * h.t + (this.rng() - 0.5) * nz2 * 6;
-          const pz = oz + dz * h.t + (this.rng() - 0.5) * nz2 * 6;
-          const hue = clampf(0.10 + 0.62 * dn + resp.hueShift, 0, 1);
-          field.push(px, py, pz, s.startTime + d / s.waveSpeed, hue, clampf(strength, 0, 1), kind);
+          // Measurement noise is scattered in the surface's TANGENT plane, with only a
+          // sliver along the normal. Isotropic jitter puffs every flat wall into a
+          // ten-centimetre slab of fog; tangential jitter keeps walls reading as planes
+          // while still looking like noisy measurements rather than a lattice.
+          const nz2 = resp.noise * (0.055 + 0.075 * dn);
+          const nrm = resp.noise * (0.0015 + 0.006 * dn);
+          // Tangent basis from the axis-aligned normal (cheap: exactly one component is set).
+          let t1x: number, t1y: number, t1z: number, t2x: number, t2y: number, t2z: number;
+          if (h.ny !== 0) { t1x = 1; t1y = 0; t1z = 0; t2x = 0; t2y = 0; t2z = 1; }
+          else if (h.nx !== 0) { t1x = 0; t1y = 1; t1z = 0; t2x = 0; t2y = 0; t2z = 1; }
+          else { t1x = 1; t1y = 0; t1z = 0; t2x = 0; t2y = 1; t2z = 0; }
+          const a1 = (this.rng() - 0.5) * nz2, a2 = (this.rng() - 0.5) * nz2;
+          const an = (this.rng() - 0.5) * nrm;
+          const px = ox + dx * h.t + t1x * a1 + t2x * a2 + h.nx * an;
+          const py = oy + dy * h.t + t1y * a1 + t2y * a2 + h.ny * an;
+          const pz = oz + dz * h.t + t1z * a1 + t2z * a2 + h.nz * an;
+          const depth = clampf(dn + resp.hueShift, 0, 1);
+          field.push(px, py, pz, s.startTime + d / s.waveSpeed, depth, clampf(strength, 0, 1), kind);
         }
 
         if (resp.pass <= 0 || this.rng() > resp.pass) break;
@@ -138,6 +180,7 @@ export class PulseJob {
 }
 
 const clampf = (x: number, a: number, b: number) => (x < a ? a : x > b ? b : x);
+const smooth01 = (x: number) => { const t = x < 0 ? 0 : x > 1 ? 1 : x; return t * t * (3 - 2 * t); };
 
 /** Runs pulses with a per-frame ray budget so big scans never stall the frame. */
 export class PulseQueue {

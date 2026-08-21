@@ -21,86 +21,124 @@ export const enum PKind {
 
 const VERT = /* glsl */ `
   uniform float uNow;
-  uniform float uLifetime;
   uniform float uPointScale;
   uniform float uFlashDur;
+  uniform float uDpr;
+  uniform float uLifeTransient;
+  uniform float uAgeStructFresh;
+  uniform float uAgeStructMemory;
+  uniform float uAgeEntity;
 
-  attribute float aBirth;     // time the wavefront reaches this point
-  attribute float aHue;       // 0..1 hue, normally encoding measured distance
-  attribute float aInt;       // 0..1 return strength (material / incidence)
+  attribute float aBirth;   // time the wavefront reaches this point
+  attribute float aDepth;   // 0..1 measured distance at capture (structural depth cue)
+  attribute float aInt;     // 0..1 return strength (material x incidence)
   attribute float aKind;
 
   varying vec3  vColor;
   varying float vAlpha;
-  varying float vKind;
   varying float vFlash;
 
-  vec3 hsv2rgb(vec3 c) {
-    vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
-    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-  }
+  // ── The Three-Color Law ─────────────────────────────────────────────
+  // Architecture is cyan->blue and cools to navy. Life is orange and cools to rust.
+  // Sound is amber and dies. The objective is gold. Nothing else has a colour.
+  const vec3 C_FRESH_NEAR = vec3(0.714, 0.941, 1.000); // #B6F0FF — pale, not white
+  const vec3 C_FRESH_FAR  = vec3(0.243, 0.624, 0.878); // #3E9FE0 — depth reads as blue
+  const vec3 C_COOL_NEAR  = vec3(0.388, 0.722, 0.863); // #63B8DC
+  const vec3 C_COOL_FAR   = vec3(0.180, 0.435, 0.659); // #2E6FA8
+  const vec3 C_MEMORY     = vec3(0.106, 0.227, 0.400); // #1B3A66 — memory forgets depth
+  const vec3 C_LIFE       = vec3(1.000, 0.353, 0.176); // #FF5A2D
+  const vec3 C_LIFE_COOL  = vec3(0.690, 0.251, 0.122); // #B0401F
+  const vec3 C_LIFE_HOLD  = vec3(0.431, 0.165, 0.094); // #6E2A18
+  const vec3 C_SOUND      = vec3(1.000, 0.702, 0.278); // #FFB347
+  const vec3 C_GOLD       = vec3(1.000, 0.827, 0.302); // #FFD34D
 
   void main() {
     float age = uNow - aBirth;
-    vKind = aKind;
+    int kind = int(aKind + 0.5);
 
-    // Not yet reached by the wavefront, or evicted from memory: cull.
-    if (age < 0.0 || age > uLifetime) {
-      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-      gl_PointSize = 0.0;
-      vAlpha = 0.0;
-      return;
-    }
+    // Before the wavefront arrives, the point does not exist yet.
+    if (age < 0.0) { gl_Position = vec4(2.0); gl_PointSize = 0.0; vAlpha = 0.0; return; }
 
-    float ageN = clamp(age / uLifetime, 0.0, 1.0);
-
-    // Freshness flash: the leading edge of the wavefront burns white-hot, then settles.
     float flash = 1.0 - clamp(age / uFlashDur, 0.0, 1.0);
     flash = flash * flash;
     vFlash = flash;
 
-    // Memory decay: saturation and value fall away, hue drifts toward cold blue.
-    float decay = pow(ageN, 0.55);
-    float hue = mix(aHue, 0.62, decay * 0.55);
-    float sat = mix(0.95, 0.18, decay);
-    float val = mix(1.0, 0.20, decay) * mix(0.55, 1.0, aInt);
+    vec3 col; float alpha; float px;
 
-    vec3 col = hsv2rgb(vec3(hue, sat, val));
-    col = mix(col, vec3(1.0, 0.97, 0.9), flash * 0.85);
+    if (kind == 1 || kind == 4) {
+      // ── LIFE: an entity contact. Cools for 10s, then holds forever. A ghost is
+      // never forgotten — it is only ever *replaced* by a newer sighting.
+      float t = clamp(age / uAgeEntity, 0.0, 1.0);
+      col   = t < 1.0 ? mix(C_LIFE, C_LIFE_COOL, t) : C_LIFE_HOLD;
+      col   = mix(col, C_LIFE_HOLD, smoothstep(0.8, 1.0, t));
+      alpha = mix(1.0, 0.38, t);
+      px    = mix(4.2, 3.0, t);
+    } else if (kind == 2) {
+      // ── SOUND / IMPACT: transient. Dies completely, leaving no memory.
+      float t = clamp(age / uLifeTransient, 0.0, 1.0);
+      if (t >= 1.0) { gl_Position = vec4(2.0); gl_PointSize = 0.0; vAlpha = 0.0; return; }
+      col   = C_SOUND;
+      alpha = 0.92 * (1.0 - t) * (1.0 - t);
+      px    = mix(4.4, 1.2, t);
+    } else if (kind == 3) {
+      // ── OBJECTIVE: gold, dims but never dies.
+      float t = clamp(age / uAgeStructMemory, 0.0, 1.0);
+      col   = mix(C_GOLD, C_GOLD * 0.45, t);
+      alpha = mix(0.95, 0.42, t);
+      px    = mix(4.0, 2.6, t);
+    } else if (kind == 5) {
+      // ── DEVICE: a faint glint. Reads as matter, but colder and smaller.
+      float t = clamp(age / uAgeStructMemory, 0.0, 1.0);
+      col   = mix(C_COOL_NEAR, C_MEMORY, t);
+      alpha = mix(0.85, 0.30, t);
+      px    = mix(3.2, 2.2, t);
+    } else {
+      // ── MATTER: fresh -> cool -> permanent navy memory. Never culled by age;
+      // only ring-buffer pressure evicts structure, so the map you have walked
+      // stays with you for the whole match.
+      float t1 = clamp(age / uAgeStructFresh, 0.0, 1.0);
+      float t2 = clamp((age - uAgeStructFresh) / max(uAgeStructMemory - uAgeStructFresh, 0.001), 0.0, 1.0);
+      vec3 fresh = mix(C_FRESH_NEAR, C_FRESH_FAR, aDepth);
+      vec3 cool  = mix(C_COOL_NEAR,  C_COOL_FAR,  aDepth);
+      col   = mix(mix(fresh, cool, t1), C_MEMORY, t2);
+      alpha = mix(mix(1.0, 0.58, t1), 0.24, t2);
+      px    = mix(mix(3.0, 2.1, t1), 1.6, t2);
+    }
+
+    // Return strength modulates presence: a grazing hit on cloth is a whisper of a point.
+    alpha *= mix(0.5, 1.0, aInt);
+    col = mix(col, vec3(1.0, 0.98, 0.94), flash * 0.8);
     vColor = col;
-
-    // Old memories thin out but never vanish entirely before eviction: the mechanic must stay readable.
-    vAlpha = mix(1.0, 0.30, decay) * mix(0.45, 1.0, aInt);
+    vAlpha = alpha;
 
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mv;
-
     float dist = -mv.z;
-    float shrink = mix(1.0, 0.62, decay);
-    // Perspective-correct sizing with a floor so distant returns stay legible.
-    float size = uPointScale * shrink * (1.0 + flash * 1.6) / max(dist, 0.6);
-    gl_PointSize = clamp(size, 1.0, 14.0);
+    // Deliberately flatter than 1/d perspective: near returns must not blow out into
+    // white slabs, and distant ones must stay legible. Depth is carried by density
+    // and hue, not by sprite size.
+    // Per-point size variance, hashed from world position: a cloud of identically sized
+    // dots reads as a print pattern, not as measurements.
+    float sv = fract(sin(dot(position.xz + position.y, vec2(12.9898, 78.233))) * 43758.5453);
+    float sz = px * uPointScale * (0.72 + 0.62 * sv) * pow(max(dist, 0.5), -0.38) * uDpr;
+    gl_PointSize = clamp(sz * (1.0 + flash * 0.8), 1.1 * uDpr, 7.0 * uDpr);
   }
 `;
 
 const FRAG = /* glsl */ `
   varying vec3  vColor;
   varying float vAlpha;
-  varying float vKind;
   varying float vFlash;
 
   void main() {
-    if (vAlpha <= 0.001) discard;
+    if (vAlpha <= 0.003) discard;
     vec2 d = gl_PointCoord - vec2(0.5);
     float r2 = dot(d, d);
     if (r2 > 0.25) discard;
-
-    // Soft round sprite with a hot core.
-    float falloff = 1.0 - smoothstep(0.02, 0.25, r2);
-    float core = 1.0 - smoothstep(0.0, 0.06, r2);
-
-    vec3 col = vColor + vColor * core * 0.9 + vec3(vFlash) * core * 0.5;
+    // Wide bright plateau with a soft rim: at 1-3px a sharp falloff eats the whole sprite.
+    float falloff = 1.0 - smoothstep(0.055, 0.25, r2);
+    float core = 1.0 - smoothstep(0.0, 0.09, r2);
+    vec3 col = vColor * (1.0 + core * 0.45) + vec3(vFlash) * core * 0.5;
     gl_FragColor = vec4(col, vAlpha * falloff);
   }
 `;
@@ -112,26 +150,31 @@ export class PointField {
   private geom: THREE.BufferGeometry;
   private pos: THREE.BufferAttribute;
   private birth: THREE.BufferAttribute;
-  private hue: THREE.BufferAttribute;
+  private depth: THREE.BufferAttribute;
   private inten: THREE.BufferAttribute;
   private kind: THREE.BufferAttribute;
   private mat: THREE.ShaderMaterial;
   private dirtyLo = Infinity;
   private dirtyHi = -Infinity;
   private wrapped = false;
+  /** voxel key -> point index, so rescanning a wall refreshes it rather than duplicating it. */
+  private vox = new Map<number, number>();
+  private voxOf: Float64Array;
+  private static readonly VOX = 0.09;
 
-  constructor(capacity: number, lifetime: number) {
+  constructor(capacity: number, ages?: Partial<{ transient: number; structFresh: number; structMemory: number; entity: number }>) {
     this.capacity = capacity;
     const g = new THREE.BufferGeometry();
     this.pos = new THREE.BufferAttribute(new Float32Array(capacity * 3), 3);
     this.birth = new THREE.BufferAttribute(new Float32Array(capacity).fill(-1e9), 1);
-    this.hue = new THREE.BufferAttribute(new Float32Array(capacity), 1);
+    this.depth = new THREE.BufferAttribute(new Float32Array(capacity), 1);
     this.inten = new THREE.BufferAttribute(new Float32Array(capacity), 1);
     this.kind = new THREE.BufferAttribute(new Float32Array(capacity), 1);
-    for (const a of [this.pos, this.birth, this.hue, this.inten, this.kind]) a.setUsage(THREE.DynamicDrawUsage);
+    this.voxOf = new Float64Array(capacity).fill(-1);
+    for (const a of [this.pos, this.birth, this.depth, this.inten, this.kind]) a.setUsage(THREE.DynamicDrawUsage);
     g.setAttribute('position', this.pos);
     g.setAttribute('aBirth', this.birth);
-    g.setAttribute('aHue', this.hue);
+    g.setAttribute('aDepth', this.depth);
     g.setAttribute('aInt', this.inten);
     g.setAttribute('aKind', this.kind);
     g.setDrawRange(0, 0);
@@ -142,9 +185,13 @@ export class PointField {
     this.mat = new THREE.ShaderMaterial({
       uniforms: {
         uNow: { value: 0 },
-        uLifetime: { value: lifetime },
-        uPointScale: { value: 26 },
+        uPointScale: { value: 5.6 },
+        uDpr: { value: 1 },
         uFlashDur: { value: 0.45 },
+        uLifeTransient: { value: 4.0 },
+        uAgeStructFresh: { value: 4.0 },
+        uAgeStructMemory: { value: 30.0 },
+        uAgeEntity: { value: 10.0 },
       },
       vertexShader: VERT,
       fragmentShader: FRAG,
@@ -153,28 +200,70 @@ export class PointField {
       blending: THREE.AdditiveBlending,
     });
 
+    if (ages) this.setAges(ages);
     this.points = new THREE.Points(g, this.mat);
     this.points.frustumCulled = false;
   }
 
-  get lifetime(): number { return this.mat.uniforms.uLifetime!.value as number; }
-  set lifetime(v: number) { this.mat.uniforms.uLifetime!.value = v; }
   set pointScale(v: number) { this.mat.uniforms.uPointScale!.value = v; }
+  set dpr(v: number) { this.mat.uniforms.uDpr!.value = v; }
+  setAges(a: Partial<{ transient: number; structFresh: number; structMemory: number; entity: number }>) {
+    const u = this.mat.uniforms;
+    if (a.transient !== undefined) u.uLifeTransient!.value = a.transient;
+    if (a.structFresh !== undefined) u.uAgeStructFresh!.value = a.structFresh;
+    if (a.structMemory !== undefined) u.uAgeStructMemory!.value = a.structMemory;
+    if (a.entity !== undefined) u.uAgeEntity!.value = a.entity;
+  }
 
-  /** Append one measurement. `birth` may be in the future to stagger a propagating wavefront. */
-  push(x: number, y: number, z: number, birth: number, hue: number, intensity: number, kind: PKind) {
+  /** Append one measurement. `birth` may be in the future to stagger a propagating wavefront.
+   *  `depth` is the normalised capture distance, used only as a structural depth cue. */
+  push(x: number, y: number, z: number, birth: number, depth: number, intensity: number, kind: PKind) {
+    // Structural memory is deduplicated on a voxel grid. Re-measuring a surface you already
+    // hold updates *that* measurement's timestamp — you refresh a memory, you do not stack
+    // a second copy of the same wall. This is what lets a 240k pool hold the whole map.
+    if (kind === PKind.Static) {
+      const V = PointField.VOX;
+      const kx = Math.floor(x / V), ky = Math.floor(y / V), kz = Math.floor(z / V);
+      const key = (kx + 1024) + (ky + 128) * 2048 + (kz + 1024) * 2048 * 256;
+      const prev = this.vox.get(key);
+      if (prev !== undefined && this.voxOf[prev] === key) {
+        this.writeAt(prev, this.pos.array[prev * 3]!, this.pos.array[prev * 3 + 1]!, this.pos.array[prev * 3 + 2]!, birth, depth, intensity, kind);
+        return;
+      }
+      // The position of the first observation is kept verbatim (a re-scan writes into the
+      // existing index above), so the cloud is stable without snapping to a visible grid.
+      const i0 = this.head;
+      const stale = this.voxOf[i0]!;
+      if (stale >= 0 && this.vox.get(stale) === i0) this.vox.delete(stale);
+      this.voxOf[i0] = key;
+      this.vox.set(key, i0);
+    } else if (this.voxOf[this.head]! >= 0) {
+      const stale = this.voxOf[this.head]!;
+      if (this.vox.get(stale) === this.head) this.vox.delete(stale);
+      this.voxOf[this.head] = -1;
+    }
     const i = this.head;
     this.pos.array[i * 3] = x;
     this.pos.array[i * 3 + 1] = y;
     this.pos.array[i * 3 + 2] = z;
     (this.birth.array as Float32Array)[i] = birth;
-    (this.hue.array as Float32Array)[i] = hue;
+    (this.depth.array as Float32Array)[i] = depth;
     (this.inten.array as Float32Array)[i] = intensity;
     (this.kind.array as Float32Array)[i] = kind;
     if (i < this.dirtyLo) this.dirtyLo = i;
     if (i > this.dirtyHi) this.dirtyHi = i;
     this.head = i + 1;
     if (this.head >= this.capacity) { this.head = 0; this.wrapped = true; }
+  }
+
+  private writeAt(i: number, x: number, y: number, z: number, birth: number, depth: number, intensity: number, kind: PKind) {
+    this.pos.array[i * 3] = x; this.pos.array[i * 3 + 1] = y; this.pos.array[i * 3 + 2] = z;
+    (this.birth.array as Float32Array)[i] = birth;
+    (this.depth.array as Float32Array)[i] = depth;
+    (this.inten.array as Float32Array)[i] = intensity;
+    (this.kind.array as Float32Array)[i] = kind;
+    if (i < this.dirtyLo) this.dirtyLo = i;
+    if (i > this.dirtyHi) this.dirtyHi = i;
   }
 
   /** Erase every point of a kind (used when a decoy is debunked, a device dies, etc.). */
@@ -187,6 +276,7 @@ export class PointField {
   }
 
   clearAll() {
+    this.vox.clear(); this.voxOf.fill(-1);
     (this.birth.array as Float32Array).fill(-1e9);
     this.dirtyLo = 0; this.dirtyHi = this.capacity - 1;
     this.head = 0; this.wrapped = false;
@@ -201,7 +291,7 @@ export class PointField {
       const lo = this.dirtyLo, n = this.dirtyHi - lo + 1;
       this.pos.addUpdateRange(lo * 3, n * 3); this.pos.needsUpdate = true;
       this.birth.addUpdateRange(lo, n); this.birth.needsUpdate = true;
-      this.hue.addUpdateRange(lo, n); this.hue.needsUpdate = true;
+      this.depth.addUpdateRange(lo, n); this.depth.needsUpdate = true;
       this.inten.addUpdateRange(lo, n); this.inten.needsUpdate = true;
       this.kind.addUpdateRange(lo, n); this.kind.needsUpdate = true;
       this.dirtyLo = Infinity; this.dirtyHi = -Infinity;
