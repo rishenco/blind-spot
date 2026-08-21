@@ -22,7 +22,12 @@ export async function openGame(browser: Browser, url = URL_BASE, w = 1280, h = 7
   (page as any).__errs = errs;
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => (window as any).__bs !== undefined, null, { timeout: 20000 });
-  await page.evaluate(() => document.getElementById('center')?.classList.add('hidden'));
+  // Software GL here would trip the adaptive-quality fallback and silently drop bloom,
+  // so captures would not show what a player with a GPU actually sees.
+  await page.evaluate(() => {
+    const bs = (window as any).__bs;
+    if (bs?.post) { bs.post.autoQualityEnabled = false; bs.post.bloom.enabled = true; }
+  });
   return page;
 }
 
@@ -132,25 +137,33 @@ if (process.argv[1]?.endsWith('shot.ts')) {
   const b = await launch();
   const p = await openGame(b);
   await solo(p);
-  // Down the Spine: the longest sightline on the map, the real depth test.
-  await place(p, 5, 26.5, -Math.PI / 2, -0.03);
-  await settle(p, 0.6); await shot(p, '01-dark');
+  // A tour of the map's distinctive spaces. Each is a different scanning problem.
+  const tour: [string, number, number, number, number][] = [
+    ['t1-concourse',  23, 11.5, Math.PI / 2, 0.02],    // down the length of the pillared hall (-X)
+    ['t2-spine',       8, 26.5, -Math.PI / 2, -0.03],  // the long artery
+    ['t3-well',       29, 34, 0, 0.05],                // extraction rotunda, looking north
+    ['t4-vault',      43, 32, Math.PI, -0.02],         // scanning THROUGH glass
+    ['t5-baffles',    12, 40, -Math.PI / 2, 0],        // cloth panels that read as doorways
+    ['t6-lattice',    34, 12, -Math.PI / 2, 0],        // tight offset cells
+  ];
+  for (const [name, x, z, yaw, pitch] of tour) {
+    await p.evaluate(() => (window as any).__bs.clearField());
+    await place(p, x, z, yaw, pitch);
+    await settle(p, 0.4);
+    await pulse(p);
+    await settle(p, 1.6);
+    await shot(p, name);
+  }
+  // Propagation study from a single vantage.
+  await p.evaluate(() => (window as any).__bs.clearField());
+  await place(p, 23, 11.5, Math.PI / 2, 0.02);
+  await settle(p, 0.4); await shot(p, 'w0-dark');
   await pulse(p);
-  await settle(p, 0.22); await shot(p, '02-wave-early');
-  await settle(p, 0.30); await shot(p, '03-wave-mid');
-  await settle(p, 1.2);  await shot(p, '04-spine-revealed');
-  await settle(p, 7.0);  await shot(p, '05-spine-cooled');
-  // Concourse: pillars + mezzanine, the volumetric test.
-  await place(p, 22, 18, Math.PI * 0.82, 0.02);
-  await pulse(p); await settle(p, 1.4); await shot(p, '06-concourse');
-  // Vault: scanning through glass at a room you cannot enter.
-  await p.evaluate(() => (window as any).__bs.clearField());
-  await place(p, 43, 32, Math.PI, -0.02);
-  await pulse(p); await settle(p, 1.4); await shot(p, '07-vault-glass');
-  // Baffles: the cloth panels that read as open doorways but are solid wall.
-  await p.evaluate(() => (window as any).__bs.clearField());
-  await place(p, 12, 40, -Math.PI / 2, 0);
-  await pulse(p); await settle(p, 1.4); await shot(p, '08-baffles');
+  await settle(p, 0.18); await shot(p, 'w1-wavefront');
+  await settle(p, 0.30); await shot(p, 'w2-arriving');
+  await settle(p, 1.2);  await shot(p, 'w3-fresh');
+  await settle(p, 8.0);  await shot(p, 'w4-cooling');
+  await settle(p, 24.0); await shot(p, 'w5-memory');
   const e = errsOf(p);
   console.log(e.length ? 'CONSOLE ERRORS:\n' + e.slice(0, 10).join('\n') : 'no console errors');
   await b.close();

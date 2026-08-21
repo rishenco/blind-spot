@@ -15,7 +15,7 @@ const BLOOM_SCALE = 0.75;
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    uExposure: { value: 1.12 },
+    uExposure: { value: 1.55 },
     uVignette: { value: 0.42 },
     uGrain: { value: 0.035 },
     uTime: { value: 0 },
@@ -53,6 +53,8 @@ export class Post {
   grade: ShaderPass;
   enabled = true;
   private bloomOn = true;
+  /** Test harnesses pin this off so captures show the intended look, not a fallback. */
+  autoQualityEnabled = true;
 
   constructor(private renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera) {
     const size = renderer.getSize(new THREE.Vector2());
@@ -80,6 +82,7 @@ export class Post {
    * needs frames far more than it needs glow, and the point cloud still reads without it.
    */
   autoQuality(fps: number) {
+    if (!this.autoQualityEnabled) return;
     if (this.bloomOn && fps < 38) { this.bloomOn = false; this.bloom.enabled = false; }
     else if (!this.bloomOn && fps > 55) { this.bloomOn = true; this.bloom.enabled = true; }
   }

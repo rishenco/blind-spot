@@ -51,6 +51,10 @@ export class Perception {
   }
 
   setDpr(v: number) { this.structural.dpr = v; this.aux.dpr = v; }
+  setProjection(physicalHeightPx: number, fovYRad: number) {
+    this.structural.setProjection(physicalHeightPx, fovYRad);
+    this.aux.setProjection(physicalHeightPx, fovYRad);
+  }
 
   applyEvent(e: Ev, serverT: number, nowLocal: number) {
     // Events are stamped with server time; render them on the local clock, offset so the
@@ -69,6 +73,7 @@ export class Perception {
           waveSpeed: e.speed, startTime: nowLocal, densityFalloff: 1,
           seed: e.seed, kind: gold ? PKind.Objective : PKind.Static,
           elevMax: e.half >= Math.PI ? 1.15 : undefined,
+          vScale: e.src === 'pulse' ? 0.60 : 1,
         });
         if (gold) this.lastHeartbeatAt = nowLocal;
         break;

@@ -31,6 +31,9 @@ const clock = () => (performance.now() - t0) / 1000;
 
 const per = new Perception(map.world, clock);
 per.setDpr(DPR);
+const refreshProjection = () =>
+  per.setProjection(innerHeight * DPR, (camera.fov * Math.PI) / 180);
+refreshProjection();
 scene.add(per.group);
 
 const post = new Post(renderer, scene, camera);
@@ -45,6 +48,7 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   post.setSize(innerWidth, innerHeight);
+  refreshProjection();
 });
 
 // ── game state (CLIENT-SIDE, never contains enemy data) ───────────────

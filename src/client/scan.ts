@@ -29,6 +29,14 @@ export interface PulseSpec {
   gain?: number;
   /** Vertical band for omni pulses (radians from horizon). */
   elevMax?: number;
+  /**
+   * Vertical squash of a cone pulse. Rooms here are 4.2m tall and a player's eye is at
+   * 1.58m, so a circular 70-degree cone spends most of its rays on the floor two metres
+   * ahead and the ceiling three metres up — the least informative surfaces in the game,
+   * and the ones that fog everything worth seeing. An elliptical cone puts the same ray
+   * budget on walls, doorways and people.
+   */
+  vScale?: number;
 }
 
 /** Per-material response to a pulse. */
@@ -105,10 +113,13 @@ export class PulseJob {
         const cz = 1 - uu * (1 - cosHalf);
         const sr = Math.sqrt(Math.max(0, 1 - cz * cz));
         const th = i * GOLDEN;
-        const lx = sr * Math.cos(th), ly = sr * Math.sin(th);
+        // bx is horizontal and by is vertical by construction, so squashing ly squashes
+        // the cone in world-vertical terms regardless of where the player is looking.
+        const lx = sr * Math.cos(th), ly = sr * Math.sin(th) * (s.vScale ?? 1);
         dx = this.bx.x * lx + this.by.x * ly + s.dx * cz;
         dy = this.bx.y * lx + this.by.y * ly + s.dy * cz;
         dz = this.bx.z * lx + this.by.z * ly + s.dz * cz;
+        { const il = 1 / (Math.hypot(dx, dy, dz) || 1); dx *= il; dy *= il; dz *= il; }
       }
 
       // Per-ray angular jitter.
@@ -131,7 +142,7 @@ export class PulseJob {
         const resp = RESP[h.mat] ?? RESP[Mat.Concrete]!;
 
         // Grazing incidence returns less energy.
-        const rimT = omni ? 1 : 1 - smooth01((u - 0.42) / 0.58);
+        const rimT = omni ? 1 : 1 - smooth01((u - 0.34) / 0.66);
         const inc = Math.abs(h.nx * dx + h.ny * dy + h.nz * dz);
         let strength = (s.gain ?? 1) * resp.gain * (0.30 + 0.70 * inc) * (omni ? 1 : 0.35 + 0.65 * rimT);
         // Inverse-ish falloff: far surfaces come back thin and dim.
@@ -141,14 +152,14 @@ export class PulseJob {
         // Density thinning with range keeps the point budget on nearby, useful geometry.
         // Range thinning keeps the budget on useful nearby geometry; the rim fade
         // dissolves the cone edge into darkness rather than cutting it off.
-        const rim = omni ? 1 : 0.02 + 0.98 * rimT * rimT;
+        const rim = omni ? 1 : 0.11 + 0.89 * rimT;
         // Thin the near field, but only where it is *splatter*: the floor underfoot and
         // the ceiling overhead, hit face-on from a metre away, are the least informative
         // returns a pulse can give and at full density they fog everything worth seeing.
         // Surfaces at grazing incidence are the opposite — they are the receding walls
         // that make a corridor read as a corridor — so incidence gates the penalty.
         const nearPenalty = smooth01((4.8 - d) / 3.8) * inc;
-        const nearFade = 1 - 0.9 * nearPenalty;
+        const nearFade = 1 - 0.95 * Math.pow(nearPenalty, 0.65);
         const keep = (1 - dn * 0.35 * s.densityFalloff) * rim * nearFade * (resp.gain > 0.1 ? 1 : 0.35);
         if (this.rng() < keep && strength > 0.02) {
           // Measurement noise is scattered in the surface's TANGENT plane, with only a

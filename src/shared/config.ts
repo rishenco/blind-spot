@@ -115,7 +115,7 @@ export const AGE = {
 };
 
 export const POOL = {
-  structural: 260_000,
+  structural: 340_000,
   transient: 30_000,
   entity: 12_000,
 };

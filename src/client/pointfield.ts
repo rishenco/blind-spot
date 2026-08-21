@@ -24,6 +24,7 @@ const VERT = /* glsl */ `
   uniform float uPointScale;
   uniform float uFlashDur;
   uniform float uDpr;
+  uniform float uVoxProj;   // screen px subtended by one voxel at 1m
   uniform float uLifeTransient;
   uniform float uAgeStructFresh;
   uniform float uAgeStructMemory;
@@ -46,7 +47,8 @@ const VERT = /* glsl */ `
   const vec3 C_FRESH_FAR  = vec3(0.243, 0.624, 0.878); // #3E9FE0 — depth reads as blue
   const vec3 C_COOL_NEAR  = vec3(0.388, 0.722, 0.863); // #63B8DC
   const vec3 C_COOL_FAR   = vec3(0.180, 0.435, 0.659); // #2E6FA8
-  const vec3 C_MEMORY     = vec3(0.106, 0.227, 0.400); // #1B3A66 — memory forgets depth
+  const vec3 C_MEM_NEAR   = vec3(0.220, 0.420, 0.690); // memory keeps a hint of depth,
+const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you built stops reading
   const vec3 C_LIFE       = vec3(1.000, 0.353, 0.176); // #FF5A2D
   const vec3 C_LIFE_COOL  = vec3(0.690, 0.251, 0.122); // #B0401F
   const vec3 C_LIFE_HOLD  = vec3(0.431, 0.165, 0.094); // #6E2A18
@@ -75,27 +77,27 @@ const VERT = /* glsl */ `
       col   = mix(col, C_LIFE_HOLD, smoothstep(0.8, 1.0, t));
       // Deliberately below full alpha: 560 overlapping additive points otherwise sum to
       // white and the silhouette loses the one colour that says "this is a person".
-      alpha = mix(0.70, 0.26, t);
-      px    = mix(3.3, 2.5, t);
+      alpha = mix(0.78, 0.30, t);
+      px    = 3.1;   // a ghost's 560 points stand in for a much coarser sampling of a body
     } else if (kind == 2) {
       // ── SOUND / IMPACT: transient. Dies completely, leaving no memory.
       float t = clamp(age / uLifeTransient, 0.0, 1.0);
       if (t >= 1.0) { gl_Position = vec4(2.0); gl_PointSize = 0.0; vAlpha = 0.0; vColor = vec3(0.0); vFlash = 0.0; return; }
       col   = C_SOUND;
-      alpha = 0.92 * (1.0 - t) * (1.0 - t);
-      px    = mix(4.4, 1.2, t);
+      alpha = 0.95 * (1.0 - t) * (1.0 - t);
+      px    = mix(4.2, 1.6, t);
     } else if (kind == 3) {
       // ── OBJECTIVE: gold, dims but never dies.
       float t = clamp(age / uAgeStructMemory, 0.0, 1.0);
       col   = mix(C_GOLD, C_GOLD * 0.45, t);
-      alpha = mix(0.95, 0.42, t);
-      px    = mix(4.0, 2.6, t);
+      alpha = mix(0.95, 0.46, t);
+      px    = 2.6;
     } else if (kind == 5) {
       // ── DEVICE: a faint glint. Reads as matter, but colder and smaller.
       float t = clamp(age / uAgeStructMemory, 0.0, 1.0);
-      col   = mix(C_COOL_NEAR, C_MEMORY, t);
-      alpha = mix(0.85, 0.30, t);
-      px    = mix(3.2, 2.2, t);
+      col   = mix(C_COOL_NEAR, C_MEM_FAR, t);
+      alpha = mix(0.85, 0.34, t);
+      px    = 1.8;
     } else {
       // ── MATTER: fresh -> cool -> permanent navy memory. Never culled by age;
       // only ring-buffer pressure evicts structure, so the map you have walked
@@ -104,9 +106,13 @@ const VERT = /* glsl */ `
       float t2 = clamp((age - uAgeStructFresh) / max(uAgeStructMemory - uAgeStructFresh, 0.001), 0.0, 1.0);
       vec3 fresh = mix(C_FRESH_NEAR, C_FRESH_FAR, aDepth);
       vec3 cool  = mix(C_COOL_NEAR,  C_COOL_FAR,  aDepth);
-      col   = mix(mix(fresh, cool, t1), C_MEMORY, t2);
-      alpha = mix(mix(1.0, 0.58, t1), 0.24, t2);
-      px    = mix(mix(3.0, 2.1, t1), 1.6, t2);
+      vec3 memory = mix(C_MEM_NEAR, C_MEM_FAR, aDepth);
+      col   = mix(mix(fresh, cool, t1), memory, t2);
+      // The memory floor is deliberately generous. This dim blue wireframe IS the player's
+      // map; if it fades to nothing, the game stops being about navigating from memory and
+      // becomes a game about whatever you scanned in the last four seconds.
+      alpha = mix(mix(1.0, 0.62, t1), 0.42, t2);
+      px    = mix(1.0, 0.86, t2);
     }
 
     // Return strength modulates presence: a grazing hit on cloth is a whisper of a point.
@@ -121,11 +127,20 @@ const VERT = /* glsl */ `
     // Deliberately flatter than 1/d perspective: near returns must not blow out into
     // white slabs, and distant ones must stay legible. Depth is carried by density
     // and hue, not by sprite size.
-    // Per-point size variance, hashed from world position: a cloud of identically sized
-    // dots reads as a print pattern, not as measurements.
+    // ── Surface splatting ──────────────────────────────────────────────
+    // A structural point is not a dot; it is a measurement standing in for one voxel of
+    // real surface. Sizing it to the screen footprint of that voxel is what makes a wall
+    // three metres away read as a WALL and the same wall at twenty metres read as grain.
+    // Density is already capped by voxel dedup, so this cannot blow out: total coverage is
+    // bounded by the surface area actually in view.
     float sv = fract(sin(dot(position.xz + position.y, vec2(12.9898, 78.233))) * 43758.5453);
-    float sz = px * uPointScale * (0.72 + 0.62 * sv) * pow(max(dist, 0.5), -0.38) * uDpr;
-    gl_PointSize = clamp(sz * (1.0 + flash * 0.8), 1.1 * uDpr, 7.0 * uDpr);
+    float splat = uVoxProj / max(dist, 0.30);
+    float sz = px * splat * uPointScale * (0.76 + 0.48 * sv);
+    sz = clamp(sz * (1.0 + flash * 0.7), 1.05 * uDpr, 26.0 * uDpr);
+    gl_PointSize = sz;
+    // Energy conservation: a big near splat spreads the same return over more pixels, so
+    // it must be correspondingly dimmer or close geometry burns out to white.
+    vAlpha = vAlpha * clamp(3.1 / max(sz / uDpr, 1.0), 0.30, 1.0);
   }
 `;
 
@@ -167,7 +182,15 @@ export class PointField {
   /** voxel key -> point index, so rescanning a wall refreshes it rather than duplicating it. */
   private vox = new Map<number, number>();
   private voxOf: Float64Array;
-  private static readonly VOX = 0.09;
+  /**
+   * Voxel size for structural dedup. This is the single most important number in the
+   * renderer: it is the resolution ceiling on close surfaces. At 0.09m a wall four metres
+   * away resolves to points ~20px apart, which reads as scattered dots rather than as a
+   * wall. At 0.045m it reads as a surface. The cost is that the whole map no longer fits
+   * in the pool — which is correct: memory is finite, and the oldest space you scanned
+   * should be the first to fade.
+   */
+  private static readonly VOX = 0.045;
 
   constructor(capacity: number, ages?: Partial<{ transient: number; structFresh: number; structMemory: number; entity: number }>) {
     this.capacity = capacity;
@@ -192,7 +215,8 @@ export class PointField {
     this.mat = new THREE.ShaderMaterial({
       uniforms: {
         uNow: { value: 0 },
-        uPointScale: { value: 2.1 },
+        uPointScale: { value: 0.70 },
+        uVoxProj: { value: 40 },
         uDpr: { value: 1 },
         uFlashDur: { value: 0.45 },
         uLifeTransient: { value: 4.0 },
@@ -215,6 +239,14 @@ export class PointField {
   get material(): THREE.ShaderMaterial { return this.mat; }
   set pointScale(v: number) { this.mat.uniforms.uPointScale!.value = v; }
   set dpr(v: number) { this.mat.uniforms.uDpr!.value = v; }
+  /**
+   * Tell the shader how many screen pixels one voxel of surface subtends at one metre.
+   * Must be refreshed whenever the viewport or field of view changes.
+   */
+  setProjection(physicalHeightPx: number, fovYRad: number) {
+    this.mat.uniforms.uVoxProj!.value = PointField.VOX * (physicalHeightPx / (2 * Math.tan(fovYRad / 2)));
+  }
+  static get voxelSize() { return PointField.VOX; }
   setAges(a: Partial<{ transient: number; structFresh: number; structMemory: number; entity: number }>) {
     const u = this.mat.uniforms;
     if (a.transient !== undefined) u.uLifeTransient!.value = a.transient;
