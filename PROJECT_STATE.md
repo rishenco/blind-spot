@@ -1,75 +1,98 @@
 # BLIND SPOT — Project State
 
-> Read this first after any context compaction. Concise, durable decisions only.
+> Read this first after any context compaction. Durable decisions only, not a diary.
 
 ## What this is
-Browser 3D 1v1 PvP prototype. Players see the world only as **point-cloud memories**
-produced by echolocation pulses. Observations are frozen at the moment they were taken
-and never self-update. Core thought the game must produce:
+A browser 3D 1v1 PvP prototype. Players see the world only as **point-cloud memories**
+produced by echolocation pulses. An observation is frozen at the moment it was taken and
+never updates itself. The thought the game exists to produce:
 *"I know what used to be here. I need to decide what is probably here now."*
 
-## Hard architecture invariants (do not violate)
-1. **The server never sends a client the opponent's live transform.** It sends only
-   `Observation` records (position + timestamp + confidence) produced by a legitimate
-   information event. This is the whole game; a leak here is a P0 bug.
-2. **Simulation state vs perceived state are separate objects.** `sim` (server truth)
-   and `perceived` (client render source) never share a reference.
-3. Static geometry is NOT secret (same map every match) so the client generates
-   geometry point clouds locally from `map.ts`. Only *dynamic* reveals cross the wire.
-4. Enemy ghosts are frozen poses — **no interpolation, no live transform, ever**.
+## Hard invariants (do not violate)
+1. **The server never sends a client the opponent's live transform.** `Room.reveal()` is the
+   only door through which enemy information leaves, and it degrades to FULL / COARSE /
+   TRACE **server-side** before queueing. A modified client gains nothing.
+2. **Simulation state and perceived state are separate objects.** `src/client/perception.ts`
+   is the only thing the renderer reads, and its only entry point is `applyEvent()`.
+3. Static geometry is not secret (same map every match), so the client raycasts its own copy
+   from emitter parameters. Only *dynamic* reveals cross the wire — bandwidth-trivial.
+4. Ghosts are frozen photographs: fixed slots, replaced wholesale, **never interpolated**.
+5. `snap.relicHeld` is deliberately reduced so it cannot say *who* holds the relic.
 
-## Stack
-TypeScript + Vite + Three.js (client), Node + `ws` (server), shared modules in `src/shared`.
-`npm run dev` runs both (server :8787, client :5173, vite proxies `/ws`).
-
-## Modules built so far
-- `src/shared/math.ts` — Vec3 helpers, `dirFromAngles`, `mulberry32` PRNG.
-- `src/shared/world.ts` — AABB `Box` list + uniform XZ grid + DDA `raycast` + `lineOfSight`.
-  Materials: Concrete/Metal/Glass/Cloth/Grate/Objective.
-  **Verified**: 20k random rays match brute force; ~1100 rays/ms on the real map.
-- `src/shared/collide.ts` — axis-separated AABB player movement w/ step-up. Shared so the
-  server can revalidate movement identically.
-- `src/shared/map.ts` — "Substation 7", 57x53m, 103 boxes. Zones: CONCOURSE (pillared hall
-  + mezzanine), LATTICE (offset-doorway cells), SPINE (central artery), BAFFLES
-  (scan-absorbing cloth panels), VAULT (glass chamber). **Verified**: fully connected
-  flood-fill, all spawns/sites in open space.
-- `src/client/pointfield.ts` — ring-buffer `Points` + shader. Each point stores the time the
-  wavefront *reaches* it, so pulses propagate with zero per-frame CPU. Age drives fade,
-  shrink, desaturation, hue drift to cold blue.
-- `src/client/scan.ts` — `PulseQueue`/`PulseJob`. Frame-budgeted ray casting; per-material
-  response (glass & grate let rays pass through, cloth returns almost nothing).
-
-## Key material trick (keep this)
-Cloth baffles are **solid walls that return almost no signal** — in your reconstruction they
-read as open doorways. Glass returns a faint plane *and lets the pulse through*, so you can
-scan a room you cannot enter. The map itself generates false negatives.
-
-## Tools
-- `npx tsx tools/test-raycast.ts` — raycaster correctness + perf (must stay green)
-- `npx tsx tools/test-map.ts` — map connectivity flood fill + ASCII preview
-
-## Design (locked — see DESIGN.md for the full brief)
-- **Reciprocity Law**: every emission is two-sided. A pulse paints geometry for you AND
-  renders your position to the enemy through walls (COARSE, 35m). This, not the cooldown,
+## Design (locked; full brief in DESIGN.md)
+- **Reciprocity Law** — every emission is two-sided. A pulse paints geometry for you *and*
+  renders your position to the enemy through walls (COARSE, 35m). This, not the 4s cooldown,
   is what stops scan spam.
-- **Relic arc** (anti-stall): relic hidden at 1 of 5 sites, heartbeat every 20s reveals its
-  neighbourhood in gold to BOTH players. Carrier can't sprint and "sings" every 5s.
-  Extraction = channel 3.5s in the Spine ring, fully lit. Overdrive at 6:00, hard cap 8:00.
-- **Three-Color Law**: cyan = matter, orange = life, amber = sound, gold = objective.
-  Age = temperature. Depth is encoded *inside* the cyan band only.
-- Weapons: JUDGE (50dmg, loud, tracer+impact bloom visible to BOTH — a paid scanner) and
-  WHISPER (16dmg, near-silent, shooter-only impact).
-- Gadgets: Sensor Spike, Decoy Shard, Echo Bomb.
-- 12 upgrade cards in 3 tiers; each changes strategy, never a number.
+- **Relic arc** (anti-stall) — relic at 1 of 5 sites; heartbeat every 20s paints its
+  neighbourhood in gold for BOTH players. Carrier cannot sprint and "sings" every 5s.
+  Extraction = channel 3.5s in The Well, fully lit. Overdrive 6:00. Hard cap 8:00, then
+  sudden death (first touch wins). No draws.
+- **Three-Color Law** — cyan = matter, orange = life, amber = sound, gold = objective.
+  Age = temperature. Depth is encoded *only inside* the cyan band, so a warm silhouette can
+  never be mistaken for near geometry.
+- Weapons: JUDGE (50 dmg, tracer + impact bloom visible to BOTH — a gun that doubles as a
+  paid scanner) and WHISPER (16 dmg, near-silent, shooter-only impact).
+- Gadgets: Sensor Spike, Decoy Shard, Echo Bomb. 12 upgrade cards in 3 tiers.
 
-## Server (`src/server/room.ts`)
-The firewall is enforced by construction: `reveal()` is the ONLY function that puts enemy
-information into a client outbox, and it degrades server-side to FULL / COARSE / TRACE
-before queueing. `snap` carries only the player's own state. `relicHeld` is deliberately
-reduced so it cannot say *who* holds the relic.
+## Rendering model (the parts that were hard)
+- **Surface splatting.** A structural point is sized to the screen footprint of the 0.045m
+  voxel it stands for (`uVoxProj / dist`). Voxel dedup caps density, so total coverage is
+  bounded by visible surface area and *cannot* blow out. Near wall = surface; far wall =
+  grain. Alpha is divided by splat size to conserve energy.
+- **Voxel dedup** (`PointField.VOX = 0.045`) — rescanning a wall refreshes that measurement
+  in place instead of stacking a second copy. This is what lets memory persist. It is also
+  the resolution ceiling on close surfaces; 0.09 was too coarse and read as scattered dots.
+- **The wavefront is data, not animation.** Every point stores the time the wave *reaches*
+  it, so the reveal propagates with zero per-frame CPU. Casting is frame-budgeted.
+- **Elliptical pulse cone** (70° wide, ~43° tall). A circular cone spends most rays on the
+  floor 2m ahead and the ceiling 3m up — the least informative surfaces in the game.
+- **Tangential jitter.** Noise is scattered in the surface tangent plane; isotropic jitter
+  puffs every flat wall into a 10cm slab of fog.
+- **Memory must stay bright.** The dim blue wireframe *is* the player's map. When it faded
+  too far the game quietly became "whatever you scanned in the last four seconds".
+- Post: half-float target → high-threshold bloom (0.75 scale) → ACES grade. A low bloom
+  threshold at low internal resolution blows a single isolated point into a hard square.
 
-## Status
-Iteration 1 (sensory) + server sim done. `tools/test-firewall.ts`: **31/31 pass**, covering
-silence, capture, reciprocity, staleness, no-leak stream scan, refresh, LOS gating,
-footsteps, heartbeat, combat info-cost, extraction win.
-Next: client networking, ghost rendering, UI.
+## Perf (measured under SwiftShader, so read the ratios not the numbers)
+`full chain 4.7fps · no bloom 12.0 · no post 22.2 · post-on-but-no-points 5.1`
+→ the point cloud is nearly free; full-screen passes dominate. On a GPU both are cheap.
+`post.autoQuality()` drops bloom under 38fps; test harnesses pin it off so captures show
+the intended look.
+
+## Layout
+```
+src/shared/  math world collide map config proto upgrades   (client+server)
+src/client/  main controller perception pointfield ghost scan post net audio
+src/server/  index room
+tools/       test-*.ts  shot*.ts  dev.sh  test-all.sh
+```
+
+## Run
+`npm install && npm run dev` → client :5173, server :8787 (vite proxies `/ws`).
+`sh tools/dev.sh` restarts both by port. `BS_ROOM_SEED=7` fixes the relic site for tests.
+
+## Tests — `sh tools/test-all.sh`
+raycaster (brute-force cross-check) · map (connectivity + standability) · firewall
+(33 headless protocol assertions) · scan yield · dedup convergence · movement (real keys in
+a real browser) · **stale-information acceptance test** (two browser clients) · gameplay ·
+full match. All green.
+
+## Bugs found and fixed (keep, so they are not reintroduced)
+- **W walked backwards** — the controller's basis had the wrong sign on the forward term.
+  Invisible for a long time because every test positioned players by teleporting.
+- **The win was never announced** — `checkEnd()` returned early once the phase was already
+  `over`, and the win is set inside `stepCarry`.
+- **Extraction was inside a crate** — the carrier could not physically stand in the ring.
+  Fixed by carving The Well; `test-map.ts` now asserts standability.
+- **Every point hit the size clamp** (scale constant ~2.7x too high) so the cloud covered
+  the screen and saturated to white.
+- **Notices were indexed by array position** while the array was being shifted.
+
+## Rejected approaches
+- Full rainbow depth colouring (Scanner Sombre style): an orange enemy became
+  indistinguishable from near geometry. Depth now lives inside the cyan band only.
+- Deriving point positions from voxel centres to force exact dedup: the first observation's
+  position is already stable because a rescan writes into the existing index, and snapping
+  produced a visible lattice.
+- Distance-only near-field thinning: it removed the grazing walls that make a corridor read
+  as a corridor. Thinning is now gated on incidence, so only face-on splatter is cut.

@@ -5,7 +5,7 @@ import { Perception } from './perception.ts';
 import { Post } from './post.ts';
 import { Net } from './net.ts';
 import { Audio } from './audio.ts';
-import { PLAYER, MATCH, RELIC, TOUCH } from '../shared/config.ts';
+import { PLAYER, MATCH, RELIC, Res } from '../shared/config.ts';
 import { dirFromAngles } from '../shared/math.ts';
 import { pulseShape } from '../shared/upgrades.ts';
 import type { S2C, SelfState, MatchState, Stance, C2S } from '../shared/proto.ts';
@@ -150,9 +150,14 @@ net.onMsg = (m: S2C) => {
 net.onClose = () => { if (!solo) $('menu-err').textContent = 'CONNECTION LOST'; };
 net.connect();
 
-// ── SOLO WALK: an offline sandbox for learning to read the space ──────
+// ── SOLO WALK ────────────────────────────────────────────────────────
+// An offline sandbox with no opponent. It runs the relic's heartbeat locally so that a
+// first-time player learns the whole colour language — cyan is matter, gold is the
+// objective — before anyone is hunting them.
 let soloPulseReadyAt = 0;
 let soloStart = 0;
+let soloRelic = { x: 0, y: 0, z: 0 };
+let soloHeartbeatAt = 0;
 function startSolo() {
   solo = true;
   per.reset();
@@ -165,9 +170,34 @@ function startSolo() {
   match = { t: 0, phase: 'live', overdrive: false, relicHeld: 0, beaconLit: false, bx: 29, by: 0, bz: 26.5 };
   soloStart = clock();
   soloPulseReadyAt = 0;
+  const site = map.sites[Math.floor(Math.random() * map.sites.length)]!;
+  soloRelic = { x: site.x, y: 0, z: site.z };
+  soloHeartbeatAt = clock() + 2;
+  per.notices.push({ id: 9001, text: 'SOLO WALK — NOBODY IS HUNTING YOU', tone: 'info', at: clock() });
+  per.notices.push({ id: 9002, text: 'RIGHT CLICK OR SPACE TO PULSE', tone: 'info', at: clock() });
   showScreen('game');
   audio.resume();
   renderer.domElement.requestPointerLock?.();
+}
+
+/** The relic's heartbeat, run client-side so Solo teaches the same vocabulary as a match. */
+function soloTick(now: number) {
+  if (now < soloHeartbeatAt) return;
+  soloHeartbeatAt = now + RELIC.heartbeatS;
+  per.applyEvent({
+    k: 'geom', t: now, src: 'heartbeat', gold: true,
+    ox: soloRelic.x, oy: 0.6, oz: soloRelic.z, dx: 0, dy: 1, dz: 0,
+    half: Math.PI, range: RELIC.heartbeatRadius, rays: 2600, speed: 42,
+    seed: (Math.random() * 1e9) >>> 0,
+  }, now, now);
+  per.applyEvent({ k: 'sound', t: now, x: soloRelic.x, y: 0.6, z: soloRelic.z, kind: 'heartbeat', res: Res.Full }, now, now);
+  if (match) match.t = now - soloStart;
+  // Walking into it in Solo simply re-hides it, so the sandbox never ends.
+  if (Math.hypot(ctl.pos.x - soloRelic.x, ctl.pos.z - soloRelic.z) < 1.5) {
+    const site = map.sites[Math.floor(Math.random() * map.sites.length)]!;
+    soloRelic = { x: site.x, y: 0, z: site.z };
+    per.notices.push({ id: Math.floor(now * 1000), text: 'RELIC FOUND — IT HAS MOVED', tone: 'good', at: now });
+  }
 }
 
 // ── input ─────────────────────────────────────────────────────────────
@@ -249,8 +279,9 @@ function renderDraft() {
 let noticeSeen = 0;
 function renderNotices() {
   const box = $('notices');
-  for (; noticeSeen < per.notices.length; noticeSeen++) {
-    const n = per.notices[noticeSeen]!;
+  for (const n of per.notices) {
+    if (n.id <= noticeSeen) continue;
+    noticeSeen = n.id;
     const d = document.createElement('div');
     d.className = `nt ${n.tone}`;
     d.textContent = n.text;
@@ -315,6 +346,7 @@ function frame() {
     // unable to move at all, and it makes the movement path untestable.
     if (self?.alive ?? true) ctl.step(dt);
     per.selfPos.x = ctl.pos.x; per.selfPos.y = ctl.pos.y; per.selfPos.z = ctl.pos.z;
+    if (solo) soloTick(now);
     per.touch(ctl.pos.x, ctl.eyeY, ctl.pos.z, now);
     if (match?.beaconLit) per.beacon(match.bx, match.by, match.bz, now);
 

@@ -13,7 +13,7 @@ import { POOL, AGE, TOUCH, Res } from '../shared/config.ts';
 import type { Ev } from '../shared/proto.ts';
 import type { World } from '../shared/world.ts';
 
-export interface Notice { text: string; tone: string; at: number }
+export interface Notice { id: number; text: string; tone: string; at: number }
 
 export class Perception {
   structural: PointField;
@@ -31,6 +31,7 @@ export class Perception {
   lastHeartbeatAt = -999;
   predictGhosts = false;
   private tag = 1;
+  private noticeId = 1;
   private touchAt = 0;
   /** The listener's own position, needed to place bearing-only information in the world. */
   selfPos = { x: 0, y: 0, z: 0 };
@@ -84,7 +85,14 @@ export class Perception {
       }
       case 'sound': {
         this.drawSound(e.x, e.y, e.z, e.kind, e.res, nowLocal);
-        if (e.kind === 'pulse') this.lastFlashAt = nowLocal;
+        // Hearing the enemy's pulse arrive through a wall is the single most actionable
+        // event in the game — it says "they are there, and right now they are half blind
+        // looking down a cone." Name it, so nobody has to infer it from an amber ring.
+        if (e.kind === 'pulse') {
+          this.lastFlashAt = nowLocal;
+          this.notices.push({ id: this.noticeId++, text: 'ENEMY PULSE — THEY LIT THEMSELVES UP', tone: 'warn', at: nowLocal });
+          if (this.notices.length > 6) this.notices.shift();
+        }
         break;
       }
       case 'hit': {
@@ -96,8 +104,10 @@ export class Perception {
         break;
       }
       case 'notice': {
-        this.notices.push({ text: e.text, tone: e.tone ?? 'info', at: nowLocal });
-        if (this.notices.length > 5) this.notices.shift();
+        // Monotonic ids: the renderer tracks which notices it has drawn, and shifting the
+        // array would otherwise make it skip or repeat them.
+        this.notices.push({ id: this.noticeId++, text: e.text, tone: e.tone ?? 'info', at: nowLocal });
+        if (this.notices.length > 6) this.notices.shift();
         break;
       }
     }
