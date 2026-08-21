@@ -50,6 +50,9 @@ never updates itself. The thought the game exists to produce:
   puffs every flat wall into a 10cm slab of fog.
 - **Memory must stay bright.** The dim blue wireframe *is* the player's map. When it faded
   too far the game quietly became "whatever you scanned in the last four seconds".
+- **Ghosts dissolve as well as cool.** Entity points drift outward with age (t^2, up to
+  0.38m), so a stale sighting visibly comes apart into an unstructured cloud. Colour alone
+  was legible but did not read peripherally; dissolution does.
 - Post: half-float target → high-threshold bloom (0.75 scale) → ACES grade. A low bloom
   threshold at low internal resolution blows a single isolated point into a hard square.
 

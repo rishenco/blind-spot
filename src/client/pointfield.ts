@@ -69,6 +69,7 @@ const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you bu
     vFlash = flash;
 
     vec3 col; float alpha; float px;
+    vec3 wpos = position;
     // Splat ceiling. Structural points may legitimately grow large up close — that is what
     // makes a near wall read as a wall. Everything else stands for a *feature*, not a patch
     // of surface, and must not balloon into screen-filling blobs when you walk up to it.
@@ -85,6 +86,14 @@ const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you bu
       alpha = mix(0.78, 0.30, t);
       px    = 3.1;   // a ghost's 560 points stand in for a much coarser sampling of a body
       maxPx = 13.0;
+      // A cooling memory does not just dim — it comes apart. The silhouette dissolves
+      // outward as it ages, so at a glance, from the corner of your eye, you can tell a
+      // sighting you can shoot at from one you can only guess from.
+      vec3 d3 = vec3(
+        fract(sin(dot(position.xy, vec2(12.9898, 78.233))) * 43758.5453),
+        fract(sin(dot(position.yz, vec2(39.3468, 11.135))) * 24634.6345),
+        fract(sin(dot(position.zx, vec2(73.1560, 52.235))) * 13718.1234)) - 0.5;
+      wpos += normalize(d3 + 0.0001) * t * t * 0.38;
     } else if (kind == 2) {
       // ── SOUND / IMPACT: transient. Dies completely, leaving no memory.
       float t = clamp(age / uLifeTransient, 0.0, 1.0);
@@ -138,7 +147,7 @@ const vec3 C_MEM_FAR    = vec3(0.130, 0.270, 0.520); // otherwise the map you bu
     vColor = col;
     vAlpha = alpha;
 
-    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    vec4 mv = modelViewMatrix * vec4(wpos, 1.0);
     gl_Position = projectionMatrix * mv;
     float dist = -mv.z;
     if (kind == 6) alpha *= smoothstep(0.4, 2.6, dist);

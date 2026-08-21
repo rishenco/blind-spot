@@ -1,0 +1,22 @@
+// The core mechanic, as a sequence of frames: the same sighting at 0s, 4s, 10s and 20s.
+import { launch, openGame, settle, shot, driveTo, serverPos } from './shot.ts';
+const b = await launch();
+const A = await openGame(b, undefined, 900, 700);
+const B = await openGame(b, undefined, 900, 700);
+await A.click('#b-create'); await A.waitForSelector('#s-lobby:not(.hidden)');
+const code = (await A.textContent('#l-code'))!.trim();
+await B.fill('#i-code', code); await B.click('#b-join');
+await B.waitForSelector('#s-lobby:not(.hidden)');
+await A.click('#b-ready'); await B.click('#b-ready');
+await A.waitForFunction(() => (window as any).__bs.screen() === 'game');
+await B.waitForFunction(() => (window as any).__bs.screen() === 'game');
+await Promise.all([driveTo(A, 8, 11.5, -Math.PI / 2), driveTo(B, 15, 11.5, Math.PI / 2)]);
+await settle(A, 0.6);
+console.log('A', await serverPos(A), 'B', await serverPos(B));
+await A.evaluate(() => (window as any).__bs.doPulse());
+await settle(A, 1.2); await shot(A, 'age-0-fresh');
+await settle(A, 3.0); await shot(A, 'age-1-four-seconds');
+await settle(A, 6.0); await shot(A, 'age-2-ten-seconds');
+await settle(A, 10.0); await shot(A, 'age-3-twenty-seconds');
+console.log('captured');
+await b.close();
