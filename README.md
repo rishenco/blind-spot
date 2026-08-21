@@ -10,6 +10,10 @@ standing in that doorway six seconds ago, they are *probably* not standing there
 Every emission is two-sided. Your pulse paints the room for you and paints **you** for them,
 through walls. That is the whole game: deciding when knowing is worth being known.
 
+![A corridor drawn entirely from memory](docs/shots/play-2-looking-back-at-memory.png)
+*Nothing here is lit. Every point is a measurement you took earlier, and the dim blue ones
+are old enough that they might already be wrong.*
+
 ## Run it
 
 ```bash
@@ -50,6 +54,15 @@ space before anyone is hunting you.
 | **orange** | a person, frozen at the instant you saw them. It cools but never leaves until a newer sighting replaces it |
 | **amber** | sound: footsteps, gunfire, an enemy pulse arriving through a wall |
 | **gold** | the relic and the extraction beacon |
+
+## What it looks like
+
+| | |
+|---|---|
+| ![wavefront](docs/shots/w1-wavefront.png) | **A pulse in flight.** The reveal is not an animation — every point carries the time the wave reaches it, so space materialises outward at 60 m/s. |
+| ![a fresh sighting](docs/shots/age-0-fresh.png) | **A fresh contact.** Bright orange, posed, with a motion smear you can lead a shot from. |
+| ![the same sighting, twenty seconds later](docs/shots/age-3-twenty-seconds.png) | **The same contact, twenty seconds later.** It cooled to rust and came apart. Somebody *was* there. |
+| ![the extraction beacon](docs/shots/beacon-2-from-afar-scanned.png) | **The extraction beacon**, once the relic has been touched — a gold column through the ceiling that both players can see from anywhere. |
 
 ## Winning
 
