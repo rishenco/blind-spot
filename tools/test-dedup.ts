@@ -1,7 +1,8 @@
-import { launch, openGame, place, pulse, settle } from './shot.ts';
+import { launch, openGame, place, pulse, settle, solo } from './shot.ts';
 const b = await launch();
 const p = await openGame(b);
-const read = () => p.evaluate(() => (window as any).__bs.field.used as number);
+await solo(p);
+const read = () => p.evaluate(() => (window as any).__bs.per.structural.used as number);
 
 await p.evaluate(() => (window as any).__bs.clearField());
 await place(p, 43, 32, Math.PI, -0.02);

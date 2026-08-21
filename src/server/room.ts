@@ -98,6 +98,8 @@ export class Room {
   devices: Device[] = [];
   winner = -1;
   overReason = '';
+  suddenDeath = false;
+  private announced = false;
   onEmpty?: () => void;
 
   constructor(code: string, seed = Date.now()) {
@@ -107,8 +109,7 @@ export class Room {
     const site = this.map.sites[Math.floor(this.rnd() * this.map.sites.length)]!;
     this.relic = { x: site.x, y: 0, z: site.z, held: -1 };
     this.relicSite = site.name;
-    // Extraction sits in the Spine, the map's most exposed artery — on purpose.
-    this.beacon = { x: 29, y: 0, z: 26.5 };
+    this.beacon = { ...this.map.extraction };
   }
 
   // ── membership ────────────────────────────────────────────────────
@@ -272,6 +273,7 @@ export class Room {
     if (!c) return;
     p.upgrades.add(c.id);
     p.offer = null;
+    p.sink.send({ t: 'offer', level: p.level, cards: [] }); // confirm: closes the client's draft
     this.notice(p, `${c.name} ONLINE`, 'good');
   }
 
@@ -506,8 +508,8 @@ export class Room {
       this.stepPlayers(dt);
       this.stepRelic();
       this.stepDevices();
-      this.checkEnd();
     }
+    this.checkEnd();
     this.flush();
   }
 
@@ -569,6 +571,7 @@ export class Room {
         const o = this.other(p);
         if (o) this.notice(o, 'THEY HAVE THE RELIC', 'bad');
         p.lastSingAt = this.t;
+        if (this.suddenDeath) { this.phase = 'over'; this.winner = p.slot; this.overReason = 'took the relic in sudden death'; }
       }
     }
     if (!p.carrying) { p.channel = 0; return; }
@@ -652,13 +655,19 @@ export class Room {
   }
 
   private checkEnd() {
-    if (this.phase !== 'live') return;
-    if (this.t >= MATCH.hardCapS) {
+    // NOTE: this must run even when the phase has *already* flipped to 'over' — the win
+    // is set inside stepCarry, and an early return here would swallow the announcement.
+    if (this.phase === 'live' && this.t >= MATCH.hardCapS) {
       const carrier = this.players.find((p) => p?.carrying);
       if (carrier) { this.phase = 'over'; this.winner = carrier.slot; this.overReason = 'held the relic at the bell'; }
-      else { this.overReason = 'sudden death — first touch wins'; }
+      else if (!this.suddenDeath) {
+        // No carrier at the bell: the next player to touch the relic wins outright.
+        // (stepCarry ends the match on pickup once this flag is set.) No draws, ever.
+        this.suddenDeath = true;
+        for (const p of this.players) if (p) this.notice(p, 'SUDDEN DEATH — FIRST TOUCH WINS', 'warn');
+      }
     }
-    if (this.phase === 'over') this.broadcastOver();
+    if (this.phase === 'over' && !this.announced) { this.announced = true; this.broadcastOver(); }
   }
 
   private broadcastOver() {
@@ -672,12 +681,15 @@ export class Room {
     if (!other) return;
     this.phase = 'lobby';
     this.winner = -1;
+    this.announced = false;
+    this.suddenDeath = false;
+    this.t = 0;
     this.devices = [];
     this.beaconLit = false;
     const site = this.map.sites[Math.floor(this.rnd() * this.map.sites.length)]!;
     this.relic = { x: site.x, y: 0, z: site.z, held: -1 };
     this.relicSite = site.name;
-    for (const q of this.players) if (q) { q.ready = false; q.xp = 0; q.level = 1; q.upgrades.clear(); q.offer = null; q.carrying = false; q.spikes = SPIKE.charges; q.decoys = DECOY.charges; q.echoes = ECHO.charges; }
+    for (const q of this.players) if (q) { q.ready = false; q.xp = 0; q.level = 1; q.upgrades.clear(); q.offer = null; q.carrying = false; q.spikes = SPIKE.charges; q.decoys = DECOY.charges; q.echoes = ECHO.charges; q.hp = PLAYER.maxHp; q.alive = true; q.channel = 0; q.pulseReadyAt = 0; q.echoReadyAt = 0; q.lastPaintAt = -999; }
     this.pushLobby();
   }
 

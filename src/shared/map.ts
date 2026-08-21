@@ -45,7 +45,11 @@ export interface MapDef {
   /** Candidate objective sites; the server picks per match. */
   siteNames: string[];
   sites: { x: number; y: number; z: number; name: string }[];
+  extraction: { x: number; y: number; z: number };
   grid: Grid;
+  /** 1 = walkable. Includes the half-height crates, which are separate boxes rather than
+   *  grid cells, so anything pathing over this grid does not route through cover. */
+  nav: Uint8Array;
   extent: { w: number; h: number };
 }
 
@@ -84,6 +88,18 @@ function buildGrid(): Grid {
 
   // ───────── SPINE: central E-W artery ─────────
   g.carve(2, 25, 55, 28);
+
+  // ───────── THE WELL: extraction rotunda straddling the Spine ─────────
+  // The one place on the map where the win condition is decided, so it gets its own
+  // room: wide enough to stand a channel in, with two alcoves that are good cover and
+  // a southern mouth into the Vault loop, so it can never be held from a single angle.
+  g.carve(25, 22, 33, 31);
+  g.fill(25, 22, 25, 24);
+  g.fill(33, 22, 33, 24);
+  g.fill(25, 29, 25, 31);
+  g.fill(33, 29, 33, 31);
+  // Four squat corner pillars make the rotunda instantly recognisable in a point cloud.
+  for (const [px, pz] of [[27, 24], [31, 24], [27, 29], [31, 29]]) g.fill(px, pz, px, pz, Mat.Metal);
 
   // Concourse -> Spine (three mouths, so the hall can always be left under cover)
   g.carve(5, 21, 7, 25);
@@ -182,8 +198,11 @@ export function buildMap(): MapDef {
   // Half-height crate cover in the Concourse and Spine — shoot over, don't walk through.
   const crates: [number, number, number, number][] = [
     [4, 4, 6, 6], [21, 17, 24, 19], [4, 17, 6, 19], [21, 4, 24, 6],
-    [12, 9, 15, 11], [9, 26, 12, 27], [28, 25, 31, 27], [40, 26, 43, 27],
+    [12, 9, 15, 11], [9, 26, 12, 27], [40, 26, 43, 27],
     [33, 41, 35, 43], [50, 34, 52, 36], [8, 48, 11, 50], [23, 33, 25, 35],
+    // Cover flanking the extraction ring — near it, never inside it. The channel must be
+    // a place you can be shot, but also a place you can physically stand.
+    [24, 25, 26, 26], [33, 27, 35, 28],
   ];
   for (const [x0, z0, x1, z1] of crates) boxes.push({ min: { x: x0, y: 0, z: z0 }, max: { x: x1, y: 1.05, z: z1 }, mat: Mat.Metal });
 
@@ -201,6 +220,10 @@ export function buildMap(): MapDef {
     { x: 46.5, y: 0, z: 49.5, yaw: 0 },             // Vault, south service loop
   ];
 
+  // The extraction point. Deliberately in the Spine: the map's fastest and most exposed
+  // artery, so the win condition is defended in the open.
+  const extraction = { x: 29.0, y: 0, z: 26.5 };
+
   const sites = [
     { x: 43.0, y: 0, z: 42.0, name: 'VAULT' },
     { x: 16.5, y: 0, z: 10.5, name: 'CONCOURSE' },
@@ -209,12 +232,21 @@ export function buildMap(): MapDef {
     { x: 29.0, y: 0, z: 26.5, name: 'SPINE' },
   ];
 
+  // Nav grid: open cells minus anything a walking player cannot cross.
+  const nav = new Uint8Array(GW * GH);
+  for (let i = 0; i < g.cells.length; i++) nav[i] = g.cells[i] === 1 ? 1 : 0;
+  for (const [x0, z0, x1, z1] of crates)
+    for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++)
+      if (x >= 0 && z >= 0 && x < GW && z < GH) nav[z * GW + x] = 0;
+
   return {
     world: new World(boxes),
     boxes,
+    nav,
     spawns,
     sites,
     siteNames: sites.map((s) => s.name),
+    extraction,
     grid: g,
     extent: { w: GW, h: GH },
   };

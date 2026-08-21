@@ -1,41 +1,29 @@
 import { launch, openGame, settle, driveTo, serverPos } from './shot.ts';
 const b = await launch();
-const A = await openGame(b, undefined, 1180, 700);
-const B = await openGame(b, undefined, 1180, 700);
-await A.click('#b-create');
-await A.waitForSelector('#s-lobby:not(.hidden)');
+const A = await openGame(b, undefined, 900, 600);
+const B = await openGame(b, undefined, 900, 600);
+await A.click('#b-create'); await A.waitForSelector('#s-lobby:not(.hidden)');
 const code = (await A.textContent('#l-code'))!.trim();
 await B.fill('#i-code', code); await B.click('#b-join');
 await B.waitForSelector('#s-lobby:not(.hidden)');
 await A.click('#b-ready'); await B.click('#b-ready');
 await A.waitForFunction(() => (window as any).__bs.screen() === 'game');
 await B.waitForFunction(() => (window as any).__bs.screen() === 'game');
-await Promise.all([driveTo(A, 4, 11.5, -Math.PI/2), driveTo(B, 20, 11.5, Math.PI/2)]);
+await driveTo(A, 43, 42);
 await settle(A, 0.8);
-console.log('server A', await serverPos(A), 'B', await serverPos(B));
-console.log('client A', await A.evaluate(() => { const p=(window as any).__bs.ctl.pos; return {x:+p.x.toFixed(2),y:+p.y.toFixed(2),z:+p.z.toFixed(2), yaw:+(window as any).__bs.ctl.yaw.toFixed(2)}; }));
-await A.evaluate(() => (window as any).__bs.doPulse());
-await settle(A, 1.5);
-const hist = await A.evaluate(() => {
-  const bs = (window as any).__bs;
-  const f = bs.per.structural;
-  const P = (f as any).pos.array as Float32Array;
-  const Bi = (f as any).birth.array as Float32Array;
-  const D = (f as any).depth.array as Float32Array;
-  const cam = bs.camera.position;
-  const buckets = new Array(10).fill(0);
-  const depthB = new Array(10).fill(0);
-  let n = 0;
-  for (let i = 0; i < (f.used as number); i++) {
-    if (Bi[i] <= -1e8) continue;
-    n++;
-    const d = Math.hypot(P[i*3]-cam.x, P[i*3+1]-cam.y, P[i*3+2]-cam.z);
-    buckets[Math.min(9, Math.floor(d/3))]++;
-    depthB[Math.min(9, Math.floor(D[i]*10))]++;
-  }
-  return { n, distHist: buckets, depthHist: depthB };
-});
-console.log('points:', hist.n);
-console.log('distance from camera, 3m buckets:', hist.distHist.join(' '));
-console.log('aDepth histogram (0..1 in tenths):', hist.depthHist.join(' '));
+console.log('carrying:', (await A.evaluate(() => (window as any).__bs.state().self.carrying)));
+await driveTo(A, 29, 26.5);
+await settle(A, 0.5);
+console.log('after driveTo, server pos:', await serverPos(A));
+for (let i = 0; i < 20; i++) {
+  await A.evaluate(() => {
+    const bs = (window as any).__bs;
+    bs.send({ t: 'input', seq: 0, x: 29, y: 0, z: 26.5, yaw: bs.ctl.yaw, pitch: 0, stance: 1, vx: 0, vz: 0 });
+  });
+  await settle(A, 0.15);
+  const s = await A.evaluate(() => (window as any).__bs.state());
+  if (i % 4 === 0) console.log(`t=${s.match.t.toFixed(1)} pos=(${s.self.x.toFixed(2)},${s.self.z.toFixed(2)}) ` +
+    `dist=${Math.hypot(s.self.x-29, s.self.z-26.5).toFixed(2)} channel=${s.self.channel.toFixed(2)} carrying=${s.self.carrying} alive=${s.self.alive}`);
+  if (await A.evaluate(() => (window as any).__bs.screen() === 'over')) { console.log('OVER at i=' + i); break; }
+}
 await b.close();

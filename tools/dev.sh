@@ -2,9 +2,10 @@
 # Restart the game server and vite without killing the calling shell.
 # (A bare `pkill -f tsx` matches this script's own command line.)
 cd /home/user/blind-spot
-if [ -f /tmp/bs-server.pid ]; then kill "$(cat /tmp/bs-server.pid)" 2>/dev/null; fi
-if [ -f /tmp/bs-vite.pid ]; then kill "$(cat /tmp/bs-vite.pid)" 2>/dev/null; fi
-sleep 1
+# Kill by PORT, not by name pattern: a bare `pkill -f tsx` also matches the shell
+# that is running this script.
+fuser -k -n tcp 8787 5173 >/dev/null 2>&1 || true
+sleep 2
 BS_ROOM_SEED=${BS_ROOM_SEED:-7} nohup npx tsx src/server/index.ts > /tmp/server.log 2>&1 &
 echo $! > /tmp/bs-server.pid
 nohup npx vite --port 5173 --host > /tmp/vite.log 2>&1 &

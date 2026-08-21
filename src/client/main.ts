@@ -128,7 +128,9 @@ net.onMsg = (m: S2C) => {
       for (const e of m.evs) { per.applyEvent(e, e.t, now); audio.forEvent(e, ctl.pos, ctl.yaw); }
       break;
     }
-    case 'offer': draft = m.cards; renderDraft(); break;
+    // An empty card list is the server confirming the pick, so the HUD can never
+    // disagree with the simulation about whether an offer is still open.
+    case 'offer': draft = m.cards.length ? m.cards : null; renderDraft(); break;
     case 'over': {
       $('o-title').textContent = m.winner === m.you ? 'EXTRACTED' : 'LOST';
       $('o-reason').textContent = m.reason.toUpperCase();
@@ -305,7 +307,9 @@ function frame() {
 
   if (screen === 'game') {
     if (locked && (self?.alive ?? true)) ctl.step(dt);
+    per.selfPos.x = ctl.pos.x; per.selfPos.y = ctl.pos.y; per.selfPos.z = ctl.pos.z;
     per.touch(ctl.pos.x, ctl.eyeY, ctl.pos.z, now);
+    if (match?.beaconLit) per.beacon(match.bx, match.by, match.bz, now);
 
     // 20Hz input upload.
     inputAcc += dt;
@@ -327,10 +331,10 @@ function frame() {
 
   camera.position.set(ctl.pos.x, ctl.eyeY, ctl.pos.z);
   camera.rotation.set(ctl.pitch, ctl.yaw, 0, 'YXZ');
-  post.render(now);
+  if (post.enabled) post.render(now); else renderer.render(scene, camera);
 
   frames++; fpsAcc += dt;
-  if (fpsAcc > 0.5) { fps = frames / fpsAcc; frames = 0; fpsAcc = 0; }
+  if (fpsAcc > 0.5) { fps = frames / fpsAcc; frames = 0; fpsAcc = 0; post.autoQuality(fps); }
   renderHud(now);
 }
 frame();

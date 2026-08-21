@@ -32,6 +32,8 @@ export class Perception {
   predictGhosts = false;
   private tag = 1;
   private touchAt = 0;
+  /** The listener's own position, needed to place bearing-only information in the world. */
+  selfPos = { x: 0, y: 0, z: 0 };
 
   constructor(private world: World, private clock: () => number) {
     this.structural = new PointField(POOL.structural, {
@@ -82,6 +84,10 @@ export class Perception {
       }
       case 'hit': {
         this.lastHit = { fx: e.fx, fy: e.fy, fz: e.fz, at: nowLocal };
+        // Being shot is itself an information event: you learn the bearing the round came
+        // from. Drawn in the world as an amber arc rather than as a screen-space marker,
+        // so it obeys the same rules as everything else you know.
+        this.drawWedge(e.fx, e.fy, e.fz, nowLocal);
         break;
       }
       case 'notice': {
@@ -127,6 +133,45 @@ export class Perception {
         pz = z + (Math.random() - 0.5) * spread;
       }
       this.aux.push(px, py, pz, now + Math.random() * 0.06, 0, res === Res.Trace ? 0.55 : 0.95, PKind.Impact);
+    }
+  }
+
+  private beaconAt = -1;
+  /**
+   * The extraction beacon. Once the relic has been picked up once, both players know where
+   * extraction is — that is the point of it, so this is drawn from public match state
+   * rather than from an observation. It is the only landmark in the game that never decays.
+   */
+  beacon(x: number, y: number, z: number, now: number) {
+    if (now < this.beaconAt) return;
+    this.beaconAt = now + 1.2;
+    for (let i = 0; i < 260; i++) {
+      const t = i / 260;
+      const a = t * Math.PI * 12;
+      const r = 2.0 * (1 - t * 0.55) + (Math.random() - 0.5) * 0.18;
+      this.aux.push(
+        x + Math.cos(a) * r,
+        y + t * 5.2,
+        z + Math.sin(a) * r,
+        now + t * 0.5, 0, 0.9, PKind.Objective,
+      );
+    }
+  }
+
+  /** An arc hung in space at the bearing an incoming round arrived from. */
+  private drawWedge(fx: number, fy: number, fz: number, now: number) {
+    const l = Math.hypot(fx, fy, fz) || 1;
+    const dx = fx / l, dy = fy / l, dz = fz / l;
+    const R = 3.6;
+    // Build a basis so the arc lies across the incoming direction.
+    const ax = -dz, az = dx;
+    const al = Math.hypot(ax, az) || 1;
+    for (let i = 0; i < 70; i++) {
+      const t = (i / 69 - 0.5) * 0.62;               // ~35 degrees of arc
+      const px = this.selfPos.x + (dx * Math.cos(t) + (ax / al) * Math.sin(t)) * R;
+      const pz = this.selfPos.z + (dz * Math.cos(t) + (az / al) * Math.sin(t)) * R;
+      const py = this.selfPos.y + 1.2 + dy * R * 0.5 + (Math.random() - 0.5) * 0.5;
+      this.aux.push(px, py, pz, now + Math.random() * 0.05, 0, 0.95, PKind.Impact);
     }
   }
 

@@ -162,6 +162,13 @@ A.carrying = true; room.relic.held = A.slot as 0 | 1;
 put(A, 29, 26.5); A.vx = 0; A.vz = 0;
 run(4);
 chk('channelling the beacon wins', room.phase === 'over' && room.winner === A.slot, `phase=${room.phase} winner=${room.winner}`);
+// Regression: the win must actually be ANNOUNCED, not merely recorded. A previous version
+// set phase='over' inside stepCarry and then returned early from checkEnd, so the match
+// ended on the server and nobody was ever told.
+chk('both players are told the match is over',
+    ca.msgs.some((m) => m.t === 'over') && cb.msgs.some((m) => m.t === 'over'));
+chk('the over message names the winner',
+    ca.msgs.some((m) => m.t === 'over' && (m as any).winner === A.slot));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

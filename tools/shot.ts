@@ -46,7 +46,7 @@ export async function driveTo(page: Page, x: number, z: number, yaw?: number) {
   const ok = await page.evaluate(async ([tx, tz, ty]) => {
     const bs = (window as any).__bs;
     const GW = bs.map.extent.w as number, GH = bs.map.extent.h as number;
-    const cells = bs.map.grid.cells as Uint8Array;
+    const cells = bs.map.nav as Uint8Array;
     const start = [Math.floor(bs.state().self?.x ?? bs.ctl.pos.x), Math.floor(bs.state().self?.z ?? bs.ctl.pos.z)];
     const goal = [Math.floor(tx as number), Math.floor(tz as number)];
     // BFS from goal so the parent chain reads forward from start.
@@ -76,7 +76,7 @@ export async function driveTo(page: Page, x: number, z: number, yaw?: number) {
     path.push([tx as number, tz as number]);
 
     for (const [wx, wz] of path) {
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < 90; i++) {
         const s = bs.state().self;
         const cx = s ? s.x : bs.ctl.pos.x, cz = s ? s.z : bs.ctl.pos.z;
         const dx = wx! - cx, dz = wz! - cz;
@@ -92,7 +92,9 @@ export async function driveTo(page: Page, x: number, z: number, yaw?: number) {
     }
     if (ty !== undefined) bs.ctl.yaw = ty as number;
     const s = bs.state().self;
-    return Math.hypot((s?.x ?? 0) - (tx as number), (s?.z ?? 0) - (tz as number)) < 1.2;
+    const err = Math.hypot((s?.x ?? 0) - (tx as number), (s?.z ?? 0) - (tz as number));
+    if (err >= 1.2) console.warn('driveTo stalled at', s?.x?.toFixed(2), s?.z?.toFixed(2), 'err', err.toFixed(2));
+    return err < 1.2;
   }, [x, z, yaw] as any);
   if (!ok) throw new Error(`driveTo(${x},${z}) did not converge`);
 }
@@ -106,7 +108,13 @@ export async function serverPos(page: Page): Promise<{ x: number; z: number }> {
 }
 
 export async function pulse(page: Page) {
-  await page.evaluate(() => { const b = (window as any).__bs; b.pulseReset?.(); b.firePulse(b.clock()); });
+  await page.evaluate(() => { const b = (window as any).__bs; b.pulseReset?.(); b.doPulse(); });
+}
+
+/** Enter the offline sandbox, where the client owns its own pulses. */
+export async function solo(page: Page) {
+  await page.evaluate(() => (window as any).__bs.startSolo());
+  await page.waitForTimeout(400);
 }
 
 export async function settle(page: Page, seconds: number) {
@@ -123,6 +131,7 @@ export async function shot(page: Page, name: string) {
 if (process.argv[1]?.endsWith('shot.ts')) {
   const b = await launch();
   const p = await openGame(b);
+  await solo(p);
   // Down the Spine: the longest sightline on the map, the real depth test.
   await place(p, 5, 26.5, -Math.PI / 2, -0.03);
   await settle(p, 0.6); await shot(p, '01-dark');

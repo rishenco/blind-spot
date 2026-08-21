@@ -41,6 +41,24 @@ for (const s of m.sites) {
   if (!ok) { console.log(`FAIL site ${s.name} unreachable/solid at ${s.x},${s.z}`); fail++; }
 }
 
+// Nothing a player must stand on may be inside solid geometry.
+const R = 0.34, H = 1.7;
+const insideAnyBox = (x: number, z: number) => m.boxes.some((b) =>
+  x + R > b.min.x && x - R < b.max.x && z + R > b.min.z && z - R < b.max.z &&
+  b.min.y < H && b.max.y > 0.05);
+for (const [i, s] of m.spawns.entries())
+  if (insideAnyBox(s.x, s.z)) { console.log(`FAIL spawn ${i} is inside geometry`); fail++; }
+for (const s of m.sites)
+  if (insideAnyBox(s.x, s.z)) { console.log(`FAIL relic site ${s.name} is inside geometry`); fail++; }
+if (insideAnyBox(m.extraction.x, m.extraction.z)) { console.log('FAIL extraction point is inside geometry'); fail++; }
+// The extraction RING must be standable, not just its centre.
+for (let a = 0; a < 8; a++) {
+  const rx = m.extraction.x + Math.cos((a / 8) * 6.283) * 1.6;
+  const rz = m.extraction.z + Math.sin((a / 8) * 6.283) * 1.6;
+  if (insideAnyBox(rx, rz)) { console.log(`FAIL extraction ring blocked at ${a * 45} deg`); fail++; }
+}
+console.log('standability checks done');
+
 // Raycast perf on the REAL map
 const w = m.world;
 const t0 = performance.now();

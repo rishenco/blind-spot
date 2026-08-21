@@ -9,6 +9,8 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
+const BLOOM_SCALE = 0.75;
+
 /** Final grade: ACES-ish tone map, subtle vignette, and a touch of scan-line grain. */
 const GradeShader = {
   uniforms: {
@@ -50,6 +52,7 @@ export class Post {
   bloom: UnrealBloomPass;
   grade: ShaderPass;
   enabled = true;
+  private bloomOn = true;
 
   constructor(private renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera) {
     const size = renderer.getSize(new THREE.Vector2());
@@ -57,9 +60,11 @@ export class Post {
       type: THREE.HalfFloatType, samples: 0,
     }));
     this.composer.addPass(new RenderPass(scene, camera));
-    // Half-resolution bloom: at this blur radius the difference is invisible and it
-    // roughly quarters the cost of the most expensive pass in the chain.
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x * 0.5, size.y * 0.5), 0.46, 0.34, 0.58);
+    // Bloom is deliberately restrained and high-threshold. A low threshold at low
+    // internal resolution turns a single isolated bright point into a hard-edged square
+    // (the mip chain has nothing to interpolate), which reads as a rendering bug rather
+    // than as light. Only genuinely hot cores are allowed to bloom.
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x * BLOOM_SCALE, size.y * BLOOM_SCALE), 0.55, 0.78, 0.82);
     this.composer.addPass(this.bloom);
     this.grade = new ShaderPass(GradeShader);
     this.composer.addPass(this.grade);
@@ -67,7 +72,16 @@ export class Post {
 
   setSize(w: number, h: number) {
     this.composer.setSize(w, h);
-    this.bloom.setSize(w * 0.5, h * 0.5);
+    this.bloom.setSize(w * BLOOM_SCALE, h * BLOOM_SCALE);
+  }
+
+  /**
+   * Drop the most expensive pass if the machine cannot hold frame rate. Competitive play
+   * needs frames far more than it needs glow, and the point cloud still reads without it.
+   */
+  autoQuality(fps: number) {
+    if (this.bloomOn && fps < 38) { this.bloomOn = false; this.bloom.enabled = false; }
+    else if (!this.bloomOn && fps > 55) { this.bloomOn = true; this.bloom.enabled = true; }
   }
 
   render(now: number) {
