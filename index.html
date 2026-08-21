@@ -18,13 +18,16 @@
   .hidden{display:none!important}
 
   /* ── overlays ─────────────────────────────────────────── */
-  .screen{position:fixed;inset:0;z-index:30;display:grid;place-items:center;
+  .screen{position:fixed;inset:0;z-index:30;display:flex;align-items:center;
+    justify-content:center;overflow-y:auto;
     background:radial-gradient(ellipse at 50% 45%,rgba(10,20,28,.9),rgba(0,0,0,.985))}
-  .card{width:min(560px,92vw);padding:34px 38px;text-align:center}
+  /* margin:auto rather than centring alone: a grid-centred card taller than the viewport
+     gets clipped at BOTH ends and its buttons become unreachable on short screens. */
+  .card{width:min(560px,92vw);padding:28px 38px;text-align:center;margin:auto}
   h1{font-size:clamp(28px,6vw,44px);letter-spacing:.44em;font-weight:400;color:#eaf7ff;
     text-shadow:0 0 30px rgba(127,228,255,.4);margin-left:.44em}
   .tag{color:var(--amber);font-size:10px;letter-spacing:.42em;margin:10px 0 4px}
-  .rule{height:1px;background:linear-gradient(90deg,transparent,rgba(127,228,255,.35),transparent);margin:22px 0}
+  .rule{height:1px;background:linear-gradient(90deg,transparent,rgba(127,228,255,.35),transparent);margin:16px 0}
   p.lede{color:var(--dim);font-size:12px;line-height:2.1;letter-spacing:.04em}
   .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:6px}
   button,.btn{background:transparent;color:var(--cyan);border:1px solid rgba(127,228,255,.34);
@@ -42,11 +45,16 @@
   .sub{font-size:10px;letter-spacing:.3em;color:var(--dim)}
   .err{color:var(--life);font-size:11px;letter-spacing:.16em;min-height:16px;margin-top:12px}
   .wsel{display:flex;gap:12px;justify-content:center;margin:8px 0}
-  .wcard{border:1px solid rgba(127,228,255,.2);padding:14px 16px;width:190px;cursor:pointer;text-align:left;transition:.16s}
+  .wcard{border:1px solid rgba(127,228,255,.2);padding:12px 14px;width:190px;cursor:pointer;text-align:left;transition:.16s}
   .wcard:hover{border-color:rgba(127,228,255,.5)}
   .wcard.sel{border-color:var(--cyan);background:rgba(127,228,255,.08)}
   .wcard h4{font-size:13px;letter-spacing:.22em;color:#eaf7ff;font-weight:400;margin-bottom:7px}
   .wcard small{color:var(--dim);font-size:10px;line-height:1.75;display:block;letter-spacing:.03em}
+  .legend{text-align:left;font-size:10px;line-height:1.75;color:var(--dim);letter-spacing:.04em;
+    max-width:430px;margin:0 auto}
+  .legend div{display:flex;align-items:flex-start;gap:9px}
+  .legend i{flex:0 0 auto;width:8px;height:8px;border-radius:50%;margin-top:5px;
+    box-shadow:0 0 8px currentColor}
   .plist{font-size:11px;letter-spacing:.16em;color:var(--dim);line-height:2.2}
   .plist b{color:var(--cyan);font-weight:400}
   .plist .rdy{color:#7CFFA0}
@@ -90,6 +98,18 @@
   .dcard span{display:block;color:var(--dim);margin-top:4px;line-height:1.7}
   .dcard u{color:var(--gold);text-decoration:none}
   #dhdr{color:var(--gold);letter-spacing:.3em;font-size:10px;margin-bottom:8px;text-align:right}
+  /* Laptops with short viewports are common; tighten rather than force a scroll. */
+  @media (max-height: 730px){
+    .card{padding:12px 28px}
+    .rule{margin:10px 0}
+    h1{font-size:clamp(24px,5vw,32px)}
+    .tag{margin:6px 0 2px}
+    p.lede{line-height:1.75}
+    .legend{font-size:9px;line-height:1.5}
+    .wcard{padding:9px 12px}
+    .wcard small{line-height:1.55}
+    .plist{line-height:1.8}
+  }
 </style>
 </head>
 <body>
@@ -122,7 +142,9 @@
     <p class="lede">
       The substation is dark. You perceive it only through echoes,<br/>
       and an echo is a photograph of a moment that has passed.<br/>
-      Somewhere in here is a relic, and someone else who wants it.
+      Somewhere in here is a relic, and someone else who wants it.<br/><br/>
+      <span style="color:var(--cyan)">Every pulse you send paints the room for you —<br/>
+      and paints you for them, through walls.</span>
     </p>
     <div class="rule"></div>
     <div class="row">
@@ -148,6 +170,15 @@
         <small>Two shots kill. Every shot lights the room for BOTH of you — the tracer points back at where you stood.</small></div>
       <div class="wcard" data-w="whisper"><h4>THE WHISPER</h4>
         <small>Quiet, fast, weak at range. It tells the enemy almost nothing — you pay for it by having to get close.</small></div>
+    </div>
+    <div class="rule"></div>
+    <div class="tag" style="margin-bottom:10px">WHAT YOU WILL SEE</div>
+    <div class="legend">
+      <div><i style="background:#B6F0FF"></i>matter you just measured</div>
+      <div><i style="background:#2E6FA8"></i>matter you measured a while ago — your map, and it may be wrong</div>
+      <div><i style="background:#FF5A2D"></i>a person, frozen where they were. It cools, it never leaves, and only a newer sighting replaces it</div>
+      <div><i style="background:#FFB347"></i>sound — footsteps, gunfire, an enemy pulse through a wall</div>
+      <div><i style="background:#FFD34D"></i>the relic and the extraction beacon</div>
     </div>
     <div class="rule"></div>
     <div class="plist" id="l-players"></div>

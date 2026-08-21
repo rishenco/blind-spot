@@ -5,8 +5,8 @@ import { launch, openGame, settle, driveTo, errsOf, shot } from './shot.ts';
 import type { Page } from 'playwright';
 
 const b = await launch();
-const A = await openGame(b, undefined, 900, 600);
-const B = await openGame(b, undefined, 900, 600);
+const A = await openGame(b, undefined, 900, 620);
+const B = await openGame(b, undefined, 900, 620);
 let pass = 0, fail = 0;
 const chk = (n: string, c: boolean, e = '') => { c ? (pass++, console.log('  ok  ' + n)) : (fail++, console.log('  FAIL ' + n + ' ' + e)); };
 

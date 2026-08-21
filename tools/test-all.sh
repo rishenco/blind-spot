@@ -15,6 +15,7 @@ sh tools/dev.sh > /dev/null 2>&1
 run "scan yield"       npx tsx tools/test-scan.ts
 run "point dedup"      npx tsx tools/test-dedup.ts
 run "movement"         npx tsx tools/test-move.ts
+run "ui fits"          npx tsx tools/test-ui-fit.ts
 run "STALE INFORMATION ACCEPTANCE TEST" npx tsx tools/test-stale.ts
 run "gameplay"         npx tsx tools/test-gameplay.ts
 run "full match"       npx tsx tools/test-match.ts

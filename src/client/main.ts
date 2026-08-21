@@ -65,6 +65,7 @@ const net = new Net();
 
 const showScreen = (s: Screen) => {
   screen = s;
+  document.querySelector('.hud')!.classList.toggle('hidden', s !== 'game');
   $('s-menu').classList.toggle('hidden', s !== 'menu');
   $('s-lobby').classList.toggle('hidden', s !== 'lobby');
   $('s-over').classList.toggle('hidden', s !== 'over');

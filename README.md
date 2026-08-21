@@ -17,7 +17,11 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:5173>. One player clicks **CREATE ROOM** and reads out the six-letter
+Open <http://localhost:5173>. (For a single-process build instead: `npm run serve`, then
+open <http://localhost:8787> — the game server serves the built client and the websocket
+from the same port.)
+
+ One player clicks **CREATE ROOM** and reads out the six-letter
 code; the other types it into **JOIN**. Both pick a weapon and hit **READY**.
 
 **SOLO WALK** is an offline sandbox with no opponent — the fastest way to learn to read the
