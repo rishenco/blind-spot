@@ -36,6 +36,75 @@ export async function place(page: Page, x: number, z: number, yaw: number, pitch
   }, [x, z, yaw, pitch]);
 }
 
+/**
+ * Walk a client to a position the way the server will accept: a BFS path over the shared
+ * map grid, followed in legal-sized steps, each uploaded as a real input message and
+ * steered by the server's OWN reported position. The server owns movement, so this is the
+ * only honest way for a test to position a player.
+ */
+export async function driveTo(page: Page, x: number, z: number, yaw?: number) {
+  const ok = await page.evaluate(async ([tx, tz, ty]) => {
+    const bs = (window as any).__bs;
+    const GW = bs.map.extent.w as number, GH = bs.map.extent.h as number;
+    const cells = bs.map.grid.cells as Uint8Array;
+    const start = [Math.floor(bs.state().self?.x ?? bs.ctl.pos.x), Math.floor(bs.state().self?.z ?? bs.ctl.pos.z)];
+    const goal = [Math.floor(tx as number), Math.floor(tz as number)];
+    // BFS from goal so the parent chain reads forward from start.
+    const prev = new Int32Array(GW * GH).fill(-1);
+    const seen = new Uint8Array(GW * GH);
+    const q: number[] = [goal[1]! * GW + goal[0]!];
+    seen[q[0]!] = 1;
+    for (let h = 0; h < q.length; h++) {
+      const c = q[h]!, cx = c % GW, cz = (c / GW) | 0;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cx + dx!, nz = cz + dz!;
+        if (nx < 0 || nz < 0 || nx >= GW || nz >= GH || cells[nz * GW + nx] !== 1) continue;
+        const ni = nz * GW + nx;
+        if (seen[ni]) continue;
+        seen[ni] = 1; prev[ni] = c; q.push(ni);
+      }
+    }
+    const path: number[][] = [];
+    let cur = start[1]! * GW + start[0]!;
+    if (!seen[cur]) return false;
+    for (let guard = 0; guard < 4000 && cur !== goal[1]! * GW + goal[0]!; guard++) {
+      path.push([(cur % GW) + 0.5, ((cur / GW) | 0) + 0.5]);
+      const nx = prev[cur]!;
+      if (nx < 0) break;
+      cur = nx;
+    }
+    path.push([tx as number, tz as number]);
+
+    for (const [wx, wz] of path) {
+      for (let i = 0; i < 60; i++) {
+        const s = bs.state().self;
+        const cx = s ? s.x : bs.ctl.pos.x, cz = s ? s.z : bs.ctl.pos.z;
+        const dx = wx! - cx, dz = wz! - cz;
+        const d = Math.hypot(dx, dz);
+        if (d < 0.45) break;
+        const step = Math.min(0.8, d);
+        bs.ctl.teleport({ x: cx + (dx / d) * step, y: 0, z: cz + (dz / d) * step });
+        if (ty !== undefined) bs.ctl.yaw = ty as number;
+        bs.send({ t: 'input', seq: i, x: bs.ctl.pos.x, y: bs.ctl.pos.y, z: bs.ctl.pos.z,
+                  yaw: bs.ctl.yaw, pitch: bs.ctl.pitch, stance: 1, vx: 0, vz: 0 });
+        await new Promise((r) => setTimeout(r, 18));
+      }
+    }
+    if (ty !== undefined) bs.ctl.yaw = ty as number;
+    const s = bs.state().self;
+    return Math.hypot((s?.x ?? 0) - (tx as number), (s?.z ?? 0) - (tz as number)) < 1.2;
+  }, [x, z, yaw] as any);
+  if (!ok) throw new Error(`driveTo(${x},${z}) did not converge`);
+}
+
+/** The server's authoritative position for this client. */
+export async function serverPos(page: Page): Promise<{ x: number; z: number }> {
+  return page.evaluate(() => {
+    const s = (window as any).__bs.state().self;
+    return { x: s?.x ?? 0, z: s?.z ?? 0 };
+  });
+}
+
 export async function pulse(page: Page) {
   await page.evaluate(() => { const b = (window as any).__bs; b.pulseReset?.(); b.firePulse(b.clock()); });
 }

@@ -37,6 +37,7 @@ const VERT = /* glsl */ `
   varying vec3  vColor;
   varying float vAlpha;
   varying float vFlash;
+  varying float vKind;
 
   // ── The Three-Color Law ─────────────────────────────────────────────
   // Architecture is cyan->blue and cools to navy. Life is orange and cools to rust.
@@ -55,9 +56,10 @@ const VERT = /* glsl */ `
   void main() {
     float age = uNow - aBirth;
     int kind = int(aKind + 0.5);
+    vKind = aKind;
 
     // Before the wavefront arrives, the point does not exist yet.
-    if (age < 0.0) { gl_Position = vec4(2.0); gl_PointSize = 0.0; vAlpha = 0.0; return; }
+    if (age < 0.0) { gl_Position = vec4(2.0); gl_PointSize = 0.0; vAlpha = 0.0; vColor = vec3(0.0); vFlash = 0.0; return; }
 
     float flash = 1.0 - clamp(age / uFlashDur, 0.0, 1.0);
     flash = flash * flash;
@@ -71,12 +73,14 @@ const VERT = /* glsl */ `
       float t = clamp(age / uAgeEntity, 0.0, 1.0);
       col   = t < 1.0 ? mix(C_LIFE, C_LIFE_COOL, t) : C_LIFE_HOLD;
       col   = mix(col, C_LIFE_HOLD, smoothstep(0.8, 1.0, t));
-      alpha = mix(1.0, 0.38, t);
-      px    = mix(4.2, 3.0, t);
+      // Deliberately below full alpha: 560 overlapping additive points otherwise sum to
+      // white and the silhouette loses the one colour that says "this is a person".
+      alpha = mix(0.70, 0.26, t);
+      px    = mix(3.3, 2.5, t);
     } else if (kind == 2) {
       // ── SOUND / IMPACT: transient. Dies completely, leaving no memory.
       float t = clamp(age / uLifeTransient, 0.0, 1.0);
-      if (t >= 1.0) { gl_Position = vec4(2.0); gl_PointSize = 0.0; vAlpha = 0.0; return; }
+      if (t >= 1.0) { gl_Position = vec4(2.0); gl_PointSize = 0.0; vAlpha = 0.0; vColor = vec3(0.0); vFlash = 0.0; return; }
       col   = C_SOUND;
       alpha = 0.92 * (1.0 - t) * (1.0 - t);
       px    = mix(4.4, 1.2, t);
@@ -129,6 +133,7 @@ const FRAG = /* glsl */ `
   varying vec3  vColor;
   varying float vAlpha;
   varying float vFlash;
+  varying float vKind;
 
   void main() {
     if (vAlpha <= 0.003) discard;
@@ -138,7 +143,9 @@ const FRAG = /* glsl */ `
     // Wide bright plateau with a soft rim: at 1-3px a sharp falloff eats the whole sprite.
     float falloff = 1.0 - smoothstep(0.055, 0.25, r2);
     float core = 1.0 - smoothstep(0.0, 0.09, r2);
-    vec3 col = vColor * (1.0 + core * 0.45) + vec3(vFlash) * core * 0.5;
+    // Life points get no hot core: their colour IS the information.
+    float boost = ((vKind > 0.5 && vKind < 1.5) || (vKind > 3.5 && vKind < 4.5)) ? 0.12 : 0.45;
+    vec3 col = vColor * (1.0 + core * boost) + vec3(vFlash) * core * 0.5;
     gl_FragColor = vec4(col, vAlpha * falloff);
   }
 `;
@@ -185,7 +192,7 @@ export class PointField {
     this.mat = new THREE.ShaderMaterial({
       uniforms: {
         uNow: { value: 0 },
-        uPointScale: { value: 5.6 },
+        uPointScale: { value: 2.1 },
         uDpr: { value: 1 },
         uFlashDur: { value: 0.45 },
         uLifeTransient: { value: 4.0 },
@@ -205,6 +212,7 @@ export class PointField {
     this.points.frustumCulled = false;
   }
 
+  get material(): THREE.ShaderMaterial { return this.mat; }
   set pointScale(v: number) { this.mat.uniforms.uPointScale!.value = v; }
   set dpr(v: number) { this.mat.uniforms.uDpr!.value = v; }
   setAges(a: Partial<{ transient: number; structFresh: number; structMemory: number; entity: number }>) {

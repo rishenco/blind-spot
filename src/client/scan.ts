@@ -24,6 +24,9 @@ export interface PulseSpec {
   densityFalloff: number;
   seed: number;
   kind?: PKind;
+  /** Overall return-strength multiplier. The touch radius uses a low value so that
+   *  feeling your way along a wall never competes with an actual pulse. */
+  gain?: number;
   /** Vertical band for omni pulses (radians from horizon). */
   elevMax?: number;
 }
@@ -130,7 +133,7 @@ export class PulseJob {
         // Grazing incidence returns less energy.
         const rimT = omni ? 1 : 1 - smooth01((u - 0.42) / 0.58);
         const inc = Math.abs(h.nx * dx + h.ny * dy + h.nz * dz);
-        let strength = resp.gain * (0.30 + 0.70 * inc) * (omni ? 1 : 0.35 + 0.65 * rimT);
+        let strength = (s.gain ?? 1) * resp.gain * (0.30 + 0.70 * inc) * (omni ? 1 : 0.35 + 0.65 * rimT);
         // Inverse-ish falloff: far surfaces come back thin and dim.
         const dn = d / s.range;
         strength *= 1 - 0.55 * dn * dn;

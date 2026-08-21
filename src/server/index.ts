@@ -64,7 +64,10 @@ wss.on('connection', (ws: WebSocket) => {
     if (m.t === 'create') {
       if (room) return;
       const code = newCode();
-      const r = new Room(code);
+      // BS_ROOM_SEED makes the relic site deterministic for automated tests. It carries no
+      // information about either player, so it cannot widen what a client can learn.
+      const seedEnv = process.env.BS_ROOM_SEED;
+      const r = new Room(code, seedEnv ? Number(seedEnv) : Date.now());
       r.onEmpty = () => rooms.delete(code);
       rooms.set(code, r);
       room = r;
