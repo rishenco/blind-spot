@@ -122,6 +122,12 @@ export async function solo(page: Page) {
   await page.waitForTimeout(400);
 }
 
+/** Wait until every queued pulse has finished casting and its wavefront has arrived. */
+export async function waitForScan(page: Page, extra = 1.0) {
+  await page.waitForFunction(() => (window as any).__bs.per.pulses.pending === 0, null, { timeout: 30000 });
+  await page.waitForTimeout(extra * 1000);
+}
+
 export async function settle(page: Page, seconds: number) {
   // Let rAF run; the wavefront and the pulse queue both need real frames.
   await page.waitForTimeout(seconds * 1000);

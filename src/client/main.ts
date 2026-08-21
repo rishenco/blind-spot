@@ -310,7 +310,10 @@ function frame() {
   if (dt > 0.1) dt = 0.1;
 
   if (screen === 'game') {
-    if (locked && (self?.alive ?? true)) ctl.step(dt);
+    // Movement is gated on being in the match, not on pointer lock. Only mouse LOOK needs
+    // the lock; requiring it for movement means a failed or refused lock leaves the player
+    // unable to move at all, and it makes the movement path untestable.
+    if (self?.alive ?? true) ctl.step(dt);
     per.selfPos.x = ctl.pos.x; per.selfPos.y = ctl.pos.y; per.selfPos.z = ctl.pos.z;
     per.touch(ctl.pos.x, ctl.eyeY, ctl.pos.z, now);
     if (match?.beaconLit) per.beacon(match.bx, match.by, match.bz, now);

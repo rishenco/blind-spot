@@ -75,10 +75,14 @@ export class Controller {
 
     const speed = (this.crouching ? this.tuning.crouch : this.sprinting ? this.tuning.sprint : this.tuning.walk) * this.speedMul;
 
-    // Camera-relative wish direction.
+    // Camera-relative wish direction. This basis MUST agree with dirFromAngles() and with
+    // the camera's own yaw rotation, or the player walks in a different direction from the
+    // one they are aiming and scanning in.
+    //   forward = (-sin yaw, 0, -cos yaw)      right = (cos yaw, 0, -sin yaw)
+    // and W sets fz = -1, so forward contributes -fz.
     const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
-    const wx = (fx * cy - fz * sy) * speed;
-    const wz = (-fx * sy - fz * cy) * speed;
+    const wx = (fx * cy + fz * sy) * speed;
+    const wz = (-fx * sy + fz * cy) * speed;
 
     // Exponential approach to the wish velocity: snappy but not instant.
     const t = 1 - Math.exp(-(l > 0 ? this.tuning.accel : this.tuning.friction) * dt);
