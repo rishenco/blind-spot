@@ -48,5 +48,28 @@ scan a room you cannot enter. The map itself generates false negatives.
 - `npx tsx tools/test-raycast.ts` — raycaster correctness + perf (must stay green)
 - `npx tsx tools/test-map.ts` — map connectivity flood fill + ASCII preview
 
+## Design (locked — see DESIGN.md for the full brief)
+- **Reciprocity Law**: every emission is two-sided. A pulse paints geometry for you AND
+  renders your position to the enemy through walls (COARSE, 35m). This, not the cooldown,
+  is what stops scan spam.
+- **Relic arc** (anti-stall): relic hidden at 1 of 5 sites, heartbeat every 20s reveals its
+  neighbourhood in gold to BOTH players. Carrier can't sprint and "sings" every 5s.
+  Extraction = channel 3.5s in the Spine ring, fully lit. Overdrive at 6:00, hard cap 8:00.
+- **Three-Color Law**: cyan = matter, orange = life, amber = sound, gold = objective.
+  Age = temperature. Depth is encoded *inside* the cyan band only.
+- Weapons: JUDGE (50dmg, loud, tracer+impact bloom visible to BOTH — a paid scanner) and
+  WHISPER (16dmg, near-silent, shooter-only impact).
+- Gadgets: Sensor Spike, Decoy Shard, Echo Bomb.
+- 12 upgrade cards in 3 tiers; each changes strategy, never a number.
+
+## Server (`src/server/room.ts`)
+The firewall is enforced by construction: `reveal()` is the ONLY function that puts enemy
+information into a client outbox, and it degrades server-side to FULL / COARSE / TRACE
+before queueing. `snap` carries only the player's own state. `relicHeld` is deliberately
+reduced so it cannot say *who* holds the relic.
+
 ## Status
-Design phase running (Fable agent → `DESIGN.md`). Engine foundations done & tested.
+Iteration 1 (sensory) + server sim done. `tools/test-firewall.ts`: **31/31 pass**, covering
+silence, capture, reciprocity, staleness, no-leak stream scan, refresh, LOS gating,
+footsteps, heartbeat, combat info-cost, extraction win.
+Next: client networking, ghost rendering, UI.
