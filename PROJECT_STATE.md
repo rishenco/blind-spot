@@ -68,17 +68,33 @@ src/shared/  math world collide map config proto upgrades   (client+server)
 src/client/  main controller perception pointfield ghost scan post net audio
 src/server/  index room
 tools/       test-*.ts  shot*.ts  dev.sh  test-all.sh
+Dockerfile   docker-compose.yml  .dockerignore
 ```
 
 ## Run
 `npm install && npm run dev` → client :5173, server :8787 (vite proxies `/ws`).
 `sh tools/dev.sh` restarts both by port. `BS_ROOM_SEED=7` fixes the relic site for tests.
 
+`docker compose up --build` → everything on :8787. Notes on the image, so nobody
+re-derives them:
+- **Debian, not Alpine.** package-lock.json resolves `@esbuild/linux-x64` (glibc) and
+  carries no musl variant, so `npm ci` on Alpine leaves tsx without an esbuild binary
+  and the server never boots. Switching base image means regenerating the lock on musl.
+- The runtime stage deletes `node_modules/three`: vite has already inlined it into
+  `dist/`, and nothing under `src/server` or `src/shared` imports it.
+- `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` in the build stage, or the playwright
+  devDependency drags ~150MB of browsers into a layer the image never uses.
+- `CMD` is `node --import tsx`, not the `tsx` shim, so node is PID 1 and takes SIGTERM
+  directly (`docker stop` returns in ~200ms, exit 143).
+- The `npm ci` steps accept an optional `--secret id=ca` for TLS-inspecting proxies; with
+  no secret the mount is absent and the build is unchanged.
+
 ## Tests — `sh tools/test-all.sh`
 raycaster (brute-force cross-check) · map (connectivity + standability) · firewall
 (33 headless protocol assertions) · scan yield · dedup convergence · movement (real keys in
 a real browser) · **stale-information acceptance test** (two browser clients) · gameplay ·
-full match. All green.
+full match · soak. All green. The eight browser suites also pass unchanged against the
+container image (`BS_URL=http://localhost:8787`); the other three touch no server.
 
 ## Bugs found and fixed (keep, so they are not reintroduced)
 - **W walked backwards** — the controller's basis had the wrong sign on the forward term.

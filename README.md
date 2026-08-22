@@ -31,6 +31,30 @@ code; the other types it into **JOIN**. Both pick a weapon and hit **READY**.
 **SOLO WALK** is an offline sandbox with no opponent — the fastest way to learn to read the
 space before anyone is hunting you.
 
+### With Docker
+
+```bash
+docker compose up --build
+```
+
+Open <http://localhost:8787>. The image builds the client with vite and then runs the
+game server, which serves that bundle and the websocket from a single port — so one
+published port is all the game needs. Override it with `PORT=9000 docker compose up`.
+
+Plain docker works too:
+
+```bash
+docker build -t blind-spot .
+docker run --init -p 8787:8787 blind-spot
+```
+
+Behind a TLS-inspecting proxy, hand the build your CA once — both install steps pick
+it up, and without the secret the mount is simply absent:
+
+```bash
+docker build --secret id=ca,src=/path/to/ca.crt -t blind-spot .
+```
+
 ## Controls
 
 | | |
@@ -78,7 +102,17 @@ lit, while the other player knows exactly where you are. At 6:00 everything gets
 sh tools/test-all.sh
 ```
 
-Nine suites, including the acceptance test that matters: two real browser clients, where
+Eleven suites, including the acceptance test that matters: two real browser clients, where
 one scans the other, the other walks away, and the ghost is proven **not** to follow.
+
+The browser suites take their target from `BS_URL`, so they can be pointed at any running
+server — a container included:
+
+```bash
+docker run -d --init -p 8787:8787 -e BS_ROOM_SEED=7 blind-spot
+BS_URL=http://localhost:8787 npx tsx tools/test-stale.ts
+```
+
+`BS_ROOM_SEED` pins the relic site; `tools/test-match.ts` needs `7` to know where to look.
 
 See `DESIGN.md` for the full design brief and `PROJECT_STATE.md` for architecture.

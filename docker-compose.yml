@@ -1,0 +1,17 @@
+# Run the game:   docker compose up --build
+# Then open http://localhost:8787 in two browser windows: one creates a room,
+# the other joins with the six-character code.
+
+services:
+  blind-spot:
+    build: .
+    image: blind-spot:latest
+    ports:
+      - "${PORT:-8787}:8787"
+    environment:
+      # The container always listens on 8787; remap on the host side above.
+      PORT: 8787
+      # Pin the relic sites for reproducible runs (used by the test harness).
+      # BS_ROOM_SEED: "1"
+    init: true
+    restart: unless-stopped
