@@ -114,6 +114,7 @@ async function capture(browser, name, query, checks, opts = {}) {
       page.evaluate(() => ({
         painted: window.blindspot.field.paintedDots,
         detonations: window.blindspot.sim.bus.counts.detonation,
+        pending: window.blindspot.stats().paintPending,
         ink: window.blindspot.ink(),
       }));
     const before = await sample();
@@ -213,7 +214,7 @@ async function capture(browser, name, query, checks, opts = {}) {
   );
   note(
     `painted ${st.paintedDots} dots · ${st.paintedEdgeVerts} edge verts · heard ${st.heard}` +
-      ` missed ${st.missed} · paint worst ${st.paintMaxMs.toFixed(2)} ms`,
+      ` missed ${st.missed} · paint worst ${st.paintMaxMs.toFixed(2)} ms/frame · pending ${st.paintPending}`,
   );
   note(
     `first-person ink lit ${(state.glInk.lit * 100).toFixed(3)}% · any ${(state.glInk.any * 100).toFixed(3)}%` +
@@ -426,9 +427,28 @@ async function main() {
         'the blast painted geometry': blast.after.painted > 1_000,
         'the blast lit the screen': blast.after.ink.lit > blast.before.ink.lit + 0.01,
         'and did not flood it': blast.after.ink.any < 0.85,
-        // Engine-plan §10 budget: paint runs inside the fixed step, so the loudest event in the
-        // game has to fit in one. A detonation is the worst case there is.
-        'the worst paint call fits inside a 16 ms step': s.stats.paintMaxMs < 16,
+        // Engine-plan §10 budget, vision §12 "60 fps". A detonation is the most paint work the
+        // engine ever does and it fires at the loudest moment in the game — the worst possible
+        // place for a hitch. It is scheduled against its own wavefront (core/paint.ts `PaintJob`)
+        // rather than painted in one call, so the quantity that matters is the worst FRAME, not
+        // the worst event, and it is now bounded by PAINT_BUDGET_MS plus whatever the wave
+        // genuinely reached during the frame — NOT by how big the event is.
+        //
+        // This ceiling is a headless-swiftshader number and deliberately loose. This harness
+        // rasterizes 118 k splats on the CPU and holds ~30 fps, so a frame here is already twice
+        // the 16.7 ms the game is budgeted for; and the frame that catches a point-blank blast
+        // spends ~75 ms rasterizing a screen-filling cloud, during which the wavefront crosses
+        // ~10 m and brings that much paint due at once. 18 ms is about half of THIS harness's
+        // frame. Measured on the same box: 16.1 ms before the schedule, 10-14 ms after, and
+        // ~3 ms at 60 fps where the peak converges on PAINT_BUDGET_MS for every event class.
+        //
+        // The portable, deterministic form of the contract — settles identically to one
+        // synchronous call, never paints a surfel after its sound arrived, hands any one frame a
+        // small slice — is pinned in test/paint.spec.ts, not here.
+        'no single frame spends more than 18 ms painting': s.stats.paintMaxMs < 18,
+        // The schedule drains: a second after the blast nothing is still waiting on its wave.
+        'the blast finished arriving': blast.after.pending === 0,
+        'nothing was still queued before it went off': blast.before.pending === 0,
       }),
       { detonate: true },
     );

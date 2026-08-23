@@ -23,6 +23,7 @@
 import {
   DITHER_GAIN,
   HEARING_BASE,
+  PAINT_BUDGET_MS,
   WALL1_INTENSITY,
   WALL1_QUALITY,
   WALL1_RADIUS,
@@ -272,6 +273,55 @@ export interface PaintResult {
 const emptyResult = (): PaintResult => ({ dots: 0, edgeVerts: 0, patchesTested: 0, patchesLit: 0 });
 
 /**
+ * Everything one event contributes to paint, resolved once and then reused for every patch.
+ *
+ * Split out of `applyEvent` so the synchronous path and the amortized `PaintJob` run the exact
+ * same per-patch code. A job outlives the call that created it, so it may not borrow the module
+ * scratch above: whoever builds a setup owns the buffers inside it.
+ */
+interface PaintSetup {
+  ox: number;
+  oy: number;
+  oz: number;
+  fuzz: readonly [number, number, number];
+  wallFilter: ((s: CollisionSolid) => boolean) | undefined;
+  cone: SoundEvent['cone'];
+  coneHalfCos: number;
+  coneLen: number;
+  R0: number;
+  intensity: number;
+  time: number;
+  wave: number;
+}
+
+function makePaintSetup(
+  world: World,
+  e: SoundEvent,
+  fuzzOut: [number, number, number],
+  ownOut: Set<number>,
+): PaintSetup {
+  const ox = e.origin[0];
+  const oy = e.origin[1];
+  const oz = e.origin[2];
+  const cone = e.cone;
+  return {
+    ox,
+    oy,
+    oz,
+    fuzz: fuzzVector(e.fuzzSeed, fuzzOut),
+    // Paint's wall filter is NOT delivery's: floors stay opaque here even for a detonation.
+    wallFilter: makeWallFilter(originSolids(world, ox, oy, oz, ownOut), false),
+    cone,
+    coneHalfCos: cone ? Math.cos((cone.angleDeg * 0.5 * Math.PI) / 180) : 0,
+    coneLen: cone ? Math.hypot(cone.dir[0], cone.dir[1], cone.dir[2]) : 0,
+    R0: e.paintRadius,
+    intensity: e.intensity,
+    time: e.time,
+    wave: e.waveSpeed,
+  };
+}
+
+/**
  * Light everything one sound reaches (engine-plan §3 "Paint", steps 1–5).
  *
  * Wall handling here is deliberately NOT the delivery filter. `deliverTo` lets a detonation's
@@ -283,6 +333,11 @@ const emptyResult = (): PaintResult => ({ dots: 0, edgeVerts: 0, patchesTested: 
  *
  * `dotsAccum` / `segAccum` are the caller's upload ranges; pass null when painting outside a
  * frame (specs, warm-up) and upload the whole buffer yourself.
+ *
+ * This is the WHOLE event, synchronously. `PaintPipeline` spreads wave-speed events over the
+ * frames their own wavefront takes to arrive instead — see `PaintJob` — but the result is the
+ * same set of writes either way (patches own disjoint dot and segment runs, so the order they
+ * are visited in cannot change the picture).
  */
 export function applyEvent(
   field: SurfelField,
@@ -309,12 +364,33 @@ export function applyEvent(
   out.patchesTested = patches.length;
   if (patches.length === 0) return out;
 
-  const fuzz = fuzzVector(e.fuzzSeed, scratchFuzz);
-  // Paint's wall filter is NOT delivery's: floors stay opaque here even for a detonation.
-  const wallFilter = makeWallFilter(originSolids(world, ox, oy, oz, paintOwn), false);
-  const cone = e.cone;
-  const coneHalfCos = cone ? Math.cos((cone.angleDeg * 0.5 * Math.PI) / 180) : 0;
-  const coneLen = cone ? Math.hypot(cone.dir[0], cone.dir[1], cone.dir[2]) : 0;
+  const setup = makePaintSetup(world, e, scratchFuzz, paintOwn);
+  for (const p of patches) paintPatch(field, world, p, setup, dotsAccum, segAccum, out);
+  return out;
+}
+
+/**
+ * Steps 1b–5 for ONE patch. Adds to `out` rather than overwriting it, so a caller walking a
+ * patch list across several frames still ends up with the event's true totals.
+ */
+function paintPatch(
+  field: SurfelField,
+  world: World,
+  p: number,
+  s: PaintSetup,
+  dotsAccum: RangeAccum | null,
+  segAccum: RangeAccum | null,
+  out: PaintResult,
+): void {
+  const ox = s.ox;
+  const oy = s.oy;
+  const oz = s.oz;
+  const R0 = s.R0;
+  const fuzz = s.fuzz;
+  const cone = s.cone;
+  const coneHalfCos = s.coneHalfCos;
+  const coneLen = s.coneLen;
+  const wave = s.wave;
 
   const pos = field.positions;
   const nrm = field.normals;
@@ -325,115 +401,109 @@ export function applyEvent(
   const edt = field.edgeDither;
   const ept = field.edgePaintTime;
   const epi = field.edgePaintIntensity;
-  const wave = e.waveSpeed;
+  const pcx = field.patchCentre[p * 3]!;
+  const pcy = field.patchCentre[p * 3 + 1]!;
+  const pcz = field.patchCentre[p * 3 + 2]!;
+  const prad = field.patchRadius[p]!;
 
-  for (const p of patches) {
-    const pcx = field.patchCentre[p * 3]!;
-    const pcy = field.patchCentre[p * 3 + 1]!;
-    const pcz = field.patchCentre[p * 3 + 2]!;
-    const prad = field.patchRadius[p]!;
+  // Step 1b — cone pre-filter (E-ping). Widened by the patch's own radius so a patch straddling
+  // the beam edge is not thrown away before its surfels get their exact test.
+  if (cone && !patchInCone(ox, oy, oz, cone.dir, coneHalfCos, coneLen, pcx, pcy, pcz, prad)) return;
 
-    // Step 1b — cone pre-filter (E-ping). Widened by the patch's own radius so a patch straddling
-    // the beam edge is not thrown away before its surfels get their exact test.
-    if (cone && !patchInCone(ox, oy, oz, cone.dir, coneHalfCos, coneLen, pcx, pcy, pcz, prad)) continue;
+  // Prune before the raycast: even the patch's most eager member cannot clear its dither.
+  const near = Math.max(0, Math.hypot(pcx - ox, pcy - oy, pcz - oz) - prad);
+  if (s.intensity * clamp01(1 - (near * near) / (R0 * R0)) < field.patchMinDither[p]! * DITHER_GAIN) return;
 
-    // Prune before the raycast: even the patch's most eager member cannot clear its dither.
-    const near = Math.max(0, Math.hypot(pcx - ox, pcy - oy, pcz - oz) - prad);
-    if (e.intensity * clamp01(1 - (near * near) / (R0 * R0)) < field.patchMinDither[p]! * DITHER_GAIN) continue;
+  // Step 2 — patch LOS. ONE raycast serves every dot and every segment the patch owns, and it
+  // starts from `patchProbe` — a point the bake proved is in open air (surfels.ts).
+  const walls = countWalls(
+    world,
+    field.patchProbe[p * 3]!,
+    field.patchProbe[p * 3 + 1]!,
+    field.patchProbe[p * 3 + 2]!,
+    ox,
+    oy,
+    oz,
+    s.wallFilter,
+  );
+  if (walls >= WALL_MAX) return;
+  const through = walls === 1;
+  const R = through ? R0 * WALL1_RADIUS : R0;
+  const I0 = through ? s.intensity * WALL1_INTENSITY : s.intensity;
+  const ex = through ? ox + fuzz[0] : ox;
+  const ey = through ? oy + fuzz[1] : oy;
+  const ez = through ? oz + fuzz[2] : oz;
+  // Re-test against the reduced sphere: most one-wall patches fall out here for free.
+  const ddx = pcx - ex;
+  const ddy = pcy - ey;
+  const ddz = pcz - ez;
+  const reach = R + prad;
+  if (ddx * ddx + ddy * ddy + ddz * ddz > reach * reach) return;
+  out.patchesLit++;
 
-    // Step 2 — patch LOS. ONE raycast serves every dot and every segment the patch owns, and it
-    // starts from `patchProbe` — a point the bake proved is in open air (surfels.ts).
-    const walls = countWalls(
-      world,
-      field.patchProbe[p * 3]!,
-      field.patchProbe[p * 3 + 1]!,
-      field.patchProbe[p * 3 + 2]!,
-      ox,
-      oy,
-      oz,
-      wallFilter,
-    );
-    if (walls >= WALL_MAX) continue;
-    const through = walls === 1;
-    const R = through ? R0 * WALL1_RADIUS : R0;
-    const I0 = through ? e.intensity * WALL1_INTENSITY : e.intensity;
-    const ex = through ? ox + fuzz[0] : ox;
-    const ey = through ? oy + fuzz[1] : oy;
-    const ez = through ? oz + fuzz[2] : oz;
-    // Re-test against the reduced sphere: most one-wall patches fall out here for free.
-    const ddx = pcx - ex;
-    const ddy = pcy - ey;
-    const ddz = pcz - ez;
-    const reach = R + prad;
-    if (ddx * ddx + ddy * ddy + ddz * ddz > reach * reach) continue;
-    out.patchesLit++;
+  const invR2 = 1 / (R * R);
 
-    const invR2 = 1 / (R * R);
+  // --- dots -----------------------------------------------------------------------------------
+  const d0 = field.patchDotStart[p]!;
+  const d1 = d0 + field.patchDotCount[p]!;
+  let lo = -1;
+  let hi = -1;
+  for (let i = d0; i < d1; i++) {
+    const i3 = i * 3;
+    const vx = ex - pos[i3]!;
+    const vy = ey - pos[i3 + 1]!;
+    const vz = ez - pos[i3 + 2]!;
+    // Step 5 — sound paints the face it hits.
+    if (nrm[i3]! * vx + nrm[i3 + 1]! * vy + nrm[i3 + 2]! * vz < 0) continue;
+    const d2 = vx * vx + vy * vy + vz * vz;
+    if (d2 >= R * R) continue;
+    // Step 3 — quadratic falloff to exactly zero at R.
+    const I = I0 * clamp01(1 - d2 * invR2);
+    if (I < dth[i]! * DITHER_GAIN) continue;
+    if (cone && !inCone(ox, oy, oz, cone.dir[0], cone.dir[1], cone.dir[2], pos[i3]!, pos[i3 + 1]!, pos[i3 + 2]!, cone.angleDeg))
+      continue;
+    // Step 4 — the wavefront. `d / Infinity` is 0, so instant classes need no branch.
+    const t = s.time + Math.sqrt(d2) / wave;
+    if (pt[i]! === UNPAINTED) field.paintedDots++;
+    pt[i] = t;
+    const old = pi[i]!;
+    pi[i] = I > old * 0.85 ? I : old * 0.85;
+    out.dots++;
+    if (lo < 0) lo = i;
+    hi = i;
+  }
+  if (lo >= 0 && dotsAccum) dotsAccum.add(lo, hi - lo + 1);
 
-    // --- dots ---------------------------------------------------------------------------------
-    const d0 = field.patchDotStart[p]!;
-    const d1 = d0 + field.patchDotCount[p]!;
-    let lo = -1;
-    let hi = -1;
-    for (let i = d0; i < d1; i++) {
-      const i3 = i * 3;
-      const vx = ex - pos[i3]!;
-      const vy = ey - pos[i3 + 1]!;
-      const vz = ez - pos[i3 + 2]!;
-      // Step 5 — sound paints the face it hits.
-      if (nrm[i3]! * vx + nrm[i3 + 1]! * vy + nrm[i3 + 2]! * vz < 0) continue;
+  // --- edge segments --------------------------------------------------------------------------
+  // Per VERTEX: a segment straddling the falloff edge fades along its own length in the shader.
+  const s0 = field.patchSegStart[p]!;
+  const s1 = s0 + field.patchSegCount[p]!;
+  let elo = -1;
+  let ehi = -1;
+  for (let sIdx = s0; sIdx < s1; sIdx++) {
+    for (let v = 0; v < 2; v++) {
+      const k = sIdx * 2 + v;
+      const k3 = k * 3;
+      const vx = ex - eps[k3]!;
+      const vy = ey - eps[k3 + 1]!;
+      const vz = ez - eps[k3 + 2]!;
       const d2 = vx * vx + vy * vy + vz * vz;
       if (d2 >= R * R) continue;
-      // Step 3 — quadratic falloff to exactly zero at R.
       const I = I0 * clamp01(1 - d2 * invR2);
-      if (I < dth[i]! * DITHER_GAIN) continue;
-      if (cone && !inCone(ox, oy, oz, cone.dir[0], cone.dir[1], cone.dir[2], pos[i3]!, pos[i3 + 1]!, pos[i3 + 2]!, cone.angleDeg))
+      if (I < edt[k]! * DITHER_GAIN) continue;
+      if (cone && !inCone(ox, oy, oz, cone.dir[0], cone.dir[1], cone.dir[2], eps[k3]!, eps[k3 + 1]!, eps[k3 + 2]!, cone.angleDeg))
         continue;
-      // Step 4 — the wavefront. `d / Infinity` is 0, so instant classes need no branch.
-      const t = e.time + Math.sqrt(d2) / wave;
-      if (pt[i]! === UNPAINTED) field.paintedDots++;
-      pt[i] = t;
-      const old = pi[i]!;
-      pi[i] = I > old * 0.85 ? I : old * 0.85;
-      out.dots++;
-      if (lo < 0) lo = i;
-      hi = i;
+      const t = s.time + Math.sqrt(d2) / wave;
+      if (ept[k]! === UNPAINTED) field.paintedEdgeVerts++;
+      ept[k] = t;
+      const old = epi[k]!;
+      epi[k] = I > old * 0.85 ? I : old * 0.85;
+      out.edgeVerts++;
+      if (elo < 0) elo = k;
+      ehi = k;
     }
-    if (lo >= 0 && dotsAccum) dotsAccum.add(lo, hi - lo + 1);
-
-    // --- edge segments ------------------------------------------------------------------------
-    // Per VERTEX: a segment straddling the falloff edge fades along its own length in the shader.
-    const s0 = field.patchSegStart[p]!;
-    const s1 = s0 + field.patchSegCount[p]!;
-    let elo = -1;
-    let ehi = -1;
-    for (let sIdx = s0; sIdx < s1; sIdx++) {
-      for (let v = 0; v < 2; v++) {
-        const k = sIdx * 2 + v;
-        const k3 = k * 3;
-        const vx = ex - eps[k3]!;
-        const vy = ey - eps[k3 + 1]!;
-        const vz = ez - eps[k3 + 2]!;
-        const d2 = vx * vx + vy * vy + vz * vz;
-        if (d2 >= R * R) continue;
-        const I = I0 * clamp01(1 - d2 * invR2);
-        if (I < edt[k]! * DITHER_GAIN) continue;
-        if (cone && !inCone(ox, oy, oz, cone.dir[0], cone.dir[1], cone.dir[2], eps[k3]!, eps[k3 + 1]!, eps[k3 + 2]!, cone.angleDeg))
-          continue;
-        const t = e.time + Math.sqrt(d2) / wave;
-        if (ept[k]! === UNPAINTED) field.paintedEdgeVerts++;
-        ept[k] = t;
-        const old = epi[k]!;
-        epi[k] = I > old * 0.85 ? I : old * 0.85;
-        out.edgeVerts++;
-        if (elo < 0) elo = k;
-        ehi = k;
-      }
-    }
-    if (elo >= 0 && segAccum) segAccum.add(elo, ehi - elo + 1);
   }
-
-  return out;
+  if (elo >= 0 && segAccum) segAccum.add(elo, ehi - elo + 1);
 }
 
 /** Conservative cone/sphere overlap: is any part of the patch inside the beam? */
@@ -461,6 +531,89 @@ function patchInCone(
   const cosB = Math.sqrt(Math.max(0, 1 - sinB * sinB));
   const sinA = Math.sqrt(Math.max(0, 1 - halfCos * halfCos));
   return c >= halfCos * cosB - sinA * sinB;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Amortized paint (engine-plan §10 budget, vision §12 "60 fps")
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * One wave-speed event's paint, spread over the frames its own wavefront takes to travel.
+ *
+ * A detonation paints 22 m through a whole floor. Done in one call that is the single most
+ * expensive thing the engine does — and it is triggered by the loudest, most dramatic moment in
+ * the game, so a hitch lands exactly where it is least forgivable.
+ *
+ * But the sound has not ARRIVED yet. Vision §3.3 gives a detonation a wave speed, so its paint
+ * legitimately reaches 22 m only after 22/140 ≈ 157 ms — ten frames at 60 fps. The shader already
+ * refuses to draw a surfel until `now >= paintTime`, so a dot painted early is invisible anyway;
+ * a dot painted late is a lie. That asymmetry is the whole schedule:
+ *
+ *   - patches are sorted by the earliest time the wavefront can touch them,
+ *   - a patch the wave HAS reached is painted this frame no matter what the budget says,
+ *   - patches ahead of the wave are painted only while `PAINT_BUDGET_MS` lasts.
+ *
+ * Because the list is sorted, every patch due this frame sits in an unbroken prefix, so "paint
+ * all due patches" is a `while` and never a search — and a patch can never be painted after its
+ * wavefront time. The budgeted work-ahead then eats into the far shells, so the due prefix keeps
+ * arriving already-painted and the peak never lands on one frame.
+ *
+ * `arrive` is deliberately conservative: it measures to the NEAREST point of the patch and then
+ * subtracts `WALL_FUZZ`, because a through-wall patch paints from a fuzzed origin that may sit up
+ * to 2 m closer than the true one. Being early is free; being late is the bug.
+ */
+class PaintJob {
+  cursor = 0;
+  constructor(
+    readonly setup: PaintSetup,
+    readonly patches: Int32Array,
+    readonly arrive: Float64Array,
+  ) {}
+  get remaining(): number {
+    return this.patches.length - this.cursor;
+  }
+}
+
+/** Patches painted between two clock reads in the budgeted pass. Power of two. */
+const PUMP_CLOCK_STRIDE = 8;
+
+/**
+ * Build the arrival-sorted patch list for one event, or null when it paints nothing.
+ * Allocates — once per wave-speed event, never per frame and never per patch.
+ */
+function makePaintJob(field: SurfelField, world: World, e: SoundEvent): PaintJob | null {
+  const R0 = e.paintRadius;
+  if (R0 <= 0 || e.intensity <= 0) return null;
+  const ox = e.origin[0];
+  const oy = e.origin[1];
+  const oz = e.origin[2];
+  const found = field.queryPatches(ox, oy, oz, R0, scratchPatches);
+  const n = found.length;
+  if (n === 0) return null;
+
+  const when = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = found[i]!;
+    const dx = field.patchCentre[p * 3]! - ox;
+    const dy = field.patchCentre[p * 3 + 1]! - oy;
+    const dz = field.patchCentre[p * 3 + 2]! - oz;
+    const nearest = Math.hypot(dx, dy, dz) - field.patchRadius[p]! - WALL_FUZZ;
+    when[i] = e.time + Math.max(0, nearest) / e.waveSpeed;
+  }
+
+  const order: number[] = [];
+  for (let i = 0; i < n; i++) order.push(i);
+  order.sort((a, b) => when[a]! - when[b]!);
+
+  const patches = new Int32Array(n);
+  const arrive = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const src = order[i]!;
+    patches[i] = found[src]!;
+    arrive[i] = when[src]!;
+  }
+  // The job outlives this call, so it gets its own fuzz tuple and its own origin-solid set.
+  return new PaintJob(makePaintSetup(world, e, [0, 0, 0], new Set<number>()), patches, arrive);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -493,10 +646,23 @@ export class PaintPipeline {
 
   /** Set true by the boot layer only — reading a clock inside the sim breaks determinism specs. */
   profile = false;
-  /** Milliseconds spent in the last `applyEvent`, and the worst seen since the last reset. */
+  /**
+   * Milliseconds of paint work in the last completed FRAME, and the worst frame since reset.
+   *
+   * Per frame, not per event: with `amortize` on, one event's cost is deliberately spread over
+   * several frames, so "the worst event" stopped being the number that decides whether the game
+   * holds 60 fps. `flush()` closes the frame and rolls these over.
+   */
   lastMs = 0;
   maxMs = 0;
   lastResult: PaintResult = emptyResult();
+
+  /**
+   * Spread wave-speed events (pings, detonations) across the frames their wavefront takes to
+   * arrive, instead of painting them in one call. Set by a consumer that runs a frame loop and
+   * therefore calls `pump()`; off by default so a spec can `hear()` and read the field at once.
+   */
+  amortize = false;
 
   /** Lifetime tallies for the F3 overlay. */
   heard = 0;
@@ -509,6 +675,9 @@ export class PaintPipeline {
   private ringHead = 0;
   private readonly listeners = new Set<DeliveredListener>();
   private detach: (() => void) | null = null;
+  private readonly jobs: PaintJob[] = [];
+  private readonly pumpResult: PaintResult = emptyResult();
+  private frameMs = 0;
 
   constructor(field: SurfelField, world: World, private readonly ringSize = 96) {
     this.field = field;
@@ -548,11 +717,16 @@ export class PaintPipeline {
     const copy = withDelivery(e, d);
 
     const t0 = this.profile ? nowMs() : 0;
-    applyEvent(this.field, this.world, copy, this.dotsAccum, this.segAccum, this.lastResult);
-    if (this.profile) {
-      this.lastMs = nowMs() - t0;
-      if (this.lastMs > this.maxMs) this.maxMs = this.lastMs;
+    // An instant class (every footstep, every landing) is small and has nothing to wait for:
+    // `waveSpeed` is Infinity, so the whole event is already "due" and queueing it would only
+    // add bookkeeping. Only a travelling sound can be scheduled.
+    if (this.amortize && Number.isFinite(copy.waveSpeed)) {
+      const job = makePaintJob(this.field, this.world, copy);
+      if (job) this.jobs.push(job);
+    } else {
+      applyEvent(this.field, this.world, copy, this.dotsAccum, this.segAccum, this.lastResult);
     }
+    if (this.profile) this.frameMs += nowMs() - t0;
 
     if (this.ring.length < this.ringSize) this.ring.push(copy);
     else {
@@ -561,6 +735,69 @@ export class PaintPipeline {
     }
     for (const fn of this.listeners) fn(copy);
     return copy;
+  }
+
+  /**
+   * Advance every scheduled event to the wavefront at `now`, then work ahead into `budgetMs`.
+   *
+   * Call once per frame, BEFORE `flush()` and before the look renders, with the SAME clock the
+   * shader gets as `uNow`. That ordering is what makes the guarantee true: any surfel the shader
+   * is about to draw (`now >= paintTime`) belongs to a patch whose `arrive <= paintTime <= now`,
+   * and every such patch was painted by the unbudgeted pass a moment ago.
+   *
+   * `budgetMs` bounds only the work-ahead. Due work is never skipped, so a pathological frame
+   * (two detonations, a 200 ms stall) pays what it owes instead of drawing a stale world.
+   */
+  pump(now: number, budgetMs: number = PAINT_BUDGET_MS): void {
+    if (this.jobs.length === 0) return;
+    const t0 = nowMs();
+
+    // Pass 1 — everything the wavefront has already reached, across ALL jobs first, so one big
+    // event's work-ahead can never starve another event's due work.
+    for (const job of this.jobs) {
+      while (job.cursor < job.patches.length && job.arrive[job.cursor]! <= now) this.paintNext(job);
+    }
+
+    // Pass 2 — spend what is left of the budget on the nearest unpainted shells.
+    const deadline = t0 + budgetMs;
+    let tick = 0;
+    outer: for (const job of this.jobs) {
+      while (job.cursor < job.patches.length) {
+        if ((tick++ & (PUMP_CLOCK_STRIDE - 1)) === 0 && nowMs() >= deadline) break outer;
+        this.paintNext(job);
+      }
+    }
+
+    let write = 0;
+    for (const job of this.jobs) if (job.remaining > 0) this.jobs[write++] = job;
+    this.jobs.length = write;
+
+    if (this.profile) this.frameMs += nowMs() - t0;
+  }
+
+  /** Finish every scheduled event immediately. For specs, warm-up, and teardown — never a frame. */
+  settle(now: number): void {
+    this.pump(now, Infinity);
+  }
+
+  /** Patches still waiting on their wavefront. Zero means the world is fully painted. */
+  get pendingPatches(): number {
+    let n = 0;
+    for (const job of this.jobs) n += job.remaining;
+    return n;
+  }
+
+  private paintNext(job: PaintJob): void {
+    paintPatch(
+      this.field,
+      this.world,
+      job.patches[job.cursor]!,
+      job.setup,
+      this.dotsAccum,
+      this.segAccum,
+      this.pumpResult,
+    );
+    job.cursor++;
   }
 
   /** The look's `EventFeed.subscribe`. Fires only for events THIS listener received. */
@@ -597,6 +834,11 @@ export class PaintPipeline {
       this.field.edgeGeometry.getAttribute('paintTime') as unknown as UpdatableAttr,
       this.field.edgeGeometry.getAttribute('paintIntensity') as unknown as UpdatableAttr,
     ]);
+    // Close the frame's profile window: everything `hear()` and `pump()` charged since the last
+    // flush was one frame's worth of paint, which is the number the 16.7 ms budget is about.
+    this.lastMs = this.frameMs;
+    if (this.frameMs > this.maxMs) this.maxMs = this.frameMs;
+    this.frameMs = 0;
   }
 
   /** Run restart: black world, empty history. Paint otherwise persists for the whole run. */
@@ -604,15 +846,18 @@ export class PaintPipeline {
     this.field.resetPaint();
     this.ring.length = 0;
     this.ringHead = 0;
+    this.jobs.length = 0;
     this.heard = 0;
     this.missed = 0;
     this.lastMs = 0;
     this.maxMs = 0;
+    this.frameMs = 0;
   }
 
   dispose(): void {
     this.detach?.();
     this.listeners.clear();
+    this.jobs.length = 0;
   }
 }
 

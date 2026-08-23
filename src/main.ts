@@ -81,6 +81,9 @@ const paint = new PaintPipeline(field, sim.world);
 // Profiling reads a wall clock, so it is a boot-layer opt-in: the determinism specs run the sim
 // with `performance.now` swapped out and count every call.
 paint.profile = true;
+// This is a frame loop, so it pumps: wave-speed events are scheduled against their own wavefront
+// rather than painted in one blocking call. See `PaintJob`.
+paint.amortize = true;
 paint.attach(sim.bus);
 
 /**
@@ -368,10 +371,19 @@ function frame(now: number): void {
   syncCamera();
   for (const hook of frameHooks) hook(dt);
 
+  // The render clock: the interpolated instant this frame is actually depicting. The pump, the
+  // look and the shaders' `uNow` must all read the SAME value, or a surfel could be drawn on the
+  // frame before the one that painted it.
+  const nowRender = sim.time + sim.alpha * SIM_STEP;
+
+  // Travelling sounds (pings, detonations) pay for themselves over the frames their wavefront
+  // takes to cross the room, capped at PAINT_BUDGET_MS of work-ahead per frame. Everything the
+  // wave has already reached is painted here regardless, so nothing is ever drawn late.
+  paint.pump(nowRender);
   // One upload per frame, not one per event: a frame that ran four steps and painted eight
   // sounds hands the GPU a single merged set of ranges.
   paint.flush();
-  looks?.update(sim.time + sim.alpha * SIM_STEP, dt);
+  looks?.update(nowRender, dt);
   looks?.render();
 
   evAcc += dtMs;
@@ -394,7 +406,8 @@ debug.extraLines = () => {
   return [
     `surfels    ${c.surfels} dots  ${c.edges} edges (${c.holds} holds)  ${c.patches} patches`,
     `painted    ${field.paintedDots} dots  ${field.paintedEdgeVerts} edge verts   bake ${c.ms.toFixed(0)} ms`,
-    `paint      ${paint.lastMs.toFixed(2)} ms  worst ${paint.maxMs.toFixed(2)} ms  heard ${paint.heard} missed ${paint.missed}`,
+    `paint      ${paint.lastMs.toFixed(2)} ms/frame  worst ${paint.maxMs.toFixed(2)} ms` +
+      `  pending ${paint.pendingPatches}  heard ${paint.heard} missed ${paint.missed}`,
     `render     ${calls} draw calls  ${evRate.toFixed(1)} event/s  look ${looks ? looks.id : 'none'}`,
     `halo       ${audibleRadius.toFixed(1)} m audible`,
   ];
@@ -481,6 +494,7 @@ window.blindspot = {
       paintedEdgeVerts: field.paintedEdgeVerts,
       paintLastMs: paint.lastMs,
       paintMaxMs: paint.maxMs,
+      paintPending: paint.pendingPatches,
       heard: paint.heard,
       missed: paint.missed,
       drawCalls: renderer ? renderer.info.render.calls : 0,

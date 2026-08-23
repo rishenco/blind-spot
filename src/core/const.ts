@@ -111,6 +111,21 @@ export const WAVE_SPEED_Q = 45;
 export const WAVE_SPEED_E = 85;
 export const WAVE_SPEED_DETONATION = 140;
 
+/**
+ * Per-frame budget for AHEAD-OF-WAVEFRONT paint work (engine-plan §10 "paint runs inside the
+ * fixed step"; vision §12 "60 fps on a mid-range GPU").
+ *
+ * A wave-speed event does not land all at once — it arrives at `d / waveSpeed`, so a 22 m
+ * detonation is still spreading 157 ms after it goes off. `PaintPipeline.pump` spends at most
+ * this long per frame painting patches the wavefront has NOT reached yet. Work the wavefront HAS
+ * reached is never budgeted: a patch due this frame is always painted this frame, or the picture
+ * would lie about when the sound got there (design law 2).
+ *
+ * 3 ms of a 16.7 ms frame leaves the renderer its margin while still finishing a detonation's
+ * ~16 ms of work well inside the 157 ms the wavefront gives us.
+ */
+export const PAINT_BUDGET_MS = 3.0;
+
 export const EV = {
   crouchStep: { paint: 1.5, hear: 2, intensity: 0.35, wave: Infinity },
   walkStep: { paint: 4, hear: 11, intensity: 0.6, wave: Infinity },

@@ -631,3 +631,154 @@ describe('accumulation over a run (vision §3.6)', () => {
     paint.dispose();
   });
 });
+
+// ------------------------------------------------------------------------------------------
+
+/**
+ * Amortized paint (engine-plan §10 budget; vision §12 "60 fps on a mid-range GPU").
+ *
+ * A 22 m detonation is the most paint work the engine ever does, and it fires at the loudest
+ * moment in the game — the worst possible place for a frame hitch. It is therefore scheduled
+ * against its own wavefront instead of being painted in one blocking call.
+ *
+ * Two things have to be true at once, and they pull in opposite directions:
+ *
+ *   BOUNDED  no frame does more than a slice of the work, or the hitch is just moved.
+ *   HONEST   no surfel is painted after the moment its own sound reached it. The shader draws a
+ *            surfel as soon as `now >= paintTime`, so a late patch is a hole in the world that
+ *            appears a frame after the blast has already lit everything around it — the system
+ *            visibly lying about when the sound got there (design law 2).
+ *
+ * The schedule buys both by only ever budgeting work AHEAD of the wavefront. These specs pin
+ * that: the settled picture is identical to the synchronous one, nothing is ever late even with
+ * the work-ahead budget set to zero, and the first frame's share is a small fraction of the job.
+ */
+describe('amortized paint: spreading a blast over its own wavefront (engine-plan §10)', () => {
+  /** Centre of the gym, 22 m of paint at 140 m/s — the real detonation, on a whole-map fixture. */
+  const blast = (time = 0): SoundEvent =>
+    makeEvent(
+      {
+        class: 'detonation',
+        source: 'detonation',
+        x: 15,
+        y: 1.6,
+        z: 6,
+        paintRadius: 22,
+        hearRadius: 60,
+        intensity: 1,
+        waveSpeed: WAVE_SPEED_DETONATION,
+      },
+      time,
+    );
+
+  /** Paint `e` in one synchronous call and snapshot the result. */
+  const reference = (e: SoundEvent): { time: Float32Array; intensity: Float32Array; dots: number } => {
+    field.resetPaint();
+    applyEvent(field, gym, e, null, null);
+    return {
+      time: Float32Array.from(field.paintTime),
+      intensity: Float32Array.from(field.paintIntensity),
+      dots: field.paintedDots,
+    };
+  };
+
+  const pipeline = (): PaintPipeline => {
+    const p = new PaintPipeline(field, gym);
+    p.amortize = true;
+    p.setListener(15, 1.6, 6);
+    return p;
+  };
+
+  it('MUST settle to exactly the picture one synchronous call would have made', () => {
+    const e = blast();
+    const ref = reference(e);
+    expect(ref.dots).toBeGreaterThan(1_000); // the fixture is actually a stress case
+
+    field.resetPaint();
+    const paint = pipeline();
+    paint.hear(e);
+    // Nothing yet: the sound has not travelled anywhere. Queued, not painted.
+    expect(field.paintedDots).toBe(0);
+    expect(paint.pendingPatches).toBeGreaterThan(0);
+
+    paint.settle(10);
+    expect(paint.pendingPatches).toBe(0);
+    expect(field.paintedDots).toBe(ref.dots);
+    // Byte-identical, not merely similar: patches own disjoint dot and segment runs, so the
+    // order they are visited in cannot change a single write.
+    expect(Array.from(field.paintTime)).toEqual(Array.from(ref.time));
+    expect(Array.from(field.paintIntensity)).toEqual(Array.from(ref.intensity));
+  });
+
+  it('MUST never paint a surfel later than the moment its sound arrived', () => {
+    const e = blast();
+    const ref = reference(e);
+
+    field.resetPaint();
+    const paint = pipeline();
+    paint.hear(e);
+
+    // Budget ZERO: no work-ahead at all, so every patch is painted on the exact frame its
+    // wavefront reaches it and nothing is carried by slack. The strictest form of the promise.
+    let late = 0;
+    let firstVisibleFrame = -1;
+    for (let f = 0; f < 60; f++) {
+      const now = f / 60;
+      paint.pump(now, 0);
+      for (let i = 0; i < field.count; i++) {
+        const due = ref.time[i]!;
+        if (due === UNPAINTED || due > now) continue;
+        // The shader would be drawing this surfel on this frame. It had better be painted.
+        if (field.paintTime[i] === UNPAINTED) late++;
+        else if (firstVisibleFrame < 0) firstVisibleFrame = f;
+      }
+    }
+    expect(late).toBe(0);
+    // And it really was a wavefront, not an instant flash disguised as one.
+    expect(firstVisibleFrame).toBeGreaterThanOrEqual(0);
+    expect(field.paintedDots).toBe(ref.dots);
+    expect(paint.pendingPatches).toBe(0);
+  });
+
+  it('MUST hand any one frame only a small slice of the work', () => {
+    const e = blast();
+    field.resetPaint();
+    const paint = pipeline();
+    paint.hear(e);
+
+    const total = paint.pendingPatches;
+    expect(total).toBeGreaterThan(100);
+
+    // The frame the blast goes off, with no work-ahead: only what the sound has already touched.
+    paint.pump(0, 0);
+    const firstFrame = total - paint.pendingPatches;
+    expect(firstFrame).toBeGreaterThan(0);
+    expect(firstFrame).toBeLessThan(total * 0.25);
+
+    // 22 m at 140 m/s is 157 ms, so by a third of a second the wave has passed everything and
+    // the queue must be empty whether or not any budget was ever spent.
+    for (let f = 1; f <= 20; f++) paint.pump(f / 60, 0);
+    expect(paint.pendingPatches).toBe(0);
+  });
+
+  it('MUST keep instant classes synchronous — a footstep has nothing to wait for', () => {
+    field.resetPaint();
+    const paint = pipeline();
+    // waveSpeed Infinity: the whole event is due the moment it is emitted.
+    paint.hear(makeEvent({ class: 'walkStep', source: 'self', x: 5, y: 0, z: 6 }));
+    expect(field.paintedDots).toBeGreaterThan(0);
+    expect(paint.pendingPatches).toBe(0);
+  });
+
+  it('MUST stay synchronous for a consumer that never pumps', () => {
+    field.resetPaint();
+    // Default off: a spec, a replay or a headless consumer can `hear()` and read the field back
+    // in the same breath. Only something running a frame loop opts in.
+    const paint = new PaintPipeline(field, gym);
+    expect(paint.amortize).toBe(false);
+    paint.setListener(15, 1.6, 6);
+    paint.hear(blast());
+    expect(field.paintedDots).toBeGreaterThan(1_000);
+    expect(paint.pendingPatches).toBe(0);
+  });
+});
