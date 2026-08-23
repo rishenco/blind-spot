@@ -95,6 +95,12 @@ export const HEARING_BASE = 18.0;
 /** Through one wall: radius x this, intensity x WALL1_INTENSITY, origin fuzzed +-WALL_FUZZ. */
 export const WALL1_RADIUS = 0.4;
 export const WALL1_INTENSITY = 0.5;
+/**
+ * Cap on the through-wall origin displacement (vision §3.4 "origin fuzzed ±2 m"). The applied
+ * magnitude is `min(WALL_FUZZ, WALL1_RADIUS × paintRadius)`: a muffled sound may never paint
+ * further from where it happened than the same sound would in open air, which for the quiet
+ * classes (a 1.5 m crouch step) a flat 2 m would badly break. See `paint.ts fuzzMagnitude`.
+ */
 export const WALL_FUZZ = 2.0;
 /** Signal-quality multiplier when the event reaches the listener through one wall. */
 export const WALL1_QUALITY = 0.45;
@@ -110,21 +116,6 @@ export const OCCLUDER_MIN_CHORD = 0.06;
 export const WAVE_SPEED_Q = 45;
 export const WAVE_SPEED_E = 85;
 export const WAVE_SPEED_DETONATION = 140;
-
-/**
- * Per-frame budget for AHEAD-OF-WAVEFRONT paint work (engine-plan §10 "paint runs inside the
- * fixed step"; vision §12 "60 fps on a mid-range GPU").
- *
- * A wave-speed event does not land all at once — it arrives at `d / waveSpeed`, so a 22 m
- * detonation is still spreading 157 ms after it goes off. `PaintPipeline.pump` spends at most
- * this long per frame painting patches the wavefront has NOT reached yet. Work the wavefront HAS
- * reached is never budgeted: a patch due this frame is always painted this frame, or the picture
- * would lie about when the sound got there (design law 2).
- *
- * 3 ms of a 16.7 ms frame leaves the renderer its margin while still finishing a detonation's
- * ~16 ms of work well inside the 157 ms the wavefront gives us.
- */
-export const PAINT_BUDGET_MS = 3.0;
 
 export const EV = {
   crouchStep: { paint: 1.5, hear: 2, intensity: 0.35, wave: Infinity },
@@ -342,7 +333,19 @@ export const SIM_MAX_STEPS = 5;
 /** Recent-event ring buffer length (looks read this for stains). */
 export const EVENT_RING = 96;
 
-/** The flat object handed to looks as `ctx.constants`. */
+/**
+ * The flat object handed to looks as `ctx.constants` — engine-plan §9's look-facing surface.
+ *
+ * POLICY: a constant belongs in here when a LOOK needs it to draw. Everything else — engine
+ * tuning, propagation coefficients, scheduling knobs, sim numbers — stays a plain export above and
+ * is imported directly by the core module that owns it. The object is a published contract: a
+ * second look must be writable against it, and every entry is a promise not to move that number
+ * without noticing. Adding an engine-internal constant here quietly makes it look-facing, which is
+ * how a look ends up depending on a number that exists for the engine's own reasons.
+ *
+ * (`WALL_FUZZ` used to live here and did not belong: propagation is core's business, and no look
+ * ever read it.)
+ */
 export const CORE_CONSTANTS = {
   SURFEL_SPACING,
   PATCH_SIZE,
@@ -363,7 +366,6 @@ export const CORE_CONSTANTS = {
   SPLAT_MIN_PX,
   SPLAT_NEAR_PX,
   HEARING_BASE,
-  WALL_FUZZ,
   WALL1_QUALITY,
   STAIN_FADE_MIN,
   STAIN_FADE_MAX,

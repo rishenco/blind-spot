@@ -78,12 +78,11 @@ audio.attach(sim.bus);
  */
 const field: SurfelField = bakeSurfels(sim.world);
 const paint = new PaintPipeline(field, sim.world);
-// Profiling reads a wall clock, so it is a boot-layer opt-in: the determinism specs run the sim
-// with `performance.now` swapped out and count every call.
+// The F3 paint timings are the ONLY wall-clock read in the paint path, and they are a boot-layer
+// opt-in for exactly that reason: with `profile` off, nothing in `hear`/`pump` touches
+// `performance.now`, which is what lets the determinism specs swap the global clocks out and
+// assert zero calls. Nothing here depends on the number — it is a readout, not an input.
 paint.profile = true;
-// This is a frame loop, so it pumps: wave-speed events are scheduled against their own wavefront
-// rather than painted in one blocking call. See `PaintJob`.
-paint.amortize = true;
 paint.attach(sim.bus);
 
 /**
@@ -180,8 +179,13 @@ const reduceFlashing =
 /** A `LookContext` the boot layer may write to; looks receive it as the read-only contract. */
 type MutableLookContext = { -readonly [K in keyof LookContext]: LookContext[K] };
 
-/** Things the frame loop refreshes after the camera and before the look draws. */
-const frameHooks: Array<(dt: number) => void> = [];
+/**
+ * Things the frame loop refreshes after the camera and before the look draws. `dt` is wall-frame
+ * elapsed (for render-side smoothers); `now` is the render clock — the interpolated SIM instant
+ * this frame depicts, the same value the pump and `uNow` get. Anything that decays in world time
+ * uses `now` deltas: a decay charged with wall dt runs at a different rate on a different monitor.
+ */
+const frameHooks: Array<(dt: number, now: number) => void> = [];
 
 let looks: LookHost | null = null;
 const lookId: LookId = resolveLookId(params.get('look'));
@@ -214,7 +218,8 @@ if (renderer) {
   paint.onDelivered((e: SoundEvent) => looks?.onEvent(e));
 
   /** Per-frame refresh of everything a look reads off the player. */
-  const syncLookState = (dt: number): void => {
+  let lastHaloClock = -1;
+  const syncLookState = (_dt: number, now: number): void => {
     const p = sim.player;
     const m = sim.movement;
     playerView.stance = p.stance;
@@ -222,10 +227,14 @@ if (renderer) {
     handsView.state = m.hands;
     handsView.phase = m.handsPhase;
 
-    // Vision §3.8: the halo is the loudest thing you have emitted recently, held briefly and
-    // then bled away — you always know exactly how loud you are.
-    const now = sim.time;
-    if (now - lastSelfSound > HALO_WINDOW) audibleRadius = Math.max(0, audibleRadius - HALO_DECAY * dt);
+    // Vision §3.8: the halo is the loudest thing you have emitted recently, held briefly and then
+    // bled away — you always know exactly how loud you are. HALO_WINDOW and HALO_DECAY are both
+    // quoted in seconds of WORLD time, so the bleed is charged with the render clock's own delta,
+    // not the wall frame's: a 144 Hz monitor must not drain the halo 2.4x faster than a 60 Hz one,
+    // and the readout must not disagree with the `event.time` axis the hold is measured on.
+    const dtRender = lastHaloClock < 0 ? 0 : Math.max(0, now - lastHaloClock);
+    lastHaloClock = now;
+    if (now - lastSelfSound > HALO_WINDOW) audibleRadius = Math.max(0, audibleRadius - HALO_DECAY * dtRender);
     playerView.audibleRadius = audibleRadius;
 
     ctx.floorCentre = renderPos[1] + 1.6;
@@ -369,16 +378,17 @@ function frame(now: number): void {
   // wall-clock things; only the sim is allowed to care about the fixed step.
   rig.update(dt, sim.movement);
   syncCamera();
-  for (const hook of frameHooks) hook(dt);
 
-  // The render clock: the interpolated instant this frame is actually depicting. The pump, the
-  // look and the shaders' `uNow` must all read the SAME value, or a surfel could be drawn on the
-  // frame before the one that painted it.
+  // The render clock: the interpolated instant this frame is actually depicting. The frame hooks,
+  // the pump, the look and the shaders' `uNow` must all read the SAME value, or a surfel could be
+  // drawn on the frame before the one that painted it. Hoisted above the hooks because anything
+  // that decays in SIM time (the halo) has to bleed on this axis, not on wall-frame dt.
   const nowRender = sim.time + sim.alpha * SIM_STEP;
+  for (const hook of frameHooks) hook(dt, nowRender);
 
-  // Travelling sounds (pings, detonations) pay for themselves over the frames their wavefront
-  // takes to cross the room, capped at PAINT_BUDGET_MS of work-ahead per frame. Everything the
-  // wave has already reached is painted here regardless, so nothing is ever drawn late.
+  // Travelling sounds (pings, detonations) are released over the frames their own wavefront takes
+  // to cross the room: everything the wave has reached by `nowRender` is painted here, and nothing
+  // ahead of it is written at all. See `PaintPipeline.pump`.
   paint.pump(nowRender);
   // One upload per frame, not one per event: a frame that ran four steps and painted eight
   // sounds hands the GPU a single merged set of ranges.
@@ -430,11 +440,19 @@ requestAnimationFrame(frame);
  *
  * A screenshot proves a file was written, not that anything was DRAWN. This renders and reads
  * back in the same task (a WebGL drawing buffer is undefined the moment you yield) and reports
- * two thresholds, because this renderer has two legitimately different brightnesses: `lit` is
- * paint, `any` also catches the 2 m contact shell, which is meant to be nearly invisible.
+ * three thresholds, because this renderer has three legitimately different brightnesses:
+ *
+ *   `any`   — anything at all above black; catches the 2 m contact shell, which is nearly invisible.
+ *   `lit`   — actual paint.
+ *   `white` — SATURATED paint: every channel pinned at the top. This one is a failure measure, not
+ *             a success one. Vision §12 says "visual porridge must be structurally impossible" and
+ *             §3.2 puts every depth cue inside the cyan band — a saturated pixel has thrown its
+ *             depth cue away, and a field of them is the porridge. Verify asserts it stays small.
  */
-function measureInk(): { lit: number; any: number; width: number; height: number } {
-  if (!renderer || !looks) return { lit: 0, any: 0, width: 0, height: 0 };
+const WHITE_LEVEL = 250;
+
+function measureInk(): { lit: number; any: number; white: number; width: number; height: number } {
+  if (!renderer || !looks) return { lit: 0, any: 0, white: 0, width: 0, height: 0 };
   looks.render();
   const gl = renderer.getContext();
   const w = gl.drawingBufferWidth;
@@ -443,13 +461,18 @@ function measureInk(): { lit: number; any: number; width: number; height: number
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
   let lit = 0;
   let any = 0;
+  let white = 0;
   for (let i = 0; i < px.length; i += 4) {
-    const sum = px[i]! + px[i + 1]! + px[i + 2]!;
+    const r = px[i]!;
+    const g = px[i + 1]!;
+    const b = px[i + 2]!;
+    const sum = r + g + b;
     if (sum > 60) lit++;
     if (sum > 8) any++;
+    if (r >= WHITE_LEVEL && g >= WHITE_LEVEL && b >= WHITE_LEVEL) white++;
   }
   const n = w * h;
-  return { lit: lit / n, any: any / n, width: w, height: h };
+  return { lit: lit / n, any: any / n, white: white / n, width: w, height: h };
 }
 
 declare global {
@@ -464,7 +487,7 @@ declare global {
       paint: PaintPipeline;
       looks: LookHost | null;
       detonate: (distance?: number) => SoundEvent;
-      ink: () => { lit: number; any: number; width: number; height: number };
+      ink: () => { lit: number; any: number; white: number; width: number; height: number };
       stats: () => Record<string, number | string>;
     };
   }

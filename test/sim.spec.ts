@@ -32,8 +32,11 @@ import { COYOTE_TIME, SIM_MAX_STEPS, SIM_STEP } from '../src/core/const.js';
 import type { SoundEvent } from '../src/core/events.js';
 import { CameraRig, type MoveInput } from '../src/core/movement.js';
 import { Sim } from '../src/core/sim.js';
+import { buildWorld } from '../src/core/map/build.js';
 import { sampleMap } from '../src/core/map/sampleMap.js';
 import type { MapDef, Solid } from '../src/core/map/types.js';
+import { PaintPipeline } from '../src/core/paint.js';
+import { bakeSurfels } from '../src/core/surfels.js';
 
 const box = (
   id: string,
@@ -386,11 +389,35 @@ interface Trace {
   end: number[];
   events: Array<[number, string, number, number, number, number]>;
   counts: Record<string, number>;
+  /** Dots the attached paint pipeline lit, or 0 when the trace ran without one. */
+  painted: number;
 }
 
-function trace(): Trace {
+/**
+ * The shipped world and its surfel field, baked ONCE at module scope.
+ *
+ * The bake belongs outside `trace()` for two reasons: it is load-time work rather than frame
+ * work, and the clock-swap spec below must not measure it — what that spec is about is the
+ * per-frame path, which in a real client is sim.step + paint.hear + paint.pump + paint.flush.
+ */
+const paintWorld = buildWorld(sampleMap);
+const paintField = bakeSurfels(paintWorld);
+
+/**
+ * Run the script. With `withPaint`, the full client frame is traced instead of the sim alone:
+ * a `PaintPipeline` follows the bus, hears every footstep the script makes, and is pumped and
+ * flushed once per step with the sim's own clock — the same order `main.ts` uses.
+ */
+function trace(withPaint = false): Trace {
   const sim = new Sim(sampleMap);
   const p = sim.player;
+  let paint: PaintPipeline | null = null;
+  if (withPaint) {
+    paintField.resetPaint();
+    paint = new PaintPipeline(paintField, paintWorld);
+    paint.profile = false;
+    paint.attach(sim.bus);
+  }
   // The shipped spawn, turned down the long open lane rather than into the near wall.
   p.x = sampleMap.spawn.pos[0];
   p.y = sampleMap.spawn.pos[1];
@@ -406,13 +433,21 @@ function trace(): Trace {
   for (const [secs, patch] of SCRIPT) {
     for (let i = 0; i < steps(secs); i++) {
       Object.assign(sim.input, NEUTRAL, patch);
+      paint?.setListener(p.x, p.y + 1.6, p.z);
       sim.step(SIM_STEP);
+      if (paint) {
+        paint.pump(sim.time);
+        paint.flush();
+      }
     }
   }
+  const painted = paint ? paintField.paintedDots : 0;
+  paint?.dispose();
   return {
     end: [p.x, p.y, p.z, p.yaw, p.pitch, p.vx, p.vy, p.vz],
     events,
     counts: { ...sim.bus.counts } as unknown as Record<string, number>,
+    painted,
   };
 }
 
@@ -435,9 +470,16 @@ describe('the sim is reproducible bit-for-bit', () => {
     expect(new Set(seeds(a)).size, 'and the seeds are not all one value').toBeGreaterThan(5);
   });
 
-  it('no wall clock and no unseeded randomness anywhere the sim can reach', () => {
+  it('no wall clock and no unseeded randomness anywhere the sim OR paint can reach', () => {
     // Stronger than grepping the source: take the global clocks and the RNG away and watch. The
-    // whole trace is synchronous, so nothing but the sim runs between the swap and the restore.
+    // whole trace is synchronous, so nothing but the frame runs between the swap and the restore.
+    //
+    // R5: the traced frame is the WHOLE frame — a PaintPipeline follows the sim's bus, so this
+    // covers hear() and pump() as well as movement. `pump` used to read `performance.now` on
+    // every call regardless of the `profile` flag (it was the work-ahead pass's deadline), and
+    // this spec could not see it because `trace()` built a bare Sim. Profiling is the only clock
+    // read on the paint path now, and it is off by default; the bake happens at module scope, so
+    // what is measured here is the per-frame path and nothing else.
     const realRandom = Math.random;
     const realDateNow = Date.now;
     const perf = (globalThis as { performance?: { now?: () => number } }).performance;
@@ -445,6 +487,7 @@ describe('the sim is reproducible bit-for-bit', () => {
     let random = 0;
     let dateNow = 0;
     let perfNow = 0;
+    let painted = 0;
     try {
       Math.random = () => {
         random++;
@@ -460,15 +503,29 @@ describe('the sim is reproducible bit-for-bit', () => {
           return 0;
         };
       }
-      trace();
+      painted = trace(true).painted;
     } finally {
       Math.random = realRandom;
       Date.now = realDateNow;
       if (perf && realPerfNow) perf.now = realPerfNow;
     }
+    expect(painted, 'the traced frame really did paint the world').toBeGreaterThan(1000);
     expect(
       [random, dateNow, perfNow],
       `Math.random x${random}, Date.now x${dateNow}, performance.now x${perfNow}`,
     ).toEqual([0, 0, 0]);
+  });
+
+  it('paints the same world twice from the same script, whatever the frame cadence was', () => {
+    // MIGRATED. The end of the determinism chain: identical input gives identical events gives
+    // an identical picture. This is the property co-op borrows — two clients derive geometry from
+    // the same tiny event payloads (engine-plan §11.1) and must agree without ever comparing it.
+    const a = trace(true);
+    const picture = Float32Array.from(paintField.paintTime);
+    const b = trace(true);
+    expect(b.painted).toBe(a.painted);
+    let differing = 0;
+    for (let i = 0; i < picture.length; i++) if (picture[i] !== paintField.paintTime[i]) differing++;
+    expect(differing, `${differing} surfels disagreed between two identical runs`).toBe(0);
   });
 });

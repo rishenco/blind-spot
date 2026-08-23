@@ -118,12 +118,31 @@ async function capture(browser, name, query, checks, opts = {}) {
         ink: window.blindspot.ink(),
       }));
     const before = await sample();
+    // Watch `paintPending` on every frame from here on. This is the STRUCTURAL discriminator for
+    // the schedule (review A5): a blast that was painted whole inside `hear()` would show a peak
+    // of zero, because it would already be finished before the next frame ever ran. A wall-clock
+    // ceiling cannot tell those two apart — a fast machine passes it either way.
+    await page.evaluate(() => {
+      window.__pendPeak = 0;
+      window.__pendFrames = 0;
+      const until = performance.now() + 1500;
+      const tick = () => {
+        const n = window.blindspot.stats().paintPending;
+        if (n > window.__pendPeak) window.__pendPeak = n;
+        if (n > 0) window.__pendFrames++;
+        if (performance.now() < until) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
     await page.keyboard.press('F7');
     // A detonation's wavefront takes paintRadius / WAVE_SPEED_DETONATION = 22/140 = 157 ms to
-    // finish arriving (vision §3.3, engine-plan §4). Wait past it, then read the settled world.
+    // finish arriving, plus the late bound a patch is released on (one patch radius plus the
+    // fuzz allowance, ~21 ms) — call it 180 ms (vision §3.3, engine-plan §3–§4). Wait well past
+    // it, then read the settled world.
     await page.waitForTimeout(1000);
     const after = await sample();
-    blast = { before, after };
+    const schedule = await page.evaluate(() => ({ peak: window.__pendPeak, frames: window.__pendFrames }));
+    blast = { before, after, schedule };
   }
 
   const state = await page.evaluate(() => {
@@ -218,13 +237,19 @@ async function capture(browser, name, query, checks, opts = {}) {
   );
   note(
     `first-person ink lit ${(state.glInk.lit * 100).toFixed(3)}% · any ${(state.glInk.any * 100).toFixed(3)}%` +
+      ` · white ${(state.glInk.white * 100).toFixed(3)}%` +
       ` · ${state.glInk.width}x${state.glInk.height} · look ${st.look} · ${st.drawCalls} draw calls` +
       ` · ${st.fps.toFixed(1)} fps`,
   );
   if (blast) {
     note(
       `F7 detonation: painted ${blast.before.painted} → ${blast.after.painted} dots · ink lit ` +
-        `${(blast.before.ink.lit * 100).toFixed(3)}% → ${(blast.after.ink.lit * 100).toFixed(3)}%`,
+        `${(blast.before.ink.lit * 100).toFixed(3)}% → ${(blast.after.ink.lit * 100).toFixed(3)}%` +
+        ` · white ${(blast.after.ink.white * 100).toFixed(3)}%`,
+    );
+    note(
+      `  schedule: pending peaked at ${blast.schedule.peak} patches over ${blast.schedule.frames} frames` +
+        ` · drained to ${blast.after.pending}`,
     );
   }
   note(`player ${state.pos.map(f2).join(' ')} · ${state.stance} · hands ${state.hands} · fall ${f2(state.lastFall)} m`);
@@ -341,6 +366,19 @@ async function main() {
         'trail was sampled': s.trail.n > 40,
         'top-down open': s.topDown,
         'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
+        // Exact, like the solid counts above. Every class on this route is instant (only the two
+        // pings and the detonation travel), the script is a fixed input list and paint is a pure
+        // function of the delivered events — so this route paints the same dots every time, on
+        // every machine, and a ">" here would hide a whole zone going dark.
+        //
+        // RE-BASELINED under ruling R3 (through-wall fuzz clamped to the degraded radius): was
+        // 6842 dots / 232 edge verts. The fuzz magnitude is now min(WALL_FUZZ, WALL1_RADIUS x R),
+        // which moves the muffled origins of this route's 3 walk steps (2.0 m -> 1.6 m) and 3
+        // crouch steps (2.0 m -> 0.6 m) and so shifts +11 dots' worth of through-wall paint. The
+        // 8 sprint steps, 10 slides and 1 landing are all >= 5 m classes and are untouched, which
+        // is why the edge-vert count did not move at all.
+        'the route painted its baseline dots exactly': s.stats.paintedDots === 6853,
+        'and its baseline holds exactly': s.stats.paintedEdgeVerts === 232,
       }),
       { scripted: true },
     );
@@ -363,6 +401,10 @@ async function main() {
         'trail was sampled': s.trail.n > 40,
         'top-down open': s.topDown,
         'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
+        // RE-BASELINED under ruling R3, same reason as the corridor route: was 4574 dots / 213
+        // edge verts, and the clamp moves this route's 3 walk steps and 1 crouch step by -1 dot.
+        'the route painted its baseline dots exactly': s.stats.paintedDots === 4573,
+        'and its baseline holds exactly': s.stats.paintedEdgeVerts === 213,
       }),
       { scripted: true },
     );
@@ -380,8 +422,10 @@ async function main() {
       'nothing has been heard yet': s.stats.heard === 0 && s.events === 0,
       'nothing has been painted': s.stats.paintedDots === 0 && s.stats.paintedEdgeVerts === 0,
       'the world is black': s.glInk.lit === 0,
-      'the contact shell is drawn': s.glInk.any > 0.0005,
-      'the contact shell is only a shell': s.glInk.any < 0.10,
+      // Measured 1.245%. The floor catches a shell that stopped drawing; the ceiling catches one
+      // that grew into a lantern, which would be law 1 broken — free light nobody paid for.
+      'the contact shell is drawn': s.glInk.any > 0.004,
+      'the contact shell is only a shell': s.glInk.any < 0.04,
       'the bake found geometry': s.stats.surfels > 50_000 && s.stats.patches > 1_000,
       'the bake found holds to draw as lines': s.stats.holds > 0 && s.stats.edges > s.stats.holds,
     }));
@@ -399,16 +443,23 @@ async function main() {
         'heard itself hit the trench floor': s.counts.landing === 1 && Math.abs(s.lastFall - 2.8) < 0.02,
         'the ladder top-out stays silent': s.counts.mantle === 0,
         'the footsteps were delivered': s.stats.heard > 10 && s.stats.missed === 0,
-        'its own footsteps painted the route': s.stats.paintedDots > 2_000,
-        'holds along the route were painted too': s.stats.paintedEdgeVerts > 0,
+        // The same route through the same paint pipeline, so the same two numbers as the top-down
+        // capture — asserted here too, because it is the FIRST-PERSON run and a divergence between
+        // the two would mean the render path had somehow got into the paint path.
+        'its own footsteps painted the route': s.stats.paintedDots === 6853,
+        'holds along the route were painted too': s.stats.paintedEdgeVerts === 232,
         // Not black, and not a flood. `any` is the whole read (paint + shell); `lit` is paint
-        // bright enough to navigate by. The upper fence catches a runaway splat size.
-        'the canvas is not black': s.glInk.lit > 0.002,
-        'the canvas is not flooded': s.glInk.any > 0.02 && s.glInk.any < 0.75,
-        // Vision §3.6: paint is kept for the whole run. The route's first steps are ~13 s old by
-        // now and must still be on screen, which is what stops `paintedDots` from being a tally
-        // of things that have since gone dark.
-        'painted dots are never evicted': s.stats.paintedDots >= 2_000,
+        // bright enough to navigate by. Both fences are set around the measured 5.1% lit / 38.8%
+        // any with roughly a factor of two either side, tight enough that halving the splat size
+        // or doubling it trips one of them — a wide-open band here caught nothing at all.
+        // Vision §3.6: the route's first steps are ~13 s old by now and must still be drawn, so
+        // `lit` is also what stops `paintedDots` being a tally of surfaces that have gone dark.
+        'the canvas is not black': s.glInk.lit > 0.02,
+        'the canvas is not flooded': s.glInk.any > 0.15 && s.glInk.any < 0.65,
+        // Vision §12, the other end of the same band: a mid-route first-person frame is mostly
+        // 3-15 m geometry, where nothing should saturate at all. Anything above a percent here
+        // means near-field splats have grown back into a sheet and eaten the depth cues.
+        'nothing on the route saturates to white': s.glInk.white < 0.05,
       }),
       { scripted: true },
     );
@@ -426,29 +477,39 @@ async function main() {
         'it was black before': blast.before.painted === 0 && blast.before.ink.lit === 0,
         'the blast painted geometry': blast.after.painted > 1_000,
         'the blast lit the screen': blast.after.ink.lit > blast.before.ink.lit + 0.01,
-        'and did not flood it': blast.after.ink.any < 0.85,
-        // Engine-plan §10 budget, vision §12 "60 fps". A detonation is the most paint work the
-        // engine ever does and it fires at the loudest moment in the game — the worst possible
-        // place for a hitch. It is scheduled against its own wavefront (core/paint.ts `PaintJob`)
-        // rather than painted in one call, so the quantity that matters is the worst FRAME, not
-        // the worst event, and it is now bounded by PAINT_BUDGET_MS plus whatever the wave
-        // genuinely reached during the frame — NOT by how big the event is.
-        //
-        // This ceiling is a headless-swiftshader number and deliberately loose. This harness
-        // rasterizes 118 k splats on the CPU and holds ~30 fps, so a frame here is already twice
-        // the 16.7 ms the game is budgeted for; and the frame that catches a point-blank blast
-        // spends ~75 ms rasterizing a screen-filling cloud, during which the wavefront crosses
-        // ~10 m and brings that much paint due at once. 18 ms is about half of THIS harness's
-        // frame. Measured on the same box: 16.1 ms before the schedule, 10-14 ms after, and
-        // ~3 ms at 60 fps where the peak converges on PAINT_BUDGET_MS for every event class.
-        //
-        // The portable, deterministic form of the contract — settles identically to one
-        // synchronous call, never paints a surfel after its sound arrived, hands any one frame a
-        // small slice — is pinned in test/paint.spec.ts, not here.
-        'no single frame spends more than 18 ms painting': s.stats.paintMaxMs < 18,
-        // The schedule drains: a second after the blast nothing is still waiting on its wave.
+        // Vision §12: "depth cues live only inside the cyan band", "splats sized to voxel
+        // footprint". A point-blank blast is the worst case for near-field ink — every splat in
+        // front of your face is metres of footprint wide — and when the splats overlap into a
+        // solid sheet the band collapses: no depth, no structure, just a lit rectangle. Ink is
+        // conserved against footprint in the shader (looks/debug `uSplatInk`), so a screen-filling
+        // near cloud stays a cloud. The pure-white fraction is what that failure looks like from
+        // the outside: 41.4% of the frame at full white before the fix, ~1% after.
+        'the near field is a cloud, not a white sheet': blast.after.ink.white < 0.05,
+        // Measured 49.7%: a 22 m sphere from the spawn lights most of what is in front of you,
+        // but a bit under half the frame is still black — the shadowed side of the hall and the
+        // geometry the blast never reached. The band, not just an upper fence: `any` collapsing
+        // means the blast stopped painting, `any` at 0.85 means the splats have flooded.
+        'and it did not flood the screen': blast.after.ink.any > 0.3 && blast.after.ink.any < 0.7,
+        // ---- the schedule, asserted structurally ---------------------------------------------
+        // A detonation's 5286 patches are released over the ~180 ms its wavefront takes to
+        // cross, so `paintPending` must be non-zero on the frames in between. If a future change
+        // ever paints the sphere whole inside `hear()` again, the peak goes to zero and this
+        // fails on any machine, fast or slow — which the wall-clock ceiling below cannot do.
+        'the blast was spread over frames, not painted whole': blast.schedule.peak > 100,
+        'it took more than one frame to arrive': blast.schedule.frames >= 2,
+        // …and it drains: a second after the blast nothing is still waiting on its wave.
         'the blast finished arriving': blast.after.pending === 0,
         'nothing was still queued before it went off': blast.before.pending === 0,
+        // ---- machine-dependent smoke bound ---------------------------------------------------
+        // NOT a discriminator, and deliberately labelled as one that is not: it is a wall-clock
+        // number on a headless SwiftShader box, so it says nothing portable and passes trivially
+        // on fast hardware. It is kept only to catch a gross regression — a frame that suddenly
+        // spends a tenth of a second painting is a hitch at the loudest moment in the game
+        // (engine-plan §10, vision §12 "60 fps"), and this notices. The real contract — converges
+        // to a picture that depends only on the event set, never paints ahead of a wavefront,
+        // never leaves due work behind, hands one frame only the slice its wave released — is
+        // pinned deterministically in test/paint.spec.ts.
+        'smoke bound (machine-dependent): no frame spends 18 ms painting': s.stats.paintMaxMs < 18,
       }),
       { detonate: true },
     );
@@ -476,12 +537,17 @@ async function main() {
           'F3 prints the halo readout': /m audible/.test(line('halo')),
           'the F3 surfel count is the baked one': num('surfels', 'surfels') === s.stats.surfels,
           'the F3 painted count is the painted one': num('painted', 'painted') === s.stats.paintedDots,
-          'F3 painted count is non-zero after a route': s.stats.paintedDots > 1_000,
+          // The same route as `script-mantle`, so the same baseline (see the R3 note there).
+          'F3 painted count is the route baseline': s.stats.paintedDots === 4573,
           'surfel count inside budget': s.stats.surfels < 1_000_000,
           // Headless swiftshader is not a GPU, so this is a liveness floor, not the 60 fps target
           // of vision §12 — a stalled loop or a frame in the seconds reads as broken here.
           'the frame loop is alive': s.stats.fps > 5 && s.stats.frameMs < 200,
-          'the canvas is not black': s.glInk.any > 0.01,
+          // Measured 3.4% lit / 78.5% any: the machinery-row vantage is a metre from a wall, so
+          // most of the frame is close geometry at low alpha. That is exactly the frame the ink
+          // bound is for — it must stay a cloud, not saturate.
+          'the canvas is not black': s.glInk.lit > 0.01,
+          'the near wall stays a cloud': s.glInk.white < 0.05,
         };
       },
       { scripted: true },

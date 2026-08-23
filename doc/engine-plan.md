@@ -78,18 +78,57 @@ test/                   vitest specs for core logic
    half-angle 12.5°? — use full cone angle 25°, i.e. ±12.5° around the aim direction).
 2. Patch LOS: raycast patch center → origin against occluder boxes; count penetrated
    walls. 0 walls → full. 1 wall → radius ×0.4, intensity ×0.5, origin offset by the
-   event's stable fuzz vector (±2 m, seeded per event). ≥2 walls → nothing. (vision §3.4)
+   event's stable fuzz vector (seeded per event; magnitude `min(WALL_FUZZ, 0.4 × R)` —
+   see §4). ≥2 walls → nothing. (vision §3.4)
 3. Per surfel in surviving patches: `d = dist(surfel, effectiveOrigin)`;
    `I = intensity × clamp01(1 − (d/R)²)` (quadratic falloff to zero at radius R).
    Light the surfel iff `I ≥ surfel.dither × DITHER_GAIN` — intensity = coverage density,
    stable per lattice point (visual-brief §2).
 4. `delay = d / waveSpeed(class)` (0 for instant classes). Write
-   `paintTime = event.time + delay`, `paintIntensity = max(I, old × 0.85)`.
+   `paintTime = max(old, event.time + delay)`, `paintIntensity = max(old, I)`.
    The shader derives everything else from `now − paintTime` (rim at small age, cooling,
    thinning: a surfel drops out when its age-alpha × intensity falls below its dither
    band — same dots drop first, oldest look thins to edges).
+
+   *(M3 review, ruling R1b — amended.)* Both channels merge with `max`, and the re-hear
+   decay this step used to specify (`max(I, old × 0.85)`) is gone. `max` is commutative,
+   associative and idempotent, so the converged picture is a pure function of the SET of
+   delivered events: it cannot depend on the order they were heard in, on how many frames
+   the wavefronts took to arrive, or on how fast the machine is. `× 0.85` is none of those
+   things — with two overlapping events the result depends on which was applied first, so
+   two co-op clients deriving geometry from the same event stream (§11.1) would draw
+   different worlds. Determinism outranks a tuning value. Age stays the only recency
+   channel; `paintIntensity` now means "the loudest this surface was ever heard", and a
+   quiet re-hear buys freshness without dimming what a loud one already established.
 5. Normal-facing check: skip surfels whose normal faces away from the effective origin
    (dot < 0) — sound paints the face it hits.
+
+**Schedule (`PaintPipeline.hear` / `pump`) — due-gated, one path.** `paintTime` is not only a
+colour, it is the shader's visibility gate (`uNow − paintTime >= 0`), so a write whose stamp is
+in the renderer's future does not "brighten later" — it *blanks* the surface until the wavefront
+lands, erasing a memory skeleton the player already bought (vision §3.6). The store therefore
+never holds a future timestamp:
+
+- An **instant** class (`waveSpeed === Infinity`) is due the moment it happens and is painted
+  whole inside `hear()`.
+- A **travelling** class is queued as a `PaintJob` — a patch list sorted by arrival — and
+  released by `pump(now)`, which paints exactly the patches whose wavefront has landed, in
+  arrival order. That is the only pass: there is no work-ahead pass and no millisecond budget.
+- A patch is released once its **farthest** member is due (`|Δcentre| + patchRadius + fuzz`), so
+  a near member can wait up to `(2·patchRadius + 2·fuzz)/waveSpeed` — ~41 ms for a detonation.
+  Bounded lateness is the price of never being early, and it is the right way round: late paint
+  is a surface that arrives a frame after its sound, early paint is a hole in the world.
+- The frame calls `pump(now)` with the **same clock the shader gets as `uNow`**, before `flush()`
+  and before the look renders. Combined with the max-merge above, the reveal is write-timed and
+  the converged picture is still a pure function of the event set.
+
+*Open, M5 (M3 review, A4 — accepted trade-off, deliberately not fixed).* Due work is unbudgeted:
+`pump` pays the whole backlog in one call. A consumer that lets several wave events pass their
+arrival before pumping — one long frame, a tab regaining focus, a load hitch, a script scrubbing
+time forward — pays for all of them at once, and a detonation is 5286 patches. If playtests show
+that spike, the fix is a hard per-frame ceiling above which *bounded lateness* is preferred to a
+dropped frame (a patch may be released a frame or two after its arrival, never before it), with
+the overflow carried to the next pump. Pinned as a deliberate choice in `test/paint.spec.ts`.
 
 **Contact shell:** shader-side, always-on: surfels within 2 m of the camera get a faint
 floor alpha (≈0.05) regardless of paint (vision §3.1). No other unpainted visibility.
@@ -119,6 +158,21 @@ Numbers per class come from vision §3.3 verbatim (crouch 1.5/2, walk 4/11, spri
 landing 8–14/28, slide 5/16 continuous, prop 8–12/25, Q 12/18, E 40-cone/30, dog gait
 2/4/8 by mode, detonation 22-through-floors/60, beacon 3/12). Wave speeds: Q 45, E 85,
 detonation 140 m/s; all step/prop/slide/gait classes instant.
+
+**Through-wall fuzz is clamped to the degraded radius** *(M3 review, ruling R3)*. Vision §3.4
+gives the muffled origin a ±2 m displacement, but that number is written for the loud classes.
+Applied flat it inverts the whole point of the wall: a 1.5 m crouch step painting through one
+wall has its radius cut to 0.6 m and is then thrown up to 2 m sideways, so it can light a surface
+2.6 m away — further than the same step reaches in open air, and *audible through a wall it could
+not be heard through in the open*. The magnitude is therefore
+`min(WALL_FUZZ, WALL1_RADIUS × paintRadius)`, which bounds through-wall reach at
+`2 × WALL1_RADIUS × R = 0.8 R < R` for every class. Loud classes (`R ≥ WALL_FUZZ / WALL1_RADIUS
+= 5 m`: sprint 7, landing 8–14, slide 5, prop 8–12, Q 12, E 40, detonation 22) keep the full ±2 m
+and are unchanged; only crouch (0.6 m) and walk (1.6 m) are clamped.
+
+The `PaintJob` arrival bound (§3) uses the same clamped magnitude for its `+ fuzz` term, so the
+clamp tightens the schedule as well as the reach: a walk step's patches now come due 4.7 ms
+earlier than they would under a flat ±2 m, and a crouch step's 9.3 ms earlier.
 
 ### 4.1 Proposed vision §3.3 addenda (pending playtest)
 
@@ -260,6 +314,20 @@ Rules (binding):
 **Debug look (engine milestone):** flat white-ish dots (age → gray), plain cyan lines,
 red dog cloud, plain circle halo + printed audibleRadius/energy, no post. It proves the
 pipeline and remains the fallback.
+
+> **Exit note — the §15 gates must be re-run on a real look** *(M3 review, deviation 2:
+> accepted).* The debug look renders age as greyscale on purpose: it is the instrument that
+> proves the pipeline, and a colour ramp in it would hide a pipeline bug behind styling. But
+> vision §3.2 puts *every* depth cue inside the cyan band, and §12 makes that a law
+> ("depth cues only inside the cyan band"). So the debug look is deliberately missing the
+> channel the readability laws are written about. Everything M3 measures — ink density,
+> saturation, skeleton legibility, the fp-* captures — is measured on a look that omits it.
+>
+> Consequence: if the Blindfold Gauntlet or the Lantern Test (vision §15) is run against
+> the debug look, a pass is not transferable and a fail may be the look's, not the design's.
+> Both gates must be **re-run on the first shipped look** that implements the full §3.2
+> two-layer palette, and the M3 numbers re-measured there before they are treated as
+> evidence about the game.
 
 ## 10. Debug & verification
 

@@ -16,14 +16,16 @@
  * `bus.emit` never computes it. What a consumer sees is a COPY of the event with its own
  * delivery fields filled; the bus's own record stays neutral forever.
  *
- * Nothing here uses `Math.random`, a wall clock, or any state outside the field's buffers: the
- * same events applied in the same order always produce the same picture (visual-brief §2).
+ * Nothing here uses `Math.random`, a wall clock (outside the opt-in `profile` counters), or any
+ * state outside the field's buffers — and the per-surfel merge is `max`, which is commutative, so
+ * the same SET of events produces the same picture regardless of the order they were applied in or
+ * the number of frames it took. Order-independence, not just replay-determinism, is what co-op
+ * needs (visual-brief §2, engine-plan §3 step 4).
  */
 
 import {
   DITHER_GAIN,
   HEARING_BASE,
-  PAINT_BUDGET_MS,
   WALL1_INTENSITY,
   WALL1_QUALITY,
   WALL1_RADIUS,
@@ -166,19 +168,32 @@ export function withDelivery(e: SoundEvent, d: Delivery): SoundEvent {
  * Seeded from `e.fuzzSeed` (itself `hash1(id)`, monotonic and never replayed), so the same event
  * fuzzes the same way for every patch it touches, every frame, every listener, and on every
  * machine — a muffled sound is heard in one wrong place, not smeared over a different wrong
- * place each time you look at it. Uniform inside a WALL_FUZZ sphere.
+ * place each time you look at it. Uniform inside a `maxMag` sphere.
+ *
+ * `maxMag` exists because a fixed ±2 m displacement is not a small perturbation of a quiet
+ * class: a crouch step paints 1.5 m, degrades to 0.6 m through a wall, and then a 2 m offset
+ * would carry its paint 2.6 m from where the sound happened — further than the sound reaches in
+ * open air. `makePaintSetup` clamps it to the DEGRADED radius (`WALL1_RADIUS × R`), so the
+ * muffled footprint can never outreach the clean one. Loud classes (R ≥ 5 m) are unaffected.
  */
-export function fuzzVector(fuzzSeed: number, out: [number, number, number]): [number, number, number] {
+export function fuzzVector(
+  fuzzSeed: number,
+  out: [number, number, number],
+  maxMag: number = WALL_FUZZ,
+): [number, number, number] {
   const s = Math.floor(fuzzSeed * 4294967296) | 0;
   const theta = hash1(s + 1) * Math.PI * 2;
   const cosPhi = hash1(s + 2) * 2 - 1;
   const sinPhi = Math.sqrt(Math.max(0, 1 - cosPhi * cosPhi));
-  const r = WALL_FUZZ * Math.cbrt(hash1(s + 3));
+  const r = Math.max(0, maxMag) * Math.cbrt(hash1(s + 3));
   out[0] = r * sinPhi * Math.cos(theta);
   out[1] = r * cosPhi;
   out[2] = r * sinPhi * Math.sin(theta);
   return out;
 }
+
+/** How far this event's origin may be displaced when it paints through a wall (R3). */
+const fuzzMagnitude = (paintRadius: number): number => Math.min(WALL_FUZZ, WALL1_RADIUS * paintRadius);
 
 // ---------------------------------------------------------------------------------------------
 // Ranged uploads
@@ -275,8 +290,8 @@ const emptyResult = (): PaintResult => ({ dots: 0, edgeVerts: 0, patchesTested: 
 /**
  * Everything one event contributes to paint, resolved once and then reused for every patch.
  *
- * Split out of `applyEvent` so the synchronous path and the amortized `PaintJob` run the exact
- * same per-patch code. A job outlives the call that created it, so it may not borrow the module
+ * Split out of `applyEvent` so the converged path and the scheduled `PaintJob` run the exact same
+ * per-patch code. A job outlives the call that created it, so it may not borrow the module
  * scratch above: whoever builds a setup owns the buffers inside it.
  */
 interface PaintSetup {
@@ -308,7 +323,7 @@ function makePaintSetup(
     ox,
     oy,
     oz,
-    fuzz: fuzzVector(e.fuzzSeed, fuzzOut),
+    fuzz: fuzzVector(e.fuzzSeed, fuzzOut, fuzzMagnitude(e.paintRadius)),
     // Paint's wall filter is NOT delivery's: floors stay opaque here even for a detonation.
     wallFilter: makeWallFilter(originSolids(world, ox, oy, oz, ownOut), false),
     cone,
@@ -334,10 +349,16 @@ function makePaintSetup(
  * `dotsAccum` / `segAccum` are the caller's upload ranges; pass null when painting outside a
  * frame (specs, warm-up) and upload the whole buffer yourself.
  *
- * This is the WHOLE event, synchronously. `PaintPipeline` spreads wave-speed events over the
- * frames their own wavefront takes to arrive instead — see `PaintJob` — but the result is the
- * same set of writes either way (patches own disjoint dot and segment runs, so the order they
- * are visited in cannot change the picture).
+ * This is the event's CONVERGED picture: every patch it will ever reach, painted now. It is what
+ * a `PaintJob` arrives at once its wavefront has crossed the whole sphere, not an alternative to
+ * one — `PaintPipeline` always schedules wave-speed events (see `PaintJob`) and this function is
+ * the instant-class path plus the specs' "settled" reference.
+ *
+ * The two agree because the per-surfel merge is `max` on both channels (step 4): `max` is
+ * commutative, associative and idempotent, so the converged picture is a pure function of the SET
+ * of delivered events — not of the order the patches were visited in, not of how many frames the
+ * visiting took, and not of how fast the machine is. That is the property co-op needs: two
+ * clients fed the same event stream must derive the same world.
  */
 export function applyEvent(
   field: SurfelField,
@@ -462,12 +483,16 @@ function paintPatch(
     if (I < dth[i]! * DITHER_GAIN) continue;
     if (cone && !inCone(ox, oy, oz, cone.dir[0], cone.dir[1], cone.dir[2], pos[i3]!, pos[i3 + 1]!, pos[i3 + 2]!, cone.angleDeg))
       continue;
-    // Step 4 — the wavefront. `d / Infinity` is 0, so instant classes need no branch.
+    // Step 4 — the wavefront, merged with `max` on both channels. `d / Infinity` is 0, so instant
+    // classes need no branch. See the note above `applyEvent`: `max` is what makes the picture a
+    // pure function of the event set rather than of visiting order.
     const t = s.time + Math.sqrt(d2) / wave;
-    if (pt[i]! === UNPAINTED) field.paintedDots++;
-    pt[i] = t;
-    const old = pi[i]!;
-    pi[i] = I > old * 0.85 ? I : old * 0.85;
+    const wasPt = pt[i]!;
+    if (wasPt === UNPAINTED) {
+      field.paintedDots++;
+      pt[i] = t;
+    } else if (t > wasPt) pt[i] = t;
+    if (I > pi[i]!) pi[i] = I;
     out.dots++;
     if (lo < 0) lo = i;
     hi = i;
@@ -494,10 +519,12 @@ function paintPatch(
       if (cone && !inCone(ox, oy, oz, cone.dir[0], cone.dir[1], cone.dir[2], eps[k3]!, eps[k3 + 1]!, eps[k3 + 2]!, cone.angleDeg))
         continue;
       const t = s.time + Math.sqrt(d2) / wave;
-      if (ept[k]! === UNPAINTED) field.paintedEdgeVerts++;
-      ept[k] = t;
-      const old = epi[k]!;
-      epi[k] = I > old * 0.85 ? I : old * 0.85;
+      const wasPt = ept[k]!;
+      if (wasPt === UNPAINTED) {
+        field.paintedEdgeVerts++;
+        ept[k] = t;
+      } else if (t > wasPt) ept[k] = t;
+      if (I > epi[k]!) epi[k] = I;
       out.edgeVerts++;
       if (elo < 0) elo = k;
       ehi = k;
@@ -534,33 +561,37 @@ function patchInCone(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Amortized paint (engine-plan §10 budget, vision §12 "60 fps")
+// Scheduled paint — the wavefront is the schedule (engine-plan §3, vision §3.3)
 // ---------------------------------------------------------------------------------------------
 
 /**
- * One wave-speed event's paint, spread over the frames its own wavefront takes to travel.
+ * One wave-speed event's paint, released over the frames its own wavefront takes to travel.
  *
- * A detonation paints 22 m through a whole floor. Done in one call that is the single most
- * expensive thing the engine does — and it is triggered by the loudest, most dramatic moment in
- * the game, so a hitch lands exactly where it is least forgivable.
+ * A detonation paints 22 m through a whole floor, and its sound has not ARRIVED yet: vision §3.3
+ * gives it a wave speed, so its paint legitimately reaches 22 m only after 22/140 ≈ 157 ms — ten
+ * frames at 60 fps. Two things follow, and the second is a correctness law, not an optimisation:
  *
- * But the sound has not ARRIVED yet. Vision §3.3 gives a detonation a wave speed, so its paint
- * legitimately reaches 22 m only after 22/140 ≈ 157 ms — ten frames at 60 fps. The shader already
- * refuses to draw a surfel until `now >= paintTime`, so a dot painted early is invisible anyway;
- * a dot painted late is a lie. That asymmetry is the whole schedule:
+ *   - a patch the wave HAS reached is painted this frame, whatever else is queued (never late);
+ *   - a patch the wave has NOT reached is not written at all (never early).
  *
- *   - patches are sorted by the earliest time the wavefront can touch them,
- *   - a patch the wave HAS reached is painted this frame no matter what the budget says,
- *   - patches ahead of the wave are painted only while `PAINT_BUDGET_MS` lasts.
+ * "Never early" is why there is no work-ahead pass. A surfel written ahead of its own wavefront
+ * carries a FUTURE `paintTime`, and the shader's `age >= 0` gate then refuses to draw it — so
+ * working ahead does not pre-warm the picture, it BLANKS whatever that surfel was already showing
+ * (vision §3.6: you never lose the map). The store therefore never holds a future timestamp: every
+ * write carries a `paintTime` no greater than the clock the write ran under.
  *
- * Because the list is sorted, every patch due this frame sits in an unbroken prefix, so "paint
- * all due patches" is a `while` and never a search — and a patch can never be painted after its
- * wavefront time. The budgeted work-ahead then eats into the far shells, so the due prefix keeps
- * arriving already-painted and the peak never lands on one frame.
+ * `arrive` is the conservative LATE bound — to the FARTHEST point of the patch, plus the largest
+ * displacement the fuzz can apply — so a patch is released only once its whole membership is due:
  *
- * `arrive` is deliberately conservative: it measures to the NEAREST point of the patch and then
- * subtracts `WALL_FUZZ`, because a through-wall patch paints from a fuzzed origin that may sit up
- * to 2 m closer than the true one. Being early is free; being late is the bug.
+ *     arrive = e.time + (|centre − origin| + patchRadius + fuzzMag) / waveSpeed
+ *
+ * Every member's own stamp is `time + d/wave` with `d ≤ |centre − origin| + patchRadius + fuzzMag`,
+ * so member stamp ≤ arrive ≤ the pump clock. The cost is bounded lateness — up to
+ * (2·patchRadius + 2·fuzzMag)/wave ≈ 40 ms for a detonation — spent to make an early write
+ * impossible. Being late by a frame or two is invisible; being early un-draws the world.
+ *
+ * Because the list is sorted by `arrive`, every patch due this frame sits in an unbroken prefix,
+ * so "paint all due patches" is a `while` and never a search.
  */
 class PaintJob {
   cursor = 0;
@@ -572,10 +603,11 @@ class PaintJob {
   get remaining(): number {
     return this.patches.length - this.cursor;
   }
+  /** When the next unreleased patch comes due. `Infinity` once the job is finished. */
+  get nextArrival(): number {
+    return this.cursor < this.arrive.length ? this.arrive[this.cursor]! : Infinity;
+  }
 }
-
-/** Patches painted between two clock reads in the budgeted pass. Power of two. */
-const PUMP_CLOCK_STRIDE = 8;
 
 /**
  * Build the arrival-sorted patch list for one event, or null when it paints nothing.
@@ -591,14 +623,17 @@ function makePaintJob(field: SurfelField, world: World, e: SoundEvent): PaintJob
   const n = found.length;
   if (n === 0) return null;
 
+  const fuzzMag = fuzzMagnitude(R0);
   const when = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const p = found[i]!;
     const dx = field.patchCentre[p * 3]! - ox;
     const dy = field.patchCentre[p * 3 + 1]! - oy;
     const dz = field.patchCentre[p * 3 + 2]! - oz;
-    const nearest = Math.hypot(dx, dy, dz) - field.patchRadius[p]! - WALL_FUZZ;
-    when[i] = e.time + Math.max(0, nearest) / e.waveSpeed;
+    // Conservative LATE bound: farthest member, from the farthest place the fuzz can move the
+    // origin to. `+ fuzzMag` is the mirror of the through-wall displacement in `paintPatch`.
+    const farthest = Math.hypot(dx, dy, dz) + field.patchRadius[p]! + fuzzMag;
+    when[i] = e.time + farthest / e.waveSpeed;
   }
 
   const order: number[] = [];
@@ -644,25 +679,22 @@ export class PaintPipeline {
   /** Vision §3.1 base 18 m; the Sensitivity chip moves it. */
   hearingRange = HEARING_BASE;
 
-  /** Set true by the boot layer only — reading a clock inside the sim breaks determinism specs. */
+  /**
+   * Set true by the BOOT layer only. Profiling is the one thing here that reads a wall clock, and
+   * it does so nowhere except inside `if (this.profile)`: with the flag off, `hear`, `pump` and
+   * `settle` never call `performance.now`, so no decision this class makes can depend on how fast
+   * the machine is (`test/sim.spec.ts` pins this with the global clocks taken away).
+   */
   profile = false;
   /**
    * Milliseconds of paint work in the last completed FRAME, and the worst frame since reset.
-   *
-   * Per frame, not per event: with `amortize` on, one event's cost is deliberately spread over
-   * several frames, so "the worst event" stopped being the number that decides whether the game
-   * holds 60 fps. `flush()` closes the frame and rolls these over.
+   * Per frame, not per event: one wave-speed event's cost is released over the frames its
+   * wavefront takes to arrive, so "the worst event" is not the number that decides whether the
+   * game holds 60 fps. `flush()` closes the frame and rolls these over.
    */
   lastMs = 0;
   maxMs = 0;
   lastResult: PaintResult = emptyResult();
-
-  /**
-   * Spread wave-speed events (pings, detonations) across the frames their wavefront takes to
-   * arrive, instead of painting them in one call. Set by a consumer that runs a frame loop and
-   * therefore calls `pump()`; off by default so a spec can `hear()` and read the field at once.
-   */
-  amortize = false;
 
   /** Lifetime tallies for the F3 overlay. */
   heard = 0;
@@ -706,6 +738,13 @@ export class PaintPipeline {
    *
    * Public so a spec (or the F7 hotkey path, or a future replay) can drive paint without a bus.
    * Returns the delivered copy, or null when the event never got here.
+   *
+   * There is ONE scheduling path, not two. An instant class (every footstep, every landing) has
+   * `waveSpeed === Infinity`: the whole sphere is due the moment it happens, so it is painted here
+   * and now. A travelling sound is queued and released by `pump()` as its own wavefront arrives;
+   * `hear` releases only what is already due at `e.time`, which keeps the invariant uniform — every
+   * write carries a `paintTime` no greater than the clock the write ran under, `e.time` here and
+   * `now` in `pump` — even though the late bound in `PaintJob` means that set is normally empty.
    */
   hear(e: SoundEvent): SoundEvent | null {
     const d = deliverTo(this.world, this.lx, this.ly, this.lz, e, this.hearingRange, this.delivery);
@@ -717,12 +756,12 @@ export class PaintPipeline {
     const copy = withDelivery(e, d);
 
     const t0 = this.profile ? nowMs() : 0;
-    // An instant class (every footstep, every landing) is small and has nothing to wait for:
-    // `waveSpeed` is Infinity, so the whole event is already "due" and queueing it would only
-    // add bookkeeping. Only a travelling sound can be scheduled.
-    if (this.amortize && Number.isFinite(copy.waveSpeed)) {
+    if (Number.isFinite(copy.waveSpeed)) {
       const job = makePaintJob(this.field, this.world, copy);
-      if (job) this.jobs.push(job);
+      if (job) {
+        this.release(job, copy.time);
+        if (job.remaining > 0) this.jobs.push(job);
+      }
     } else {
       applyEvent(this.field, this.world, copy, this.dotsAccum, this.segAccum, this.lastResult);
     }
@@ -738,66 +777,75 @@ export class PaintPipeline {
   }
 
   /**
-   * Advance every scheduled event to the wavefront at `now`, then work ahead into `budgetMs`.
+   * Release every scheduled patch whose wavefront has arrived by `now`. The ONLY pass.
    *
    * Call once per frame, BEFORE `flush()` and before the look renders, with the SAME clock the
-   * shader gets as `uNow`. That ordering is what makes the guarantee true: any surfel the shader
-   * is about to draw (`now >= paintTime`) belongs to a patch whose `arrive <= paintTime <= now`,
-   * and every such patch was painted by the unbudgeted pass a moment ago.
+   * shader gets as `uNow`. That ordering is the whole guarantee, in both directions:
    *
-   * `budgetMs` bounds only the work-ahead. Due work is never skipped, so a pathological frame
-   * (two detonations, a 200 ms stall) pays what it owes instead of drawing a stale world.
+   *   never late  — every patch with `arrive <= now` is painted before this call returns, so a
+   *                 surfel the shader is entitled to draw is on the GPU by the time it looks;
+   *   never early — every patch painted has `arrive <= now`, and `arrive` bounds every member's
+   *                 own stamp from above, so no write leaves a `paintTime` in the shader's future.
+   *
+   * There is no budget and no work-ahead. Painting ahead of the wave is not "getting a head start"
+   * — it stamps a future time on a surfel and the shader stops drawing it (see `PaintJob`). What
+   * bounds the cost is the wavefront itself: a detonation's 5286-patch sphere is spread over the
+   * ~157 ms it takes to cross, which is what makes the expensive event cheap per frame.
+   *
+   * Cross-job order is irrelevant: the merge is `max` on both channels, so jobs may be drained in
+   * any order and the picture is the same.
    */
-  pump(now: number, budgetMs: number = PAINT_BUDGET_MS): void {
+  pump(now: number): void {
     if (this.jobs.length === 0) return;
-    const t0 = nowMs();
-
-    // Pass 1 — everything the wavefront has already reached, across ALL jobs first, so one big
-    // event's work-ahead can never starve another event's due work.
-    for (const job of this.jobs) {
-      while (job.cursor < job.patches.length && job.arrive[job.cursor]! <= now) this.paintNext(job);
-    }
-
-    // Pass 2 — spend what is left of the budget on the nearest unpainted shells.
-    const deadline = t0 + budgetMs;
-    let tick = 0;
-    outer: for (const job of this.jobs) {
-      while (job.cursor < job.patches.length) {
-        if ((tick++ & (PUMP_CLOCK_STRIDE - 1)) === 0 && nowMs() >= deadline) break outer;
-        this.paintNext(job);
-      }
-    }
+    const t0 = this.profile ? nowMs() : 0;
 
     let write = 0;
-    for (const job of this.jobs) if (job.remaining > 0) this.jobs[write++] = job;
+    for (const job of this.jobs) {
+      this.release(job, now);
+      if (job.remaining > 0) this.jobs[write++] = job;
+    }
     this.jobs.length = write;
 
     if (this.profile) this.frameMs += nowMs() - t0;
   }
 
-  /** Finish every scheduled event immediately. For specs, warm-up, and teardown — never a frame. */
+  /**
+   * Finish every scheduled event as of `now`. `settle(Infinity)` is the fully converged picture —
+   * exactly what `applyEvent` would have written for the same events. For specs, warm-up and
+   * teardown; a frame calls `pump`.
+   */
   settle(now: number): void {
-    this.pump(now, Infinity);
+    this.pump(now);
   }
 
-  /** Patches still waiting on their wavefront. Zero means the world is fully painted. */
+  /** Patches still waiting on their wavefront. Zero means every heard sound has fully arrived. */
   get pendingPatches(): number {
     let n = 0;
     for (const job of this.jobs) n += job.remaining;
     return n;
   }
 
-  private paintNext(job: PaintJob): void {
-    paintPatch(
-      this.field,
-      this.world,
-      job.patches[job.cursor]!,
-      job.setup,
-      this.dotsAccum,
-      this.segAccum,
-      this.pumpResult,
-    );
-    job.cursor++;
+  /** When the earliest still-pending patch comes due, or `Infinity` when nothing is scheduled. */
+  get nextArrival(): number {
+    let t = Infinity;
+    for (const job of this.jobs) if (job.nextArrival < t) t = job.nextArrival;
+    return t;
+  }
+
+  /** Drain one job's due prefix. Sorted by `arrive`, so due work is always an unbroken prefix. */
+  private release(job: PaintJob, now: number): void {
+    while (job.cursor < job.patches.length && job.arrive[job.cursor]! <= now) {
+      paintPatch(
+        this.field,
+        this.world,
+        job.patches[job.cursor]!,
+        job.setup,
+        this.dotsAccum,
+        this.segAccum,
+        this.pumpResult,
+      );
+      job.cursor++;
+    }
   }
 
   /** The look's `EventFeed.subscribe`. Fires only for events THIS listener received. */

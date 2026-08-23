@@ -58,10 +58,47 @@ const LINE_LIFT = 0.02;
  * for cost: footprint splatting is self-balancing, since a surfel that doubles in size halves the
  * number of its neighbours you can see. The ceiling exists for one artifact only — WebGL culls a
  * point whose CENTRE leaves the viewport, so a very large splat pops out at the frame edge while
- * half of it is still on screen. 64 px binds only inside ~1.7 m of a surface (0.22 m lattice, 92°
- * FOV, 1080-tall), where the wall fills the view anyway, and keeps that pop under half a splat.
+ * half of it is still on screen.
+ *
+ * It used to be 64 px, and that was a readability bug: at 1.6 m from a wall the true footprint is
+ * ~110 px, so the cap clipped every near splat and left black gaps between full-brightness discs —
+ * a halftone screen, flooded and screen-doored at the same time. A splat clipped BELOW its
+ * footprint is the one case where the self-balancing stops working, because the dots it should
+ * have been hiding are gone and the ink it should have spread is concentrated. The cap is now high
+ * enough to bind only in the last few centimetres before a surface (256 px ≈ 0.45 m), where the
+ * edge pop is the least of the picture's problems; density is bounded by SPLAT_INK_PX instead.
  */
-const SPLAT_CAP_PX = 64;
+const SPLAT_CAP_PX = 256;
+
+/**
+ * NEAR-FIELD INK BOUND (vision §12 "visual porridge must be structurally impossible").
+ *
+ * Sizing a splat to its projected footprint is what makes "nearby reads as a cloud" true, but on
+ * its own it bounds ink density only from BELOW: as you approach a surface each splat covers more
+ * screen at the same alpha, so a wall at arm's length is a solid sheet of saturated white with
+ * every depth cue burned out of it. The far field already has its density bound (the dither prune
+ * below); this is the near-field mirror of it.
+ *
+ * The rule is ink conservation: a splat that has grown past `SPLAT_INK_PX` is drawn at the alpha
+ * that deposits the same total ink it WOULD have deposited at `SPLAT_INK_PX` — area goes as the
+ * square of the radius, so alpha goes as the inverse square. Coverage rises, brightness falls, and
+ * the product — ink per unit of screen — stops rising.
+ *
+ * Nothing beyond `SPLAT_INK_PX` of footprint is touched, and that is a bound rather than an
+ * estimate: `shrink` is exactly 1 whenever `size <= SPLAT_INK_PX`, and at 1600x1000 with FOV 92
+ * the projected footprint `uProjScale * uSpacing / depth` reaches 24 px at 483 * 0.22 / 24 =
+ * 4.43 m (the foreshortening factor is <= 1, so it can only push that nearer). Every surfel from
+ * 4.43 m out therefore renders bit-identically to before this bound existed — and `SPLAT_CAP_PX`
+ * binds nearer still, at 1.66 m. The whole change lives inside arm's reach.
+ *
+ * `SPLAT_INK_FLOOR` stops conservation from erasing what it is bounding: at 0.5 m a splat is 20x
+ * over target and exact conservation would take it to 0.002 alpha, i.e. black. Vision §3.6 says
+ * the map is never lost, so the dimming stops at a fifth of the surface's authored alpha — still
+ * far below saturation, still plainly visible, and now the near field reads as a dim close surface
+ * instead of a white wall, which is also the truthful depth cue.
+ */
+const SPLAT_INK_PX = 24;
+const SPLAT_INK_FLOOR = 0.2;
 
 const DOT_VERT = /* glsl */ `
 attribute float dither;
@@ -87,6 +124,8 @@ uniform float uPixelRatio;
 uniform float uSplatMin;
 uniform float uSplatNear;
 uniform float uSplatCap;
+uniform float uSplatInk;
+uniform float uInkFloor;
 
 varying float vAlpha;
 varying float vAge;
@@ -117,8 +156,12 @@ void main() {
   // The hard window (vision §3.6). A cut, not a fade: outside it there is no world.
   if (camDist > uWindowRadius || abs(position.y - uFloorCentre) > uFloorSpan) CULL()
 
-  // age < 0 means the sound has been emitted but has not travelled this far yet. That is the
-  // expanding wavefront, and it is why a detonation blooms outward instead of blinking on.
+  // The wavefront is WRITE-timed, not gate-timed: core paints a surfel when the sound reaches it
+  // and never before (see PaintJob in core/paint.ts), so a detonation blooms outward because the
+  // dots arrive over ten frames, not because the shader is hiding them. The age test below is
+  // therefore a guard that should never fire — it is kept as the assertion that the invariant
+  // holds, because a future paintTime would BLANK a surface the player already owned (vision
+  // §3.6), and a silent hole is the hardest kind of bug to see.
   float age = uNow - paintTime;
   float lit = (paintTime > ${NEVER_PAINTED.toExponential()} && age >= 0.0) ? 1.0 : 0.0;
 
@@ -132,16 +175,6 @@ void main() {
   float far = smoothstep(uFarBias, uWindowRadius, camDist);
   if (dither > 1.0 - far) alpha = 0.0;
   alpha *= 1.0 - 0.6 * far;
-
-  // Contact shell (vision §3.1): the only geometry visible without sound. Faint, 2 m, always on.
-  alpha = max(alpha, shellAlpha(position));
-  if (alpha <= 0.003) CULL()
-
-  vAlpha = alpha;
-  vAge = lit > 0.5 ? age : -1.0;
-
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_Position = projectionMatrix * mv;
 
   // A splat IS the projected footprint of its lattice cell (vision §12 "splats sized to voxel
   // footprint"). This is not decoration, it is the whole reason "nearby reads as a cloud": the
@@ -159,10 +192,32 @@ void main() {
   // same cell covers face-on. A round sprite cannot be that ellipse, so it is drawn at the
   // equal-area radius, a*sqrt(|n.v|). Without this, every grazing surface (which is most of a
   // corridor) overlaps itself into a solid white sheet and the cloud stops being a cloud.
+  //
+  // Sized BEFORE the shell and the cull, because the size decides the alpha: see uSplatInk.
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
   vec3 toCam = normalize(uCamPos - position);
   float foot = uProjScale * uSpacing / max(0.05, -mv.z);
   foot *= sqrt(clamp(abs(dot(normal, toCam)), 0.15, 1.0));
-  gl_PointSize = clamp(foot, mix(uSplatNear, uSplatMin, far), uSplatCap) * uPixelRatio;
+  float size = max(foot, mix(uSplatNear, uSplatMin, far));
+
+  // The near-field ink bound. Past uSplatInk the splat keeps growing and its alpha falls as the
+  // inverse square, so ink per unit of screen stops rising: coverage up, brightness down, product
+  // flat. Below uSplatInk the shrink factor is 1 and this does nothing at all — mid and far field
+  // are untouched. uInkFloor keeps a point-blank surface visible rather than conserving it to
+  // black (vision §3.6). Applied to PAINT only: the contact shell has its own authored alpha and
+  // its own reason to be faint, and dimming it further would erase it.
+  float shrink = clamp(uSplatInk / max(1.0, size), 0.0, 1.0);
+  alpha *= max(shrink * shrink, uInkFloor);
+
+  // Contact shell (vision §3.1): the only geometry visible without sound. Faint, 2 m, always on.
+  alpha = max(alpha, shellAlpha(position));
+  if (alpha <= 0.003) CULL()
+
+  vAlpha = alpha;
+  vAge = lit > 0.5 ? age : -1.0;
+
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = min(size, uSplatCap) * uPixelRatio;
 }
 `;
 
@@ -237,6 +292,7 @@ void main() {
   float camDist = distance(position, uCamPos);
   if (camDist > uWindowRadius || abs(position.y - uFloorCentre) > uFloorSpan) CULL()
 
+  // Same gate as the dot shader, same never-fires reasoning: see DOT_VERT.
   float age = uNow - paintTime;
   float lit = (paintTime > ${NEVER_PAINTED.toExponential()} && age >= 0.0) ? 1.0 : 0.0;
 
@@ -356,6 +412,8 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
           uSplatMin: { value: c.constants.SPLAT_MIN_PX },
           uSplatNear: { value: c.constants.SPLAT_NEAR_PX },
           uSplatCap: { value: SPLAT_CAP_PX },
+          uSplatInk: { value: SPLAT_INK_PX },
+          uInkFloor: { value: SPLAT_INK_FLOOR },
         },
         vertexShader: DOT_VERT,
         fragmentShader: DOT_FRAG,
