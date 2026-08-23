@@ -36,6 +36,14 @@ npm run build        # -> dist/
 npm run preview      # http://localhost:4173  (strict port; == npx vite preview --port 4173)
 ```
 
+With Docker instead of a local Node (the client is fully static, so the image is just the
+bundle behind nginx):
+
+```sh
+docker compose up --build           # build + serve      -> http://localhost:8080
+docker compose --profile dev up dev # live-reload dev server -> http://localhost:5173
+```
+
 **The first screen is black, and that is correct.** Boot bakes the lattice synchronously (a couple
 of hundred milliseconds, under the "baking lattice…" splash), and vision §1.3 says absence is never
 drawn — no
@@ -45,9 +53,10 @@ your body. Walk, and your own footfalls light the room ~4 m at a time. Sprint, a
 Around the reticle: a ring whose brightness is your current audible radius, and a printed readout
 of that radius in metres plus the reactor (`⚡ energy/max`). A refused ping prints why.
 
-Keys `1`/`2`/`3` are the three reserved art directions. **They are not authored yet**: in this tree
-each renders the debug look under its own id and says so on screen, which exercises the real
-switch path (dispose materials, rebuild the scene, leave the paint buffers untouched).
+Keys `1`/`2`/`3` are the three art directions. `2` (Blueprint — line-led drafting look) is
+authored; `1` (Phosphor) and `3` (Signal) **are not authored yet**: each renders the debug look
+under its own id and says so on screen, which exercises the real switch path (dispose materials,
+rebuild the scene, leave the paint buffers untouched).
 
 ## Controls
 

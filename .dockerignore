@@ -1,0 +1,10 @@
+.git
+.claude
+node_modules
+dist
+verify-out
+look-shots
+doc
+test
+scripts
+*.md
