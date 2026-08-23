@@ -227,21 +227,6 @@ information plays, never from ping count. Meta stays thin until the core loop is
 - Assembly: authored room library, procedurally selected and rotated; dog patrols, cell
   placement, cache and trap arming randomized per run.
 
-## 12. Rendering and readability laws
-
-- Hard point-pool budgets with oldest-first eviction; visual porridge must be structurally
-  impossible. Splats sized to voxel footprint; rescans refresh in place; tangential jitter only.
-- Splats ≥2–3 px and temporally stable — the image must survive stream compression.
-- Beyond ~20 m: render the skeleton representation with a screen-space density cap and
-  edge-biased retention; distance reads as a drawing, nearby as a cloud. Plus the hard window:
-  ~45 m radius, ±1 floor (§3.6).
-- Depth cues only inside the cyan band; a warm silhouette must never read as near geometry.
-- Colorblind-safe by construction: meaning is always hue + shape + motion, never hue alone.
-- Comfort floor: FOV 80–110, no motion blur, toggleable bob/shake, reduce-flashing mode,
-  ping spacing ≥0.75 s, chroma-not-luminance pulses.
-- Performance: browser, 60 fps on a mid-range GPU; ~1 M point ceiling; sound events are tiny
-  payloads (origin, intensity, class) — geometry is never sent, always re-derived client-side.
-
 ## 13. Tone
 
 Cold, clean, precise — Mirror's Edge / Ghostrunner register, not R.E.P.O. Sleek rigs, dead
@@ -258,39 +243,7 @@ funny.
 - No destruction. No fall damage. No encumbrance. No shop/currency. No hard run timer.
 - No minimap, no compass, no objective markers — navigation is diegetic (memory skeleton,
   landmarks, sound).
-- No procedural free-form level generation — authored rooms, procedural arrangement.
 
-## 15. Validation gates
-
-Point-cloud readability at parkour speed is validated by no shipped game — so it is bought
-first, before any content:
-
-1. **Blindfold Gauntlet:** a mid-skill first-session tester sprints an unfamiliar route lit only
-   by their own footfall-paint plus a partial memory skeleton — ≤1 fall across 3 consecutive
-   runs, and they can sketch the route afterward.
-2. **Lantern Test:** the tester tracks an unseen patrolling dog through one wall by its
-   sound-paint for 20 s and correctly calls its exit point.
-
-Fail either after two perception redesigns → re-scope the pace of the game before building
-content. Later kill-signals: testers cornered without counterplay ≥1×/run → add Shove; runs
-stalling without a timer → tune Heat; testers not starting a second run unprompted after the
-full-loop prototype → the loop, not the content, is the problem.
-
-## 16. Engineering constraints
-
-- **Never use code written before the `reset` commit.** The v1 prototype is design evidence
-  only; its code is dead. All code is written fresh.
-- Web first: TypeScript / Three.js client. The solo prototype may run fully client-side, but
-  perception must be event-sourced from day one (sound events in, paint derived) so co-op
-  needs a transport, not a rewrite.
-- Build order: solo prototype (renderer + movement + sound-paint + §15 gates) → solo full loop
-  (five floors, dogs, cells, Heat, chips) → co-op 2–4 + voice → content depth and meta. A
-  native/Steam port is a later decision; the web build is the proving instrument.
-- If it ever ships commercially: $8–12, one flagship mode, co-op-first.
-
-## 17. Open questions
-
-1. Does the sprint drain (1 /s) earn its place, or does noise alone suffice? (Playtest.)
-2. Dogs-hear-open-mics: right default per lobby type? (Playtest.)
-3. Cell count and Heat tuning for solo vs. full squad. (Playtest.)
-4. When the silo archetype returns, what replaces its dropped central stairs? (Design, later.)
+# Visual references
+- Scanner Sombre
+- After Image: https://github.com/altaidevorg/afterimage
