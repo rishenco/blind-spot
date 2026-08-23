@@ -7,17 +7,22 @@
  * "your own footsteps are your headlights" honest instead of decorative: the tick in your ears
  * and the dots on your screen are the same fact, delivered twice.
  *
- * Milestone 2 covers the self classes movement emits — footsteps, landings, slides, the mantle
- * scuff (and the jump takeoff, which reuses the footstep rows). Pings, gait,
- * clatter, chain, hum and the beacon arrive with their milestones; unhandled classes are ignored
+ * Covered so far: the self classes movement emits — footsteps, landings, slides, the mantle scuff
+ * (and the jump takeoff, which reuses the footstep rows) — plus both pings and the halo hum. Dog
+ * gait, clatter, chain and the beacon arrive with their milestones; unhandled classes are ignored
  * here rather than faked. Delivery is not modelled yet either (M3 owns walls/quality), so this
  * plays what the player themselves emitted, at the player's own position.
+ *
+ * The halo hum is the ONE thing here that is not triggered by an event, and it cannot be: vision
+ * §3.8 asks for a continuous readout of how loud you are, so it is a held oscillator steered from
+ * `PlayerView.audibleRadius` — the same number the ring's brightness comes from, so the two halves
+ * of the readout can never disagree. It still lives under the master gain like everything else.
  *
  * Browser autoplay policy: a context created before a user gesture starts suspended. `resume()`
  * is wired to the first gesture in main.ts; until then this is silent and harmless.
  */
 
-import { AUDIO_MASTER_GAIN, EV } from './const.js';
+import { AUDIO_MASTER_GAIN, EV, HALO_FULL_M } from './const.js';
 import type { EventBus, SoundEvent } from './events.js';
 import { clamp01, invLerp, makeRng } from './math.js';
 
@@ -25,12 +30,29 @@ type Ctor = new () => AudioContext;
 
 const NOISE_SECONDS = 0.5;
 
+/**
+ * The hum's pitch and volume at silence and at full scale (vision §3.8: "a matching hum pitch",
+ * "barely audible at crouch loudness, clearly present at sprint/ping loudness" — engine-plan §8).
+ * A crouch step's 2 m sits at 7 % of full scale, which is where the low gain has to still be
+ * audible-but-ignorable; a sprint step's 24 m is at 80 %.
+ */
+const HUM_HZ_QUIET = 62;
+const HUM_HZ_LOUD = 148;
+const HUM_GAIN_QUIET = 0.006;
+const HUM_GAIN_LOUD = 0.075;
+/** Seconds for the hum to chase a change in loudness. Long enough that a footstep swells it. */
+const HUM_GLIDE = 0.09;
+
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private noise: AudioBuffer | null = null;
   private unsubscribe: (() => void) | null = null;
   private muted = false;
+  private humOsc: OscillatorNode | null = null;
+  private humGain: GainNode | null = null;
+  /** Last loudness handed to `setHalo`, replayed when the context finally starts. */
+  private humRadius = 0;
   /** Events actually sounded — the F3 overlay reads it to prove the bus reached audio. */
   played = 0;
 
@@ -67,8 +89,29 @@ export class AudioEngine {
       this.master.gain.value = this.muted ? 0 : AUDIO_MASTER_GAIN;
       this.master.connect(this.ctx.destination);
       this.noise = makeNoise(this.ctx);
+      this.startHum();
     }
     void this.ctx.resume?.();
+  }
+
+  /**
+   * Steer the halo hum. Called every frame from the boot layer with `PlayerView.audibleRadius`;
+   * safe before the context exists (the value is kept and applied when it does).
+   *
+   * Both pitch and volume move together and both are ramped rather than set: the halo itself is
+   * already a smoothed max-hold (core/player.ts), so a stepped oscillator would add a second,
+   * uglier quantisation on top of a value that is deliberately continuous.
+   */
+  setHalo(audibleRadius: number): void {
+    this.humRadius = audibleRadius;
+    const ctx = this.ctx;
+    const osc = this.humOsc;
+    const gain = this.humGain;
+    if (!ctx || !osc || !gain) return;
+    const loud = clamp01(audibleRadius / HALO_FULL_M);
+    const t = ctx.currentTime;
+    osc.frequency.setTargetAtTime(HUM_HZ_QUIET + (HUM_HZ_LOUD - HUM_HZ_QUIET) * loud, t, HUM_GLIDE);
+    gain.gain.setTargetAtTime(HUM_GAIN_QUIET + (HUM_GAIN_LOUD - HUM_GAIN_QUIET) * loud, t, HUM_GLIDE);
   }
 
   setMuted(m: boolean): void {
@@ -85,6 +128,9 @@ export class AudioEngine {
 
   dispose(): void {
     this.detach();
+    this.humOsc?.stop();
+    this.humOsc = null;
+    this.humGain = null;
     void this.ctx?.close?.();
     this.ctx = null;
     this.master = null;
@@ -129,10 +175,72 @@ export class AudioEngine {
         // UP rather than down, so it never reads as "you are sliding".
         this.scrape(t, 0.14, 0.1, 900, 2600, e.fuzzSeed);
         break;
+      case 'ePing':
+        // Engine-plan §8: a chirp rising 300 -> 1400 Hz over 90 ms. The `far` variant is the same
+        // chirp arriving back from wherever the beam landed (core/player.ts) — quieter, duller,
+        // and late by the wavefront's real flight time. That delay is not dressing: it is the
+        // beam's range read out in your ears, and it is honest because it comes from the event's
+        // own timestamp, not from a scripted echo (vision §1.2).
+        if (e.variant === 'far') this.chirp(t, 0.055, 300, 1400, 0.13, 1400);
+        else this.chirp(t, 0.24, 300, 1400, 0.09, 9000);
+        break;
+      case 'qPing':
+        // A soft 500 Hz pulse: the room-read, deliberately blunt next to the E-ping's question.
+        this.pulse(t, 0.2, 500, 0.16);
+        break;
       default:
         return;
     }
     this.played++;
+  }
+
+  /** The hum runs for the life of the context; `setHalo` is the only thing that moves it. */
+  private startHum(): void {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = HUM_HZ_QUIET;
+    const g = ctx.createGain();
+    g.gain.value = 0;
+    osc.connect(g).connect(this.master!);
+    osc.start();
+    this.humOsc = osc;
+    this.humGain = g;
+    this.setHalo(this.humRadius);
+  }
+
+  /** A ping: a swept sine under a low-pass ceiling, so the far return can be dulled as well as dimmed. */
+  private chirp(t: number, gain: number, fromHz: number, toHz: number, dur: number, ceilHz: number): void {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(fromHz, t);
+    osc.frequency.exponentialRampToValueAtTime(toHz, t + dur);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = ceilHz;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(gain, t + dur * 0.15);
+    g.gain.exponentialRampToValueAtTime(0.0005, t + dur + 0.06);
+    osc.connect(lp).connect(g).connect(this.master!);
+    osc.start(t);
+    osc.stop(t + dur + 0.08);
+  }
+
+  /** A single soft tone with no sweep — the Q-ping's flat pulse. */
+  private pulse(t: number, gain: number, hz: number, dur: number): void {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = hz;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(gain, t + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    osc.connect(g).connect(this.master!);
+    osc.start(t);
+    osc.stop(t + dur + 0.02);
   }
 
   /** A footstep: a short band-passed noise tick. Heavier gait = louder and lower. */

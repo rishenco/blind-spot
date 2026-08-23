@@ -274,6 +274,13 @@ export const EPING_FAR_HEAR = 30;
 /** Halo: smoothed max of self-emitted hearRadius over this window. */
 export const HALO_WINDOW = 1.2;
 export const HALO_DECAY = 9.0;
+/**
+ * Audible radius that reads as "as loud as you get", for both halves of the readout: the ring's
+ * brightness and the hum's pitch (vision §3.8). 30 m is the top of the self-noise table in vision
+ * §3.3 — the E-ping's 30 m, one notch above a sprint step's 24. Shared rather than picked twice,
+ * because a ring and a hum that disagree about full scale are two different instruments.
+ */
+export const HALO_FULL_M = 30;
 
 // ---------------------------------------------------------------------------------------------
 // Dog (vision §6, engine-plan §7)
@@ -371,6 +378,7 @@ export const CORE_CONSTANTS = {
   STAIN_FADE_MAX,
   ENERGY_MAX,
   PING_COOLDOWN,
+  HALO_FULL_M,
   FOV_BASE,
   FOV_SPRINT_KICK,
   DOG_GHOST_LIFE,

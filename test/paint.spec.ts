@@ -840,6 +840,43 @@ describe('accumulation over a run (vision §3.6)', () => {
     expect(paint.heard).toBe(1);
     paint.dispose();
   });
+
+  it('hears a paint-radius-0 event and paints nothing from it (the E-ping far end)', () => {
+    // The E-ping is heard at BOTH ends (vision §3.3), but the cone already painted everything the
+    // beam swept: a sphere at the far end would hand the player geometry around a corner they
+    // never illuminated. So `player.ts` emits the far end with paintRadius 0, and that has to be
+    // an event you HEAR — delivered, republished to the looks and the stain layer — that simply
+    // lights nothing. Not an event that is dropped, and not one that queues a job to paint later.
+    const bus = new EventBus();
+    const paint = new PaintPipeline(field, gym);
+    paint.setListener(5, 1.6, 6);
+    paint.attach(bus);
+    const seen: SoundEvent[] = [];
+    paint.onDelivered((e) => seen.push(e));
+
+    bus.now = 2;
+    bus.emit({
+      class: 'ePing',
+      source: 'self',
+      variant: 'far',
+      x: 5,
+      y: 1.6,
+      z: 6,
+      paintRadius: 0,
+      hearRadius: 30,
+    });
+
+    expect(paint.heard).toBe(1);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.paintRadius).toBe(0);
+    expect(field.paintedDots).toBe(0);
+    expect(paint.pendingPatches).toBe(0);
+    // …and settling proves there was nothing queued to arrive later, either.
+    paint.settle(Infinity);
+    expect(field.paintedDots).toBe(0);
+    expect(litDots(field)).toHaveLength(0);
+    paint.dispose();
+  });
 });
 
 

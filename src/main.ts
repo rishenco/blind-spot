@@ -15,6 +15,7 @@
  * cheap thing that specs build by the dozen, and a bake is a hundred thousand dots.
  *
  * Keys:  WASD move · Shift sprint · Ctrl/C crouch (slide at speed) · Space jump/mantle
+ *        E directed ping (25° cone, 40 m) · Q spatial ping (360°, 12 m)
  *        0/1/2/3 look (0 = debug) · M top-down debug view · F3 stats · F6 dog 2 on the plan
  *        F7 test detonation 12 m ahead · B camera motion · N mute
  * Query: ?look=<debug|phosphor|blueprint|signal>   boot straight into a look (engine-plan §9)
@@ -29,15 +30,7 @@
 
 import { PerspectiveCamera, WebGLRenderer } from 'three';
 import { AudioEngine } from './core/audio.js';
-import {
-  CORE_CONSTANTS,
-  ENERGY_MAX,
-  FOV_BASE,
-  HALO_DECAY,
-  HALO_WINDOW,
-  MOUSE_SENSITIVITY,
-  SIM_STEP,
-} from './core/const.js';
+import { CORE_CONSTANTS, FOV_BASE, MOUSE_SENSITIVITY, SIM_STEP } from './core/const.js';
 import { DebugOverlay, SCRIPTS, SCRIPT_ALIASES, ScriptedInput, testDetonation } from './core/debug.js';
 import type { SoundEvent } from './core/events.js';
 import { yawToThreeRotationY } from './core/math.js';
@@ -156,20 +149,20 @@ function syncCamera(): void {
  */
 const FLOOR_SPAN = 12.0;
 
-/** Halo state (vision §3.8). A placeholder for M4's player.ts, which owns the real reactor. */
-let audibleRadius = 0;
-let lastSelfSound = -1e9;
-
-const handsView = { state: 'none' as 'none' | 'mantle' | 'ladder' | 'vault', phase: 0 };
+/**
+ * The look-facing view of the player (engine-plan §9). The scalars are copied out of
+ * `sim.playerSystems` once a frame; the hands rig is the live pose object, shared the same way the
+ * surfel geometries are — it is four bones rewritten every step, and a per-frame deep copy would
+ * buy nothing the contract's "a look never mutates core state" does not already promise.
+ */
 const playerView = {
   pos: renderPos as readonly [number, number, number],
   stance: 'stand' as Stance,
   speed: 0,
   audibleRadius: 0,
-  /** M4 builds the reactor. Until then this is honestly zero and prints as a dash. */
-  energy: 0,
-  energyMax: ENERGY_MAX,
-  hands: handsView,
+  energy: sim.playerSystems.energy,
+  energyMax: sim.playerSystems.energyMax,
+  hands: sim.playerSystems.hands,
 };
 
 const reduceFlashing =
@@ -218,36 +211,20 @@ if (renderer) {
   paint.onDelivered((e: SoundEvent) => looks?.onEvent(e));
 
   /** Per-frame refresh of everything a look reads off the player. */
-  let lastHaloClock = -1;
-  const syncLookState = (_dt: number, now: number): void => {
+  const syncLookState = (_dt: number, _now: number): void => {
     const p = sim.player;
-    const m = sim.movement;
+    const ps = sim.playerSystems;
     playerView.stance = p.stance;
-    playerView.speed = m.speedXZ;
-    handsView.state = m.hands;
-    handsView.phase = m.handsPhase;
-
-    // Vision §3.8: the halo is the loudest thing you have emitted recently, held briefly and then
-    // bled away — you always know exactly how loud you are. HALO_WINDOW and HALO_DECAY are both
-    // quoted in seconds of WORLD time, so the bleed is charged with the render clock's own delta,
-    // not the wall frame's: a 144 Hz monitor must not drain the halo 2.4x faster than a 60 Hz one,
-    // and the readout must not disagree with the `event.time` axis the hold is measured on.
-    const dtRender = lastHaloClock < 0 ? 0 : Math.max(0, now - lastHaloClock);
-    lastHaloClock = now;
-    if (now - lastSelfSound > HALO_WINDOW) audibleRadius = Math.max(0, audibleRadius - HALO_DECAY * dtRender);
-    playerView.audibleRadius = audibleRadius;
+    playerView.speed = sim.movement.speedXZ;
+    playerView.audibleRadius = ps.audibleRadius;
+    playerView.energy = ps.energy;
+    playerView.energyMax = ps.energyMax;
 
     ctx.floorCentre = renderPos[1] + 1.6;
     ctx.floorSpan = FLOOR_SPAN;
   };
   frameHooks.push(syncLookState);
 }
-
-paint.onDelivered((e: SoundEvent) => {
-  if (e.source !== 'self') return;
-  if (e.hearRadius > audibleRadius || sim.time - lastSelfSound > HALO_WINDOW) audibleRadius = e.hearRadius;
-  lastSelfSound = e.time;
-});
 
 function resize(): void {
   const w = window.innerWidth;
@@ -300,6 +277,14 @@ window.addEventListener('keydown', (e) => {
     case 'Space':
       sim.input.jumpPressed = true;
       e.preventDefault();
+      break;
+    // Latched, not fired here: a ping must leave from inside a fixed step, stamped with that
+    // step's clock and aimed by that step's pose (core/player.ts `PlayerIntent`).
+    case 'KeyE':
+      sim.playerSystems.intent.pingE = true;
+      break;
+    case 'KeyQ':
+      sim.playerSystems.intent.pingQ = true;
       break;
     case 'KeyM':
       debug.toggleTopDown();
@@ -378,6 +363,9 @@ function frame(now: number): void {
   // wall-clock things; only the sim is allowed to care about the fixed step.
   rig.update(dt, sim.movement);
   syncCamera();
+  // The hum is the audible half of the halo (vision §3.8) and the only sound not triggered by an
+  // event, so it is steered here, from the same number the ring's brightness reads.
+  audio.setHalo(sim.playerSystems.audibleRadius);
 
   // The render clock: the interpolated instant this frame is actually depicting. The frame hooks,
   // the pump, the look and the shaders' `uNow` must all read the SAME value, or a surfel could be
@@ -412,6 +400,7 @@ function frame(now: number): void {
 
 debug.extraLines = () => {
   const c = field.counts;
+  const ps = sim.playerSystems;
   const calls = renderer ? renderer.info.render.calls : 0;
   return [
     `surfels    ${c.surfels} dots  ${c.edges} edges (${c.holds} holds)  ${c.patches} patches`,
@@ -419,7 +408,8 @@ debug.extraLines = () => {
     `paint      ${paint.lastMs.toFixed(2)} ms/frame  worst ${paint.maxMs.toFixed(2)} ms` +
       `  pending ${paint.pendingPatches}  heard ${paint.heard} missed ${paint.missed}`,
     `render     ${calls} draw calls  ${evRate.toFixed(1)} event/s  look ${looks ? looks.id : 'none'}`,
-    `halo       ${audibleRadius.toFixed(1)} m audible`,
+    `halo       ${ps.audibleRadius.toFixed(1)} m audible   energy ${ps.energy.toFixed(0)}/${ps.energyMax}` +
+      `   hands ${ps.hands.state} ${ps.hands.phase.toFixed(2)}`,
   ];
 };
 
@@ -448,17 +438,34 @@ requestAnimationFrame(frame);
  *             a success one. Vision §12 says "visual porridge must be structurally impossible" and
  *             §3.2 puts every depth cue inside the cyan band — a saturated pixel has thrown its
  *             depth cue away, and a field of them is the porridge. Verify asserts it stays small.
+ *
+ * `rect` restricts the count to a fraction of the frame, given as [x, y, w, h] in 0..1 with the
+ * origin at the BOTTOM-LEFT (readPixels' own origin, not the screenshot's). A whole-frame fraction
+ * cannot tell where the ink is, and one of the things worth asserting — that the contact shell is
+ * measured from the body and not the eye (vision §3.1) — is a claim about exactly that.
  */
 const WHITE_LEVEL = 250;
 
-function measureInk(): { lit: number; any: number; white: number; width: number; height: number } {
+interface InkReport {
+  lit: number;
+  any: number;
+  white: number;
+  width: number;
+  height: number;
+}
+
+function measureInk(rect?: readonly [number, number, number, number]): InkReport {
   if (!renderer || !looks) return { lit: 0, any: 0, white: 0, width: 0, height: 0 };
   looks.render();
   const gl = renderer.getContext();
-  const w = gl.drawingBufferWidth;
-  const h = gl.drawingBufferHeight;
+  const bw = gl.drawingBufferWidth;
+  const bh = gl.drawingBufferHeight;
+  const x = rect ? Math.max(0, Math.min(bw - 1, Math.round(rect[0] * bw))) : 0;
+  const y = rect ? Math.max(0, Math.min(bh - 1, Math.round(rect[1] * bh))) : 0;
+  const w = rect ? Math.max(1, Math.min(bw - x, Math.round(rect[2] * bw))) : bw;
+  const h = rect ? Math.max(1, Math.min(bh - y, Math.round(rect[3] * bh))) : bh;
   const px = new Uint8Array(w * h * 4);
-  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
   let lit = 0;
   let any = 0;
   let white = 0;
@@ -487,7 +494,7 @@ declare global {
       paint: PaintPipeline;
       looks: LookHost | null;
       detonate: (distance?: number) => SoundEvent;
-      ink: () => { lit: number; any: number; white: number; width: number; height: number };
+      ink: (rect?: readonly [number, number, number, number]) => InkReport;
       stats: () => Record<string, number | string>;
     };
   }
@@ -525,7 +532,10 @@ window.blindspot = {
       frameMs: f.frameMs,
       eventRate: evRate,
       look: looks ? looks.id : 'none',
-      audibleRadius,
+      audibleRadius: sim.playerSystems.audibleRadius,
+      energy: sim.playerSystems.energy,
+      handsState: sim.playerSystems.hands.state,
+      handsPhase: sim.playerSystems.hands.phase,
     };
   },
 };

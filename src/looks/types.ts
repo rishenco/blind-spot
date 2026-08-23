@@ -18,14 +18,15 @@
  *   distance, past ~20 m the read biases to edges, and there is a hard cut at 45 m.
  *
  * MILESTONE HONESTY. Several fields below cannot be filled yet. They are typed now, at their
- * final shape, and carry empty values until the milestone that owns them arrives: `dog` is M5,
- * `energy` / `hands` are M4. A look may read them today and will simply get nothing — never a
- * lie, never a placeholder that looks like data (vision §1.2).
+ * final shape, and carry empty values until the milestone that owns them arrives: `dog` is M5.
+ * A look may read them today and will simply get nothing — never a lie, never a placeholder that
+ * looks like data (vision §1.2).
  */
 
 import type { BufferGeometry, PerspectiveCamera, WebGLRenderer } from 'three';
 import type { CoreConstants } from '../core/const.js';
 import type { SoundEvent } from '../core/events.js';
+import type { HandsPose, RigArm, RigBone } from '../core/player.js';
 import type { Stance } from '../core/sim.js';
 
 /** One frozen pose of a moving thing, for motion smear (vision §3.7). M5 fills these. */
@@ -56,12 +57,15 @@ export interface DogView {
   readonly lastEventQuality: number;
 }
 
-/** The hands rig state machine (engine-plan §6). Core owns the pose; looks own the styling. */
-export interface HandsView {
-  readonly state: 'none' | 'mantle' | 'ladder' | 'vault';
-  /** 0..1 through the current verb. */
-  readonly phase: number;
-}
+/**
+ * The hands rig (engine-plan §6). Core owns the POSE — a state, a phase, a fade and four bones
+ * in CAMERA space (see `RigBone` in core/player.ts for the axes and the Euler order). Looks own
+ * what a hand is made of and how it is lit; the rig is deliberately not geometry, so the three
+ * schools can each answer visual-brief §1.6 "faint machine hands" in their own material language.
+ */
+export type HandsView = HandsPose;
+export type RigArmView = RigArm;
+export type RigBoneView = RigBone;
 
 export interface PlayerView {
   /** INTERPOLATED render position — feet (engine-plan §11.1: never the raw sim pose). */
@@ -71,7 +75,7 @@ export interface PlayerView {
   readonly speed: number;
   /** How loud you are right now, in metres (vision §3.8 "the Halo"). */
   readonly audibleRadius: number;
-  /** M4. Reads 0 / ENERGY_MAX until the reactor exists. */
+  /** The reactor (vision §4). One bar; `energyMax` shrinks as chips reserve capacity (§9). */
   readonly energy: number;
   readonly energyMax: number;
   readonly hands: HandsView;

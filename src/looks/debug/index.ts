@@ -34,71 +34,63 @@
  * the paint — which is what lets you flip looks mid-run and compare the same painted world.
  */
 
-import { LineSegments, Points, Scene, ShaderMaterial } from 'three';
-import type { Look, LookContext } from '../types.js';
-
-/**
- * Reference loudness for the halo ring's brightness, in metres. Vision §3.8 fixes the MEANING
- * ("brightness equals your current audible radius"); the metres-to-brightness mapping is a
- * display choice and therefore lives in the look. 30 m is the loudest thing the player can
- * routinely be: an E-ping's far end.
- */
-const HALO_FULL_M = 30;
+import { BoxGeometry, Group, LineSegments, Mesh, MeshBasicMaterial, Points, Scene, ShaderMaterial } from 'three';
+import type { SoundEvent } from '../../core/events.js';
+import type { Look, LookContext, RigArmView } from '../types.js';
 
 /** `paintTime` sentinel test. UNPAINTED is −1e9; anything below −1e8 has never been lit. */
 const NEVER_PAINTED = -1.0e8;
+
+/** How long the reticle rim takes to race out and fade after a ping, seconds. */
+const RIM_PULSE = 0.4;
+
+/**
+ * Cross-section of the rig's prisms, metres. The hand is stubbier and slightly wider.
+ *
+ * These are small because of where the elbow ends up, not because a robot's arm is thin. The rig
+ * is posed in camera space with the wrist ~0.55 m out and the elbow ~0.3 m out, and at the FOV
+ * this game runs (80-110, vision §12) a 0.3 m depth magnifies a cross-section by ~1600x: every
+ * centimetre of prism is another 16 px of solid slab across the frame. A limb that is honest in
+ * metres is still the loudest object on screen, which is the opposite of visual-brief §1.6.
+ */
+const FOREARM_THICK = 0.042;
+const HAND_THICK = 0.056;
+const HAND_LENGTH = 0.12;
+
+/**
+ * Rig opacity at full visibility. Visual-brief §1.6 asks for FAINT machine hands, and faint here
+ * is measured against the world and not against black: the world is a sparse lattice of 12 px
+ * dots, so a filled prism reads as loud at a fraction of the alpha a solid surface would need.
+ * The hand leads the forearm because the hand is the part carrying the verb — where it is planted
+ * is the information; the forearm only has to say which way the arm came from.
+ */
+const FOREARM_ALPHA = 0.22;
+const HAND_ALPHA = 0.36;
 
 /** View-space nudge toward the camera for line vertices, metres — beats surfel z-fighting. */
 const LINE_LIFT = 0.02;
 
 /**
- * Upper bound on a splat, in device pixels.
+ * THE DOT CAP, in device-independent pixels. Visual-brief §2 "Near field: dots stay dots".
  *
- * Vision §12 sizes a splat to its voxel footprint and puts no ceiling on it, and none is needed
- * for cost: footprint splatting is self-balancing, since a surfel that doubles in size halves the
- * number of its neighbours you can see. The ceiling exists for one artifact only — WebGL culls a
- * point whose CENTRE leaves the viewport, so a very large splat pops out at the frame edge while
- * half of it is still on screen.
+ * A splat is drawn at its projected footprint only up to this ceiling. Vision §12's "splats sized
+ * to voxel footprint" is a CEILING — a dot never grows past its own cell — and not a mandate to
+ * fill that cell at any range: uncapped, a surfel at arm's length draws as a ~110 px disc, and a
+ * field of soft discs is not the "structural dense distance-faded dot lattice" the whole look is
+ * built on. The near field reads as a crisp sparse lattice over black, with the 2 m contact shell
+ * under it; "nearby reads as a cloud" is bought with density and brightness, never with disc size.
  *
- * It used to be 64 px, and that was a readability bug: at 1.6 m from a wall the true footprint is
- * ~110 px, so the cap clipped every near splat and left black gaps between full-brightness discs —
- * a halftone screen, flooded and screen-doored at the same time. A splat clipped BELOW its
- * footprint is the one case where the self-balancing stops working, because the dots it should
- * have been hiding are gone and the ink it should have spread is concentrated. The cap is now high
- * enough to bind only in the last few centimetres before a surface (256 px ≈ 0.45 m), where the
- * edge pop is the least of the picture's problems; density is bounded by SPLAT_INK_PX instead.
+ * 12 px is chosen against the lattice's own screen pitch, which is the only scale that matters
+ * here: at 1600x1000 with FOV 92 a neighbouring surfel sits `483 * 0.22 / depth` px away, so the
+ * cap binds from 8.9 m inward (face-on; sooner at grazing angles, where the equal-area radius is
+ * smaller). At 9 m dots are ~12 px at a ~12 px pitch — still a continuous surface — and they open
+ * out into visibly separate dots as you close, which is the near-field read the ruling asks for.
+ * Below ~8 px the mid-field breaks into a starfield; above ~14 px the discs return.
+ *
+ * The cap also removes an artifact for free: WebGL culls a point whose CENTRE leaves the viewport,
+ * so a huge splat popped out at the frame edge while half of it was still on screen.
  */
-const SPLAT_CAP_PX = 256;
-
-/**
- * NEAR-FIELD INK BOUND (vision §12 "visual porridge must be structurally impossible").
- *
- * Sizing a splat to its projected footprint is what makes "nearby reads as a cloud" true, but on
- * its own it bounds ink density only from BELOW: as you approach a surface each splat covers more
- * screen at the same alpha, so a wall at arm's length is a solid sheet of saturated white with
- * every depth cue burned out of it. The far field already has its density bound (the dither prune
- * below); this is the near-field mirror of it.
- *
- * The rule is ink conservation: a splat that has grown past `SPLAT_INK_PX` is drawn at the alpha
- * that deposits the same total ink it WOULD have deposited at `SPLAT_INK_PX` — area goes as the
- * square of the radius, so alpha goes as the inverse square. Coverage rises, brightness falls, and
- * the product — ink per unit of screen — stops rising.
- *
- * Nothing beyond `SPLAT_INK_PX` of footprint is touched, and that is a bound rather than an
- * estimate: `shrink` is exactly 1 whenever `size <= SPLAT_INK_PX`, and at 1600x1000 with FOV 92
- * the projected footprint `uProjScale * uSpacing / depth` reaches 24 px at 483 * 0.22 / 24 =
- * 4.43 m (the foreshortening factor is <= 1, so it can only push that nearer). Every surfel from
- * 4.43 m out therefore renders bit-identically to before this bound existed — and `SPLAT_CAP_PX`
- * binds nearer still, at 1.66 m. The whole change lives inside arm's reach.
- *
- * `SPLAT_INK_FLOOR` stops conservation from erasing what it is bounding: at 0.5 m a splat is 20x
- * over target and exact conservation would take it to 0.002 alpha, i.e. black. Vision §3.6 says
- * the map is never lost, so the dimming stops at a fifth of the surface's authored alpha — still
- * far below saturation, still plainly visible, and now the near field reads as a dim close surface
- * instead of a white wall, which is also the truthful depth cue.
- */
-const SPLAT_INK_PX = 24;
-const SPLAT_INK_FLOOR = 0.2;
+const SPLAT_CAP_PX = 12;
 
 const DOT_VERT = /* glsl */ `
 attribute float dither;
@@ -124,8 +116,6 @@ uniform float uPixelRatio;
 uniform float uSplatMin;
 uniform float uSplatNear;
 uniform float uSplatCap;
-uniform float uSplatInk;
-uniform float uInkFloor;
 
 varying float vAlpha;
 varying float vAge;
@@ -176,38 +166,29 @@ void main() {
   if (dither > 1.0 - far) alpha = 0.0;
   alpha *= 1.0 - 0.6 * far;
 
-  // A splat IS the projected footprint of its lattice cell (vision §12 "splats sized to voxel
-  // footprint"). This is not decoration, it is the whole reason "nearby reads as a cloud": the
-  // lattice is fixed in WORLD space, so up close you see FEWER dots covering MORE solid angle.
-  // Draw them at a fixed small size and a wall 2 m away becomes a starfield with 50 px of black
-  // between neighbours — the exact inverse of the law.
+  // A splat is drawn at the projected footprint of its lattice cell, BOUNDED ABOVE by uSplatCap
+  // (visual-brief §2 "Near field: dots stay dots"). Footprint growth is what makes the mid field
+  // a surface rather than a starfield — the lattice is fixed in WORLD space, so as you approach
+  // you see fewer dots covering more solid angle and they have to grow to keep the surface
+  // continuous. Past the cap that stops being true and starts being a screenful of soft discs, so
+  // the cap holds them at a dot and lets density and brightness carry the near read instead.
   //
-  // The two px constants are FLOORS on that footprint, not sizes (visual-brief §2 "splats >= 2-3
-  // px and temporally stable" — a sub-pixel dot dies in stream compression and shimmers). The
-  // floor relaxes with distance because the far field is meant to thin toward a drawing: near
-  // dots hold uSplatNear, far dots may go down to uSplatMin. At normal resolutions the footprint
-  // clears both; on a small canvas or a wide FOV they are what keeps the image alive.
-  // Foreshortening. The cell is a square in the SURFACE, so what it covers on screen is an
-  // ellipse with semi-axes a and a*|n.v| — a floor seen edge-on covers a fraction of what the
-  // same cell covers face-on. A round sprite cannot be that ellipse, so it is drawn at the
-  // equal-area radius, a*sqrt(|n.v|). Without this, every grazing surface (which is most of a
-  // corridor) overlaps itself into a solid white sheet and the cloud stops being a cloud.
+  // The two px constants are FLOORS on the same footprint (visual-brief §2 "splats >= 2-3 px and
+  // temporally stable" — a sub-pixel dot dies in stream compression and shimmers). The floor
+  // relaxes with distance because the far field is meant to thin toward a drawing: near dots hold
+  // uSplatNear, far dots may go down to uSplatMin. Floors are far below the cap by construction,
+  // so the clamp below can never invert.
   //
-  // Sized BEFORE the shell and the cull, because the size decides the alpha: see uSplatInk.
+  // Foreshortening: the cell is a square in the SURFACE, so what it covers on screen is an ellipse
+  // with semi-axes a and a*|n.v| — a floor seen edge-on covers a fraction of what the same cell
+  // covers face-on. A round sprite cannot be that ellipse, so it is drawn at the equal-area
+  // radius, a*sqrt(|n.v|). Without this, every grazing surface (which is most of a corridor)
+  // overlaps itself into a solid sheet and the cloud stops being a cloud.
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   vec3 toCam = normalize(uCamPos - position);
   float foot = uProjScale * uSpacing / max(0.05, -mv.z);
   foot *= sqrt(clamp(abs(dot(normal, toCam)), 0.15, 1.0));
-  float size = max(foot, mix(uSplatNear, uSplatMin, far));
-
-  // The near-field ink bound. Past uSplatInk the splat keeps growing and its alpha falls as the
-  // inverse square, so ink per unit of screen stops rising: coverage up, brightness down, product
-  // flat. Below uSplatInk the shrink factor is 1 and this does nothing at all — mid and far field
-  // are untouched. uInkFloor keeps a point-blank surface visible rather than conserving it to
-  // black (vision §3.6). Applied to PAINT only: the contact shell has its own authored alpha and
-  // its own reason to be faint, and dimming it further would erase it.
-  float shrink = clamp(uSplatInk / max(1.0, size), 0.0, 1.0);
-  alpha *= max(shrink * shrink, uInkFloor);
+  float size = clamp(foot, mix(uSplatNear, uSplatMin, far), uSplatCap);
 
   // Contact shell (vision §3.1): the only geometry visible without sound. Faint, 2 m, always on.
   alpha = max(alpha, shellAlpha(position));
@@ -217,7 +198,7 @@ void main() {
   vAge = lit > 0.5 ? age : -1.0;
 
   gl_Position = projectionMatrix * mv;
-  gl_PointSize = min(size, uSplatCap) * uPixelRatio;
+  gl_PointSize = size * uPixelRatio;
 }
 `;
 
@@ -350,8 +331,27 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
 
   let hudRoot: HTMLDivElement | null = null;
   let halo: HTMLDivElement | null = null;
+  let rim: HTMLDivElement | null = null;
   let readout: HTMLDivElement | null = null;
   let readoutAcc = 0;
+  /** Sim time of the last outgoing ping, for the rim pulse. −1 = none this session. */
+  let lastPingAt = -1;
+
+  /**
+   * The hands rig (engine-plan §6, visual-brief §1.6). Core hands over four bone poses in CAMERA
+   * space; this look owns what they are made of. The group's transform IS the camera's, so the
+   * bones can be written into it unchanged — no per-frame world-space conversion, and the rig
+   * cannot drift from the eye it hangs off.
+   */
+  const handsGroup = new Group();
+  handsGroup.matrixAutoUpdate = false;
+  handsGroup.frustumCulled = false;
+  let forearmGeom: BoxGeometry | null = null;
+  let handGeom: BoxGeometry | null = null;
+  let forearmMat: MeshBasicMaterial | null = null;
+  let handMat: MeshBasicMaterial | null = null;
+  /** [left, right] × [forearm, hand]. */
+  let handMeshes: Mesh[] = [];
 
   let viewW = 1;
   let viewH = 1;
@@ -395,6 +395,25 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
     if (u) u.value = v;
   };
 
+  /**
+   * Write one arm's two bones onto their meshes. The forearm's LENGTH is recovered rather than
+   * given: core puts the forearm bone at the elbow-wrist midpoint and the hand bone at the wrist,
+   * so the half-length is the distance between them. The rig is authored, not solved, and this
+   * keeps the two definitions of "how long is this arm" from being able to disagree.
+   */
+  const poseArm = (a: RigArmView, forearm: Mesh, hand: Mesh): void => {
+    const half = Math.hypot(
+      a.hand.pos[0] - a.forearm.pos[0],
+      a.hand.pos[1] - a.forearm.pos[1],
+      a.hand.pos[2] - a.forearm.pos[2],
+    );
+    forearm.position.set(a.forearm.pos[0], a.forearm.pos[1], a.forearm.pos[2]);
+    forearm.rotation.set(a.forearm.rot[0], a.forearm.rot[1], a.forearm.rot[2], 'YXZ');
+    forearm.scale.set(1, 1, Math.max(0.02, half * 2));
+    hand.position.set(a.hand.pos[0], a.hand.pos[1], a.hand.pos[2]);
+    hand.rotation.set(a.hand.rot[0], a.hand.rot[1], a.hand.rot[2], 'YXZ');
+  };
+
   return {
     id,
     title,
@@ -412,8 +431,6 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
           uSplatMin: { value: c.constants.SPLAT_MIN_PX },
           uSplatNear: { value: c.constants.SPLAT_NEAR_PX },
           uSplatCap: { value: SPLAT_CAP_PX },
-          uSplatInk: { value: SPLAT_INK_PX },
-          uInkFloor: { value: SPLAT_INK_FLOOR },
         },
         vertexShader: DOT_VERT,
         fragmentShader: DOT_FRAG,
@@ -436,6 +453,27 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
       holds.renderOrder = 2;
       scene.add(dots, lines, holds);
 
+      // A bone's long axis is its local +z (core/player.ts RigBone), so both prisms are built
+      // along +z: the forearm is a unit-length box scaled to the bone, the hand a fixed stub
+      // pushed forward off the wrist rather than straddling it.
+      forearmGeom = new BoxGeometry(FOREARM_THICK, FOREARM_THICK, 1);
+      handGeom = new BoxGeometry(HAND_THICK, HAND_THICK * 0.72, HAND_LENGTH);
+      handGeom.translate(0, 0, HAND_LENGTH * 0.5);
+      forearmMat = new MeshBasicMaterial({ color: 0x8fa6b4, transparent: true, opacity: 0 });
+      handMat = new MeshBasicMaterial({ color: 0xc6d8e4, transparent: true, opacity: 0 });
+      handMeshes = [
+        new Mesh(forearmGeom, forearmMat),
+        new Mesh(handGeom, handMat),
+        new Mesh(forearmGeom, forearmMat),
+        new Mesh(handGeom, handMat),
+      ];
+      for (const m of handMeshes) {
+        m.frustumCulled = false;
+        handsGroup.add(m);
+      }
+      handsGroup.visible = false;
+      scene.add(handsGroup);
+
       // --- HUD: reticle, halo ring, printed readout (engine-plan §9) ----------------------
       hudRoot = document.createElement('div');
       hudRoot.style.cssText = 'position:absolute;inset:0;pointer-events:none;';
@@ -451,6 +489,16 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
         'position:absolute;left:50%;top:50%;width:54px;height:54px;margin:-27px 0 0 -27px;' +
         'border-radius:50%;border:1px solid rgba(235,245,255,0);';
       hudRoot.appendChild(halo);
+
+      // Visual-brief §1.11 "racing rim": a ping needs an answer before its paint can possibly
+      // arrive, so the rim leaves the reticle the instant the event does. A SEPARATE ring from the
+      // halo on purpose — the halo's brightness means loudness and nothing else, and borrowing it
+      // for a moment of feedback would make the one honest readout lie twice a second.
+      rim = document.createElement('div');
+      rim.style.cssText =
+        'position:absolute;left:50%;top:50%;width:54px;height:54px;margin:-27px 0 0 -27px;' +
+        'border-radius:50%;border:1px solid rgba(235,245,255,0);opacity:0;';
+      hudRoot.appendChild(rim);
 
       readout = document.createElement('div');
       readout.style.cssText =
@@ -472,8 +520,16 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
       this.resize(viewW, viewH);
     },
 
-    /** Nothing to spawn: the debug look draws paint and holds, and no event decoration at all. */
-    onEvent(): void {},
+    /**
+     * The debug look draws no event decoration — no stains, no markers. The one exception is the
+     * rim, and it is not decoration: it is the acknowledgement that the ping you pressed happened,
+     * which the paint alone cannot give you until the wavefront gets somewhere. The far end is
+     * skipped: it is the same ping arriving, not a second press.
+     */
+    onEvent(e: SoundEvent): void {
+      if (e.source !== 'self' || e.variant === 'far') return;
+      if (e.class === 'ePing' || e.class === 'qPing') lastPingAt = e.time;
+    },
 
     update(now: number, dt: number): void {
       const c = ctx;
@@ -498,19 +554,49 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
       const projScale = (viewH * 0.5) / Math.tan((cam.fov * Math.PI) / 360);
       setUniform(dotMat, 'uProjScale', projScale);
 
-      if (!halo || !readout) return;
       const p = c.player;
-      const loud = Math.min(1, p.audibleRadius / HALO_FULL_M);
+
+      // The hands rig rides the camera exactly (see handsGroup): the bones are already camera-
+      // space, so the group simply wears the camera's world matrix. `visibility` is core's fade,
+      // so letting go of a ladder withdraws the rig instead of deleting it mid-frame.
+      const vis = p.hands.visibility;
+      handsGroup.visible = vis > 0.01;
+      if (handsGroup.visible) {
+        cam.updateMatrixWorld();
+        handsGroup.matrix.copy(cam.matrixWorld);
+        handsGroup.matrixWorldNeedsUpdate = true;
+        poseArm(p.hands.left, handMeshes[0]!, handMeshes[1]!);
+        poseArm(p.hands.right, handMeshes[2]!, handMeshes[3]!);
+        if (forearmMat) forearmMat.opacity = FOREARM_ALPHA * vis;
+        if (handMat) handMat.opacity = HAND_ALPHA * vis;
+      }
+
+      if (!halo || !rim || !readout) return;
+
+      // Vision §3.8: ring brightness IS the audible radius. Linear in `loud`, with a floor that
+      // exists so the ring is still findable at silence — the reading is the ramp, not the floor.
+      const loud = Math.min(1, p.audibleRadius / c.constants.HALO_FULL_M);
       halo.style.borderColor = `rgba(235,245,255,${(0.06 + 0.62 * loud).toFixed(3)})`;
+
+      const pingAge = lastPingAt < 0 ? Infinity : now - lastPingAt;
+      if (pingAge >= 0 && pingAge < RIM_PULSE) {
+        const u = pingAge / RIM_PULSE;
+        // Reduce-flashing (vision §12): the ring still answers, it just fades in place instead of
+        // racing. No school may depend on the motion, so neither may the instrument.
+        const scale = c.reduceFlashing() ? 1 : 1 + 1.1 * u;
+        rim.style.opacity = (1 - u).toFixed(3);
+        rim.style.transform = `scale(${scale.toFixed(3)})`;
+        rim.style.borderColor = 'rgba(235,245,255,0.8)';
+      } else if (rim.style.opacity !== '0') {
+        rim.style.opacity = '0';
+      }
 
       readoutAcc += dt;
       if (readoutAcc >= 0.1) {
         readoutAcc = 0;
-        // Energy is honestly absent until M4 builds the reactor: it prints as a dash, never as
-        // a full bar that would read as "you have 100 energy" (vision §1.2).
-        const e = p.energyMax > 0 && p.energy > 0 ? p.energy.toFixed(0) : '—';
         readout.textContent =
-          `audible ${p.audibleRadius.toFixed(1).padStart(5)} m    energy ${String(e).padStart(3)}/${p.energyMax}`;
+          `audible ${p.audibleRadius.toFixed(1).padStart(5)} m    ` +
+          `⚡ ${p.energy.toFixed(0).padStart(3)}/${p.energyMax}`;
       }
     },
 
@@ -532,15 +618,25 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
 
     dispose(): void {
       scene.clear();
+      handsGroup.clear();
       dotMat?.dispose();
       lineMat?.dispose();
       holdMat?.dispose();
+      forearmGeom?.dispose();
+      handGeom?.dispose();
+      forearmMat?.dispose();
+      handMat?.dispose();
       dotMat = lineMat = holdMat = null;
+      forearmGeom = handGeom = null;
+      forearmMat = handMat = null;
+      handMeshes = [];
       dots = lines = holds = null;
       hudRoot?.remove();
       hudRoot = null;
       halo = null;
+      rim = null;
       readout = null;
+      lastPingAt = -1;
       ctx = null;
       // NOT disposed, on purpose: ctx.surfelGeom / ctx.edgeGeom are the SurfelField's, and they
       // hold the run's paint. Disposing them here would black the world on every look switch.

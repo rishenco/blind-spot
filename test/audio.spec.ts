@@ -16,7 +16,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { AudioEngine } from '../src/core/audio.js';
-import { EV } from '../src/core/const.js';
+import { AUDIO_MASTER_GAIN, EV, HALO_FULL_M } from '../src/core/const.js';
 import { EventBus, type SoundClass, type SoundEvent } from '../src/core/events.js';
 
 // ------------------------------------------------------------------------------------------
@@ -163,10 +163,10 @@ describe('audio is a pure consumer of the bus (engine-plan §8)', () => {
     }
   });
 
-  it('sounds exactly the M2 self classes and silently ignores the rest', () => {
+  it('sounds exactly the implemented self classes and silently ignores the rest', () => {
     withAudio((bus, engine) => {
-      // `mantle` is the sixth: deviation 4 gives the pull-up its own scuff, so the ears agree
-      // with the event the verb now publishes.
+      // `mantle` gives the pull-up its own scuff, so the ears agree with the event the verb
+      // publishes; the two pings are the deliberate perception verbs (vision §3.5).
       for (const c of [
         'crouchStep',
         'walkStep',
@@ -174,18 +174,20 @@ describe('audio is a pure consumer of the bus (engine-plan §8)', () => {
         'landing',
         'slide',
         'mantle',
+        'qPing',
+        'ePing',
       ] as SoundClass[]) {
         bus.emit(ev(c));
       }
-      expect(engine.played).toBe(6);
+      expect(engine.played).toBe(8);
       // Classes whose milestone has not landed yet are ignored, not faked.
-      for (const c of ['qPing', 'ePing', 'detonation', 'propKnock', 'beaconHum'] as SoundClass[]) {
+      for (const c of ['detonation', 'propKnock', 'beaconHum', 'dogGait'] as SoundClass[]) {
         bus.emit(ev(c));
       }
-      expect(engine.played).toBe(6);
+      expect(engine.played).toBe(8);
       // And a sound that is not yours is not played (M3 owns delivery).
       bus.emit({ ...ev('sprintStep'), source: 'dog' });
-      expect(engine.played).toBe(6);
+      expect(engine.played).toBe(8);
     });
   });
 
@@ -288,6 +290,34 @@ describe('the swept-noise synths jitter per event, so nothing combs (review find
     expect(mantles, `mantle: ${mantles}/6 distinct`).toBe(6);
   });
 
+  it('the E-ping chirp rises 300 -> 1400 Hz, and its far end is the same chirp, quieter', () => {
+    // Engine-plan §8 fixes the sweep. The far end is the beam landing somewhere and being heard
+    // back (core/player.ts): the SAME question returning, so it must not be a different sound —
+    // only a quieter, duller one. Anything else would be a scripted echo, and vision §1.2 forbids
+    // a sound the world did not actually make.
+    const chirp = (over: Partial<SoundEvent> = {}): { from: number; to: number; gain: number } => {
+      let from = 0;
+      let to = 0;
+      let gain = 0;
+      withAudio((bus, _e, rec) => {
+        bus.emit(ev('ePing', over));
+        for (const [k, v] of rec.calls) {
+          if (k.endsWith('freq.setValueAtTime')) from = v;
+          if (k.endsWith('freq.expRamp')) to = v;
+          if (k.endsWith('gain.linearRamp')) gain = v;
+        }
+      });
+      return { from, to, gain };
+    };
+    const out = chirp();
+    expect(out.from).toBe(300);
+    expect(out.to).toBe(1400);
+    const far = chirp({ variant: 'far' } as Partial<SoundEvent>);
+    expect(far.from).toBe(300);
+    expect(far.to).toBe(1400);
+    expect(far.gain).toBeLessThan(out.gain);
+  });
+
   it('the mantle scuff sweeps UP where the slide sweeps down, so they never read alike', () => {
     // Deviation 4: same machinery (a swept filter over noise), opposite direction and a shorter,
     // quieter grain — a braced heave, not a scrape along the floor.
@@ -307,5 +337,82 @@ describe('the swept-noise synths jitter per event, so nothing combs (review find
     const [mantleFrom, mantleTo] = sweep('mantle');
     expect(slideTo).toBeLessThan(slideFrom); // 2200 -> 700 Hz
     expect(mantleTo).toBeGreaterThan(mantleFrom); // 900 -> 2600 Hz
+  });
+});
+
+// ==========================================================================================
+// The halo hum: the audible half of "you always know exactly how loud you are"
+// ==========================================================================================
+
+describe('the halo hum tracks audibleRadius (vision §3.8, engine-plan §8)', () => {
+  /** Every value the hum's own oscillator/gain were steered to, in order. */
+  const humSteers = (radii: number[]): { freq: number[]; gain: number[] } => {
+    const freq: number[] = [];
+    const gain: number[] = [];
+    withAudio((_bus, engine, rec) => {
+      for (const r of radii) {
+        rec.calls.length = 0;
+        engine.setHalo(r);
+        for (const [k, v] of rec.calls) {
+          if (k.endsWith('freq.setTarget')) freq.push(v);
+          if (k.endsWith('gain.setTarget')) gain.push(v);
+        }
+      }
+    });
+    return { freq, gain };
+  };
+
+  it('BOTH volume and pitch rise with loudness, monotonically', () => {
+    const { freq, gain } = humSteers([0, 2, 11, 24, 30]);
+    expect(freq.length).toBe(5);
+    expect(gain.length).toBe(5);
+    for (let i = 1; i < freq.length; i++) {
+      expect(freq[i]!, `pitch at step ${i}`).toBeGreaterThan(freq[i - 1]!);
+      expect(gain[i]!, `volume at step ${i}`).toBeGreaterThan(gain[i - 1]!);
+    }
+    // A crouch step must be audible but ignorable next to a sprint step (engine-plan §8).
+    expect(gain[1]!).toBeLessThan(gain[3]! * 0.3);
+  });
+
+  it('saturates at full scale rather than running away past it', () => {
+    const { freq, gain } = humSteers([HALO_FULL_M, HALO_FULL_M * 4]);
+    expect(freq[1]).toBe(freq[0]);
+    expect(gain[1]).toBe(gain[0]);
+  });
+
+  it('survives being steered before the context exists, and applies the last value on resume', () => {
+    const rec: Rec = { nodes: [], calls: [], starts: [] };
+    const g = globalThis as { AudioContext?: unknown };
+    const had = 'AudioContext' in g;
+    const prev = g.AudioContext;
+    const engine = new AudioEngine();
+    try {
+      // Autoplay policy: the boot layer steers the hum every frame from the first one, which is
+      // long before the first user gesture. That must be silent, not a crash.
+      engine.setHalo(24);
+      g.AudioContext = makeStub(rec);
+      engine.resume();
+      const steered = rec.calls.filter(([k]) => k.endsWith('freq.setTarget')).map(([, v]) => v);
+      expect(steered.length).toBeGreaterThan(0);
+      expect(steered[0]!).toBeGreaterThan(100); // the 24 m it was told about while asleep
+    } finally {
+      engine.dispose();
+      if (had) g.AudioContext = prev;
+      else delete g.AudioContext;
+    }
+  });
+
+  it('runs under the master gain, so mute silences it like everything else', () => {
+    withAudio((_bus, engine, rec) => {
+      engine.setHalo(30);
+      rec.calls.length = 0;
+      engine.setMuted(true);
+      const targets = rec.calls.filter(([k]) => k.endsWith('gain.setTarget')).map(([, v]) => v);
+      expect(targets).toContain(0);
+      rec.calls.length = 0;
+      engine.setMuted(false);
+      const back = rec.calls.filter(([k]) => k.endsWith('gain.setTarget')).map(([, v]) => v);
+      expect(back).toContain(AUDIO_MASTER_GAIN);
+    });
   });
 });

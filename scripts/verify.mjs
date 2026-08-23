@@ -183,6 +183,12 @@ async function capture(browser, name, query, checks, opts = {}) {
       stats: window.blindspot.stats(),
       f3: window.blindspot.debug.extraLines ? window.blindspot.debug.extraLines() : [],
       glInk: window.blindspot.ink(),
+      // The floor within arm's reach, in the bottom-centre sixth of the frame. Vision §3.1
+      // measures the contact shell from the BODY, and this box is where that claim is visible:
+      // standing, the eye is 1.7 m up, so the floor only enters the frame past 1.64 m and the
+      // shell's own edge is at 2 m — a thin arc at the bottom. A shell measured from the EYE
+      // instead reaches only 1.05 m of floor and would leave this box completely black.
+      feetInk: window.blindspot.ink([0.3, 0.0, 0.4, 0.16]),
       solids: sim.world.solids.length,
       walkables: sim.world.walkables.length,
       steps: sim.steps,
@@ -422,10 +428,19 @@ async function main() {
       'nothing has been heard yet': s.stats.heard === 0 && s.events === 0,
       'nothing has been painted': s.stats.paintedDots === 0 && s.stats.paintedEdgeVerts === 0,
       'the world is black': s.glInk.lit === 0,
-      // Measured 1.245%. The floor catches a shell that stopped drawing; the ceiling catches one
-      // that grew into a lantern, which would be law 1 broken — free light nobody paid for.
-      'the contact shell is drawn': s.glInk.any > 0.004,
-      'the contact shell is only a shell': s.glInk.any < 0.04,
+      // Measured 0.057% (was 1.245% before the dot cap: the shell's dots are the closest in the
+      // game, so they are the ones the cap shrinks hardest — same dots, ~1/22 the ink). The floor
+      // catches a shell that stopped drawing; the ceiling catches one that grew into a lantern,
+      // which would be law 1 broken — free light nobody paid for, and it also catches the cap
+      // being lifted back off, which would put this straight back over a percent.
+      'the contact shell is drawn': s.glInk.any > 0.0003,
+      'the contact shell is only a shell': s.glInk.any < 0.002,
+      // Vision §3.1, the part a whole-frame fraction cannot see: the shell is measured from the
+      // BODY. Measured 0.892% inside the bottom-centre box against 0.057% over the whole frame,
+      // and exactly 0 in the same box at eye level — the ink is where the feet are. An
+      // eye-measured shell reaches 1.05 m of floor, all of it below the bottom of the frame, and
+      // would read 0 here while the whole-frame fence above still passed on the walls.
+      'the shell reaches the floor at your feet': s.feetInk.any > 0.003,
       'the bake found geometry': s.stats.surfels > 50_000 && s.stats.patches > 1_000,
       'the bake found holds to draw as lines': s.stats.holds > 0 && s.stats.edges > s.stats.holds,
     }));
@@ -449,16 +464,19 @@ async function main() {
         'its own footsteps painted the route': s.stats.paintedDots === 6853,
         'holds along the route were painted too': s.stats.paintedEdgeVerts === 232,
         // Not black, and not a flood. `any` is the whole read (paint + shell); `lit` is paint
-        // bright enough to navigate by. Both fences are set around the measured 5.1% lit / 38.8%
-        // any with roughly a factor of two either side, tight enough that halving the splat size
-        // or doubling it trips one of them — a wide-open band here caught nothing at all.
+        // bright enough to navigate by. Measured 0.107% lit / 0.878% any, re-baselined from 5.1%
+        // / 38.8%: the dot cap did not remove a single dot from this frame, it stopped ~150 of
+        // them being drawn as 70 px discs. Both fences keep the old shape — a factor of two
+        // either side, tight enough that halving or doubling the cap trips one of them.
         // Vision §3.6: the route's first steps are ~13 s old by now and must still be drawn, so
         // `lit` is also what stops `paintedDots` being a tally of surfaces that have gone dark.
-        'the canvas is not black': s.glInk.lit > 0.02,
-        'the canvas is not flooded': s.glInk.any > 0.15 && s.glInk.any < 0.65,
+        'the canvas is not black': s.glInk.lit > 0.0005,
+        'the canvas is not flooded': s.glInk.any > 0.004 && s.glInk.any < 0.018,
         // Vision §12, the other end of the same band: a mid-route first-person frame is mostly
         // 3-15 m geometry, where nothing should saturate at all. Anything above a percent here
         // means near-field splats have grown back into a sheet and eaten the depth cues.
+        // Measured 0.000% — the bound is left where it was, because it is a law and not a
+        // baseline, and it is the number the near-field rework had to hold.
         'nothing on the route saturates to white': s.glInk.white < 0.05,
       }),
       { scripted: true },
@@ -478,18 +496,22 @@ async function main() {
         'the blast painted geometry': blast.after.painted > 1_000,
         'the blast lit the screen': blast.after.ink.lit > blast.before.ink.lit + 0.01,
         // Vision §12: "depth cues live only inside the cyan band", "splats sized to voxel
-        // footprint". A point-blank blast is the worst case for near-field ink — every splat in
-        // front of your face is metres of footprint wide — and when the splats overlap into a
-        // solid sheet the band collapses: no depth, no structure, just a lit rectangle. Ink is
-        // conserved against footprint in the shader (looks/debug `uSplatInk`), so a screen-filling
-        // near cloud stays a cloud. The pure-white fraction is what that failure looks like from
-        // the outside: 41.4% of the frame at full white before the fix, ~1% after.
+        // footprint". A point-blank blast is the worst case for near-field ink — the wall three
+        // metres from your face is lit at full intensity all at once — and when the splats
+        // overlap into a solid sheet the band collapses: no depth, no structure, just a lit
+        // rectangle. What stops that is the dot cap (looks/debug `SPLAT_CAP_PX`): a near dot is
+        // held at 12 px while its lattice neighbour is 46 px away, so the near field opens out
+        // into separate dots instead of closing into halftone. The pure-white fraction is what
+        // the failure looks like from the outside: 41.4% of the frame at full white when splats
+        // were drawn at literal footprint, 3.2% now, and every white pixel that is left is a
+        // single capped dot rather than a piece of sheet.
         'the near field is a cloud, not a white sheet': blast.after.ink.white < 0.05,
-        // Measured 49.7%: a 22 m sphere from the spawn lights most of what is in front of you,
-        // but a bit under half the frame is still black — the shadowed side of the hall and the
-        // geometry the blast never reached. The band, not just an upper fence: `any` collapsing
-        // means the blast stopped painting, `any` at 0.85 means the splats have flooded.
-        'and it did not flood the screen': blast.after.ink.any > 0.3 && blast.after.ink.any < 0.7,
+        // Measured 7.4%, re-baselined from 49.7%. The same 4659 dots are drawn either way — this
+        // number is the difference between a dot at its footprint and a dot at the cap, nothing
+        // else, and it scales as the square of the cap (3.5% at 8 px, 9.6% at 14 px), which is
+        // what makes it a usable fence at all. The band, not just an upper bound: `any` collapsing
+        // means the blast stopped painting, `any` back near half the frame means the cap is gone.
+        'and it did not flood the screen': blast.after.ink.any > 0.04 && blast.after.ink.any < 0.12,
         // ---- the schedule, asserted structurally ---------------------------------------------
         // A detonation's 5286 patches are released over the ~180 ms its wavefront takes to
         // cross, so `paintPending` must be non-zero on the frames in between. If a future change
@@ -543,10 +565,14 @@ async function main() {
           // Headless swiftshader is not a GPU, so this is a liveness floor, not the 60 fps target
           // of vision §12 — a stalled loop or a frame in the seconds reads as broken here.
           'the frame loop is alive': s.stats.fps > 5 && s.stats.frameMs < 200,
-          // Measured 3.4% lit / 78.5% any: the machinery-row vantage is a metre from a wall, so
-          // most of the frame is close geometry at low alpha. That is exactly the frame the ink
-          // bound is for — it must stay a cloud, not saturate.
-          'the canvas is not black': s.glInk.lit > 0.01,
+          // Measured 0.007% lit / 0.721% any, re-baselined from 3.4% / 78.5%. This vantage is a
+          // metre from a wall the route never painted, so what fills the frame is the contact
+          // shell and almost nothing else — which is why `lit` is now a single dot's worth and is
+          // no longer asserted here (fp-script is where painted route geometry is fenced). `any`
+          // is the honest measurement of this frame, and it is a sharp one: a wall at 1 m has a
+          // 106 px lattice pitch, so capped 12 px dots cover pi*36/106^2 = 1.0% of the area they
+          // sit on, and the grazing floor and ceiling bring the frame total to 0.72%.
+          'the shell fills the near wall without flooding it': s.glInk.any > 0.004 && s.glInk.any < 0.02,
           'the near wall stays a cloud': s.glInk.white < 0.05,
         };
       },

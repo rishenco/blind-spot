@@ -46,8 +46,12 @@ export type SourceKind = (typeof SOURCE_KINDS)[number];
  * separate rows): the dog's three gaits, and the chain curtain's loud/quiet pass. Kept off
  * `SoundClass` on purpose — a consumer switching on "it's a dog gait" must not have to know
  * which gait, and the colour/shape language is per class.
+ *
+ * `far` is the E-ping's other end: vision §3.3 gives the row one class heard "at **both ends**
+ * of the beam", so the arrival at the beam's impact centre is the same ePing with its own
+ * numbers (hear 30, paints nothing — the near end already painted the cone).
  */
-export type SoundVariant = 'patrol' | 'investigate' | 'chase' | 'loud' | 'quiet';
+export type SoundVariant = 'patrol' | 'investigate' | 'chase' | 'loud' | 'quiet' | 'far';
 
 export interface SoundCone {
   /** Aim direction; need not be normalised (see `inCone` in core/math.ts). */
@@ -63,6 +67,12 @@ export interface SoundEvent {
   readonly origin: V3;
   readonly class: SoundClass;
   readonly source: SourceKind;
+  /**
+   * Carried on the event, not just used to look the numbers up: a consumer that styles or
+   * synthesises per variant (the E-ping's return, the dog's three gaits, the chain's two passes)
+   * cannot recover it from the radii, and guessing it from them would be a second, wrong truth.
+   */
+  readonly variant?: SoundVariant;
   /** 0..1 — scales paint density (engine-plan §3 step 3). */
   readonly intensity: number;
   /** Paint radius at the origin, in metres (vision §3.3). */
@@ -190,6 +200,7 @@ export class EventBus {
       origin: [spec.x, spec.y, spec.z],
       class: spec.class,
       source: spec.source,
+      ...(spec.variant ? { variant: spec.variant } : {}),
       intensity: spec.intensity ?? d.intensity,
       paintRadius: spec.paintRadius ?? d.paint,
       hearRadius: spec.hearRadius ?? d.hear,
