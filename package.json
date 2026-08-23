@@ -1,0 +1,25 @@
+{
+  "name": "blind-spot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "BLIND SPOT — visual-test prototype engine (sound-painted point-lattice perception)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "verify": "node scripts/verify.mjs"
+  },
+  "dependencies": {
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "0.185.4",
+    "playwright": "1.62.1",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}

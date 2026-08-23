@@ -1,0 +1,5 @@
+node_modules
+dist
+verify-out
+*.local
+.DS_Store
