@@ -17,6 +17,8 @@ import { describe, expect, it } from 'vitest';
 import {
   BEACON_PERIOD,
   CAN_MAX_BOUNCES,
+  CAN_RADIUS,
+  CAPSULE_RADIUS,
   EV,
   SIM_STEP,
   SPEED_SPRINT,
@@ -47,7 +49,13 @@ const yard: MapDef = {
   ladders: [],
   props: [
     { type: 'can', id: 'can', x: 12, y: 0, z: 10 },
-    { type: 'chain', id: 'chain', min: [40, 0, 20], max: [41.6, 2.2, 20.4], thinAxis: 'z' },
+    {
+      type: 'chain',
+      id: 'chain',
+      min: [40, 0, 20],
+      max: [41.6, 2.2, 20.4],
+      thinAxis: 'z',
+    },
     { type: 'beacon', id: 'beacon', x: 70, y: 1, z: 70 },
   ],
   doors: [],
@@ -135,7 +143,10 @@ describe('a kicked can (vision §8, §3.3)', () => {
     again.drive(3, { forward: 1 });
     const trace = (r: Run): string =>
       knocks(r)
-        .map((e) => `${e.time.toFixed(6)}@${e.origin.map((v) => v.toFixed(6)).join(',')}:${e.paintRadius.toFixed(6)}`)
+        .map(
+          (e) =>
+            `${e.time.toFixed(6)}@${e.origin.map((v) => v.toFixed(6)).join(',')}:${e.paintRadius.toFixed(6)}`,
+        )
         .join('|');
     expect(trace(again)).toBe(trace(walk));
 
@@ -176,6 +187,70 @@ describe('a kicked can (vision §8, §3.3)', () => {
     const reKick = second[first]!;
     expect(reKick.origin[0]).toBeGreaterThan(restedAt - 0.5);
     expect(r.sim.props.cans[0]!.x).toBeGreaterThan(restedAt);
+  });
+
+  it('stays silent for a body standing on it, and re-arms once that body is clear', () => {
+    // Standing inside a can is silent by law, not by accident: the tin has no collision (vision §5
+    // law 5 — nothing may tax movement) and a trap you are already standing in has nothing left to
+    // tell anyone. What must never happen is a can staying disarmed forever because the body
+    // lingered exactly on the contact boundary, so the re-arm is a margin rather than a boundary.
+    const r = yardRun(['can']);
+    const can = r.sim.props.cans[0]!;
+    r.sim.player.x = can.x;
+    r.sim.player.z = can.z;
+    r.drive(1);
+    expect(knocks(r).length).toBe(0);
+
+    // The body is unmoved by the tin it is standing in — compared against a run with no can at all.
+    const bare = yardRun([]);
+    bare.sim.player.x = can.x;
+    bare.sim.player.z = can.z;
+    bare.drive(1);
+    expect([r.sim.player.x, r.sim.player.y, r.sim.player.z]).toEqual([
+      bare.sim.player.x,
+      bare.sim.player.y,
+      bare.sim.player.z,
+    ]);
+
+    // Walk away and come back: clear of the margin, the can is armed again and sounds.
+    r.sim.player.x = can.x - 2;
+    r.sim.player.z = can.z;
+    r.sim.player.yaw = 0;
+    r.drive(2, { forward: 1 });
+    expect(knocks(r).length).toBeGreaterThan(0);
+  });
+
+  it('re-arms on a margin, never on the contact boundary itself', () => {
+    // The latch is what makes a can one trap rather than a rattle: it disarms on the kick and may
+    // only come back once the body is properly clear. Re-arming exactly at contact range would let
+    // a body loitering on that boundary flicker the latch on the sign of a float. The latch itself
+    // is internal — nothing outside props.ts may act on it — so it is read here directly.
+    const r = yardRun(['can']);
+    const can = r.sim.props.cans[0]!;
+    const latch = can as unknown as { armed: boolean };
+    const reach = CAPSULE_RADIUS + CAN_RADIUS;
+
+    // Kick it, then stop the clock the instant the tin settles: a can in flight has no latch to
+    // read, and the first resting step is the one that decides.
+    r.sim.player.x = can.x - 1.2;
+    r.sim.player.z = can.z;
+    r.sim.player.yaw = 0;
+    for (let i = 0; i < Math.round(4 / SIM_STEP) && !(knocks(r).length > 0 && can.resting); i++) {
+      r.drive(SIM_STEP, { forward: 1 });
+    }
+    expect(knocks(r).length).toBeGreaterThan(0);
+    expect(latch.armed).toBe(false);
+
+    // Standing a hair outside contact is not clear: the latch holds.
+    r.sim.player.x = can.x - (reach + 0.05);
+    r.sim.player.z = can.z;
+    r.drive(SIM_STEP);
+    expect(latch.armed).toBe(false);
+
+    // A step further and the body is genuinely away from the tin, so the trap is set again.
+    r.sim.player.x = can.x - (reach + 0.5);
+    r.drive(SIM_STEP);
+    expect(latch.armed).toBe(true);
   });
 
   it('never touches the body that kicked it (vision §5)', () => {
@@ -225,6 +300,66 @@ describe('a chain curtain (vision §8, §3.3)', () => {
     const r = cross({});
     expect(rattles(r).length).toBe(1);
     expect(r.sim.player.z).toBeGreaterThan(20.4);
+  });
+
+  it('rattles again on the way back — one crisp signature per crossing, whatever the route', () => {
+    // Vision §8: one trap, one signature. Through and back is two events, both on the curtain
+    // plane and both from the prop rather than from the body.
+    const r = yardRun(['chain']);
+    const p = r.sim.player;
+    p.x = 40.8;
+    p.z = 17.5;
+    p.yaw = Math.PI / 2;
+    r.drive(2, { forward: 1 });
+    p.yaw = -Math.PI / 2;
+    r.drive(2, { forward: 1 });
+    expect(rattles(r).length).toBe(2);
+    for (const e of rattles(r)) {
+      expect(e.origin[2]).toBeCloseTo(20.2, 6);
+      expect(e.source).toBe('prop');
+    }
+
+    // …and it stays one-per-crossing under a route that keeps reversing through the doorway. The
+    // count is not a tuning value: rattles equal committed crossings, however the body arrives.
+    const w = yardRun(['chain']);
+    w.sim.player.x = 40.8;
+    w.sim.player.z = 21.7;
+    let prev = 1;
+    let crossings = 0;
+    for (let i = 0; i < Math.round(6 / SIM_STEP); i++) {
+      w.sim.player.yaw = Math.floor(i / Math.round(0.75 / SIM_STEP)) % 2 === 0 ? -Math.PI / 2 : Math.PI / 2;
+      w.drive(SIM_STEP, { forward: 1 });
+      const across = w.sim.player.z - 20.2;
+      // Committed: measured well clear of the latch's deadband, so this counts traversals and
+      // not float noise on the plane.
+      if (Math.abs(across) < 0.3) continue;
+      const side = across > 0 ? 1 : -1;
+      if (side !== prev) crossings++;
+      prev = side;
+    }
+    expect(crossings).toBeGreaterThan(2);
+    expect(rattles(w).length).toBe(crossings);
+  });
+
+  it('holds its latch while the body straddles the plane, and never machine-guns', () => {
+    // The rattle carries 25 m (vision §3.3), so what the latch must not do is fire on the sign of
+    // a float. A body dithering across the plane by less than the deadband is the case a future
+    // knockback or a teleport can produce; today's movement cannot, which is why it is pinned.
+    const r = yardRun(['chain']);
+    const p = r.sim.player;
+    p.x = 40.8;
+    for (let i = 0; i < 60; i++) {
+      p.z = 20.2 + (i % 2 === 0 ? 0.03 : -0.03);
+      r.drive(SIM_STEP);
+    }
+    expect(rattles(r).length).toBe(0);
+
+    // A committed crossing through the same doorway still sounds exactly once.
+    p.z = 20.9;
+    r.drive(SIM_STEP);
+    p.z = 19.5;
+    r.drive(SIM_STEP);
+    expect(rattles(r).length).toBe(1);
   });
 
   it('answers to the gait you are actually travelling at, not to the key you are holding', () => {
@@ -284,6 +419,9 @@ describe('the objective hum (vision §7)', () => {
       expect(hums[i]!.source).toBe('objective');
       expect(hums[i]!.origin).toEqual([70, 1, 70]);
     }
+    // The clock advances by += PERIOD rather than from "now", so the step quantisation never
+    // accumulates: three beats apart is exactly two periods apart, not two periods plus drift.
+    expect(Math.abs(hums[2]!.time - hums[0]!.time - 2 * BEACON_PERIOD)).toBeLessThan(SIM_STEP + 1e-9);
   });
 
   it('hums whether or not anyone is there, and not at all when it is not in the roster', () => {

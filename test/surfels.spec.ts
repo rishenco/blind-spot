@@ -20,15 +20,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   EDGE_SEG_MAX,
+  EYE_STAND,
   FACE_PROBE,
   HEIGHT_STAND,
   HOLD_MAX_STEP,
   HOLD_MIN_CLEARANCE,
   HOLD_MIN_STEP,
   PATCH_SIZE,
+  SIM_STEP,
   SURFEL_SPACING,
 } from '../src/core/const.js';
+import { SCRIPTS, ScriptedInput } from '../src/core/debug.js';
 import { latticeCentre } from '../src/core/math.js';
+import { PaintPipeline } from '../src/core/paint.js';
+import { Sim } from '../src/core/sim.js';
 import { buildWorld, insideAir, pointInSolid, queryXZ } from '../src/core/map/build.js';
 import { sampleMap } from '../src/core/map/sampleMap.js';
 import type { MapDef, Solid, SolidKind } from '../src/core/map/types.js';
@@ -45,7 +50,16 @@ import { bakeSurfels, surfelDither, UNPAINTED, type SurfelField } from '../src/c
 //   pedestal    top at 0.4     too shallow to be a hold (drop < HOLD_MIN_STEP)
 // ------------------------------------------------------------------------------------------
 
-const box = (id: string, kind: SolidKind, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): Solid => ({
+const box = (
+  id: string,
+  kind: SolidKind,
+  x0: number,
+  y0: number,
+  z0: number,
+  x1: number,
+  y1: number,
+  z1: number,
+): Solid => ({
   type: 'box',
   id,
   kind,
@@ -195,7 +209,10 @@ describe('the lattice is world-axis and absolute (visual-brief §2)', () => {
       expect(d.y).toBeCloseTo(1.0, 5);
     }
     // …and the face plane itself is the authored number, never snapped to the grid.
-    const side = dots(fxField, (d) => d.nx === -1 && d.x < 5 && d.y > 0.1 && d.y < 0.9 && d.z > 3.2 && d.z < 4.9);
+    const side = dots(
+      fxField,
+      (d) => d.nx === -1 && d.x < 5 && d.y > 0.1 && d.y < 0.9 && d.z > 3.2 && d.z < 4.9,
+    );
     expect(side.length).toBeGreaterThan(5);
     for (const d of side) expect(d.x).toBeCloseTo(2.13, 5);
   });
@@ -261,7 +278,9 @@ describe('absence is black: buried faces do not exist (vision §1.3)', () => {
     expect(dots(fxField, (d) => near(d.x, 9) && d.y > 0 && d.y < 3 && d.z > 2 && d.z < 4)).toHaveLength(0);
     // The pair's OUTER faces are still there, so the cull is a cull and not a deletion.
     expect(dots(fxField, (d) => near(d.x, 8) && d.nx === -1).length).toBeGreaterThan(50);
-    expect(dots(fxField, (d) => near(d.x, 10) && d.nx === 1 && d.z > 2 && d.z < 4).length).toBeGreaterThan(50);
+    expect(dots(fxField, (d) => near(d.x, 10) && d.nx === 1 && d.z > 2 && d.z < 4).length).toBeGreaterThan(
+      50,
+    );
   });
 
   it('culls everything outside the authored air', () => {
@@ -317,7 +336,8 @@ describe('dots are matter, lines are holds (vision §5)', () => {
     // sliding, so its underside lip is exactly the affordance a bright micro-line is for.
     const lip = segs(
       field,
-      (e) => near(e.y0, 1.2) && (near(e.x0, 23.6) || near(e.x0, 24.4)) && e.z0 > -0.5 && e.z0 < 2.1 && !e.vertical,
+      (e) =>
+        near(e.y0, 1.2) && (near(e.x0, 23.6) || near(e.x0, 24.4)) && e.z0 > -0.5 && e.z0 < 2.1 && !e.vertical,
     );
     expect(lip.length).toBeGreaterThan(0);
     for (const e of lip) expect(e.hold, `duct lip at z ${e.z0}`).toBe(true);
@@ -421,8 +441,14 @@ describe('dots are matter, lines are holds (vision §5)', () => {
       expect(mine.length, d.id).toBeGreaterThan(4);
       for (const e of mine) expect(e.hold, `${d.id} segment at y ${e.y0}`).toBe(true);
       // Rails AND rungs: a ladder you can only see the sides of is not a ladder.
-      expect(mine.some((e) => e.vertical), `${d.id} rails`).toBe(true);
-      expect(mine.some((e) => !e.vertical), `${d.id} rungs`).toBe(true);
+      expect(
+        mine.some((e) => e.vertical),
+        `${d.id} rails`,
+      ).toBe(true);
+      expect(
+        mine.some((e) => !e.vertical),
+        `${d.id} rungs`,
+      ).toBe(true);
     }
   });
 
@@ -488,7 +514,8 @@ describe('patch table (engine-plan §3)', () => {
     // Floor-major is what makes the ±1-floor render window a contiguous slice; Morton within the
     // floor is what makes a sound's footprint a handful of index runs instead of a scatter, which
     // is the entire justification for ranged uploads over re-sending the buffer.
-    const cellY = (p: number): number => Math.floor(field.positions[field.patchDotStart[p]! * 3 + 1]! / PATCH_SIZE);
+    const cellY = (p: number): number =>
+      Math.floor(field.positions[field.patchDotStart[p]! * 3 + 1]! / PATCH_SIZE);
     let prev = -Infinity;
     const steps: number[] = [];
     for (let p = 0; p < field.patchCount; p++) {
@@ -519,7 +546,11 @@ describe('patch table (engine-plan §3)', () => {
       const r = field.patchRadius[p]!;
       const d0 = field.patchDotStart[p]!;
       for (let i = d0; i < d0 + field.patchDotCount[p]!; i++) {
-        const d = Math.hypot(field.positions[i * 3]! - cx, field.positions[i * 3 + 1]! - cy, field.positions[i * 3 + 2]! - cz);
+        const d = Math.hypot(
+          field.positions[i * 3]! - cx,
+          field.positions[i * 3 + 1]! - cy,
+          field.positions[i * 3 + 2]! - cz,
+        );
         expect(d, `patch ${p} dot ${i}`).toBeLessThanOrEqual(r + 1e-4);
       }
       const s0 = field.patchSegStart[p]!;
@@ -540,9 +571,11 @@ describe('patch table (engine-plan §3)', () => {
     for (let p = 0; p < field.patchCount; p += 7) {
       let min = 1;
       const d0 = field.patchDotStart[p]!;
-      for (let i = d0; i < d0 + field.patchDotCount[p]!; i++) if (field.dither[i]! < min) min = field.dither[i]!;
+      for (let i = d0; i < d0 + field.patchDotCount[p]!; i++)
+        if (field.dither[i]! < min) min = field.dither[i]!;
       const s0 = field.patchSegStart[p]!;
-      for (let k = s0 * 2; k < (s0 + field.patchSegCount[p]!) * 2; k++) if (field.edgeDither[k]! < min) min = field.edgeDither[k]!;
+      for (let k = s0 * 2; k < (s0 + field.patchSegCount[p]!) * 2; k++)
+        if (field.edgeDither[k]! < min) min = field.edgeDither[k]!;
       expect(field.patchMinDither[p], `patch ${p}`).toBeCloseTo(min, 6);
     }
   });
@@ -584,9 +617,10 @@ describe('patch table (engine-plan §3)', () => {
       }
       // A patch that owns dots has a normal to lift along, so its probe is genuinely in free air.
       const inside = cand.find((k) => pointInSolid(world.solids[k]!, x, y, z));
-      expect(inside === undefined, `patch ${p} probe inside ${inside !== undefined ? world.solids[inside]!.id : ''}`).toBe(
-        true,
-      );
+      expect(
+        inside === undefined,
+        `patch ${p} probe inside ${inside !== undefined ? world.solids[inside]!.id : ''}`,
+      ).toBe(true);
       expect(insideAir(world, x, y, z), `patch ${p} probe outside authored air`).toBe(true);
     }
     // …and the fallback is the rare case, not the rule.
@@ -608,12 +642,22 @@ describe('patch table (engine-plan §3)', () => {
       const got = new Set(out);
       const want = new Set<number>();
       for (let p = 0; p < field.patchCount; p++) {
-        const d = Math.hypot(field.patchCentre[p * 3]! - x, field.patchCentre[p * 3 + 1]! - y, field.patchCentre[p * 3 + 2]! - z);
+        const d = Math.hypot(
+          field.patchCentre[p * 3]! - x,
+          field.patchCentre[p * 3 + 1]! - y,
+          field.patchCentre[p * 3 + 2]! - z,
+        );
         if (d <= r + field.patchRadius[p]!) want.add(p);
       }
       expect(got.size, `query ${x},${y},${z} r${r}`).toBe(out.length);
-      expect([...want].filter((p) => !got.has(p)), `missed by hash at ${x},${y},${z} r${r}`).toHaveLength(0);
-      expect([...got].filter((p) => !want.has(p)), `spurious at ${x},${y},${z} r${r}`).toHaveLength(0);
+      expect(
+        [...want].filter((p) => !got.has(p)),
+        `missed by hash at ${x},${y},${z} r${r}`,
+      ).toHaveLength(0);
+      expect(
+        [...got].filter((p) => !want.has(p)),
+        `spurious at ${x},${y},${z} r${r}`,
+      ).toHaveLength(0);
     }
   });
 });
@@ -665,5 +709,91 @@ describe('budget and paint buffers', () => {
     expect(fxField.edgeGeometry.getAttribute('paintTime').array).toBe(fxField.edgePaintTime);
     expect(fxField.edgeGeometry.getAttribute('flagsHold').array).toBe(fxField.edgeHold);
     expect(fxField.geometry.getAttribute('dither').array).toBe(fxField.dither);
+  });
+});
+
+// ==========================================================================================
+// Chain curtains as matter
+// ==========================================================================================
+
+/**
+ * The curtain bake, pinned as a differential rather than as a total.
+ *
+ * A chain curtain is the one thing in the map that is MATTER without being a solid (surfels.ts
+ * `bakeChains`): no collision, no occlusion, but real dots, because vision §1.2 does not allow an
+ * obstacle you can hear to be missing from what a ping returns. Everything below is the same
+ * world with and without the curtain prop, so what is measured is the curtain's own contribution
+ * and nothing else.
+ */
+describe('a chain curtain is matter, and only matter (vision §8, §1.2)', () => {
+  const noChain: MapDef = { ...sampleMap, props: sampleMap.props.filter((p) => p.type !== 'chain') };
+
+  /** Paint one authored script end to end and report what it lit. */
+  function routePaint(map: MapDef, id: string): { dots: number; edges: number } {
+    const sim = new Sim(map);
+    const f = bakeSurfels(sim.world);
+    const paint = new PaintPipeline(f, sim.world);
+    paint.attach(sim.bus);
+    const def = SCRIPTS[id]!;
+    const script = new ScriptedInput(sim, def);
+    const n = Math.round((def.end + 1) / SIM_STEP);
+    for (let i = 0; i < n; i++) {
+      script.sync();
+      paint.setListener(sim.player.x, sim.player.y + EYE_STAND, sim.player.z);
+      sim.step(SIM_STEP);
+      paint.pump(sim.time);
+    }
+    paint.settle(Infinity);
+    return { dots: f.paintedDots, edges: f.paintedEdgeVerts };
+  }
+
+  it('adds its 88 dots and changes nothing else about the field', () => {
+    const withChain = bakeSurfels(new Sim(sampleMap).world);
+    const without = bakeSurfels(new Sim(noChain).world);
+    expect(withChain.counts.surfels - without.counts.surfels).toBe(88);
+    // Strands are dots, never holds and never creases: vision §5's encoding must not gain a line
+    // promising a traversal you cannot make.
+    expect(withChain.counts.edges).toBe(without.counts.edges);
+    expect(withChain.counts.holds).toBe(without.counts.holds);
+    expect(withChain.counts.patches).toBe(without.counts.patches);
+  });
+
+  it('is lit like any other matter on the route that walks through it', () => {
+    const c1 = routePaint(sampleMap, 'corridor');
+    const c0 = routePaint(noChain, 'corridor');
+    expect(c1.dots - c0.dots).toBe(40);
+    expect(c1.edges).toBe(c0.edges);
+
+    // …and a route that never goes near door [c] sees none of it.
+    const m1 = routePaint(sampleMap, 'mantle');
+    const m0 = routePaint(noChain, 'mantle');
+    expect(m1.dots).toBe(m0.dots);
+    expect(m1.edges).toBe(m0.edges);
+  });
+
+  it('is never collision — the corridor walk is bit-identical with and without it', () => {
+    const walk = (map: MapDef): number[] => {
+      const sim = new Sim(map);
+      const def = SCRIPTS['corridor']!;
+      const script = new ScriptedInput(sim, def);
+      const n = Math.round((def.end + 1) / SIM_STEP);
+      for (let i = 0; i < n; i++) {
+        script.sync();
+        sim.step(SIM_STEP);
+      }
+      return [sim.player.x, sim.player.y, sim.player.z];
+    };
+    expect(walk(sampleMap)).toEqual(walk(noChain));
+  });
+
+  it('is baked whether or not the prop roster is live', () => {
+    // The roster decides which props EMIT; the bake decides what EXISTS (surfels.ts bakeChains).
+    // `?props=none` silences the rattle and leaves the strands hanging, which is the world every
+    // pinned capture number was measured in.
+    const off = new Sim(sampleMap, { props: [] });
+    const on = new Sim(sampleMap, { props: ['chain-c'] });
+    expect(bakeSurfels(off.world).counts.surfels).toBe(bakeSurfels(on.world).counts.surfels);
+    expect(off.props.chains.length).toBe(0);
+    expect(on.props.chains.length).toBe(1);
   });
 });

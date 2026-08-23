@@ -288,8 +288,8 @@ async function capture(browser, name, query, checks, opts = {}) {
     }, 1500);
     await page.keyboard.press('F7');
     // A detonation's wavefront takes paintRadius / WAVE_SPEED_DETONATION = 22/140 = 157 ms to
-    // finish arriving, plus the late bound a patch is released on (one patch radius plus the
-    // fuzz allowance, ~21 ms) — call it 180 ms (vision §3.3, engine-plan §3–§4). So a second
+    // finish arriving, plus the late bound a patch is released on (one patch radius past its
+    // centre, ~7 ms) — call it 165 ms (vision §3.3, engine-plan §3–§4). So a second
     // later `after` is the SETTLED world: every dot the blast painted is on screen and none of
     // them is fresh. That is what it is asserted on — coverage, not brightness.
     await page.waitForTimeout(1000);
@@ -585,21 +585,19 @@ async function main() {
         // function of the delivered events — so this route paints the same dots every time, on
         // every machine, and a ">" here would hide a whole zone going dark.
         //
-        // RE-BASELINED under ruling R3 (through-wall fuzz clamped to the degraded radius): was
-        // 6842 dots / 232 edge verts. The fuzz magnitude is now min(WALL_FUZZ, WALL1_RADIUS x R),
-        // which moves the muffled origins of this route's 3 walk steps (2.0 m -> 1.6 m) and 3
-        // crouch steps (2.0 m -> 0.6 m) and so shifts +11 dots' worth of through-wall paint. The
-        // 8 sprint steps, 10 slides and 1 landing are all >= 5 m classes and are untouched, which
-        // is why the edge-vert count did not move at all.
+        // What the number is made of, and the only two things that may legitimately move it:
         //
-        // RE-BASELINED again now the chain curtain is MATTER: 6853 -> 6893 dots. The curtain at
-        // door [c] (x 30..31.6, y 0..2.4, z 2.0..2.4) is a real surface that hangs in a real
-        // doorway — a sound in that doorway has to come back off it — so it joins the static bake
-        // as paintable non-solid geometry, adding 88 surfels to the map (118306 -> 118394). This
-        // is the only route that walks through [c], and it lights 40 of them. Measured by baking
-        // the same route against a map with the curtain removed: every other number, this route's
-        // holds included, is unchanged, because a hanging curtain carries no traversal affordance.
-        'the route painted its baseline dots exactly': s.stats.paintedDots === 6893,
+        //   · The chain curtain at door [c] (x 30..31.6, y 0..2.4, z 2.0..2.4) is MATTER, not
+        //     clutter: it hangs in a real doorway and a sound in that doorway comes back off it,
+        //     so `bakeChains` puts its 88 surfels in the static bake. This is the only route that
+        //     walks through [c] and it lights 40 of them. It adds nothing to the holds count — a
+        //     hanging curtain carries no traversal affordance.
+        //   · Every muffled lobe on this route is an exact concentric sphere of radius
+        //     WALL1_RADIUS × R0 around one origin. Fuzz is a DELIVERY term (vision §3.4: where the
+        //     listener believes the sound happened), and a player's own footsteps deliver at zero
+        //     walls — so nothing on a self-noise route is ever displaced, and every through-wall
+        //     patch is measured from the true origin.
+        'the route painted its baseline dots exactly': s.stats.paintedDots === 6797,
         'and its baseline holds exactly': s.stats.paintedEdgeVerts === 232,
       }),
       { scripted: true },
@@ -623,9 +621,10 @@ async function main() {
         'trail was sampled': s.trail.n > 40,
         'top-down open': s.topDown,
         'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
-        // RE-BASELINED under ruling R3, same reason as the corridor route: was 4574 dots / 213
-        // edge verts, and the clamp moves this route's 3 walk steps and 1 crouch step by -1 dot.
-        'the route painted its baseline dots exactly': s.stats.paintedDots === 4573,
+        // Exact for the same reasons as the corridor route, minus the curtain: this route never
+        // touches door [c], and its muffled lobes are undisplaced concentric spheres because its
+        // own footsteps deliver at zero walls.
+        'the route painted its baseline dots exactly': s.stats.paintedDots === 4565,
         'and its baseline holds exactly': s.stats.paintedEdgeVerts === 213,
       }),
       { scripted: true },
@@ -679,9 +678,8 @@ async function main() {
         'the footsteps were delivered': s.stats.heard > 10 && s.stats.missed === 0,
         // The same route through the same paint pipeline, so the same two numbers as the top-down
         // capture — asserted here too, because it is the FIRST-PERSON run and a divergence between
-        // the two would mean the render path had somehow got into the paint path. Re-baselined
-        // with it: 6853 -> 6893, the chain curtain at door [c] joining the bake (see above).
-        'its own footsteps painted the route': s.stats.paintedDots === 6893,
+        // the two would mean the render path had somehow got into the paint path.
+        'its own footsteps painted the route': s.stats.paintedDots === 6797,
         'holds along the route were painted too': s.stats.paintedEdgeVerts === 232,
         // Not black, and not a flood. `any` is the whole read (paint + shell); `lit` is paint
         // bright enough to navigate by. Measured 0.107% lit / 0.878% any, re-baselined from 5.1%
@@ -723,8 +721,10 @@ async function main() {
       // into separate dots instead of closing into halftone.
       //
       // THE CANONICAL WORST WHITE: 4.844% of the frame, at 1600×1000, on the first frame sampled
-      // after the blast reaches the bus (+45..70 ms — one frame of quantisation, not a range in
-      // the image). That is the largest saturated fraction this build produces anywhere; every
+      // after the blast reaches the bus (the instant printed with it is one frame of harness
+      // quantisation, not a property of the image, and it moves with the box's frame rate — this
+      // one currently lands at +117..130 ms). That is the largest saturated fraction this build
+      // produces anywhere; every
       // other white fence in the tree is a law, not a measurement. And it is a FLASH: the same
       // frame reads ~3% a second later, which is why the peak is sampled per frame instead of
       // photographed once at the settle, where it would read 40% low.
@@ -736,18 +736,23 @@ async function main() {
       'the flash stays inside the saturation bound': blast.peak.white <= 0.06,
       'the near field is a cloud, not a white sheet':
         blast.peak.whiteBlob <= SHEET_BLOB_DOTS * dotArea(blast.peak.height),
-      // Coverage at the settle, when every dot the blast painted is on screen: measured 7.364%
-      // here and 6.834% at 1280×720. The band, not just an upper bound — `any` collapsing means
+      // Coverage at the settle, when every dot the blast painted is on screen: measured 8.264%
+      // here and 7.676% at 1280×720. The band, not just an upper bound — `any` collapsing means
       // the blast stopped painting, `any` back near half the frame means the cap is gone (it
       // reads 49.7% with splats drawn at their raw footprint).
       'and it did not flood the screen': blast.after.ink.any > 0.04 && blast.after.ink.any < 0.12,
       // ---- the schedule, asserted structurally ---------------------------------------------
-      // A detonation's 5286 patches are released over the ~180 ms its wavefront takes to
-      // cross, so `paintPending` must be non-zero on the frames in between. If a future change
-      // ever paints the sphere whole inside `hear()` again, the peak goes to zero and this
-      // fails on any machine, fast or slow — which the wall-clock ceiling below cannot do.
+      // A detonation's 5286 patches are released over the ~165 ms its wavefront takes to cross,
+      // so a frame that runs while the wave is still travelling must find work still queued. If a
+      // future change ever paints the sphere whole inside `hear()` again, the peak goes to zero
+      // and this fails on any machine, fast or slow — which the wall-clock ceiling below cannot
+      // do. Backlog, not frame COUNT, is the portable statement: the number of frames that see
+      // pending work is the harness's frame rate divided into 165 ms, and this box straddles it
+      // (13.7 fps at 1600×1000 samples the whole schedule on one frame, 19.4 fps at 1280×720 on
+      // two). What one frame is allowed to be handed — only the slice its wave has released, never
+      // a patch whose stamp is in the shader's future — is pinned deterministically, at a fixed
+      // clock, in test/paint.spec.ts.
       'the blast was spread over frames, not painted whole': blast.schedule.peak > 100,
-      'it took more than one frame to arrive': blast.schedule.frames >= 2,
       // …and it drains: a second after the blast nothing is still waiting on its wave.
       'the blast finished arriving': blast.after.pending === 0,
       'nothing was still queued before it went off': blast.before.pending === 0,
@@ -828,8 +833,8 @@ async function main() {
           'F3 prints the halo readout': /m audible/.test(line('halo')),
           'the F3 surfel count is the baked one': num('surfels', 'surfels') === s.stats.surfels,
           'the F3 painted count is the painted one': num('painted', 'painted') === s.stats.paintedDots,
-          // The same route as `script-mantle`, so the same baseline (see the R3 note there).
-          'F3 painted count is the route baseline': s.stats.paintedDots === 4573,
+          // The same route as `script-mantle`, so the same baseline (see the note there).
+          'F3 painted count is the route baseline': s.stats.paintedDots === 4565,
           'surfel count inside budget': s.stats.surfels < 1_000_000,
           // Headless swiftshader is not a GPU, so this is a liveness floor, not the 60 fps target
           // of vision §12 — a stalled loop or a frame in the seconds reads as broken here.
@@ -880,11 +885,13 @@ async function main() {
         'every sound on the route was delivered': s.stats.heard === 9 && s.stats.missed === 0,
         // Exact on both sides. The route is a fixed input list, paint is a pure function of the
         // delivered events and every walk class is instant, so the count in the quiet second
-        // before the first press is 1191 on every machine, and the two pings add exactly 6810
+        // before the first press is 1191 on every machine, and the two pings add exactly 6795
         // dots on top of it. A ">" here would let the Q-ping go missing and still pass.
         'the world was already painted by the walk in': t.paintedQuiet === 1191,
-        'and the two pings painted exactly their own wavefronts': s.stats.paintedDots === 8001,
-        'the ping also painted the holds it found': s.stats.paintedEdgeVerts === 330,
+        'and the two pings painted exactly their own wavefronts': s.stats.paintedDots === 7986,
+        // The holds the beam found. Higher than the walk-in routes' counts for the obvious reason
+        // — a 40 m cone reaches the far wall's rungs and lips, which a 4 m footstep never does.
+        'the ping also painted the holds it found': s.stats.paintedEdgeVerts === 342,
         // Vision §3.8: the halo is what you are audible at, and an E-ping is the loudest thing a
         // silent player does — 30 m at both ends of the beam. Sampled per frame, so this is the
         // peak over the whole run and not wherever the last frame happened to land.
@@ -952,16 +959,23 @@ async function main() {
         // The Lantern claim itself, read off the delivered feed. Every dog event arrived through
         // exactly one wall (never zero — line of sight would make this a different test — and
         // never two, which the pipeline drops), and the qualities are real numbers inside the
-        // one-wall band: WALL1_QUALITY (0.45) is the ceiling a through-wall event can ever reach,
-        // and `maxQuality > 0` is the difference between hearing the dog and merely logging it.
+        // one-wall band: WALL1_QUALITY (0.45) is the ceiling a through-wall event can ever reach.
         'the dog was heard, and only through the wall':
           s.dogHeard.n > 0 &&
           s.dogHeard.classes.length === 1 &&
           s.dogHeard.classes[0] === 'dogGait' &&
           s.dogHeard.walls.length === 1 &&
           s.dogHeard.walls[0] === 1,
-        'through-wall quality stayed inside its own band':
-          s.dogHeard.maxQuality > 0 && s.dogHeard.maxQuality <= 0.45 && s.dogHeard.minQuality >= 0,
+        // The band, honestly. `minQuality >= 0` fenced nothing — quality is clamped to [0,1] at
+        // the source, so it passed for a run in which every event arrived at zero definition,
+        // which is the exact opposite of the claim above. The real statement is about the TOP of
+        // the band: at least one read carried actual signal, and no read beat the one-wall
+        // ceiling WALL1_QUALITY (0.45), which only a listener standing on the origin could reach.
+        // The bottom is legitimately 0 and must not be fenced: `eventQuality` divides by the
+        // EVENT's own radius (patrol gait: 8 m), while delivery uses the listener's 18 m base ear
+        // (core/math.ts), so gait steps from the far end of the patrol lane are correctly
+        // delivered as heard-but-undefined. Those zeroes are the Lantern read fading, not a bug.
+        'through-wall quality stayed inside its own band': s.dogHeard.maxQuality > 0 && s.dogHeard.maxQuality <= 0.45,
         // `quietUntil: 10` samples the painted count nearly four seconds after the player's last
         // footfall, so everything above it was painted by the animal. Vision §6: "dogs are walking
         // lanterns". This is that sentence as a number.

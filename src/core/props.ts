@@ -52,12 +52,31 @@ import type { PlayerState } from './sim.js';
 
 /** How far the body may sit from the curtain plane and still count as "in the doorway". */
 const CHAIN_ENGAGE_BAND = 1.0;
+/**
+ * How far past the plane the body must get before the latch believes the side changed.
+ *
+ * The rattle is one crisp signature per crossing (vision §8), so what the latch must not do is
+ * fire on the sign of a float. Real traversal clears six centimetres in two frames and never
+ * notices the deadband; a body parked on the plane, or shoved back and forth across it by a
+ * future knockback, cannot machine-gun a 25 m event at step rate.
+ */
+const CHAIN_DEADBAND = 0.06;
 /** Below this the can is at rest: one step at 60 Hz moves it under a millimetre. */
 const CAN_REST_SPEED = 0.05;
 /** A landing slower than this is a settle, not a bounce — it gets no event. */
 const CAN_BOUNCE_MIN_SPEED = 0.8;
 /** The body must be going at least this fast to knock anything; leaning on a can is silent. */
 const CAN_KICK_MIN_SPEED = 0.05;
+/**
+ * How far clear of the can the body must get before the can may be kicked again.
+ *
+ * Standing on or inside a resting can stays silent for as long as you stand there — the can is a
+ * trap you have already sprung, and law 5 keeps it out of the movement's way. What the margin
+ * fixes is the boundary case: a body resting exactly at contact range could otherwise flicker in
+ * and out of contact and either re-fire or stay disarmed forever on the sign of a float. Walking
+ * away and coming back must always re-arm, and fifteen centimetres is one frame of a walk.
+ */
+const CAN_REARM_MARGIN = 0.15;
 /** Impact speed that reads as a full-strength knock (vision §3.3's 12 m paint row). */
 const CAN_LOUD_SPEED = 3.0;
 
@@ -182,9 +201,9 @@ export class PropSystem {
 
   private stepCan(c: Can, dt: number): void {
     if (c.resting) {
-      const touching = this.contacts(c);
-      if (!touching) {
-        c.armed = true;
+      if (!this.contacts(c)) {
+        // Re-arm only once the body is clear by a margin, never on the contact boundary itself.
+        if (!this.contacts(c, CAN_REARM_MARGIN)) c.armed = true;
         return;
       }
       if (!c.armed) return;
@@ -256,10 +275,10 @@ export class PropSystem {
     }
   }
 
-  /** True when the body's capsule overlaps the can's 0.3 m cylinder. */
-  private contacts(c: Can): boolean {
+  /** True when the body's capsule overlaps the can's 0.3 m cylinder, grown by `margin`. */
+  private contacts(c: Can, margin = 0): boolean {
     const p = this.player;
-    const reach = CAPSULE_RADIUS + CAN_RADIUS;
+    const reach = CAPSULE_RADIUS + CAN_RADIUS + margin;
     const dx = p.x - c.x;
     const dz = p.z - c.z;
     if (dx * dx + dz * dz > reach * reach) return false;
@@ -338,6 +357,9 @@ export class PropSystem {
       c.side = 0;
       return;
     }
+    // Inside the deadband the latch holds whatever it last believed: neither a rattle nor a
+    // re-arm happens while the body straddles the plane.
+    if (Math.abs(across) < CHAIN_DEADBAND) return;
     const side = across >= 0 ? 1 : -1;
     if (c.side !== 0 && side !== c.side) {
       const quiet = gaitForSpeed(this.movement.speedXZ, this.movement.crouched) === 'crouch';

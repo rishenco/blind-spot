@@ -39,7 +39,14 @@ import {
   SURFEL_SPACING,
 } from './const.js';
 import { dither3i, latticeCentre, latticeFirstAtOrAfter } from './math.js';
-import { groundUnder, insideAir, pointInSolid, queryXZ, type CollisionSolid, type World } from './map/build.js';
+import {
+  groundUnder,
+  insideAir,
+  pointInSolid,
+  queryXZ,
+  type CollisionSolid,
+  type World,
+} from './map/build.js';
 
 /** `paintTime` for a surfel no sound has ever reached. Any age computed from it is astronomical. */
 export const UNPAINTED = -1e9;
@@ -127,7 +134,14 @@ function boxTouchesAir(
  * slab and the outside of the shell are not buried in anything, and without the air test they
  * would bake a second full-map lattice nobody can ever hear.
  */
-function isFree(world: World, x: number, y: number, z: number, cand: readonly number[], skip: number): boolean {
+function isFree(
+  world: World,
+  x: number,
+  y: number,
+  z: number,
+  cand: readonly number[],
+  skip: number,
+): boolean {
   if (!insideAir(world, x, y, z)) return false;
   for (const idx of cand) {
     if (idx === skip) continue;
@@ -618,7 +632,14 @@ function bakeBoxFace(
   pmax[axis] = Math.max(plane, probe);
   if (!boxTouchesAir(world, pmin[0], pmin[1], pmin[2], pmax[0], pmax[1], pmax[2])) return 0;
 
-  queryXZ(world, pmin[0] - FACE_PROBE, pmin[2] - FACE_PROBE, pmax[0] + FACE_PROBE, pmax[2] + FACE_PROBE, cand);
+  queryXZ(
+    world,
+    pmin[0] - FACE_PROBE,
+    pmin[2] - FACE_PROBE,
+    pmax[0] + FACE_PROBE,
+    pmax[2] + FACE_PROBE,
+    cand,
+  );
   const occ = planeOccupancy.get(planeKey(s, axis, sign));
 
   const n = [0, 0, 0];
@@ -894,7 +915,12 @@ function bakeCylinder(
 }
 
 /** The rim circles. A cylinder has no box edges; its silhouette line is the cap crease. */
-function bakeCylinderRims(world: World, s: CollisionSolid, walkableSolids: Set<number>, out: RawEdge[]): void {
+function bakeCylinderRims(
+  world: World,
+  s: CollisionSolid,
+  walkableSolids: Set<number>,
+  out: RawEdge[],
+): void {
   const pieces = Math.max(8, Math.ceil((2 * Math.PI * s.r) / EDGE_SEG_MAX));
   for (const [capY, sign] of [
     [s.maxY, 1],
@@ -1007,6 +1033,14 @@ function bakeLadders(world: World, out: RawEdge[]): void {
  * the lattice (test/surfels.spec.ts pins it globally), and a doubled position would be a second
  * dot answering for the same place forever. The offset is the chain's own thickness, which is
  * both true and small enough to read as one hanging sheet rather than two.
+ *
+ * The bake is deliberately NOT roster-gated, and that split is the rule for every prop: the
+ * ROSTER (`?props=`, core/roster.ts) decides which props run as EMITTERS, while the bake decides
+ * what exists as MATTER. Silencing a curtain's rattle does not demolish the curtain — the strands
+ * still hang in the doorway, still return an E-ping, and still occupy the same dots, so a capture
+ * taken with `?props=none` sees exactly the world a capture with props sees, minus the sounds.
+ * Anything else would make the roster an authoring tool and every pinned dot count a function of
+ * which emitters happened to be switched on.
  *
  * Every SECOND lattice column carries strands. A curtain filled edge to edge is indistinguishable
  * from a wall, which is exactly the read vision §8 does not want — these are "read-and-route

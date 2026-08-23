@@ -5,9 +5,10 @@
  *
  *   DELIVERY  "does this listener receive this event?"  engine-plan §4's explicit gate,
  *             `d <= max(HEARING_BASE, hearRadius) && walls <= 1`, per listener, per event.
- *   PAINT     "which surfels does this event light?"    vision §3.1/§3.4, per event, ONCE, from
- *             the event's own origin — the wall reductions are measured to the SURFACE, not to
- *             your ear.
+ *   PAINT     "which surfels does this event light?"    vision §3.1/§3.4, per delivered event,
+ *             ONCE, from that delivery's single effective origin — true in the clear, fuzzed
+ *             through one wall. The wall reductions on top of that are measured to the SURFACE,
+ *             not to your ear.
  *
  * The laws under test, all of them from the vision:
  *
@@ -42,7 +43,15 @@ import { EventBus, type EmitSpec, type SoundEvent } from '../src/core/events.js'
 import { eventQuality } from '../src/core/math.js';
 import { buildWorld } from '../src/core/map/build.js';
 import type { MapDef, Solid, SolidKind } from '../src/core/map/types.js';
-import { applyEvent, deliverTo, fuzzVector, PaintPipeline, RangeAccum, withDelivery } from '../src/core/paint.js';
+import {
+  applyEvent,
+  deliveredOrigin,
+  deliverTo,
+  fuzzVector,
+  PaintPipeline,
+  RangeAccum,
+  withDelivery,
+} from '../src/core/paint.js';
 import { Sim } from '../src/core/sim.js';
 import { bakeSurfels, UNPAINTED, type SurfelField } from '../src/core/surfels.js';
 
@@ -100,12 +109,10 @@ const field = bakeSurfels(gym);
 
 /** No walls, no ceiling, 80 m of room: the delivery gate's own measuring stick. */
 const openWorld = buildWorld(
-  mapOf(
-    'open',
-    [box('floor', 'floor', 0, -0.4, 0, 80, 0, 20)],
-    [{ min: [0, 0, 0], max: [80, 10, 20] }],
-    { min: [0, -0.4, 0], max: [80, 10, 20] },
-  ),
+  mapOf('open', [box('floor', 'floor', 0, -0.4, 0, 80, 0, 20)], [{ min: [0, 0, 0], max: [80, 10, 20] }], {
+    min: [0, -0.4, 0],
+    max: [80, 10, 20],
+  }),
 );
 
 /** Three storeys, two slabs: the only fixture where "loud bleeds through floors" is visible. */
@@ -357,7 +364,9 @@ describe('paint: which surfels one sound lights (vision §3.1)', () => {
       const I = expectedI(e.intensity, d, e.paintRadius);
       const [x, y, z] = at(field, i);
       const facing =
-        field.normals[i * 3]! * (5 - x) + field.normals[i * 3 + 1]! * (1.6 - y) + field.normals[i * 3 + 2]! * (6 - z);
+        field.normals[i * 3]! * (5 - x) +
+        field.normals[i * 3 + 1]! * (1.6 - y) +
+        field.normals[i * 3 + 2]! * (6 - z);
       // Inside the sphere and unlit ⇒ it failed the dither gate, or the sound is behind its face,
       // or its whole patch is occluded. Never "the loop just missed it".
       const occluded = field.paintedDots > 0 && facing >= 0 && I >= field.dither[i]! * DITHER_GAIN;
@@ -455,7 +464,8 @@ describe('paint: which surfels one sound lights (vision §3.1)', () => {
     // The gantry beams and tank rims of a real map own PATCH_SIZE cells with no dots in them at
     // all. If those fell out of the LOS pass the map would lose exactly its silhouettes.
     const dotless: number[] = [];
-    for (let p = 0; p < field.patchCount; p++) if (field.patchDotCount[p] === 0 && field.patchSegCount[p]! > 0) dotless.push(p);
+    for (let p = 0; p < field.patchCount; p++)
+      if (field.patchDotCount[p] === 0 && field.patchSegCount[p]! > 0) dotless.push(p);
     expect(dotless.length, 'the fixture must contain a lines-only patch').toBeGreaterThan(0);
     const p = dotless[0]!;
     const e = cleanPing({
@@ -467,7 +477,8 @@ describe('paint: which surfels one sound lights (vision §3.1)', () => {
     applyEvent(field, gym, e, null, null);
     const s0 = field.patchSegStart[p]!;
     let lit = 0;
-    for (let k = s0 * 2; k < (s0 + field.patchSegCount[p]!) * 2; k++) if (field.edgePaintTime[k] !== UNPAINTED) lit++;
+    for (let k = s0 * 2; k < (s0 + field.patchSegCount[p]!) * 2; k++)
+      if (field.edgePaintTime[k] !== UNPAINTED) lit++;
     expect(lit).toBeGreaterThan(0);
     expect(field.paintedEdgeVerts).toBeGreaterThan(0);
   });
@@ -542,6 +553,33 @@ describe('paint through walls (vision §3.4)', () => {
     expect(seen.size).toBeGreaterThan(20);
   });
 
+  it('answers the same effective origin every time it is asked, for the life of the event', () => {
+    // `deliveredOrigin` is called once by paint and again by every look that stamps the event, on
+    // whatever frame it happens to draw. Two answers for one event would put the stain somewhere
+    // the dots are not — and a shared scratch buffer makes that an easy accident, so it is pinned.
+    const bus = new EventBus();
+    for (let k = 0; k < 8; k++) {
+      bus.now = k;
+      const raw = bus.emit({ class: 'walkStep', source: 'self', x: 9.6, y: 0.05, z: 6 });
+      for (const [lx, walls] of [
+        [5, 0],
+        [15, 1],
+      ] as const) {
+        const e = withDelivery(raw, deliverTo(gym, lx, 1.6, 6, raw));
+        expect(e.wallsToListener).toBe(walls);
+        const first = [...deliveredOrigin(e)];
+        expect([...deliveredOrigin(e)]).toEqual(first);
+        const moved = Math.hypot(
+          first[0]! - raw.origin[0],
+          first[1]! - raw.origin[1],
+          first[2]! - raw.origin[2],
+        );
+        if (walls === 1) expect(moved).toBeGreaterThan(0);
+        else expect(moved).toBe(0);
+      }
+    }
+  });
+
   /**
    * MIGRATED (review BUG). Vision §3.4 makes one wall a COST: radius → 0.4 R, origin fuzzed ±2 m.
    * A flat 2 m displacement is not a small perturbation of a quiet class — it is larger than the
@@ -552,27 +590,36 @@ describe('paint through walls (vision §3.4)', () => {
    *
    * The fix clamps the displacement to the degraded radius, so through-wall reach is at most
    * 0.4R + min(2, 0.4R) ≤ 0.8R < R. Loud classes (R ≥ 5 m) are untouched.
+   *
+   * The displacement now lives one level up — it is the LISTENER'S uncertainty, applied once to
+   * the delivered event's effective origin, so a muffled picture is TRANSLATED rather than
+   * smeared: never wider than the same sound in open air, and always overlapping the truth
+   * because the clamp keeps the translation inside the degraded radius.
    */
   it('never lets a muffled sound paint further out than the same sound would in open air', () => {
     // The law, over the whole authored class table — no fixture can reach every class.
     for (const [name, ev] of Object.entries(EV)) {
       const reach = WALL1_RADIUS * ev.paint + Math.min(WALL_FUZZ, WALL1_RADIUS * ev.paint);
-      expect(reach, `${name}: through-wall reach ${reach.toFixed(2)} m vs ${ev.paint} m clean`).toBeLessThanOrEqual(
-        ev.paint,
-      );
+      expect(
+        reach,
+        `${name}: through-wall reach ${reach.toFixed(2)} m vs ${ev.paint} m clean`,
+      ).toBeLessThanOrEqual(ev.paint);
     }
 
     // …and measured on geometry, over 96 different fuzz seeds: a 4 m walk step just in front of
-    // wallA must never light a dot more than 4 m from where the foot actually fell, even though
-    // the fuzz is free to throw its origin straight through the wall and away from it.
+    // wallA, heard from behind it, must never light a dot more than 4 m from the point the ear
+    // BELIEVES it fell — the displaced picture is the same size as the clean one, never bigger —
+    // and that believed point is never further from the truth than the degraded radius.
     const R0 = EV.walkStep.paint;
+    const maxFuzz = Math.min(WALL_FUZZ, WALL1_RADIUS * R0);
     const bus = new EventBus();
     let worst = 0;
-    let throughWall = 0;
+    let worstDrift = 0;
+    let displaced = 0;
     for (let k = 0; k < 96; k++) {
       field.resetPaint();
       bus.now = k;
-      const e = bus.emit({
+      const raw = bus.emit({
         class: 'walkStep',
         source: 'self',
         x: 9.6,
@@ -583,14 +630,108 @@ describe('paint through walls (vision §3.4)', () => {
         intensity: EV.walkStep.intensity,
         waveSpeed: Infinity,
       });
+      // A listener behind wallA: one wall, so this delivery carries the uncertainty.
+      const d = deliverTo(gym, 15, 1.6, 6, raw);
+      expect(d.walls).toBe(1);
+      const e = withDelivery(raw, d);
+      const o = deliveredOrigin(e, [0, 0, 0]);
+      const drift = Math.hypot(o[0] - 9.6, o[1] - 0.05, o[2] - 6);
+      worstDrift = Math.max(worstDrift, drift);
+      if (drift > 1e-6) displaced++;
       applyEvent(field, gym, e, null, null);
-      for (const i of litDots(field)) {
-        worst = Math.max(worst, distTo(field, i, 9.6, 0.05, 6));
-        if (field.positions[i * 3]! > 10.2 + 1e-6) throughWall++;
-      }
+      for (const i of litDots(field)) worst = Math.max(worst, distTo(field, i, o[0], o[1], o[2]));
     }
-    expect(throughWall, 'the probe must actually be painting through the wall').toBeGreaterThan(0);
-    expect(worst, `a ${R0} m sound painted a surface ${worst.toFixed(2)} m away`).toBeLessThanOrEqual(R0 + 1e-3);
+    expect(displaced, 'the probe must actually be painting a displaced picture').toBeGreaterThan(90);
+    expect(worstDrift, `a muffled origin drifted ${worstDrift.toFixed(2)} m`).toBeLessThanOrEqual(
+      maxFuzz + 1e-6,
+    );
+    expect(worst, `a ${R0} m sound painted a surface ${worst.toFixed(2)} m away`).toBeLessThanOrEqual(
+      R0 + 1e-3,
+    );
+  });
+
+  /**
+   * MIGRATED (review BUG B-STAIN-DRIFT).
+   *
+   * The fuzz is the LISTENER'S uncertainty about where a sound happened, so it is a property of
+   * the delivery and of nothing else: one delivery resolves ONE effective origin, and the whole
+   * picture — every patch, every dot, and the stain the look stamps — comes from that one point.
+   *
+   * Displacing per PATCH instead (counting walls from the origin to each surface) is the failure
+   * this pins against: it leaves the dots in the emitter's own room on the true position while
+   * the stain marking the same sound sits up to two metres away. One sound, two answers to "where
+   * did that happen", which paint.ts's own header forbids and which the Lantern Test (vision
+   * §15.2 — call the dog's exit point) is decided by.
+   */
+  it('paints the whole cluster at the origin the LISTENER believes, not at the true one', () => {
+    const R0 = EV.walkStep.paint;
+    const bus = new EventBus();
+    bus.now = 3;
+    const raw = bus.emit({
+      class: 'walkStep',
+      source: 'self',
+      x: 9.6,
+      y: 0.05,
+      z: 6,
+      paintRadius: R0,
+      hearRadius: 30,
+      intensity: EV.walkStep.intensity,
+      waveSpeed: Infinity,
+    });
+
+    const centroid = (): [number, number, number] => {
+      const lit = litDots(field);
+      expect(lit.length).toBeGreaterThan(20);
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      for (const i of lit) {
+        x += field.positions[i * 3]!;
+        y += field.positions[i * 3 + 1]!;
+        z += field.positions[i * 3 + 2]!;
+      }
+      return [x / lit.length, y / lit.length, z / lit.length];
+    };
+    const gap = (a: readonly number[], b: readonly number[]): number =>
+      Math.hypot(a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!);
+
+    // Zero walls to the ear: nothing is displaced anywhere. The picture is the one a listener
+    // standing next to the foot gets, dot for dot.
+    const clean = withDelivery(raw, deliverTo(gym, 5, 1.6, 6, raw));
+    expect(clean.wallsToListener).toBe(0);
+    expect(deliveredOrigin(clean, [0, 0, 0])).toEqual([...raw.origin]);
+    field.resetPaint();
+    applyEvent(field, gym, clean, null, null);
+    const cleanCentre = centroid();
+    const cleanLit = litDots(field).length;
+
+    // One wall to the ear: the same event, delivered to an ear that cannot be sure where it
+    // happened. The cluster moves with the belief — all of it, together.
+    const muffled = withDelivery(raw, deliverTo(gym, 15, 1.6, 6, raw));
+    expect(muffled.wallsToListener).toBe(1);
+    const believed = [...deliveredOrigin(muffled, [0, 0, 0])];
+    expect(gap(believed, raw.origin)).toBeGreaterThan(0.5);
+    field.resetPaint();
+    applyEvent(field, gym, muffled, null, null);
+    const muffledCentre = centroid();
+
+    // The cluster CLUSTERS on the believed origin and not on the true one — measured 0.33 m
+    // against 1.30 m — and it got there by moving with the belief rather than by spreading.
+    // A regression to either old behaviour fails one of these: per-patch fuzz would leave the dots
+    // in the source room on the true origin, and no fuzz at all would leave every dot there.
+    expect(gap(muffledCentre, believed)).toBeLessThan(0.5);
+    expect(gap(muffledCentre, raw.origin)).toBeGreaterThan(2 * gap(muffledCentre, believed));
+    const shift = [
+      muffledCentre[0] - cleanCentre[0],
+      muffledCentre[1] - cleanCentre[1],
+      muffledCentre[2] - cleanCentre[2],
+    ];
+    const belief = [believed[0]! - raw.origin[0], believed[1]! - raw.origin[1], believed[2]! - raw.origin[2]];
+    // The wall clips one side of the displaced picture, so the centroid does not travel the whole
+    // belief vector — but it travels ALONG it, never against it.
+    expect(shift[0]! * belief[0]! + shift[1]! * belief[1]! + shift[2]! * belief[2]!).toBeGreaterThan(0);
+    // …and it is still a picture: a displaced sound paints a cluster, not a sliver.
+    expect(litDots(field).length).toBeGreaterThan(cleanLit * 0.5);
   });
 
   it('paints the same picture from the same events, every time', () => {
@@ -684,7 +825,10 @@ describe('accumulation over a run (vision §3.6)', () => {
       if (field.dither[i]! >= 0.05) continue;
       if (probe < 0 || field.paintIntensity[i]! > field.paintIntensity[probe]!) probe = i;
     }
-    expect(probe, 'the gym must offer a low-dither dot the quiet re-hears can still reach').toBeGreaterThanOrEqual(0);
+    expect(
+      probe,
+      'the gym must offer a low-dither dot the quiet re-hears can still reach',
+    ).toBeGreaterThanOrEqual(0);
     const start = field.paintIntensity[probe]!;
     expect(start).toBeGreaterThan(0.8);
     for (let k = 1; k <= 6; k++) paint.hear(cleanPing({ intensity: 0.1 }, k));
@@ -777,9 +921,13 @@ describe('accumulation over a run (vision §3.6)', () => {
     dotsAccum.flushTo([attr]);
     const lit = litDots(field);
     expect(lit.length, 'both events must actually land').toBeGreaterThan(afterFirst.size);
-    expect([...lit].some((i) => !afterFirst.has(i)), 'the second event must reach new dots').toBe(true);
+    expect(
+      [...lit].some((i) => !afterFirst.has(i)),
+      'the second event must reach new dots',
+    ).toBe(true);
     const covered = (i: number): boolean => ranges.some(([s, c]) => i >= s && i < s + c);
-    for (const i of lit) expect(covered(i), `dot ${i} was painted by one of two events but never uploaded`).toBe(true);
+    for (const i of lit)
+      expect(covered(i), `dot ${i} was painted by one of two events but never uploaded`).toBe(true);
     let prevEnd = -1;
     for (const [s, c] of ranges) {
       expect(s, 'flushed ranges must come out sorted and disjoint').toBeGreaterThan(prevEnd);
@@ -801,16 +949,36 @@ describe('accumulation over a run (vision §3.6)', () => {
       return out;
     };
     // Gap of exactly 512 free elements between the end of one run and the start of the next.
-    expect(flush([[0, 10], [522, 10]])).toEqual([[0, 532]]);
+    expect(
+      flush([
+        [0, 10],
+        [522, 10],
+      ]),
+    ).toEqual([[0, 532]]);
     // One more, and they stay two uploads.
-    expect(flush([[0, 10], [523, 10]])).toEqual([
+    expect(
+      flush([
+        [0, 10],
+        [523, 10],
+      ]),
+    ).toEqual([
       [0, 10],
       [523, 10],
     ]);
     // Order of arrival is irrelevant — flushTo sorts before it merges.
-    expect(flush([[522, 10], [0, 10]])).toEqual([[0, 532]]);
+    expect(
+      flush([
+        [522, 10],
+        [0, 10],
+      ]),
+    ).toEqual([[0, 532]]);
     // Overlapping and touching runs collapse whatever the gap rule says.
-    expect(flush([[100, 50], [120, 50]])).toEqual([[100, 70]]);
+    expect(
+      flush([
+        [100, 50],
+        [120, 50],
+      ]),
+    ).toEqual([[100, 70]]);
   });
 
   it('routes a bus event through delivery to paint, and drops what it cannot hear', () => {
@@ -882,7 +1050,6 @@ describe('accumulation over a run (vision §3.6)', () => {
   });
 });
 
-
 // ------------------------------------------------------------------------------------------
 
 /**
@@ -911,7 +1078,7 @@ describe('accumulation over a run (vision §3.6)', () => {
  *   BOUNDED      no frame does more than the slice of work its wavefront released.
  *
  * The price of NEVER EARLY is bounded lateness: a patch is released only once its FARTHEST member
- * is due, so a near member waits up to (2·patchRadius + 2·fuzz)/waveSpeed. That is measured and
+ * is due, so a near member waits up to 2·patchRadius/waveSpeed. That is measured and
  * pinned below rather than left to chance.
  */
 describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', () => {
@@ -953,7 +1120,11 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
         waveSpeed,
       });
     };
-    return [at(8, 20, WAVE_SPEED_DETONATION, 0), at(15, 12, WAVE_SPEED_Q, 0.01), at(22, 16, WAVE_SPEED_E, 0.02)];
+    return [
+      at(8, 20, WAVE_SPEED_DETONATION, 0),
+      at(15, 12, WAVE_SPEED_Q, 0.01),
+      at(22, 16, WAVE_SPEED_E, 0.02),
+    ];
   };
 
   interface Snapshot {
@@ -972,10 +1143,21 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
     dots: field.paintedDots,
   });
 
-  /** The converged picture: every event applied whole, by the reference function. */
-  const converged = (events: readonly SoundEvent[]): Snapshot => {
+  /**
+   * The converged picture: every event applied whole, by the reference function.
+   *
+   * Applied as the listener RECEIVED them. Paint runs from an event's effective origin
+   * (`deliveredOrigin`) — true in the clear, fuzzed through one wall — so the reference has to
+   * be fed the same delivered copies the pipeline paints from, or it is a picture of a different
+   * ear. The law under test is that the converged picture is a pure function of the SET of
+   * DELIVERED events; the delivery itself is pinned elsewhere in this file.
+   */
+  const converged = (events: readonly SoundEvent[], lx = 15): Snapshot => {
     field.resetPaint();
-    for (const e of events) applyEvent(field, gym, e, null, null);
+    for (const e of events) {
+      const d = deliverTo(gym, lx, 1.6, 6, e);
+      applyEvent(field, gym, withDelivery(e, d), null, null);
+    }
     return snapshot();
   };
 
@@ -1103,9 +1285,10 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
         const p = field.edgePaintTime[k]!;
         if (p !== UNPAINTED && p > worst) worst = p;
       }
-      expect(worst, `${label}: a surfel is stamped ${(worst - now) * 1000} ms in the future`).toBeLessThanOrEqual(
-        now + 1e-9,
-      );
+      expect(
+        worst,
+        `${label}: a surfel is stamped ${(worst - now) * 1000} ms in the future`,
+      ).toBeLessThanOrEqual(now + 1e-9);
     };
 
     // `hear()` itself is a write site, and its clock is the event's own time.
@@ -1132,7 +1315,7 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
   it('MUST paint an instant class wholly inside hear() — a footstep has nothing to wait for', () => {
     field.resetPaint();
     const paint = pipeline(5);
-    const ref = converged([makeEvent({ class: 'walkStep', source: 'self', x: 5, y: 0, z: 6 })]);
+    const ref = converged([makeEvent({ class: 'walkStep', source: 'self', x: 5, y: 0, z: 6 })], 5);
 
     field.resetPaint();
     paint.hear(makeEvent({ class: 'walkStep', source: 'self', x: 5, y: 0, z: 6 }));
@@ -1169,12 +1352,12 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
     paint.pump(0);
     expect(paint.pendingPatches, 'at t=0 the blast has travelled nowhere').toBe(total);
 
-    // The first shell lands about a third of a frame in — one patch radius plus the fuzz
-    // allowance, at 140 m/s. Three frames in the wave is 7 m out and has released a slice.
+    // The first shell lands about a sixth of a frame in — one patch radius at 140 m/s. Three
+    // frames in the wave is 7 m out of 22 and has released a slice, not the job.
     paint.pump(3 / 60);
     const soFar = total - paint.pendingPatches;
     expect(soFar).toBeGreaterThan(0);
-    expect(soFar, 'a wavefront hands over a slice, not the job').toBeLessThan(total * 0.25);
+    expect(soFar, 'a wavefront hands over a slice, not the job').toBeLessThan(total * 0.5);
 
     // 22 m at 140 m/s is 157 ms, so by a third of a second the wave has passed everything.
     for (let f = 2; f <= 25; f++) paint.pump(f / 60);
@@ -1220,9 +1403,10 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
     // arrival". The bound used to be EARLY (centre − patchRadius − WALL_FUZZ) so that no member
     // could be painted after its own wavefront; being early was thought to be free. It is not —
     // an early write is a future stamp, and a future stamp un-draws the surface (see MUST never be
-    // early). The bound is now LATE (centre + patchRadius + fuzz), and this is its cost.
+    // early). The bound is now LATE (centre + patchRadius), and this is its cost. There is no
+    // displacement term: the effective origin is settled once, at delivery, and every member of
+    // every patch is measured from that one point.
     const e = blast();
-    const fuzzMag = Math.min(WALL_FUZZ, WALL1_RADIUS * e.paintRadius);
     let worstLate = 0;
     for (let p = 0; p < field.patchCount; p++) {
       const dc = Math.hypot(
@@ -1232,7 +1416,7 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
       );
       const prad = field.patchRadius[p]!;
       if (dc - prad > e.paintRadius) continue;
-      const arrive = (dc + prad + fuzzMag) / WAVE_SPEED_DETONATION;
+      const arrive = (dc + prad) / WAVE_SPEED_DETONATION;
       const d0 = field.patchDotStart[p]!;
       for (let i = d0; i < d0 + field.patchDotCount[p]!; i++) {
         const d = Math.hypot(
@@ -1240,18 +1424,16 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
           field.positions[i * 3 + 1]! - e.origin[1],
           field.positions[i * 3 + 2]! - e.origin[2],
         );
-        // Worst case the other way: a one-wall patch paints from an origin displaced up to
-        // fuzzMag TOWARDS the dot, so its true stamp can be that much earlier.
-        const trueStamp = Math.max(0, d - fuzzMag) / WAVE_SPEED_DETONATION;
+        const trueStamp = d / WAVE_SPEED_DETONATION;
         expect(arrive, `patch ${p} releases before dot ${i} is due`).toBeGreaterThanOrEqual(trueStamp - 1e-9);
         worstLate = Math.max(worstLate, arrive - trueStamp);
       }
     }
-    // The margin is (2·patchRadius + 2·fuzz)/waveSpeed and nothing more — ~41 ms for a detonation,
-    // two or three frames. Invisible; an early write is not.
-    const bound = (2 * Math.max(...Array.from(field.patchRadius)) + 2 * fuzzMag) / WAVE_SPEED_DETONATION;
+    // The margin is 2·patchRadius/waveSpeed and nothing more — ~12 ms for a detonation, well
+    // under a frame. Invisible; an early write is not.
+    const bound = (2 * Math.max(...Array.from(field.patchRadius))) / WAVE_SPEED_DETONATION;
     expect(worstLate).toBeLessThanOrEqual(bound + 1e-9);
-    expect(worstLate).toBeLessThan(0.05);
+    expect(worstLate).toBeLessThan(0.02);
   });
 
   it('settles a cone event (E-ping) to exactly the converged cone', () => {
@@ -1268,7 +1450,7 @@ describe('scheduled paint: a sound arrives at its own speed (engine-plan §3)', 
       waveSpeed: WAVE_SPEED_E,
     });
     expect(e.cone).toBeDefined();
-    const ref = converged([e]);
+    const ref = converged([e], 4);
     expect(ref.dots).toBeGreaterThan(100);
 
     field.resetPaint();
@@ -1440,7 +1622,9 @@ describe('a new sound never un-draws the map (vision §3.6)', () => {
       const now = t0 + f / 60;
       paint.pump(now);
       const { blanked, worstMs } = countBlanked(was, now);
-      expect(blanked, `frame ${f}: ${blanked} known dots un-drawn for up to ${worstMs.toFixed(0)} ms`).toBe(0);
+      expect(blanked, `frame ${f}: ${blanked} known dots un-drawn for up to ${worstMs.toFixed(0)} ms`).toBe(
+        0,
+      );
     }
     expect(paint.pendingPatches).toBe(0);
     // …and the blast really did do something: it lit the walls the footsteps never reached.
@@ -1480,7 +1664,10 @@ describe('a new sound never un-draws the map (vision §3.6)', () => {
       const now = t0 + f / 60;
       paint.pump(now);
       const { blanked, worstMs } = countBlanked(was, now);
-      expect(blanked, `frame ${f}: E-ping un-drew ${blanked} of ${known} known dots (${worstMs.toFixed(0)} ms)`).toBe(0);
+      expect(
+        blanked,
+        `frame ${f}: E-ping un-drew ${blanked} of ${known} known dots (${worstMs.toFixed(0)} ms)`,
+      ).toBe(0);
     }
   });
 

@@ -6,15 +6,25 @@
  * keeping them separate is the point:
  *
  *   DELIVERY  — "does this listener receive this event at all?" Per listener, per event.
- *               Range gate + wall gate, and the `quality` number stains and audio read.
- *   PAINT     — "which surfels does this event light?" Per event, ONCE, from the event's own
- *               origin outward. Paint is a property of the sound, not of the ear: the wall
- *               reductions in step 2 are measured from the event to the SURFACE, not to you.
+ *               Range gate + wall gate, the `quality` number stains and audio read, and — the
+ *               one thing delivery decides for paint — WHERE the listener believes the sound
+ *               happened (`deliveredOrigin`: the true origin in the clear, the fuzzed one
+ *               through a wall). One event, one effective origin, per delivery.
+ *   PAINT     — "which surfels does that sound light?" Per delivered event, ONCE, from that one
+ *               effective origin outward. How WELL a surface is read is still measured from the
+ *               event to the SURFACE, not to you: the −60 % radius, the dimming and the ≥2-wall
+ *               cutoff are per-patch and have nothing to do with where your ears are.
+ *
+ * Fuzz answers *where*; per-patch walls answer *how well*. Keeping those two apart is what makes
+ * the two layers agree: the stain a look stamps and every dot the same event lit come from the
+ * same point in space, so one sound never gives the player two answers (vision §3.4, §1 law 2).
  *
  * The seam matters for co-op (vision §10, engine-plan §11.1): one emission, many listeners.
  * Delivery is therefore a pure function of a listener position — it never touches the bus, and
  * `bus.emit` never computes it. What a consumer sees is a COPY of the event with its own
- * delivery fields filled; the bus's own record stays neutral forever.
+ * delivery fields filled; the bus's own record stays neutral forever. Two listeners on opposite
+ * sides of a wall legitimately paint the same sound from two different places: the displacement
+ * is the listener's own uncertainty, not a property of the world.
  *
  * Nothing here uses `Math.random`, a wall clock (outside the opt-in `profile` counters), or any
  * state outside the field's buffers — and the per-surfel merge is `max`, which is commutative, so
@@ -164,16 +174,16 @@ export function withDelivery(e: SoundEvent, d: Delivery): SoundEvent {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The stable displacement applied to an event's origin when it is painting through a wall.
+ * The stable displacement applied to an event's origin when a listener hears it through a wall.
  * Seeded from `e.fuzzSeed` (itself `hash1(id)`, monotonic and never replayed), so the same event
- * fuzzes the same way for every patch it touches, every frame, every listener, and on every
- * machine — a muffled sound is heard in one wrong place, not smeared over a different wrong
+ * lands in the same one wrong place every frame, for every consumer of that delivery, and on
+ * every machine — a muffled sound is heard somewhere wrong, not smeared over a different wrong
  * place each time you look at it. Uniform inside a `maxMag` sphere.
  *
  * `maxMag` exists because a fixed ±2 m displacement is not a small perturbation of a quiet
  * class: a crouch step paints 1.5 m, degrades to 0.6 m through a wall, and then a 2 m offset
  * would carry its paint 2.6 m from where the sound happened — further than the sound reaches in
- * open air. `makePaintSetup` clamps it to the DEGRADED radius (`WALL1_RADIUS × R`), so the
+ * open air. `deliveredOrigin` clamps it to the DEGRADED radius (`WALL1_RADIUS × R`), so the
  * muffled footprint can never outreach the clean one. Loud classes (R ≥ 5 m) are unaffected.
  */
 export function fuzzVector(
@@ -200,13 +210,19 @@ const deliveredFuzz: [number, number, number] = [0, 0, 0];
 
 /**
  * WHERE a delivered event appears to have happened: its true origin in the clear, its fuzzed one
- * through a wall.
+ * through a wall. THE effective origin — the single point the whole delivery is resolved from.
  *
- * The event layer has to agree with the matter layer about this. The stain a look draws is the
- * player's read on where a sound came from, and paint already committed to an answer — if the
- * stain sat on the true origin while the dots it painted sat two metres away, the picture would
- * be telling the player two different things about one sound (vision §1.2), and the through-wall
- * vagueness visual-brief §2 asks to be DRAWN as spread would instead read as a rendering bug.
+ * The displacement is the LISTENER'S uncertainty about where a sound happened, so it is gated on
+ * the walls between the origin and the ear (`wallsToListener`) and it is a property of the
+ * delivery, not of any one surface. Paint runs its entire pipeline from this point — patch query,
+ * cone apex, falloff, face test, wave arrival — and the stain a look stamps sits on it too, so
+ * the event layer and the matter layer agree by construction. If the stain sat on the true origin
+ * while the dots it painted sat two metres away, the picture would be telling the player two
+ * different things about one sound (vision §1.2), and the through-wall vagueness visual-brief §2
+ * asks to be DRAWN as spread would instead read as a rendering bug.
+ *
+ * What the per-patch wall count still decides is how WELL each surface is read (`paintPatch`:
+ * WALL1_RADIUS, WALL1_INTENSITY, the WALL_MAX cutoff) — measured, from now on, from this origin.
  *
  * The returned array is reused; copy what you keep.
  */
@@ -265,7 +281,9 @@ class RangeAccum {
   }
 
   /** Push the accumulated runs onto the two dynamic attributes of one geometry and clear. */
-  flushTo(attrs: readonly { addUpdateRange(start: number, count: number): void; needsUpdate: boolean }[]): void {
+  flushTo(
+    attrs: readonly { addUpdateRange(start: number, count: number): void; needsUpdate: boolean }[],
+  ): void {
     if (this.starts.length === 0) return;
     const order = this.starts.map((_, i) => i).sort((a, b) => this.starts[a]! - this.starts[b]!);
     let runStart = -1;
@@ -301,7 +319,7 @@ class RangeAccum {
 
 /** Scratch shared by every `applyEvent` call — paint runs inside the step and must not allocate. */
 const scratchPatches: number[] = [];
-const scratchFuzz: [number, number, number] = [0, 0, 0];
+const scratchOrigin: [number, number, number] = [0, 0, 0];
 const paintOwn = new Set<number>();
 
 export interface PaintResult {
@@ -325,10 +343,10 @@ const emptyResult = (): PaintResult => ({ dots: 0, edgeVerts: 0, patchesTested: 
  * scratch above: whoever builds a setup owns the buffers inside it.
  */
 interface PaintSetup {
+  /** The event's EFFECTIVE origin (`deliveredOrigin`) — everything below is measured from it. */
   ox: number;
   oy: number;
   oz: number;
-  fuzz: readonly [number, number, number];
   wallFilter: ((s: CollisionSolid) => boolean) | undefined;
   cone: SoundEvent['cone'];
   coneHalfCos: number;
@@ -342,19 +360,20 @@ interface PaintSetup {
 function makePaintSetup(
   world: World,
   e: SoundEvent,
-  fuzzOut: [number, number, number],
+  origin: readonly [number, number, number],
   ownOut: Set<number>,
 ): PaintSetup {
-  const ox = e.origin[0];
-  const oy = e.origin[1];
-  const oz = e.origin[2];
+  const ox = origin[0];
+  const oy = origin[1];
+  const oz = origin[2];
   const cone = e.cone;
   return {
     ox,
     oy,
     oz,
-    fuzz: fuzzVector(e.fuzzSeed, fuzzOut, fuzzMagnitude(e.paintRadius)),
     // Paint's wall filter is NOT delivery's: floors stay opaque here even for a detonation.
+    // Resolved at the EFFECTIVE origin, so a fuzzed origin that lands inside a slab radiates out
+    // of it instead of blacking out the map (see `originSolids`).
     wallFilter: makeWallFilter(originSolids(world, ox, oy, oz, ownOut), false),
     cone,
     coneHalfCos: cone ? Math.cos((cone.angleDeg * 0.5 * Math.PI) / 180) : 0,
@@ -405,17 +424,18 @@ export function applyEvent(
 
   const R0 = e.paintRadius;
   if (R0 <= 0 || e.intensity <= 0) return out;
-  const ox = e.origin[0];
-  const oy = e.origin[1];
-  const oz = e.origin[2];
+
+  // The ONE origin this delivery is resolved from (`deliveredOrigin`): true in the clear, fuzzed
+  // through a wall. Everything below — the query, the LOS, the falloff, the cone — uses it.
+  const o = deliveredOrigin(e, scratchOrigin);
 
   // Step 1 — candidate patches. Gathered at the FULL radius: a patch behind a wall paints with a
   // smaller radius, never a larger one, so the full-radius sphere is always a superset.
-  const patches = field.queryPatches(ox, oy, oz, R0, scratchPatches);
+  const patches = field.queryPatches(o[0], o[1], o[2], R0, scratchPatches);
   out.patchesTested = patches.length;
   if (patches.length === 0) return out;
 
-  const setup = makePaintSetup(world, e, scratchFuzz, paintOwn);
+  const setup = makePaintSetup(world, e, o, paintOwn);
   for (const p of patches) paintPatch(field, world, p, setup, dotsAccum, segAccum, out);
   return out;
 }
@@ -437,7 +457,6 @@ function paintPatch(
   const oy = s.oy;
   const oz = s.oz;
   const R0 = s.R0;
-  const fuzz = s.fuzz;
   const cone = s.cone;
   const coneHalfCos = s.coneHalfCos;
   const coneLen = s.coneLen;
@@ -478,16 +497,16 @@ function paintPatch(
     s.wallFilter,
   );
   if (walls >= WALL_MAX) return;
+  // How WELL this surface is read — never WHERE the sound was. The origin was settled once, at
+  // delivery (`deliveredOrigin`); a per-patch displacement on top of it would give one sound as
+  // many positions as it lit patches, and the stain could then only agree with one of them.
   const through = walls === 1;
   const R = through ? R0 * WALL1_RADIUS : R0;
   const I0 = through ? s.intensity * WALL1_INTENSITY : s.intensity;
-  const ex = through ? ox + fuzz[0] : ox;
-  const ey = through ? oy + fuzz[1] : oy;
-  const ez = through ? oz + fuzz[2] : oz;
   // Re-test against the reduced sphere: most one-wall patches fall out here for free.
-  const ddx = pcx - ex;
-  const ddy = pcy - ey;
-  const ddz = pcz - ez;
+  const ddx = pcx - ox;
+  const ddy = pcy - oy;
+  const ddz = pcz - oz;
   const reach = R + prad;
   if (ddx * ddx + ddy * ddy + ddz * ddz > reach * reach) return;
   out.patchesLit++;
@@ -501,9 +520,9 @@ function paintPatch(
   let hi = -1;
   for (let i = d0; i < d1; i++) {
     const i3 = i * 3;
-    const vx = ex - pos[i3]!;
-    const vy = ey - pos[i3 + 1]!;
-    const vz = ez - pos[i3 + 2]!;
+    const vx = ox - pos[i3]!;
+    const vy = oy - pos[i3 + 1]!;
+    const vz = oz - pos[i3 + 2]!;
     // Step 5 — sound paints the face it hits.
     if (nrm[i3]! * vx + nrm[i3 + 1]! * vy + nrm[i3 + 2]! * vz < 0) continue;
     const d2 = vx * vx + vy * vy + vz * vz;
@@ -511,7 +530,21 @@ function paintPatch(
     // Step 3 — quadratic falloff to exactly zero at R.
     const I = I0 * clamp01(1 - d2 * invR2);
     if (I < dth[i]! * DITHER_GAIN) continue;
-    if (cone && !inCone(ox, oy, oz, cone.dir[0], cone.dir[1], cone.dir[2], pos[i3]!, pos[i3 + 1]!, pos[i3 + 2]!, cone.angleDeg))
+    if (
+      cone &&
+      !inCone(
+        ox,
+        oy,
+        oz,
+        cone.dir[0],
+        cone.dir[1],
+        cone.dir[2],
+        pos[i3]!,
+        pos[i3 + 1]!,
+        pos[i3 + 2]!,
+        cone.angleDeg,
+      )
+    )
       continue;
     // Step 4 — the wavefront, merged with `max` on both channels. `d / Infinity` is 0, so instant
     // classes need no branch. See the note above `applyEvent`: `max` is what makes the picture a
@@ -539,14 +572,28 @@ function paintPatch(
     for (let v = 0; v < 2; v++) {
       const k = sIdx * 2 + v;
       const k3 = k * 3;
-      const vx = ex - eps[k3]!;
-      const vy = ey - eps[k3 + 1]!;
-      const vz = ez - eps[k3 + 2]!;
+      const vx = ox - eps[k3]!;
+      const vy = oy - eps[k3 + 1]!;
+      const vz = oz - eps[k3 + 2]!;
       const d2 = vx * vx + vy * vy + vz * vz;
       if (d2 >= R * R) continue;
       const I = I0 * clamp01(1 - d2 * invR2);
       if (I < edt[k]! * DITHER_GAIN) continue;
-      if (cone && !inCone(ox, oy, oz, cone.dir[0], cone.dir[1], cone.dir[2], eps[k3]!, eps[k3 + 1]!, eps[k3 + 2]!, cone.angleDeg))
+      if (
+        cone &&
+        !inCone(
+          ox,
+          oy,
+          oz,
+          cone.dir[0],
+          cone.dir[1],
+          cone.dir[2],
+          eps[k3]!,
+          eps[k3 + 1]!,
+          eps[k3 + 2]!,
+          cone.angleDeg,
+        )
+      )
         continue;
       const t = s.time + Math.sqrt(d2) / wave;
       const wasPt = ept[k]!;
@@ -610,15 +657,17 @@ function patchInCone(
  * (vision §3.6: you never lose the map). The store therefore never holds a future timestamp: every
  * write carries a `paintTime` no greater than the clock the write ran under.
  *
- * `arrive` is the conservative LATE bound — to the FARTHEST point of the patch, plus the largest
- * displacement the fuzz can apply — so a patch is released only once its whole membership is due:
+ * `arrive` is the conservative LATE bound — to the FARTHEST point of the patch — so a patch is
+ * released only once its whole membership is due:
  *
- *     arrive = e.time + (|centre − origin| + patchRadius + fuzzMag) / waveSpeed
+ *     arrive = e.time + (|centre − effectiveOrigin| + patchRadius) / waveSpeed
  *
- * Every member's own stamp is `time + d/wave` with `d ≤ |centre − origin| + patchRadius + fuzzMag`,
- * so member stamp ≤ arrive ≤ the pump clock. The cost is bounded lateness — up to
- * (2·patchRadius + 2·fuzzMag)/wave ≈ 40 ms for a detonation — spent to make an early write
- * impossible. Being late by a frame or two is invisible; being early un-draws the world.
+ * Every member's own stamp is `time + d/wave` with `d ≤ |centre − effectiveOrigin| + patchRadius`,
+ * so member stamp ≤ arrive ≤ the pump clock. No fuzz term: the origin is settled ONCE at delivery
+ * and every distance in the job is measured from it, so there is no later displacement to guard
+ * against. The cost is bounded lateness — up to 2·patchRadius/wave ≈ 12 ms for a detonation —
+ * spent to make an early write impossible. Being late by a frame or two is invisible; being early
+ * un-draws the world.
  *
  * Because the list is sorted by `arrive`, every patch due this frame sits in an unbroken prefix,
  * so "paint all due patches" is a `while` and never a search.
@@ -646,23 +695,23 @@ class PaintJob {
 function makePaintJob(field: SurfelField, world: World, e: SoundEvent): PaintJob | null {
   const R0 = e.paintRadius;
   if (R0 <= 0 || e.intensity <= 0) return null;
-  const ox = e.origin[0];
-  const oy = e.origin[1];
-  const oz = e.origin[2];
+  // The same one origin `applyEvent` uses, resolved before anything is measured.
+  const o = deliveredOrigin(e, scratchOrigin);
+  const ox = o[0];
+  const oy = o[1];
+  const oz = o[2];
   const found = field.queryPatches(ox, oy, oz, R0, scratchPatches);
   const n = found.length;
   if (n === 0) return null;
 
-  const fuzzMag = fuzzMagnitude(R0);
   const when = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const p = found[i]!;
     const dx = field.patchCentre[p * 3]! - ox;
     const dy = field.patchCentre[p * 3 + 1]! - oy;
     const dz = field.patchCentre[p * 3 + 2]! - oz;
-    // Conservative LATE bound: farthest member, from the farthest place the fuzz can move the
-    // origin to. `+ fuzzMag` is the mirror of the through-wall displacement in `paintPatch`.
-    const farthest = Math.hypot(dx, dy, dz) + field.patchRadius[p]! + fuzzMag;
+    // Conservative LATE bound: the patch's farthest member from the effective origin.
+    const farthest = Math.hypot(dx, dy, dz) + field.patchRadius[p]!;
     when[i] = e.time + farthest / e.waveSpeed;
   }
 
@@ -677,8 +726,9 @@ function makePaintJob(field: SurfelField, world: World, e: SoundEvent): PaintJob
     patches[i] = found[src]!;
     arrive[i] = when[src]!;
   }
-  // The job outlives this call, so it gets its own fuzz tuple and its own origin-solid set.
-  return new PaintJob(makePaintSetup(world, e, [0, 0, 0], new Set<number>()), patches, arrive);
+  // The job outlives this call, so it gets its own origin-solid set (the origin tuple below is
+  // read into plain numbers by `makePaintSetup` and is not retained).
+  return new PaintJob(makePaintSetup(world, e, [ox, oy, oz], new Set<number>()), patches, arrive);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -741,7 +791,11 @@ export class PaintPipeline {
   private readonly pumpResult: PaintResult = emptyResult();
   private frameMs = 0;
 
-  constructor(field: SurfelField, world: World, private readonly ringSize = 96) {
+  constructor(
+    field: SurfelField,
+    world: World,
+    private readonly ringSize = 96,
+  ) {
     this.field = field;
     this.world = world;
   }

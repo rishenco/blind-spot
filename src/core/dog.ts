@@ -103,6 +103,16 @@ const DOG_EMIT_LIFT = 0.1;
 /** A waypoint is reached when the body crosses the plane through it, perpendicular to the leg. */
 const ARRIVE_EPS = 1e-4;
 
+/**
+ * How many despawned dogs may keep cooling at once (see `DogSystem.despawn`).
+ *
+ * A ghost is information the player paid a sound for; removing the body must not confiscate it.
+ * Each orphan holds at most DOG_MAX_GHOSTS of its own, so this is the second half of a bounded
+ * budget rather than a guess: a debug key cycling the roster cannot grow the ghost pool without
+ * limit, and four cooling routes is already more than the ±1-floor window ever shows.
+ */
+const DOG_MAX_ORPHANS = 4;
+
 // ---------------------------------------------------------------------------------------------
 // The body: a box skeleton sampled on a body-local lattice
 // ---------------------------------------------------------------------------------------------
@@ -130,15 +140,15 @@ const LIMB_HALF = 0.05;
 /** How far fore/aft a planted paw sits from its hip at the footfall phase. */
 const STRIDE_REACH = 0.16;
 
-const part = (
-  cx: number,
-  cy: number,
-  cz: number,
-  hx: number,
-  hy: number,
-  hz: number,
-  rot = 0,
-): Part => ({ cx, cy, cz, hx, hy, hz, rot });
+const part = (cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, rot = 0): Part => ({
+  cx,
+  cy,
+  cz,
+  hx,
+  hy,
+  hz,
+  rot,
+});
 
 /** Knee of a two-link leg, solved in the sagittal plane. `bend` picks elbow-back / stifle-forward. */
 function knee(hx: number, hy: number, fx: number, fy: number, bend: number): [number, number] {
@@ -449,9 +459,14 @@ class Dog implements DogView, DogBody {
     this.lastHeardAt = e.time;
     this.frozen = false;
     this.poseHistory.push({ time: e.time, matrix: this.matrix() });
-    // The window is measured from the NEWEST sample and the newest is never dropped: the smear
-    // window (0.3 s) is shorter than the freeze delay (0.4 s), so ageing the history against the
-    // clock instead would blank a live dog for the last tenth of a second before it froze.
+    // The window is measured from the NEWEST sample and the newest is never dropped, so the real
+    // invariant is NOT "no pose is older than DOG_SMEAR_WINDOW": a pose is held until the dog
+    // freezes, up to `lastHeardAt + DOG_FREEZE_DELAY` (0.4 s), which is deliberately longer than
+    // the smear window (0.3 s). Ageing the history against the clock instead would blank a live
+    // dog for the last tenth of a second before it froze. The window bounds the SPREAD of the
+    // samples behind the newest — the smear tail. Each sample carries the instant it was heard
+    // and a look fades it by that age (looks/debug/marks.ts stamps `aBorn` per pose), so a pose
+    // held past the smear window reads as a body going stale, never as a longer smear.
     const newest = this.poseHistory[this.poseHistory.length - 1]!.time;
     let keep = 0;
     for (let i = this.poseHistory.length - 1; i >= 0; i--) {
@@ -494,6 +509,14 @@ export class DogSystem {
   private readonly bus: EventBus;
   private readonly live: Dog[] = [];
   /**
+   * Despawned dogs that still hold something the player heard. They no longer walk, steer or
+   * sound — `update` only ages them — but they keep cooling and dissolving on the normal clock
+   * and they stay in `views` until the last ghost is gone. See `despawn`.
+   */
+  private readonly orphans: Dog[] = [];
+  /** Rebuilt in place while orphans exist, so `views` allocates nothing per frame. */
+  private readonly viewList: Dog[] = [];
+  /**
    * Built on first spawn, not in the constructor: a dog-free run — which every existing scripted
    * capture is — must allocate no geometry and must sample no lattice.
    */
@@ -514,7 +537,11 @@ export class DogSystem {
   }
 
   get views(): readonly DogView[] {
-    return this.live;
+    if (this.orphans.length === 0) return this.live;
+    this.viewList.length = 0;
+    for (const d of this.live) this.viewList.push(d);
+    for (const d of this.orphans) this.viewList.push(d);
+    return this.viewList;
   }
 
   get bodies(): readonly DogBody[] {
@@ -539,9 +566,25 @@ export class DogSystem {
     this.live.sort((a, b) => a.id - b.id);
   }
 
+  /**
+   * Remove a dog's BODY. Whatever the player has already heard of it survives.
+   *
+   * A ghost is information a sound was spent on (vision §3.7, §1 law 1): the debug key that
+   * removes a dog must not reach into the player's map and erase reads it already paid for. The
+   * body leaves the roster — it stops walking, stops sounding, stops being a `bodies` entry — and
+   * the record it left behind is detached into `orphans`, where it keeps cooling and dissolving on
+   * the same clock as any other ghost and stays visible to `views` until it is gone. A pose still
+   * inside its smear window is kept too, and freezes into its ghost at `lastHeardAt +
+   * DOG_FREEZE_DELAY` exactly as it would have: the freeze is the silence maturing, and removing
+   * the body does not change when the sound stopped.
+   */
   despawn(routeId: string): void {
     const i = this.live.findIndex((d) => d.routeId === routeId);
-    if (i >= 0) this.live.splice(i, 1);
+    if (i < 0) return;
+    const [dog] = this.live.splice(i, 1);
+    if (!dog || (dog.ghosts.length === 0 && dog.poseHistory.length === 0)) return;
+    this.orphans.push(dog);
+    if (this.orphans.length > DOG_MAX_ORPHANS) this.orphans.splice(0, this.orphans.length - DOG_MAX_ORPHANS);
   }
 
   /**
@@ -565,12 +608,21 @@ export class DogSystem {
       for (let i = 0; i < owed; i++) this.emitGait(dog);
     }
     for (const dog of this.live) dog.settleVisibility(this.bus.now);
+    // Orphans only age: no advance, no gait, no attribution — a removed body makes no sound.
+    let write = 0;
+    for (const dog of this.orphans) {
+      dog.settleVisibility(this.bus.now);
+      if (dog.ghosts.length > 0 || dog.poseHistory.length > 0) this.orphans[write++] = dog;
+    }
+    this.orphans.length = write;
   }
 
   dispose(): void {
     this.detach?.();
     this.detach = null;
     this.live.length = 0;
+    this.orphans.length = 0;
+    this.viewList.length = 0;
     this.cloudGeom?.dispose();
     this.cloudGeom = null;
   }

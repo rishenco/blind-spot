@@ -73,13 +73,18 @@ test/                   vitest specs for core logic
 - Buffers are THREE.BufferGeometry with the above as attributes; dynamic attrs use
   partial `addUpdateRange` uploads per painted region.
 
-**Paint (`applyEvent`):**
-1. Gather candidate patches in the event's paint radius (cone-filtered for E-ping: 25°
-   half-angle 12.5°? — use full cone angle 25°, i.e. ±12.5° around the aim direction).
-2. Patch LOS: raycast patch center → origin against occluder boxes; count penetrated
-   walls. 0 walls → full. 1 wall → radius ×0.4, intensity ×0.5, origin offset by the
-   event's stable fuzz vector (seeded per event; magnitude `min(WALL_FUZZ, 0.4 × R)` —
-   see §4). ≥2 walls → nothing. (vision §3.4)
+**Paint (`applyEvent`):** every step below measures from ONE point — the *effective origin*, which
+delivery settled before paint ran (`deliveredOrigin`: the true origin in the clear, the fuzzed one
+through a wall). Fuzz answers *where the listener believes the sound happened*; the per-patch wall
+count answers only *how well that patch is read* (§4).
+
+1. Gather candidate patches in the event's paint radius, around the effective origin
+   (cone-filtered for E-ping: 25° half-angle 12.5°? — use full cone angle 25°, i.e. ±12.5°
+   around the aim direction).
+2. Patch LOS: raycast patch center → effective origin against occluder boxes; count penetrated
+   walls. 0 walls → full. 1 wall → radius ×0.4, intensity ×0.5. ≥2 walls → nothing. (vision §3.4)
+   No displacement here: a per-patch offset would give one sound as many positions as it lit
+   patches, and the event stain a look stamps could then agree with at most one of them.
 3. Per surfel in surviving patches: `d = dist(surfel, effectiveOrigin)`;
    `I = intensity × clamp01(1 − (d/R)²)` (quadratic falloff to zero at radius R).
    Light the surfel iff `I ≥ surfel.dither × DITHER_GAIN` — intensity = coverage density,
@@ -114,10 +119,12 @@ never holds a future timestamp:
 - A **travelling** class is queued as a `PaintJob` — a patch list sorted by arrival — and
   released by `pump(now)`, which paints exactly the patches whose wavefront has landed, in
   arrival order. That is the only pass: there is no work-ahead pass and no millisecond budget.
-- A patch is released once its **farthest** member is due (`|Δcentre| + patchRadius + fuzz`), so
-  a near member can wait up to `(2·patchRadius + 2·fuzz)/waveSpeed` — ~41 ms for a detonation.
-  Bounded lateness is the price of never being early, and it is the right way round: late paint
-  is a surface that arrives a frame after its sound, early paint is a hole in the world.
+- A patch is released once its **farthest** member is due (`|Δcentre| + patchRadius`), so a near
+  member can wait up to `2·patchRadius/waveSpeed` — ~12 ms for a detonation. There is no fuzz term:
+  the origin is settled once, at delivery, and every distance in the job is measured from it, so
+  there is no later displacement to guard against. Bounded lateness is the price of never being
+  early, and it is the right way round: late paint is a surface that arrives a frame after its
+  sound, early paint is a hole in the world.
 - The frame calls `pump(now)` with the **same clock the shader gets as `uNow`**, before `flush()`
   and before the look renders. Combined with the max-merge above, the reveal is write-timed and
   the converged picture is still a pure function of the event set.
@@ -159,8 +166,17 @@ landing 8–14/28, slide 5/16 continuous, prop 8–12/25, Q 12/18, E 40-cone/30,
 2/4/8 by mode, detonation 22-through-floors/60, beacon 3/12). Wave speeds: Q 45, E 85,
 detonation 140 m/s; all step/prop/slide/gait classes instant.
 
-**Through-wall fuzz is clamped to the degraded radius** *(M3 review, ruling R3)*. Vision §3.4
-gives the muffled origin a ±2 m displacement, but that number is written for the loud classes.
+**Through-wall fuzz is a DELIVERY term, and it is clamped to the degraded radius.** It is resolved
+once per delivered event, from the event's own stable seed and the listener's wall count, and every
+distance paint measures — patch gather, falloff, arrival schedule — is measured from that one
+point. Two listeners on opposite sides of a wall legitimately paint the same sound from two
+different places: the displacement is a listener's uncertainty about *where*, never a property of
+the world. What the per-patch wall count decides is *how well* — the −60 % radius, the ×0.5
+intensity and the ≥2-wall cutoff. Keeping the two questions apart is what lets the event stain and
+the geometry the same event lit agree on one position (vision §3.4, law 2).
+
+The clamp itself *(M3 review, ruling R3)*: vision §3.4 gives the muffled origin a ±2 m
+displacement, but that number is written for the loud classes.
 Applied flat it inverts the whole point of the wall: a 1.5 m crouch step painting through one
 wall has its radius cut to 0.6 m and is then thrown up to 2 m sideways, so it can light a surface
 2.6 m away — further than the same step reaches in open air, and *audible through a wall it could
@@ -170,9 +186,9 @@ not be heard through in the open*. The magnitude is therefore
 = 5 m`: sprint 7, landing 8–14, slide 5, prop 8–12, Q 12, E 40, detonation 22) keep the full ±2 m
 and are unchanged; only crouch (0.6 m) and walk (1.6 m) are clamped.
 
-The `PaintJob` arrival bound (§3) uses the same clamped magnitude for its `+ fuzz` term, so the
-clamp tightens the schedule as well as the reach: a walk step's patches now come due 4.7 ms
-earlier than they would under a flat ±2 m, and a crouch step's 9.3 ms earlier.
+The `PaintJob` arrival bound (§3) carries no fuzz term of its own: the displaced origin *is* the
+origin the job is built around, so the clamp tightens the schedule exactly as much as it tightens
+the reach and nothing needs to be reserved for a later displacement.
 
 ### 4.1 Proposed vision §3.3 addenda (pending playtest)
 
@@ -266,6 +282,13 @@ Strafe-jumping stays expressive and stays finite.
   each bounce a `propKnock` (paint 8–12 m by impulse). Settles and stays displaced.
 - **Chain curtain:** door-filling strip plane; pass-through emits `chainRattle`
   (walk/sprint: paint 10 m hear 25; crouch: paint 4 m hear 8), sways 1.5 s.
+  **Matter and emitter are separate questions.** A curtain hangs in a real doorway and a sound in
+  that doorway comes back off it, so its strips are baked as paintable non-solid geometry
+  (`bakeChains`) whatever the roster says. The ROSTER (`core/roster.ts`, `?props=`) decides which
+  props run as EMITTERS; the BAKE decides what exists as MATTER. `?props=none` silences a curtain,
+  it does not demolish it — a run with the emitter off must paint the same 88 surfels as a run with
+  it on, which is pinned in test/surfels.spec.ts. Anything that can be heard off must still be
+  there to be heard off.
 - **Beacon:** every 4 s `beaconHum` (paint 3, hear 12, source `objective`, gold).
 - **Audio synth (WebAudio, no assets):** stance-shaped noise-burst footsteps, chirp pings
   (E rising 300→1400 Hz 90 ms; Q soft 500 Hz pulse), dog gait tick-tick, can clatter
@@ -311,6 +334,11 @@ Rules (binding):
   to edges (edge buffer stays, dots thin harder); hard cut 45 m. Splats ≥ 2–3 px.
 - `reduceFlashing()` true ⇒ no strobe/flicker effects (decode flickers, afterglow pulses
   become fades).
+- **Meaning is hue + shape + motion, never hue alone** (vision §12, visual-brief §2). Every
+  event-layer marker carries a per-source FORM as well as a colour — jagged and motion-smeared for
+  a dog, a steady glyph pip for a teammate, a ring for the objective — so the layer stays readable
+  with the hue channel removed. Binding on every art look; see the deferral note below for the one
+  place it is not yet met.
 - Switch protocol: number keys 1/2/3 (0 = debug) hot-switch; paint state persists across
   switches so the same painted world can be compared. `?look=phosphor` boots directly.
 
@@ -331,12 +359,27 @@ pipeline and remains the fallback.
 > Both gates must be **re-run on the first shipped look** that implements the full §3.2
 > two-layer palette, and the M3 numbers re-measured there before they are treated as
 > evidence about the game.
+>
+> The same is true one layer down: the debug look draws EVENT markers as plain hue-only discs,
+> with no per-source form at all. That is authorized for the instrument and only for the
+> instrument — it keeps the stain a direct read of quality and origin. The colorblind law above
+> (hue + shape + motion) is therefore **deferred, not waived**: the first art look owes the
+> per-source shapes (jagged dog, glyph pip for a teammate, ring for the objective), and no
+> readability claim about the event layer may be made from a debug-look capture.
+
+**Gate protocol.** The Blindfold Gauntlet and the Lantern Test (vision §15) are run with the
+debug top-down plan **disabled** — both ways in: the M hotkey and the `?topdown` boot param
+(§10). The plan is a dev truth view — it draws solids the
+player has never heard — so a tester who can glance at it is not being tested on the sound-paint
+at all, and the Lantern read in particular becomes trivial: the dog's route line is on the plan.
+Any gate result recorded with the plan reachable is not evidence.
 
 ## 10. Debug & verification
 
 - F3 overlay: fps, frame ms, surfel count, painted count, draw calls, event/s.
 - M: top-down orthographic debug view (solids as wireframe, dog route lines, player
-  marker) — must visually match `doc/sample-map.md` §1.
+  marker) — must visually match `doc/sample-map.md` §1. A truth view, not a player view: it is
+  switched off for the §15 gates (see the gate protocol in §9).
 - F7: test detonation 12 m ahead of the camera (paints through floors, white flash class)
   — the loudest-flashbulb showcase without dog AI.
 - `?autotest`: scripted ~20 s demo (spawn → sprint C with slide+jump → Q-ping → E-ping at

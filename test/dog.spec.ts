@@ -33,7 +33,7 @@ import {
   SIM_STEP,
   WALL1_QUALITY,
 } from '../src/core/const.js';
-import { buildDogCloud } from '../src/core/dog.js';
+import { buildDogCloud, type DogView } from '../src/core/dog.js';
 import type { SoundEvent } from '../src/core/events.js';
 import { PaintPipeline } from '../src/core/paint.js';
 import { resolveRoster } from '../src/core/roster.js';
@@ -61,10 +61,7 @@ const box = (
 function kennel(routes: DogRouteDef[]): MapDef {
   return {
     name: 'kennel',
-    solids: [
-      box('floor', 'floor', 0, -1, 0, 60, 0, 60),
-      box('divider', 'wall', 0, 0, 29.8, 60, 4, 30.2),
-    ],
+    solids: [box('floor', 'floor', 0, -1, 0, 60, 0, 60), box('divider', 'wall', 0, 0, 29.8, 60, 4, 30.2)],
     ladders: [],
     props: [],
     doors: [],
@@ -105,11 +102,23 @@ const stutter: DogRouteDef = {
   waypoints: Array.from({ length: 13 }, (_, i) => ({ x: 20 + i, z: 33, pause: 0.5 })),
 };
 
+/** A long straight leg, for a dog that simply walks out of hearing and goes quiet for good. */
+const straight: DogRouteDef = {
+  id: 'straight',
+  speed: DOG_SPEED_PATROL,
+  defaultOn: true,
+  waypoints: [
+    { x: 4, z: 34 },
+    { x: 56, z: 34 },
+  ],
+};
+
 interface Rig {
   readonly sim: Sim;
   readonly paint: PaintPipeline;
   readonly delivered: SoundEvent[];
-  run(seconds: number): void;
+  /** `sub` splits each sim step, to prove results depend on sim time and not on step grouping. */
+  run(seconds: number, sub?: number): void;
 }
 
 /** A sim with a listener wired exactly as `main.ts` wires it: paint on the bus, dogs on paint. */
@@ -126,10 +135,10 @@ function rig(map: MapDef, dogs: readonly string[], listener?: [number, number, n
     sim,
     paint,
     delivered,
-    run(seconds: number): void {
+    run(seconds: number, sub = 1): void {
       const n = Math.round(seconds / SIM_STEP);
       for (let i = 0; i < n; i++) {
-        sim.step(SIM_STEP);
+        for (let k = 0; k < sub; k++) sim.step(SIM_STEP / sub);
         paint.pump(sim.time);
       }
     },
@@ -235,6 +244,43 @@ describe('a dog is drawn from what was heard of it (vision §6, §3.7)', () => {
     expect(g.frozenAt).toBeGreaterThanOrEqual(heardAt);
     // The photograph is the last pose that was actually heard, not a fresh reading of the body.
     expect(g.pose.matrix.length).toBe(16);
+  });
+
+  it('photographs where the dog was last HEARD, not where the body has walked to', () => {
+    // The half of §3.7 the freeze-instant spec above cannot see: the body keeps walking through
+    // the silence, so a ghost built from a fresh reading of the matrix would sit ahead of the
+    // truth the player was told. Measured on a dog that walks out of hearing mid-route, so the
+    // silence is real rather than a pause. The gap is the ground covered while it was not being
+    // heard — one gait interval plus the freeze delay, at patrol speed — and it must be at least
+    // the freeze delay's worth: anything less means the ghost was updated after the last sound.
+    // Run at two step groupings: the freeze instant is a sim-time quantity (paint.ts), so it must
+    // not depend on how the caller chopped up its steps.
+    const freezeRun = (
+      sub: number,
+    ): { frozenAt: number; ghostX: number; bodyX: number; lastHeard: number } => {
+      const r = rig(kennel([straight]), ['straight'], [6, 1.6, 26]);
+      const view = (): DogView => r.sim.dogs.views[0]!;
+      for (let i = 0; i < Math.round(30 / SIM_STEP); i++) {
+        r.run(SIM_STEP, sub);
+        if (view().ghosts.length > 0) break;
+      }
+      const g = view().ghosts[0]!;
+      const dogEvents = r.delivered.filter((e) => e.source === 'dog');
+      return {
+        frozenAt: g.frozenAt,
+        ghostX: g.pose.matrix[12]!,
+        bodyX: r.sim.dogs.bodies[0]!.x,
+        lastHeard: dogEvents[dogEvents.length - 1]!.time,
+      };
+    };
+    const a = freezeRun(1);
+    expect(a.frozenAt).toBeCloseTo(a.lastHeard + DOG_FREEZE_DELAY, 9);
+    expect(Math.abs(a.ghostX - a.bodyX)).toBeGreaterThan(DOG_SPEED_PATROL * DOG_FREEZE_DELAY);
+    expect(Math.abs(a.ghostX - a.bodyX)).toBeLessThan(DOG_SPEED_PATROL * (DOG_FREEZE_DELAY + SIM_STEP * 2));
+
+    const b = freezeRun(3);
+    expect(b.frozenAt).toBeCloseTo(a.frozenAt, 9);
+    expect(b.ghostX).toBeCloseTo(a.ghostX, 6);
   });
 
   it('keeps at most DOG_SMEAR_SAMPLES live poses, newest last', () => {
@@ -347,6 +393,30 @@ describe('a dog is drawn from what was heard of it (vision §6, §3.7)', () => {
     }
   });
 
+  it('credits a dog event NO DogSystem dog emitted to nobody, however close a dog is standing', () => {
+    // The discriminating half of the attribution law, and the reason the two-routes case above is
+    // not enough on its own: a gait is emitted at its own emitter's position, so on that fixture
+    // "nearest to the origin" and "on the stack" agree on every event and a nearest-dog rule would
+    // pass it unchanged. Here they cannot agree. The event is a real `source:'dog'` event, emitted
+    // straight onto the bus at the exact position of a live dog — the strongest possible case for
+    // a positional rule — but no dog is on the stack, so no dog may be credited with it. Anything
+    // that searches positions instead of reading the emitter fails here.
+    const r = rig(kennel([square]), ['square'], [25, 1.6, 29]);
+    r.run(4);
+    const view = r.sim.dogs.views[0]!;
+    const body = r.sim.dogs.bodies[0]!;
+    const before = view.poseHistory.length;
+    const newest = view.poseHistory[before - 1]?.time;
+    const quality = view.lastEventQuality;
+
+    const stray = r.sim.bus.emit({ class: 'dogGait', source: 'dog', x: body.x, y: body.y + 0.1, z: body.z });
+    // The event must genuinely have been delivered: the probe is about attribution, not hearing.
+    expect(r.delivered.some((e) => e.id === stray.id)).toBe(true);
+    expect(view.poseHistory.length).toBe(before);
+    expect(view.poseHistory[view.poseHistory.length - 1]?.time).toBe(newest);
+    expect(view.lastEventQuality).toBe(quality);
+  });
+
   it('delivers inside the emit that produced it — the contract attribution rests on', () => {
     const r = rig(kennel([]), []);
     let inside = false;
@@ -444,6 +514,15 @@ describe('who is alive this run (core/roster.ts)', () => {
     expect(resolveRoster({ ...base, param: 'dog2,dog1', scripted: false })).toEqual(known);
     expect(resolveRoster({ ...base, param: ' dog2 , nope ', scripted: false })).toEqual(['dog2']);
     expect(resolveRoster({ ...base, param: 'nope', scripted: false })).toEqual([]);
+    // A repeat is a set member, not a second dog.
+    expect(resolveRoster({ ...base, param: 'dog2,dog2,dog1', scripted: false })).toEqual(known);
+  });
+
+  it('lets a URL param override what a script declared, in both directions', () => {
+    // A capture script names its own roster, but the URL is the operator's hand on the wheel:
+    // `?dogs=none` must be able to silence a scripted run and `?dogs=all` to populate one.
+    expect(resolveRoster({ ...base, param: 'none', scripted: true, scriptRoster: ['dog1'] })).toEqual([]);
+    expect(resolveRoster({ ...base, param: 'all', scripted: true, scriptRoster: [] })).toEqual(known);
   });
 
   it('an empty roster spawns nothing, and nothing is what a dog-free capture measures', () => {
@@ -481,6 +560,34 @@ describe('spawning and despawning mid-run (engine-plan §10, the F6 toggle)', ()
     r.sim.dogs.spawn('nope');
     r.sim.dogs.spawn('dog1');
     expect(r.sim.dogs.bodies.length).toBe(1);
+  });
+
+  it('leaves a despawned dog’s ghosts cooling on the normal clock', () => {
+    // A ghost is information a sound was spent on (vision §3.7, §1 law 1). Removing the body is a
+    // dev act; it must not reach into the player's map and confiscate reads already paid for. The
+    // body goes, the photograph stays, and it ages out exactly as it would have.
+    const r = rig(kennel([stutter]), ['stutter'], [28.5, 1.6, 31]);
+    r.run(1.5);
+    const before = r.sim.dogs.views[0]!.ghosts;
+    expect(before.length).toBeGreaterThan(0);
+    const frozenAt = before[0]!.frozenAt;
+
+    r.sim.dogs.despawn('stutter');
+    // No body, no sound, no route.
+    expect(r.sim.dogs.bodies.length).toBe(0);
+    expect(r.sim.dogs.has('stutter')).toBe(false);
+    const gaits = r.sim.bus.counts.dogGait;
+    r.run(1);
+    expect(r.sim.bus.counts.dogGait).toBe(gaits);
+
+    // …but a look still sees the photograph, unchanged and still stamped with its own instant.
+    const orphan = r.sim.dogs.views[0]!;
+    expect(orphan.ghosts.length).toBeGreaterThan(0);
+    expect(orphan.ghosts[0]!.frozenAt).toBe(frozenAt);
+
+    // And it dissolves on the same clock as any other ghost, leaving nothing behind.
+    r.run(DOG_GHOST_LIFE + DOG_GHOST_DISSOLVE + 1);
+    expect(r.sim.dogs.views.length).toBe(0);
   });
 });
 
