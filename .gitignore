@@ -3,3 +3,4 @@ dist
 verify-out
 *.local
 .DS_Store
+.claude/worktrees/
