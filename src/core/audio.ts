@@ -16,9 +16,9 @@
  * is wired to the first gesture in main.ts; until then this is silent and harmless.
  */
 
-import { AUDIO_MASTER_GAIN } from './const.js';
+import { AUDIO_MASTER_GAIN, EV } from './const.js';
 import type { EventBus, SoundEvent } from './events.js';
-import { clamp01, makeRng } from './math.js';
+import { clamp01, invLerp, makeRng } from './math.js';
 
 type Ctor = new () => AudioContext;
 
@@ -113,7 +113,11 @@ export class AudioEngine {
         this.tick(t, 0.45, 620, 0.07, e.fuzzSeed);
         break;
       case 'landing':
-        this.thud(t, clamp01(e.intensity), e.fuzzSeed);
+        // `intensity` is a constant of the class; the PAINT RADIUS is what the fall height moves
+        // (vision §3.3: landing paints 8 m at the threshold, 14 m at the top of the scale). Read
+        // the strength back out of it so a 2 m step-down and an 8 m plunge do not sound alike —
+        // the ears and the dots have to agree about how loud you just were (§3.8).
+        this.thud(t, clamp01(invLerp(EV.landing.paint, EV.landing.paintMax, e.paintRadius)), e.fuzzSeed);
         break;
       case 'slide':
         this.scrape(t, 0.22);

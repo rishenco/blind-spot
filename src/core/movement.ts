@@ -177,6 +177,13 @@ export class MovementController {
   private glide: Glide | null = null;
   /** A wall stopped us while we were pushing into it — the auto-vault trigger. */
   private blockedForward = false;
+  /**
+   * The speed we were carrying into that wall, sampled BEFORE the collision response zeroed it.
+   * A vault triggers on the step after the block, by which time the run is already gone from the
+   * velocity — handing this back on exit is what stops a knee-high crate from confiscating a
+   * sprint (law 5). Zero whenever we are not blocked.
+   */
+  private approachSpeed = 0;
 
   constructor(world: World, player: PlayerState, bus: EventBus) {
     this.world = world;
@@ -327,8 +334,20 @@ export class MovementController {
             ? SPEED_SPRINT
             : SPEED_WALK;
       const wishSpeed = cap * wishMag;
+      const before = Math.hypot(p.vx, p.vz);
       if (wishSpeed > 0.01) {
         accelerate(p, wx, wz, wishSpeed, ACCEL_GROUND * dt);
+        // `accelerate` only measures your speed ALONG wishdir, so any velocity across it is
+        // invisible to the cap. Rub a wall at angle t and the projection equilibrates at
+        // cap / cos(t) — 11 m/s against a 6 m/s sprint. Ground accel may therefore never RAISE
+        // your speed past the gait cap; overspeed can only be inherited (a slide, a landing,
+        // a boost) and, per the bleed below, only ever decays.
+        const ceiling = Math.max(cap, before);
+        const after = Math.hypot(p.vx, p.vz);
+        if (after > ceiling + EPS) {
+          p.vx *= ceiling / after;
+          p.vz *= ceiling / after;
+        }
       } else {
         const s = Math.hypot(p.vx, p.vz);
         if (s > EPS) {
@@ -355,6 +374,7 @@ export class MovementController {
     // --- move -----------------------------------------------------------------------------
     const x0 = p.x;
     const z0 = p.z;
+    const approach = Math.hypot(p.vx, p.vz);
     const res = moveCapsule(
       this.world,
       p.x,
@@ -381,6 +401,7 @@ export class MovementController {
     }
     this.blockedForward =
       res.hitWall && wishMag > 0.1 && res.travelXZ < res.requestedXZ - 1e-3 && wx * res.wallNX + wz * res.wallNZ < 0;
+    this.approachSpeed = this.blockedForward ? approach : 0;
 
     if (res.hitCeiling && p.vy > 0) p.vy = 0;
 
@@ -515,7 +536,7 @@ export class MovementController {
     this.jumpBuffer = 0;
     this.crouched = false;
     this.height = HEIGHT_STAND;
-    const speed = Math.hypot(p.vx, p.vz);
+    const speed = Math.max(Math.hypot(p.vx, p.vz), this.approachSpeed);
     this.startGlide(
       hit.x,
       hit.topY,
@@ -550,6 +571,7 @@ export class MovementController {
     this.ladder = null;
     this.sliding = false;
     this.blockedForward = false;
+    this.approachSpeed = 0;
     this.hands = hands;
     this.handsPhase = 0;
     p.vx = 0;
@@ -607,6 +629,9 @@ export class MovementController {
     p.vx = dx * g.exitSpeed;
     p.vz = dz * g.exitSpeed;
     p.vy = 0;
+    // The readout must report the speed you LEAVE with, not the glide's own last interpolation
+    // velocity — the camera rig, the F3 line and the gait test all read this.
+    this.speedXZ = g.exitSpeed;
 
     this.glide = null;
     this.hands = 'none';
@@ -637,6 +662,8 @@ export class MovementController {
     if (capsuleOverlaps(this.world, hugX, y, hugZ, CAPSULE_RADIUS, this.height)) return;
 
     this.ladder = l;
+    this.blockedForward = false;
+    this.approachSpeed = 0;
     p.x = hugX;
     p.z = hugZ;
     p.y = y;

@@ -5,7 +5,9 @@
  * Builds, serves `dist/` from a tiny static server, drives it in Playwright chromium and drops
  * screenshots into `verify-out/` (git-ignored). Asserts boot + console cleanliness on every
  * capture. The `?autotest` demo and the surfel/paint assertions arrive with their milestones;
- * milestone 1 verifies the boot screen and the top-down debug view.
+ * milestone 1 verifies the boot screen and the top-down debug view, milestone 2 adds the two
+ * scripted movement routes (`?sim=script`, `?sim=script2`) and reads the route out of the
+ * debug trail as well as out of the end state.
  *
  *   node scripts/verify.mjs [--no-build] [--port 4180]
  */
@@ -73,7 +75,7 @@ function serve(dir, port) {
 const problems = [];
 const note = (m) => console.log(`  ${m}`);
 
-async function capture(browser, name, query, checks) {
+async function capture(browser, name, query, checks, opts = {}) {
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1 });
   const errors = [];
   page.on('console', (m) => {
@@ -83,10 +85,28 @@ async function capture(browser, name, query, checks) {
 
   await page.goto(`http://127.0.0.1:${PORT}/index.html${query}`, { waitUntil: 'load' });
   await page.waitForFunction(() => Boolean(window.blindspot), null, { timeout: 15000 });
+  if (opts.scripted) {
+    // Scripted mode steps a fixed number of times per frame, so the route takes as long as the
+    // browser needs and not a second of wall clock more — wait on the route, never on a timer.
+    await page.waitForFunction(() => window.blindspot.script?.done === true, null, { timeout: 60000 });
+  }
   await page.waitForTimeout(600);
 
   const state = await page.evaluate(() => {
     const sim = window.blindspot.sim;
+    const p = sim.player;
+    const m = sim.movement;
+    const trail = window.blindspot.debug.trailPoints;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (let i = 0; i < trail.length; i += 2) {
+      minX = Math.min(minX, trail[i]);
+      maxX = Math.max(maxX, trail[i]);
+      minZ = Math.min(minZ, trail[i + 1]);
+      maxZ = Math.max(maxZ, trail[i + 1]);
+    }
     // Ink coverage of the debug overlay canvas: the fraction of pixels carrying any real
     // luminance. A screenshot proves a file was written, not that anything was DRAWN — an
     // empty canvas, a black-on-black palette or a crash mid-draw all still screenshot fine.
@@ -111,6 +131,15 @@ async function capture(browser, name, query, checks) {
       map: sim.map.name,
       ink,
       webgl: Boolean(document.querySelector('#app canvas')),
+      scriptDone: window.blindspot.script?.done ?? null,
+      pos: [p.x, p.y, p.z],
+      stance: p.stance,
+      hands: m.hands,
+      lastFall: m.lastFall,
+      events: sim.bus.emitted,
+      counts: sim.bus.counts,
+      trail: { n: trail.length / 2, minX, maxX, minZ, maxZ },
+      fov: window.blindspot.rig.fov,
     };
   });
 
@@ -118,10 +147,21 @@ async function capture(browser, name, query, checks) {
   await page.screenshot({ path: shot });
   await page.close();
 
+  const f2 = (v) => v.toFixed(2);
   console.log(`- ${name}${query || ''}`);
   note(`map ${state.map} · ${state.solids} solids · ${state.walkables} walkable tops · ${state.steps} sim steps`);
   note(`boot hidden ${state.boot} · top-down ${state.topDown} · webgl canvas ${state.webgl}`);
   note(`overlay ink ${(state.ink * 100).toFixed(2)}%`);
+  note(`player ${state.pos.map(f2).join(' ')} · ${state.stance} · hands ${state.hands} · fall ${f2(state.lastFall)} m`);
+  const c = state.counts;
+  note(
+    `events ${state.events} — walk ${c.walkStep} sprint ${c.sprintStep} crouch ${c.crouchStep}` +
+      ` slide ${c.slide} land ${c.landing}`,
+  );
+  if (state.trail.n > 1) {
+    const t = state.trail;
+    note(`trail ${t.n} crumbs · x ${f2(t.minX)}..${f2(t.maxX)} · z ${f2(t.minZ)}..${f2(t.maxZ)}`);
+  }
   note(`screenshot ${shot}`);
   if (!state.webgl) console.warn('  !! WebGL canvas missing — headless GPU unavailable, overlay-only run');
   for (const e of errors) problems.push(`${name}: ${e}`);
@@ -159,7 +199,56 @@ async function main() {
       'solids baked': s.solids === 63,
       'walkable tops found': s.walkables === 21,
       'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
+      'body has not moved on its own': Math.abs(s.pos[0] - 3) < 0.01 && Math.abs(s.pos[2] - 3) < 0.01,
+      'a silent body paints nothing': s.events === 0,
     }));
+
+    // ---------------------------------------------------------------------------------------
+    // Milestone 2: the scripted routes. Both are asserted in full by test/scripts.spec.ts; what
+    // these captures add is that they still do it in the SHIPPED bundle, in a real browser, on
+    // the real clock — and a picture of the trail to read them by (core/debug.ts SCRIPTS).
+    // ---------------------------------------------------------------------------------------
+
+    await capture(
+      browser,
+      'script-corridor',
+      '?sim=script&topdown&stats',
+      (s) => ({
+        'route ran to the end': s.scriptDone === true,
+        // Out of the trench, east of the pit (x 31..35), standing on corridor C's floor.
+        'ended east down corridor C': s.pos[0] > 40 && Math.abs(s.pos[1]) < 0.01 && s.pos[2] > 0.4 && s.pos[2] < 1.9,
+        'ended on its feet': s.stance === 'stand' && s.hands === 'none',
+        // Braking at the lip is the point: sprint over it and you catch the rungs in mid-air,
+        // and a 2.8 m descent paints nothing at all.
+        'heard itself hit the trench floor': s.counts.landing === 1 && Math.abs(s.lastFall - 2.8) < 0.02,
+        'sprinted, slid and crouched': s.counts.sprintStep > 3 && s.counts.slide > 5 && s.counts.crouchStep > 0,
+        'trail crosses the whole corridor': s.trail.maxX - s.trail.minX > 38 && s.trail.maxZ - s.trail.minZ < 3.5,
+        'trail was sampled': s.trail.n > 40,
+        'top-down open': s.topDown,
+        'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
+      }),
+      { scripted: true },
+    );
+
+    await capture(
+      browser,
+      'script-mantle',
+      '?sim=script2&topdown&stats',
+      (s) => ({
+        'route ran to the end': s.scriptDone === true,
+        // The machinery row is x 4..20, z 24..26, top at exactly MANTLE_MAX_HEIGHT (2.2).
+        'ended on top of the machinery row':
+          Math.abs(s.pos[1] - 2.2) < 0.01 && s.pos[0] > 4 && s.pos[0] < 20 && s.pos[2] > 24 && s.pos[2] < 26,
+        'ended on its feet': s.stance === 'stand' && s.hands === 'none',
+        'climbed rather than fell onto it': s.counts.landing === 0,
+        'crossed the hall at a sprint': s.counts.sprintStep > 3,
+        'trail crosses the machine hall': s.trail.maxZ - s.trail.minZ > 20,
+        'trail was sampled': s.trail.n > 40,
+        'top-down open': s.topDown,
+        'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
+      }),
+      { scripted: true },
+    );
   } finally {
     await browser.close();
     server.close();

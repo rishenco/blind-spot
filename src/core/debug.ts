@@ -136,9 +136,14 @@ export class DebugOverlay {
 
     // Anchored right: the top-down view's title, axis hint and ruler own the left margin.
     this.statsEl = document.createElement('div');
+    // Bottom-right is the free corner: the top-down view's title and axis hint own the top-left,
+    // its ruler the left margin, its legend the bottom-left — and corridor C runs along the top
+    // edge of a wide map, which is exactly where the scripted routes end. The panel is opaque so
+    // it can be read over the drawing rather than through it.
     this.statsEl.style.cssText =
-      `position:fixed;right:12px;top:8px;font:11px/1.5 ${MONO};color:${C.dim};` +
-      'white-space:pre;pointer-events:none;display:none;text-shadow:0 0 6px #000;';
+      `position:fixed;right:12px;bottom:96px;font:11px/1.5 ${MONO};color:${C.dim};` +
+      'white-space:pre;pointer-events:none;display:none;text-shadow:0 0 6px #000;' +
+      `background:rgba(4,7,10,0.86);border:1px solid ${C.wallFill};border-radius:3px;padding:6px 9px;`;
     root.appendChild(this.statsEl);
 
     this.resize(window.innerWidth, window.innerHeight);
@@ -213,6 +218,14 @@ export class DebugOverlay {
   dispose(): void {
     this.canvas.remove();
     this.statsEl.remove();
+  }
+
+  /**
+   * The breadcrumbs, flat `[x, z, x, z, …]`. `npm run verify` reads the scripted routes out of
+   * here: an end position proves where a body stopped, the trail proves how it got there.
+   */
+  get trailPoints(): readonly number[] {
+    return this.trail;
   }
 
   private sampleTrail(): void {
@@ -803,29 +816,34 @@ export const SCRIPTS: Record<string, ScriptDef> = {
   corridor: {
     id: 'corridor',
     title: 'C corridor: sprint · slide · jump · drop · ladder',
-    end: 12.0,
+    end: 11.0,
     segments: [
       { at: 0.0, yaw: -Math.PI / 2, forward: 1, note: 'walk north onto the door line' },
       { at: 0.55, note: 'settle' },
       { at: 0.85, yaw: 0, forward: 1, sprint: true, note: 'sprint east through door [a]' },
       { at: 3.1, forward: 1, sprint: true, jump: true, note: 'jump — 1.1 m, under the landing threshold' },
       { at: 4.2, forward: 1, sprint: true, crouch: true, note: 'slide under the duct at x 24' },
-      { at: 5.3, forward: 1, sprint: true, note: 'stand up, run at the pit' },
-      { at: 6.6, note: 'walked off the lip: 2.8 m drop into the trench' },
-      { at: 8.6, yaw: 0, forward: 1, note: 'grab the trench ladder and climb (silent)' },
-      { at: 11.5, note: 'back on the corridor floor' },
+      { at: 5.0, forward: 1, sprint: true, note: 'stand up, run at the pit' },
+      // Braking before the lip is the point, not timidity: carry the sprint over and you fly the
+      // 2.8 m gap and catch the ladder in mid-air, which is a legal play but emits no landing.
+      // Stepping off at a crouch drops you short of the rungs, so the trench floor gets heard.
+      { at: 5.3, note: 'brake at the lip' },
+      { at: 5.6, yaw: 0, forward: 1, crouch: true, note: 'crouch off the lip: a 2.8 m drop into the trench' },
+      { at: 7.0, yaw: 0, forward: 1, note: 'landed — walk east to the rungs' },
+      { at: 7.6, yaw: 0, forward: 1, note: 'grab the trench ladder and climb (silent)' },
+      { at: 9.4, yaw: 0, forward: 1, note: 'topped out — back on the corridor floor' },
     ],
   },
   mantle: {
     id: 'mantle',
     title: 'B hall: cross the machine hall · mantle the machinery row',
-    end: 7.6,
+    end: 6.4,
     segments: [
       { at: 0.0, yaw: Math.PI / 2, forward: 1, note: 'walk south through door [d]' },
-      { at: 1.4, yaw: 1.0, forward: 1, sprint: true, note: 'sprint south-east past the columns' },
-      { at: 5.2, yaw: Math.PI / 2, forward: 1, note: 'square up to the machinery row' },
-      { at: 5.8, yaw: Math.PI / 2, forward: 1, jump: true, note: 'mantle the 2.2 m row' },
-      { at: 6.6, note: 'standing on the row — the listening post' },
+      { at: 1.2, yaw: 1.19, forward: 1, sprint: true, note: 'sprint south-east between the column rows' },
+      { at: 3.7, yaw: Math.PI / 2, forward: 1, sprint: true, note: 'square up on the machinery row' },
+      { at: 4.4, yaw: Math.PI / 2, forward: 1, jump: true, note: 'mantle the 2.2 m row' },
+      { at: 5.3, note: 'standing on the row — the listening post' },
     ],
   },
 };
