@@ -38,8 +38,8 @@ export class Input {
 
   private readonly down = new Set<Action>();
   private readonly pressedThisTick = new Set<Action>();
-  /** Raw KeyboardEvent.code values pressed since the last consumeKeyPresses(). */
-  private readonly rawPresses: string[] = [];
+  /** Raw KeyboardEvent.code values that went down during the tick being simulated. */
+  private readonly codesPressedThisTick = new Set<string>();
 
   private dragging = false;
   private lastDragX = 0;
@@ -112,23 +112,22 @@ export class Input {
     return { dx, dy };
   }
 
-  /** Returns and clears raw key codes pressed since last call (for UI hotkeys). */
-  consumeKeyPresses(): string[] {
-    const out = this.rawPresses.slice();
-    this.rawPresses.length = 0;
-    return out;
+  /** True if this raw key code went down during the tick being simulated (UI hotkeys). */
+  wasKeyPressed(code: string): boolean {
+    return this.codesPressedThisTick.has(code);
   }
 
-  /** Called by the loop at the end of each sim tick. */
+  /** Called by the loop at the end of each sim tick; edge state is tick-scoped. */
   endTick(): void {
     this.pressedThisTick.clear();
+    this.codesPressedThisTick.clear();
   }
 
   // ---- handlers ------------------------------------------------------------
 
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.repeat) return;
-    this.rawPresses.push(e.code);
+    this.codesPressedThisTick.add(e.code);
     const action = KEY_BINDINGS[e.code];
     if (action === undefined) return;
     // Space/arrows would scroll the page; movement keys are ours.
@@ -212,6 +211,12 @@ export class Input {
     window.setTimeout(() => {
       if (this.lockRequested && !this.isLocked) this.fallbackToDrag();
     }, 350);
+  }
+
+  /** Forces the drag-to-look path (used by tooling and by `?look=drag`). */
+  forceDragLook(): void {
+    this.lockMode = 'drag';
+    this.lockRequested = false;
   }
 
   /** Probe support once at boot; unsupported environments start in drag mode. */
