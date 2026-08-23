@@ -195,6 +195,36 @@ export function fuzzVector(
 /** How far this event's origin may be displaced when it paints through a wall (R3). */
 const fuzzMagnitude = (paintRadius: number): number => Math.min(WALL_FUZZ, WALL1_RADIUS * paintRadius);
 
+const deliveredScratch: [number, number, number] = [0, 0, 0];
+const deliveredFuzz: [number, number, number] = [0, 0, 0];
+
+/**
+ * WHERE a delivered event appears to have happened: its true origin in the clear, its fuzzed one
+ * through a wall.
+ *
+ * The event layer has to agree with the matter layer about this. The stain a look draws is the
+ * player's read on where a sound came from, and paint already committed to an answer — if the
+ * stain sat on the true origin while the dots it painted sat two metres away, the picture would
+ * be telling the player two different things about one sound (vision §1.2), and the through-wall
+ * vagueness visual-brief §2 asks to be DRAWN as spread would instead read as a rendering bug.
+ *
+ * The returned array is reused; copy what you keep.
+ */
+export function deliveredOrigin(
+  e: SoundEvent,
+  out: [number, number, number] = deliveredScratch,
+): [number, number, number] {
+  out[0] = e.origin[0];
+  out[1] = e.origin[1];
+  out[2] = e.origin[2];
+  if (e.wallsToListener !== 1) return out;
+  const f = fuzzVector(e.fuzzSeed, deliveredFuzz, fuzzMagnitude(e.paintRadius));
+  out[0] += f[0];
+  out[1] += f[1];
+  out[2] += f[2];
+  return out;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Ranged uploads
 // ---------------------------------------------------------------------------------------------

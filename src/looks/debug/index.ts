@@ -37,6 +37,7 @@
 import { BoxGeometry, Group, LineSegments, Mesh, MeshBasicMaterial, Points, Scene, ShaderMaterial } from 'three';
 import type { SoundEvent } from '../../core/events.js';
 import type { Look, LookContext, RigArmView } from '../types.js';
+import { DogField, StainField, type MarkFrame } from './marks.js';
 
 /** `paintTime` sentinel test. UNPAINTED is −1e9; anything below −1e8 has never been lit. */
 const NEVER_PAINTED = -1.0e8;
@@ -353,6 +354,18 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
   let dots: Points | null = null;
   let lines: LineSegments | null = null;
   let holds: LineSegments | null = null;
+  /** The event layer (looks/debug/marks.ts): noise stains and the dog cloud with its ghosts. */
+  let stains: StainField | null = null;
+  let dogField: DogField | null = null;
+  const markFrame: { -readonly [K in keyof MarkFrame]: MarkFrame[K] } = {
+    now: 0,
+    camPos: [0, 0, 0],
+    projScale: 500,
+    pixelRatio: 1,
+    capPx: 12,
+    floorCentre: 0,
+    floorSpan: 0,
+  };
 
   let hudRoot: HTMLDivElement | null = null;
   let halo: HTMLDivElement | null = null;
@@ -478,6 +491,10 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
       holds.renderOrder = 2;
       scene.add(dots, lines, holds);
 
+      stains = new StainField(c.constants, c.reduceFlashing());
+      dogField = new DogField(c.constants);
+      scene.add(stains.points, dogField.points);
+
       // A bone's long axis is its local +z (core/player.ts RigBone), so both prisms are built
       // along +z: the forearm is a unit-length box scaled to the bone, the hand a fixed stub
       // pushed forward off the wrist rather than straddling it.
@@ -546,12 +563,14 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
     },
 
     /**
-     * The debug look draws no event decoration — no stains, no markers. The one exception is the
-     * rim, and it is not decoration: it is the acknowledgement that the ping you pressed happened,
-     * which the paint alone cannot give you until the wavefront gets somewhere. The far end is
-     * skipped: it is the same ping arriving, not a second press.
+     * Every delivered event leaves a stain at its origin (visual-brief §1.13). The rim is the one
+     * mark that is not a stain, and it is not decoration either: it is the acknowledgement that
+     * the ping you pressed happened, which the paint alone cannot give you until the wavefront
+     * gets somewhere. The far end is skipped for the RIM only — it is the same ping arriving, not
+     * a second press — but it still stains, because it is a real sound in a real place.
      */
     onEvent(e: SoundEvent): void {
+      stains?.stamp(e);
       if (e.source !== 'self' || e.variant === 'far') return;
       if (e.class === 'ePing' || e.class === 'qPing') lastPingAt = e.time;
     },
@@ -578,6 +597,18 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
       // with the sprint kick — a splat that ignored that would swell as you accelerate.
       const projScale = (viewH * 0.5) / Math.tan((cam.fov * Math.PI) / 360);
       setUniform(dotMat, 'uProjScale', projScale);
+
+      // The event layer rides the same projection and the same window as the matter layer, so a
+      // mark can never be drawn at a scale or a range the geometry it annotates is not.
+      markFrame.now = now;
+      markFrame.camPos = camPos as [number, number, number];
+      markFrame.projScale = projScale;
+      markFrame.pixelRatio = c.renderer.getPixelRatio();
+      markFrame.capPx = SPLAT_CAP_FRAC * viewH;
+      markFrame.floorCentre = c.floorCentre;
+      markFrame.floorSpan = c.floorSpan;
+      stains?.update(markFrame);
+      dogField?.update(c.dog, markFrame);
 
       const p = c.player;
 
@@ -650,6 +681,10 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
     dispose(): void {
       scene.clear();
       handsGroup.clear();
+      stains?.dispose();
+      dogField?.dispose();
+      stains = null;
+      dogField = null;
       dotMat?.dispose();
       lineMat?.dispose();
       holdMat?.dispose();

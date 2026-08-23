@@ -195,7 +195,15 @@ async function capture(browser, name, query, checks, opts = {}) {
   // An init script runs before the page's own scripts do, so no frame is missed.
   if (opts.trace) await page.addInitScript(traceScript, opts.trace);
 
-  await page.goto(`http://127.0.0.1:${PORT}/index.html${query}`, { waitUntil: 'load' });
+  // EVERY capture states its roster, and the default is NOBODY (core/roster.ts). A patrolling dog
+  // emits every 0.8 m and a beacon hums every 4 s whether or not anyone is listening, so a world
+  // with either in it cannot reproduce a number measured in a world without them — paint is one
+  // shared buffer and the dot count is the sum of everything that ever sounded. A capture that
+  // is ABOUT a dog says so in its own query and overrides this.
+  const q = new URLSearchParams(query.replace(/^\?/, ''));
+  if (!q.has('dogs')) q.set('dogs', 'none');
+  if (!q.has('props')) q.set('props', 'none');
+  await page.goto(`http://127.0.0.1:${PORT}/index.html?${q}`, { waitUntil: 'load' });
   await page.waitForFunction(() => Boolean(window.blindspot), null, { timeout: 15000 });
   if (opts.scripted) {
     // Scripted mode steps a fixed number of times per frame, so the route takes as long as the
@@ -360,6 +368,24 @@ async function capture(browser, name, query, checks, opts = {}) {
       trail: { n: trail.length / 2, minX, maxX, minZ, maxZ },
       fov: window.blindspot.rig.fov,
       dog2On: sim.map.dogRoutes.find((r) => r.id === 'dog2')?.defaultOn ?? null,
+      // What the LOOK is given (core/dog.ts DogView): poses on screen now, ghosts remembered.
+      dogs: sim.dogs.views.map((d) => ({
+        poses: d.poseHistory.length,
+        ghosts: d.ghosts.length,
+        quality: d.lastEventQuality,
+        cloud: d.cloudGeom.getAttribute('position').count,
+      })),
+      // The delivered feed itself, filtered to the dog: the Lantern read, event by event.
+      dogHeard: (() => {
+        const r = window.blindspot.paint.recent(96).filter((e) => e.source === 'dog');
+        return {
+          n: r.length,
+          walls: [...new Set(r.map((e) => e.wallsToListener))].sort(),
+          maxQuality: r.length ? Math.max(...r.map((e) => e.quality)) : -1,
+          minQuality: r.length ? Math.min(...r.map((e) => e.quality)) : -1,
+          classes: [...new Set(r.map((e) => e.class))].sort(),
+        };
+      })(),
     };
   });
 
@@ -424,10 +450,11 @@ async function capture(browser, name, query, checks, opts = {}) {
         ` before the first press → ${st.paintedDots} · reactor low ${trace.minEnergy.toFixed(2)}` +
         ` · halo peak ${trace.maxAudible.toFixed(2)} m`,
     );
-    note(
-      `  flash peak white ${pct(trace.peak.white)} at sim t ${trace.peakT.toFixed(2)} s` +
-        ` · any there ${pct(trace.peak.any)} · largest white blob ${dots(trace.peak)} dots`,
-    );
+    if (trace.peak)
+      note(
+        `  flash peak white ${pct(trace.peak.white)} at sim t ${trace.peakT.toFixed(2)} s` +
+          ` · any there ${pct(trace.peak.any)} · largest white blob ${dots(trace.peak)} dots`,
+      );
   }
   note(`player ${state.pos.map(f2).join(' ')} · ${state.stance} · hands ${state.hands} · fall ${f2(state.lastFall)} m`);
   const c = state.counts;
@@ -436,6 +463,18 @@ async function capture(browser, name, query, checks, opts = {}) {
       ` slide ${c.slide} land ${c.landing} mantle ${c.mantle}`,
   );
   note(`fov ${f2(state.fov)}°`);
+  if (state.dogs.length) {
+    const d = state.dogs[0];
+    const h = state.dogHeard;
+    note(
+      `dog ${state.dogs.length} alive · ${d.cloud} cloud points · ${d.poses} poses ${d.ghosts} ghosts` +
+        ` · gait ${c.dogGait}`,
+    );
+    note(
+      `heard ${h.n} dog events (of the last 96) · ${h.classes.join(',') || '—'}` +
+        ` · walls ${h.walls.join(',')} · quality ${h.minQuality.toFixed(3)}..${h.maxQuality.toFixed(3)}`,
+    );
+  }
   if (hotkeys) note(`F6 dog-2 route ${hotkeys.before} → ${hotkeys.flipped} → ${hotkeys.restored}`);
   if (state.trail.n > 1) {
     const t = state.trail;
@@ -552,7 +591,15 @@ async function main() {
         // crouch steps (2.0 m -> 0.6 m) and so shifts +11 dots' worth of through-wall paint. The
         // 8 sprint steps, 10 slides and 1 landing are all >= 5 m classes and are untouched, which
         // is why the edge-vert count did not move at all.
-        'the route painted its baseline dots exactly': s.stats.paintedDots === 6853,
+        //
+        // RE-BASELINED again now the chain curtain is MATTER: 6853 -> 6893 dots. The curtain at
+        // door [c] (x 30..31.6, y 0..2.4, z 2.0..2.4) is a real surface that hangs in a real
+        // doorway — a sound in that doorway has to come back off it — so it joins the static bake
+        // as paintable non-solid geometry, adding 88 surfels to the map (118306 -> 118394). This
+        // is the only route that walks through [c], and it lights 40 of them. Measured by baking
+        // the same route against a map with the curtain removed: every other number, this route's
+        // holds included, is unchanged, because a hanging curtain carries no traversal affordance.
+        'the route painted its baseline dots exactly': s.stats.paintedDots === 6893,
         'and its baseline holds exactly': s.stats.paintedEdgeVerts === 232,
       }),
       { scripted: true },
@@ -632,8 +679,9 @@ async function main() {
         'the footsteps were delivered': s.stats.heard > 10 && s.stats.missed === 0,
         // The same route through the same paint pipeline, so the same two numbers as the top-down
         // capture — asserted here too, because it is the FIRST-PERSON run and a divergence between
-        // the two would mean the render path had somehow got into the paint path.
-        'its own footsteps painted the route': s.stats.paintedDots === 6853,
+        // the two would mean the render path had somehow got into the paint path. Re-baselined
+        // with it: 6853 -> 6893, the chain curtain at door [c] joining the bake (see above).
+        'its own footsteps painted the route': s.stats.paintedDots === 6893,
         'holds along the route were painted too': s.stats.paintedEdgeVerts === 232,
         // Not black, and not a flood. `any` is the whole read (paint + shell); `lit` is paint
         // bright enough to navigate by. Measured 0.107% lit / 0.878% any, re-baselined from 5.1%
@@ -858,6 +906,85 @@ async function main() {
         // Sim seconds: the pings are at 5.0 (Q) and 6.5 (E), the route ends at 7.5. `quietUntil`
         // is the instant the paint delta is measured from — inside the silence, before the press.
         trace: { quietUntil: 5.0, inkFrom: 4.9, inkTo: 8.2 },
+      },
+    );
+
+    // ---------------------------------------------------------------------------------------
+    // Milestone 5: the Lantern rig (vision §15.2 — "track an unseen patrolling dog through one
+    // wall by its sound-paint"). The only capture with an animal in the world, and the only one
+    // whose paint is bought by something that is not the player.
+    //
+    // The route (core/debug.ts SCRIPTS `lantern`) sprints down hall B, mantles the 2.2 m
+    // machinery row and walks east along the top of it to a listening post at x ≈ 13, then stops
+    // and stays stopped. The post is ON the row for a reason: at floor level the wall stack
+    // between that ear and dog 1's patrol lane is two deep, and two walls is silence (vision
+    // §3.4). Standing on the row leaves exactly one — `w-listening` — so every dog event that
+    // arrives has `wallsToListener === 1` and a quality scaled by WALL1_QUALITY. That is the
+    // whole test: a dog that is never seen, never pinged and never in line of sight, painting a
+    // room through a wall for a player who is making no sound at all.
+    //
+    // `dogs=dog1` is the capture's own override of the roster default every other capture takes
+    // (see `capture()`): this is the one world that is supposed to have an animal in it.
+    // ---------------------------------------------------------------------------------------
+    await capture(
+      browser,
+      'fp-dog',
+      '?sim=script4&dogs=dog1',
+      (s, _blast, t) => ({
+        'route ran to the end': s.scriptDone === true,
+        'ended at the listening post on top of the machinery row':
+          Math.abs(s.pos[1] - 2.2) < 0.01 && Math.abs(s.pos[0] - 13.09) < 0.2 && Math.abs(s.pos[2] - 25.45) < 0.2,
+        // Exact, on a fixed input list: the whole self-noise budget of the run is these thirteen
+        // events, and then nothing. The route deliberately spends its noise early (sprint down the
+        // hall) and buys silence with the rest — a footfall after the post would put the player's
+        // own paint into the number below and the read would stop being the dog's.
+        'the player spent exactly the route’s own noise':
+          s.counts.sprintStep === 6 &&
+          s.counts.walkStep === 5 &&
+          s.counts.crouchStep === 1 &&
+          s.counts.mantle === 1 &&
+          s.counts.landing === 0 &&
+          s.counts.slide === 0,
+        // Vision §3.3: a patrolling dog emits its gait every 0.8 m travelled, so a dog that is
+        // walking at all cannot be quiet. Sixty is a floor, not a measurement — what it fences is
+        // a route follower that stalled or a gait emitter that stopped emitting.
+        'the dog trotted the whole run': s.counts.dogGait > 60,
+        // The Lantern claim itself, read off the delivered feed. Every dog event arrived through
+        // exactly one wall (never zero — line of sight would make this a different test — and
+        // never two, which the pipeline drops), and the qualities are real numbers inside the
+        // one-wall band: WALL1_QUALITY (0.45) is the ceiling a through-wall event can ever reach,
+        // and `maxQuality > 0` is the difference between hearing the dog and merely logging it.
+        'the dog was heard, and only through the wall':
+          s.dogHeard.n > 0 &&
+          s.dogHeard.classes.length === 1 &&
+          s.dogHeard.classes[0] === 'dogGait' &&
+          s.dogHeard.walls.length === 1 &&
+          s.dogHeard.walls[0] === 1,
+        'through-wall quality stayed inside its own band':
+          s.dogHeard.maxQuality > 0 && s.dogHeard.maxQuality <= 0.45 && s.dogHeard.minQuality >= 0,
+        // `quietUntil: 10` samples the painted count nearly four seconds after the player's last
+        // footfall, so everything above it was painted by the animal. Vision §6: "dogs are walking
+        // lanterns". This is that sentence as a number.
+        'the dog kept painting after the player went silent': s.stats.paintedDots > t.paintedQuiet + 300,
+        // Vision §3.7: what the look is handed is a photograph, never a prediction — live poses
+        // for what is being heard now, frozen ghosts for what was. Both present means the freeze
+        // path ran and the prune did not eat it.
+        'the look was given both live poses and cooling ghosts':
+          s.dogs.length === 1 && s.dogs[0].poses > 0 && s.dogs[0].ghosts > 0,
+        // The body is a point cloud like everything else (vision §12): a fixed lattice solve, not
+        // a mesh. Exact, because the solver is deterministic and the budget is ~600 points a dog.
+        'the dog body is the budgeted cloud': s.dogs[0].cloud === 596,
+        // The dog's own layer obeys the same saturation law as the world's (vision §12): red-orange
+        // is not white, and a body at 3 m through a wall must not fuse into a sheet.
+        'the dog never saturates the frame': t.peak.white <= 0.02,
+        'and is drawn as dots, not a sheet': t.peak.whiteBlob <= SHEET_BLOB_DOTS * dotArea(t.peak.height),
+      }),
+      {
+        scripted: true,
+        // Sim seconds: the player's last sound is at 6.38 and the route ends at 32.0, which puts
+        // the capture inside dog 1's audible window on the far side of the wall. The ink window
+        // is the tail of that — the frames where the dog is actually on screen.
+        trace: { quietUntil: 10, inkFrom: 28, inkTo: 40 },
       },
     );
   } finally {

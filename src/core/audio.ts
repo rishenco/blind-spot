@@ -170,11 +170,9 @@ export class AudioEngine {
     const master = this.master;
     const noise = this.noise;
     if (!ctx || !master || !noise || ctx.state !== 'running') return;
-    // Only the player's own classes have voices so far; a dog's gait and a prop's clatter get
-    // their own synths with their milestones and are ignored rather than faked until then.
-    // Audibility is NOT decided here — everything reaching this point already passed the
-    // delivery gate in paint.ts (see the header).
-    if (e.source !== 'self') return;
+    // Source is not a gate: what is playable is decided by CLASS, in the switch below, and an
+    // unhandled class returns rather than being faked. Audibility is not decided here either —
+    // everything reaching this point already passed the delivery gate in paint.ts (see header).
 
     // How well it arrived, as a gain scalar. One number for every class: a sound heard from the
     // far side of the room, or through a wall, is the same sound quieter (vision §3.4).
@@ -221,6 +219,37 @@ export class AudioEngine {
       case 'qPing':
         // A soft 500 Hz pulse: the room-read, deliberately blunt next to the E-ping's question.
         this.pulse(t, 0.2 * v, 500, 0.16);
+        break;
+      case 'dogGait': {
+        // Two hard ticks a breath apart — the diagonal pair of a trot, which is why the dog is
+        // heard on a stride rather than on a step. Higher and drier than any of the player's own
+        // footfalls: vision §6 makes the dog a thing you TRACK by ear, and the first thing a
+        // tester has to be able to say is "that is not me" (visual-brief §1.9, §15.2).
+        const heat = e.variant === 'chase' ? 1 : e.variant === 'investigate' ? 0.5 : 0;
+        const gain = (0.16 + 0.16 * heat) * v;
+        this.tick(t, gain, 2400 + 500 * heat, 0.03, e.fuzzSeed);
+        this.tick(t + 0.055 - 0.02 * heat, gain * 0.8, 2200 + 500 * heat, 0.03, (e.fuzzSeed + 0.37) % 1);
+        break;
+      }
+      case 'propKnock':
+        // Struck tin: a bright metallic ring over the impact's own noise burst. The ring's pitch
+        // and length come off the paint radius — the same 8→12 m scale the event carries — so a
+        // nudge and a full-speed kick are audibly different sizes of mistake (vision §8).
+        this.clatter(t, clamp01(invLerp(EV.propKnock.paint, EV.propKnock.paintMax ?? 12, e.paintRadius)), e.fuzzSeed, v);
+        break;
+      case 'chainRattle':
+        // A shimmer, not a hit: a longer noise wash swept high, so the curtain never reads as a
+        // can. The quiet row (a crouched pass) is shorter and darker — the audible reward for
+        // vision §8's "crouch through" being a real answer rather than a slower one.
+        if (e.variant === 'quiet') this.scrape(t, 0.09 * v, 0.16, 3000, 5200, e.fuzzSeed);
+        else this.scrape(t, 0.24 * v, 0.34, 4200, 7000, e.fuzzSeed);
+        break;
+      case 'beaconHum':
+        // Two soft tones a major third apart: the one friendly interval in the game, reserved for
+        // the objective (vision §3.2 gives gold to the objective and nothing else). It is a
+        // beacon — it is supposed to be the sound you steer toward.
+        this.pulse(t, 0.1 * v, 660, 0.3);
+        this.pulse(t + 0.12, 0.085 * v, 831, 0.34);
         break;
       default:
         return;
@@ -293,6 +322,34 @@ export class AudioEngine {
     src.connect(bp).connect(g).connect(this.master!);
     src.start(t, seed * (NOISE_SECONDS - decay - 0.01));
     src.stop(t + decay + 0.01);
+  }
+
+  /**
+   * A struck can: a noise burst plus two inharmonic partials that ring on past it.
+   *
+   * Inharmonic on purpose — a can is a tube, not a string, and two tones an irrational ratio
+   * apart beat against each other instead of fusing into a note. That beating is what makes it
+   * read as metal rather than as a chime, and it is what keeps it distinct from the beacon, which
+   * is the only consonant thing in the game.
+   */
+  private clatter(t: number, strength: number, seed: number, vol: number): void {
+    const ctx = this.ctx!;
+    this.tick(t, (0.2 + 0.25 * strength) * vol, 1800, 0.045, seed);
+    const base = 720 + seed * 260;
+    for (const [mult, level, dur] of [
+      [1, 0.16, 0.34],
+      [2.71, 0.09, 0.22],
+    ] as const) {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = base * mult;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime((level + level * strength) * vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0005, t + dur * (0.6 + 0.4 * strength));
+      osc.connect(g).connect(this.master!);
+      osc.start(t);
+      osc.stop(t + dur + 0.05);
+    }
   }
 
   /** A landing: the tick plus a body — a low sine dropping in pitch. */

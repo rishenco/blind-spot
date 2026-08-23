@@ -205,11 +205,12 @@ describe('audio is a pure consumer of the bus (engine-plan §8)', () => {
     }
   });
 
-  it('sounds exactly the implemented self classes and silently ignores the rest', () => {
+  it('sounds exactly the implemented classes and silently ignores the rest', () => {
     withAudio((bus, engine) => {
       // `mantle` gives the pull-up its own scuff, so the ears agree with the event the verb
-      // publishes; the two pings are the deliberate perception verbs (vision §3.5).
-      for (const c of [
+      // publishes; the two pings are the deliberate perception verbs (vision §3.5); the dog, the
+      // props and the beacon are the world's own voices (vision §3.3, §6, §8).
+      const implemented: SoundClass[] = [
         'crouchStep',
         'walkStep',
         'sprintStep',
@@ -218,18 +219,20 @@ describe('audio is a pure consumer of the bus (engine-plan §8)', () => {
         'mantle',
         'qPing',
         'ePing',
-      ] as SoundClass[]) {
-        bus.emit(ev(c));
-      }
-      expect(engine.played).toBe(8);
+        'dogGait',
+        'propKnock',
+        'chainRattle',
+        'beaconHum',
+      ];
+      for (const c of implemented) bus.emit(ev(c));
+      expect(engine.played).toBe(implemented.length);
       // Classes whose milestone has not landed yet are ignored, not faked.
-      for (const c of ['detonation', 'propKnock', 'beaconHum', 'dogGait'] as SoundClass[]) {
-        bus.emit(ev(c));
-      }
-      expect(engine.played).toBe(8);
-      // And a sound that is not yours is not played (M3 owns delivery).
-      bus.emit({ ...ev('sprintStep'), source: 'dog' });
-      expect(engine.played).toBe(8);
+      bus.emit(ev('detonation'));
+      expect(engine.played).toBe(implemented.length);
+      // What may be played is decided by CLASS, never by who made the sound: a footstep is a
+      // footstep whoever's foot it was, and a teammate's is the same event with another source.
+      bus.emit({ ...ev('sprintStep'), source: 'teammate' });
+      expect(engine.played).toBe(implemented.length + 1);
     });
   });
 

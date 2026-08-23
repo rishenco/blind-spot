@@ -13,12 +13,14 @@
  */
 
 import { SIM_MAX_STEPS, SIM_STEP } from './const.js';
+import { DogSystem } from './dog.js';
 import { EventBus } from './events.js';
 import { clamp01, lerp } from './math.js';
 import { buildWorld, type World } from './map/build.js';
 import type { MapDef } from './map/types.js';
 import { makeInput, MovementController, type MoveInput } from './movement.js';
 import { PlayerSystems } from './player.js';
+import { PropSystem } from './props.js';
 
 export type Stance = 'stand' | 'crouch' | 'slide' | 'air' | 'ladder';
 
@@ -46,8 +48,21 @@ export interface SimView {
   readonly bus: EventBus;
   readonly movement: MovementController;
   readonly playerSystems: PlayerSystems;
+  readonly dogs: DogSystem;
+  readonly props: PropSystem;
   readonly time: number;
   readonly steps: number;
+}
+
+/**
+ * Who else is alive this run. Both default to NOBODY, and that default is load-bearing: a dog and
+ * a beacon emit on their own schedule whether or not anyone is listening, so a measurement taken
+ * in a world that has them is not the same measurement. A caller that wants company asks for it
+ * by name; `core/roster.ts` turns a URL or a script's declaration into these lists.
+ */
+export interface SimOptions {
+  readonly dogs?: readonly string[];
+  readonly props?: readonly string[];
 }
 
 export class Sim {
@@ -57,6 +72,8 @@ export class Sim {
   readonly bus = new EventBus();
   readonly movement: MovementController;
   readonly playerSystems: PlayerSystems;
+  readonly dogs: DogSystem;
+  readonly props: PropSystem;
   /** Intent for the next step. The boot layer (or the scripted harness) writes it. */
   readonly input: MoveInput = makeInput();
   time = 0;
@@ -75,7 +92,7 @@ export class Sim {
   private prevY: number;
   private prevZ: number;
 
-  constructor(map: MapDef) {
+  constructor(map: MapDef, options: SimOptions = {}) {
     // A Sim OWNS its map. Handed the caller's object by reference, `sampleMap` becomes a live
     // singleton every run writes through — the debug overlay's dog toggle already mutates it,
     // and vision §11's per-run randomisation ("dog patrols, cell placement, cache and trap
@@ -97,6 +114,8 @@ export class Sim {
     };
     this.movement = new MovementController(this.world, this.player, this.bus);
     this.playerSystems = new PlayerSystems(this.world, this.player, this.movement, this.bus);
+    this.props = new PropSystem(this.world, this.player, this.movement, this.bus, options.props ?? []);
+    this.dogs = new DogSystem(this.world, this.bus, options.dogs ?? []);
     this.prevX = this.player.x;
     this.prevY = this.player.y;
     this.prevZ = this.player.z;
@@ -124,6 +143,12 @@ export class Sim {
     this.bus.now = this.time;
     this.movement.update(dt, this.input);
     this.playerSystems.update(dt);
+    // Props before dogs, and both after the body: a can is knocked by where the body ENDED this
+    // step, and a dog that walks past a curtain must not be able to rattle it before the step
+    // that moved the dog has run. Within a step the emission order is therefore always
+    // self → prop → dog, which is what consumers are entitled to rely on (events.ts).
+    this.props.update(dt);
+    this.dogs.update(dt);
   }
 
   /** Fraction of a step left over, for render-side interpolation. */
@@ -154,6 +179,8 @@ export class Sim {
       bus: this.bus,
       movement: this.movement,
       playerSystems: this.playerSystems,
+      dogs: this.dogs,
+      props: this.props,
       time: this.time,
       steps: this.steps,
     };

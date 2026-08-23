@@ -28,7 +28,11 @@
  *                   switch (comfort law, vision §12)
  *        ?flat      reduce-flashing comfort mode (vision §12); also honours the OS setting
  *        ?sim=script  run a scripted movement route instead of reading the keyboard
- *                     (script|script1|corridor, script2|mantle — see core/debug.ts SCRIPTS)
+ *                     (script|script1|corridor, script2|mantle, script3|ping, script4|lantern —
+ *                     see core/debug.ts SCRIPTS)
+ *        ?dogs=  ?props=   which patrols and which props are live: `none`, `all`, or a comma
+ *                     list of ids. Absent means the script's own declaration on a scripted run
+ *                     and the map's defaults on a human one (core/roster.ts).
  */
 
 import { PerspectiveCamera, WebGLRenderer } from 'three';
@@ -40,6 +44,7 @@ import { yawToThreeRotationY } from './core/math.js';
 import { sampleMap } from './core/map/sampleMap.js';
 import { CameraRig } from './core/movement.js';
 import { PaintPipeline } from './core/paint.js';
+import { resolveRoster } from './core/roster.js';
 import { Sim } from './core/sim.js';
 import type { Stance } from './core/sim.js';
 import { bakeSurfels, type SurfelField } from './core/surfels.js';
@@ -54,7 +59,29 @@ const overlayRoot = document.getElementById('overlay');
 const boot = document.getElementById('boot');
 if (!app || !hud || !overlayRoot) throw new Error('boot: #app / #hud / #overlay missing from index.html');
 
-const sim = new Sim(sampleMap);
+/**
+ * WHO ELSE IS ALIVE. A dog and a beacon are emitters that never stop, so their membership is
+ * resolved BEFORE the Sim exists rather than toggled afterwards: paint is a shared buffer and a
+ * capture's numbers are the sum of everything that ever sounded in front of it (core/roster.ts).
+ */
+const scriptId = SCRIPT_ALIASES[params.get('sim') ?? ''];
+const scriptDef = scriptId ? SCRIPTS[scriptId] : undefined;
+const sim = new Sim(sampleMap, {
+  dogs: resolveRoster({
+    param: params.get('dogs'),
+    scripted: Boolean(scriptDef),
+    scriptRoster: scriptDef?.dogs,
+    known: sampleMap.dogRoutes.map((r) => r.id),
+    defaults: sampleMap.dogRoutes.filter((r) => r.defaultOn).map((r) => r.id),
+  }),
+  props: resolveRoster({
+    param: params.get('props'),
+    scripted: Boolean(scriptDef),
+    scriptRoster: scriptDef?.props,
+    known: sampleMap.props.map((p) => p.id),
+    defaults: sampleMap.props.map((p) => p.id),
+  }),
+});
 const debug = new DebugOverlay(overlayRoot, sim);
 const rig = new CameraRig();
 const audio = new AudioEngine();
@@ -80,6 +107,9 @@ const paint = new PaintPipeline(field, sim.world);
 paint.profile = true;
 paint.attach(sim.bus);
 audio.attach(paint);
+// A dog becomes visible only through the same delivered feed the player hears with (core/dog.ts):
+// it is drawn from the poses its own sound was HEARD at, never from where it is.
+sim.dogs.attach(paint);
 
 /**
  * THE LISTENER is the player, and it is set from the SIM pose rather than the interpolated one.
@@ -101,8 +131,7 @@ function syncListener(): void {
  * clock: the route then plays out identically on a 144 Hz desktop and a throttled headless
  * browser, which is the whole point of using it as a verification fixture.
  */
-const scriptId = SCRIPT_ALIASES[params.get('sim') ?? ''];
-const script = scriptId ? new ScriptedInput(sim, SCRIPTS[scriptId]!) : null;
+const script = scriptDef ? new ScriptedInput(sim, scriptDef) : null;
 const SCRIPT_STEPS_PER_FRAME = 4;
 
 // ---------------------------------------------------------------------------------------
@@ -193,7 +222,7 @@ if (renderer) {
     camera,
     surfelGeom: field.geometry,
     edgeGeom: field.edgeGeometry,
-    dog: [], // M5
+    dog: sim.dogs.views,
     events: {
       subscribe: (cb) => paint.onDelivered(cb),
       recent: (limit) => paint.recent(limit),
@@ -415,6 +444,13 @@ debug.extraLines = () => {
     `render     ${calls} draw calls  ${evRate.toFixed(1)} event/s  look ${looks ? looks.id : 'none'}`,
     `halo       ${ps.audibleRadius.toFixed(1)} m audible   energy ${ps.energy.toFixed(0)}/${ps.energyMax}` +
       `   hands ${ps.hands.state} ${ps.hands.phase.toFixed(2)}`,
+    // The dog line reads the PICTURE, not the plan: `poses` is how much of a dog is on screen
+    // right now and `ghosts` is how much of one is remembered, both of which are zero for a dog
+    // that is standing still two rooms away (vision §6). `gait` is what the bus published.
+    `dogs       ${sim.dogs.views.length} alive  ${sim.bus.counts.dogGait} gait  ` +
+      `${sim.dogs.views.reduce((n, d) => n + d.poseHistory.length, 0)} poses  ` +
+      `${sim.dogs.views.reduce((n, d) => n + d.ghosts.length, 0)} ghosts` +
+      `   props ${sim.props.cans.length} cans ${sim.props.chains.length} chains`,
   ];
 };
 

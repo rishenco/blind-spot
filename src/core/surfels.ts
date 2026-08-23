@@ -421,6 +421,7 @@ export function bakeSurfels(world: World): SurfelField {
   }
 
   bakeLadders(world, edges);
+  samples += bakeChains(world, px, py, pz, nx, ny, nz);
 
   // --- pack into patch-ordered typed arrays ------------------------------------------------
   const dotCount = px.length;
@@ -989,6 +990,73 @@ function bakeLadders(world: World, out: RawEdge[]): void {
       }
     }
   }
+}
+
+/**
+ * Chain curtains as MATTER (vision §8, §1.2).
+ *
+ * A curtain is not a solid — it has no collision, you walk through it, and the whole point of it
+ * is that passing through costs noise rather than time — and it is not an occluder either: a
+ * doorway hung with chain does not muffle a sound the way a wall does. But it exists, and vision
+ * §1.2 cuts both ways: an E-ping fired down that doorway has to come back with something, or the
+ * player is being told an obstacle they can hear is not there. So it bakes into the same static
+ * lattice as everything else, and is simply never consulted by collision or by wall counting.
+ *
+ * Both sides are baked, a hand's thickness apart either side of the curtain's mid-plane and
+ * facing outward. Not coincident: one world position carries exactly one dot everywhere else in
+ * the lattice (test/surfels.spec.ts pins it globally), and a doubled position would be a second
+ * dot answering for the same place forever. The offset is the chain's own thickness, which is
+ * both true and small enough to read as one hanging sheet rather than two.
+ *
+ * Every SECOND lattice column carries strands. A curtain filled edge to edge is indistinguishable
+ * from a wall, which is exactly the read vision §8 does not want — these are "read-and-route
+ * puzzles (crouch through, go around)", so the geometry has to say "hanging, passable" at a
+ * glance. The gap is the whole message.
+ */
+const CHAIN_HALF_THICK = FACE_PROBE;
+
+function bakeChains(
+  world: World,
+  px: number[],
+  py: number[],
+  pz: number[],
+  nx: number[],
+  ny: number[],
+  nz: number[],
+): number {
+  let samples = 0;
+  for (const p of world.map.props) {
+    if (p.type !== 'chain') continue;
+    const thinZ = p.thinAxis === 'z';
+    const mid = thinZ ? (p.min[2] + p.max[2]) / 2 : (p.min[0] + p.max[0]) / 2;
+    const lo = thinZ ? p.min[0] : p.min[2];
+    const hi = thinZ ? p.max[0] : p.max[2];
+    for (let i = latticeFirstAtOrAfter(lo, SURFEL_SPACING); latticeCentre(i, SURFEL_SPACING) <= hi; i++) {
+      if (i % 2 !== 0) continue;
+      const across = latticeCentre(i, SURFEL_SPACING);
+      for (
+        let j = latticeFirstAtOrAfter(p.min[1], SURFEL_SPACING);
+        latticeCentre(j, SURFEL_SPACING) <= p.max[1];
+        j++
+      ) {
+        const y = latticeCentre(j, SURFEL_SPACING);
+        samples++;
+        // Air-only, same predicate the walls use: a curtain authored across a doorway that got
+        // filled in later must not leave a sheet of dots floating inside the fill.
+        if (!insideAir(world, thinZ ? across : mid, y, thinZ ? mid : across)) continue;
+        for (const sign of [-1, 1] as const) {
+          const plane = mid + sign * CHAIN_HALF_THICK;
+          px.push(thinZ ? across : plane);
+          py.push(y);
+          pz.push(thinZ ? plane : across);
+          nx.push(thinZ ? 0 : sign);
+          ny.push(0);
+          nz.push(thinZ ? sign : 0);
+        }
+      }
+    }
+  }
+  return samples;
 }
 
 // ------------------------------------------------------------------------------------------

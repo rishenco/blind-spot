@@ -45,6 +45,7 @@ const C = {
   chain: '#e8e08a',
   beacon: '#ffd54a',
   route: '#ff8a5c',
+  dogBody: '#ff5a2c',
   player: '#ffb347',
   trail: 'rgba(255,179,71,0.45)',
   zoneLabel: '#8fd8ee',
@@ -184,6 +185,11 @@ export class DebugOverlay {
     const route = this.sim.map.dogRoutes.find((r) => r.id === 'dog2');
     if (!route) return;
     route.defaultOn = !route.defaultOn;
+    // The plan and the world are the same statement (vision §1.2): flipping the flag without
+    // spawning the animal would draw a patrol that is not walking, which is the one thing a
+    // debug view may never do.
+    if (route.defaultOn) this.sim.dogs.spawn(route.id);
+    else this.sim.dogs.despawn(route.id);
     if (this.state.topDown) this.draw();
   }
 
@@ -585,12 +591,18 @@ export class DebugOverlay {
 
   private drawProps(X: (n: number) => number, Z: (n: number) => number, S: (n: number) => number): void {
     const { ctx } = this;
+    // A can that has been kicked is somewhere else now, and the plan says where: the authored
+    // spot is only the truth until someone walks into it (vision §1.2).
+    const moved = new Map(this.sim.props.cans.map((c) => [c.id, c]));
     for (const p of this.sim.map.props) {
       if (p.type === 'can') {
+        const live = moved.get(p.id);
         ctx.fillStyle = C.can;
+        ctx.globalAlpha = live ? 1 : 0.45;
         ctx.beginPath();
-        ctx.arc(X(p.x), Z(p.z), Math.max(2.5, S(0.12)), 0, Math.PI * 2);
+        ctx.arc(X(live ? live.x : p.x), Z(live ? live.z : p.z), Math.max(2.5, S(0.12)), 0, Math.PI * 2);
         ctx.fill();
+        ctx.globalAlpha = 1;
       } else if (p.type === 'chain') {
         ctx.strokeStyle = C.chain;
         ctx.lineWidth = 2;
@@ -632,7 +644,9 @@ export class DebugOverlay {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     for (const route of this.sim.map.dogRoutes) {
-      const on = route.defaultOn;
+      // Solid means WALKING, not authored-on: `?dogs=` decides membership at boot (core/roster.ts)
+      // and F6 changes it mid-run, so the plan reads the live roster and never the intent.
+      const on = this.sim.dogs.has(route.id);
       ctx.strokeStyle = C.route;
       ctx.globalAlpha = on ? 0.95 : 0.4;
       ctx.lineWidth = on ? 1.75 : 1.25;
@@ -675,6 +689,31 @@ export class DebugOverlay {
       this.reserveText(tag, tx, tz);
       ctx.fillText(tag, tx, tz);
       ctx.globalAlpha = 1;
+    }
+
+    // Where the animals ACTUALLY are. This is the plan, not the game: the first-person image is
+    // forbidden to draw a dog from its position (vision §6), and the top-down view exists to be
+    // compared against that — you read the route here and check what the ear reported there.
+    for (const d of this.sim.dogs.bodies) {
+      const [fx, fz] = yawToForward(d.yaw);
+      ctx.fillStyle = C.dogBody;
+      ctx.strokeStyle = C.dogBody;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(X(d.x), Z(d.z), 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      // A nose, so the plan says which way it is facing — and a hollow ring while it is stopped,
+      // because a stopped dog is a silent dog and silence is the whole mechanic (vision §6).
+      ctx.beginPath();
+      ctx.moveTo(X(d.x), Z(d.z));
+      ctx.lineTo(X(d.x) + fx * 11, Z(d.z) + fz * 11);
+      ctx.stroke();
+      if (!d.moving) {
+        ctx.fillStyle = C.bg;
+        ctx.beginPath();
+        ctx.arc(X(d.x), Z(d.z), 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 
@@ -880,6 +919,13 @@ export interface ScriptSegment {
   readonly at: number;
   /** Absolute target yaw; applied through the same look path as the mouse. */
   readonly yaw?: number;
+  /**
+   * Absolute target pitch, same path as yaw. A route that only ever looks level does not need
+   * this, but a route whose subject is BELOW it does: the Lantern read (vision §15.2) watches a
+   * dog on the floor from the top of the machinery row, and at that depression angle a level
+   * camera has the dog outside the frustum entirely.
+   */
+  readonly pitch?: number;
   readonly forward?: number;
   readonly right?: number;
   readonly sprint?: boolean;
@@ -909,6 +955,14 @@ export interface ScriptDef {
   readonly end: number;
   readonly segments: readonly ScriptSegment[];
   readonly pings?: readonly ScriptPing[];
+  /**
+   * Which dogs and props the route needs alive (core/roster.ts). Omitted means NONE: a route is a
+   * reproducible measurement, and every other emitter in the world adds paint to the same shared
+   * buffer, so a route that did not ask for company must not get any. A route that is ABOUT a dog
+   * says so here, and that declaration is part of the route the same way its waypoints are.
+   */
+  readonly dogs?: readonly string[];
+  readonly props?: readonly string[];
 }
 
 /**
@@ -981,6 +1035,39 @@ export const SCRIPTS: Record<string, ScriptDef> = {
       { at: 6.5, mode: 'e', note: 'E — one directed question, at the tank' },
     ],
   },
+  /**
+   * The Lantern rig (vision §15.2): stand still behind a wall and track a patrolling dog by the
+   * sound-paint it makes for you.
+   *
+   * The route is the `mantle` traverse plus a walk west along the top of the machinery row to a
+   * post at x 13, and then nothing at all — the player is silent for the whole read. Everything
+   * that happens after that is dog 1's, which is the entire point: the geometry beyond
+   * `w-listening` is painted by an animal that does not know it is holding a lamp (vision §6).
+   *
+   * The post is ON the row rather than on the hall floor beside it. At floor level the dog's
+   * sound reaches the ear through the wall AND through the row, and two walls is silence
+   * (vision §3.4); from the top the row is under the ear and the wall is the only thing between.
+   *
+   * The end time sits just after dog 1 leaves its (14, 28) pause heading west, so the read runs
+   * through the closest approach of the whole patrol — and it is the LAST leg of the loop, so a
+   * capture that keeps stepping for another second or two sees more of the same pass rather than
+   * an empty hall.
+   */
+  lantern: {
+    id: 'lantern',
+    title: 'B hall: mantle the row · go silent · hear dog 1 through the wall',
+    end: 32.0,
+    dogs: ['dog1'],
+    segments: [
+      { at: 0.0, yaw: Math.PI / 2, forward: 1, note: 'walk south through door [d]' },
+      { at: 1.2, yaw: 1.19, forward: 1, sprint: true, note: 'sprint south-east between the column rows' },
+      { at: 3.7, yaw: Math.PI / 2, forward: 1, sprint: true, note: 'square up on the machinery row' },
+      { at: 4.4, yaw: Math.PI / 2, forward: 1, jump: true, note: 'mantle the 2.2 m row' },
+      { at: 5.3, yaw: 0, forward: 1, note: 'walk east along the top of the row' },
+      { at: 6.6, note: 'stop' },
+      { at: 7.0, yaw: Math.PI / 2, pitch: -0.42, note: 'face the wall, ear down — and go silent' },
+    ],
+  },
 };
 
 /** `?sim=` values, so the query string can stay human ( `?sim=script` = the corridor route ). */
@@ -992,6 +1079,8 @@ export const SCRIPT_ALIASES: Record<string, string> = {
   mantle: 'mantle',
   script3: 'ping',
   ping: 'ping',
+  script4: 'lantern',
+  lantern: 'lantern',
 };
 
 export class ScriptedInput {
@@ -1022,6 +1111,7 @@ export class ScriptedInput {
       input.crouch = s.crouch ?? false;
       if (s.jump) input.jumpPressed = true;
       if (s.yaw !== undefined) input.yawDelta = angleDelta(this.sim.player.yaw, s.yaw);
+      if (s.pitch !== undefined) input.pitchDelta = s.pitch - this.sim.player.pitch;
       this.note = s.note ?? '';
     }
     // The ping track sets the same latch a keydown sets, for one step, and lets the step decide:

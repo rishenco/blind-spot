@@ -17,10 +17,9 @@
  * - Distance discipline is not optional (engine-plan §9, vision §12): dot alpha fades with camera
  *   distance, past ~20 m the read biases to edges, and there is a hard cut at 45 m.
  *
- * MILESTONE HONESTY. Several fields below cannot be filled yet. They are typed now, at their
- * final shape, and carry empty values until the milestone that owns them arrives: `dog` is M5.
- * A look may read them today and will simply get nothing — never a lie, never a placeholder that
- * looks like data (vision §1.2).
+ * HONESTY. A field with nothing in it carries an empty value, never a placeholder that looks like
+ * data (vision §1.2): no dogs alive means `dog` is an empty array, and a look reading it draws
+ * nothing rather than a guess.
  */
 
 import type { BufferGeometry, PerspectiveCamera, WebGLRenderer } from 'three';
@@ -29,33 +28,13 @@ import type { SoundEvent } from '../core/events.js';
 import type { HandsPose, PingResult, RigArm, RigBone } from '../core/player.js';
 import type { Stance } from '../core/sim.js';
 
-/** One frozen pose of a moving thing, for motion smear (vision §3.7). M5 fills these. */
-export interface PoseSample {
-  /** Sim time this pose was heard at. */
-  readonly time: number;
-  /** Body-space → world transform, column-major 4×4, ready for `Matrix4.fromArray`. */
-  readonly matrix: readonly number[];
-}
-
-/** A dog's last-heard photograph, cooling hot → rust then dissolving (vision §3.7). M5. */
-export interface GhostSnapshot {
-  readonly pose: PoseSample;
-  /** Sim time the ghost was frozen — the look ages it against `LookContext.time()`. */
-  readonly frozenAt: number;
-  /** Quality of the event that produced it: how sure the read is (visual-brief §1.13). */
-  readonly quality: number;
-}
-
-/** One dog as a look sees it: a body-local cloud plus what was last heard of it. M5. */
-export interface DogView {
-  readonly id: number;
-  /** Body-local sample cloud on the same 0.22 lattice discipline (engine-plan §7). */
-  readonly cloudGeom: BufferGeometry;
-  /** Newest last. Empty while the dog has made no sound this session. */
-  readonly poseHistory: readonly PoseSample[];
-  readonly ghosts: readonly GhostSnapshot[];
-  readonly lastEventQuality: number;
-}
+/**
+ * The dog's view contracts. Declared in core/dog.ts — core is what FILLS them, and a shape whose
+ * only declaration lived here would mean core importing from looks, which is the one direction
+ * this boundary does not allow. Re-exported so a look's import path is still this file.
+ */
+import type { DogView } from '../core/dog.js';
+export type { DogView, GhostSnapshot, PoseSample } from '../core/dog.js';
 
 /**
  * The hands rig (engine-plan §6). Core owns the POSE — a state, a phase, a fade and four bones
@@ -114,7 +93,7 @@ export interface LookContext {
   readonly surfelGeom: BufferGeometry;
   /** Line segments: position, dither, flagsHold, paintTime, paintIntensity. SHARED. */
   readonly edgeGeom: BufferGeometry;
-  /** Empty until M5. */
+  /** Every dog alive this run (core/dog.ts). Empty is the normal case, not a placeholder. */
   readonly dog: readonly DogView[];
   readonly events: EventFeed;
   readonly player: PlayerView;
