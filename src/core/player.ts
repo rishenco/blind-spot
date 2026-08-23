@@ -53,6 +53,12 @@ export interface PingResult {
   readonly event: SoundEvent | null;
   /** Null when it fired. */
   readonly refused: PingRefusal | null;
+  /**
+   * Sim time the press RESOLVED. A refusal emits nothing, so it has no event to carry its own
+   * stamp, and a readout that shows the reason has to know how old it is (vision §3.5: the ping
+   * is a decision made at a place — the answer to a press must not outlive the place).
+   */
+  readonly at: number;
 }
 
 /**
@@ -328,7 +334,7 @@ export class PlayerSystems {
 
     if (mode === 'q') {
       const event = this.bus.emit({ class: 'qPing', source: 'self', x: ex, y: ey, z: ez });
-      const out: PingResult = { mode, event, refused: null };
+      const out: PingResult = { mode, event, refused: null, at: this.now };
       this.lastPing = out;
       return out;
     }
@@ -347,7 +353,7 @@ export class PlayerSystems {
       cone: { dir: [dx, dy, dz], angleDeg: EV.ePing.coneDeg },
     });
     this.scheduleFarEnd(event, ex, ey, ez, dx, dy, dz);
-    const out: PingResult = { mode, event, refused: null };
+    const out: PingResult = { mode, event, refused: null, at: this.now };
     this.lastPing = out;
     return out;
   }
@@ -359,7 +365,7 @@ export class PlayerSystems {
   // ------------------------------------------------------------------------------------------
 
   private refuse(mode: PingMode, refused: PingRefusal): PingResult {
-    const out: PingResult = { mode, event: null, refused };
+    const out: PingResult = { mode, event: null, refused, at: this.now };
     this.lastPing = out;
     return out;
   }
@@ -368,6 +374,14 @@ export class PlayerSystems {
    * The E-ping is heard at BOTH ends (engine-plan §6): the beam lands somewhere and that landing
    * is a sound in its own right, 30 m worth of it, in a room you may be nowhere near. It is the
    * reason the directed ping is a bait tool and not a free telescope — it wakes what it looks at.
+   *
+   * The far end exists only where the beam IMPACTS something (engine-plan §6: "at beam impact
+   * center"). A beam that reaches its 40 m without touching a surface schedules nothing at all:
+   * vision law 2 — every sound has a real physical source — and the sound here is made by the
+   * struck surface, not by the beam. A miss is silent past your own outgoing chirp, and nothing
+   * may be added to compensate: hearing nothing come back IS the answer to the question.
+   * `hit.inside` (the beam started within a solid) has no near face to re-radiate, so it counts
+   * as no impact too.
    *
    * It PAINTS NOTHING (radius 0). The cone already painted everything the beam swept on its way
    * out; a second sphere at the far end would hand the player free geometry around a corner they
@@ -387,9 +401,9 @@ export class PlayerSystems {
     dy: number,
     dz: number,
   ): void {
-    let reach = e.paintRadius;
-    const hit = raycast(this.world, ex, ey, ez, dx, dy, dz, reach);
-    if (hit && !hit.inside) reach = Math.max(0, Math.min(reach, hit.t - EPING_FAR_BACKOFF));
+    const hit = raycast(this.world, ex, ey, ez, dx, dy, dz, e.paintRadius);
+    if (!hit || hit.inside) return;
+    const reach = Math.max(0, Math.min(e.paintRadius, hit.t - EPING_FAR_BACKOFF));
     // One slot is enough by construction: the flight of the longest beam is 40/85 = 0.47 s and
     // PING_COOLDOWN is 0.75 s, so a pending far end is always emitted before the next E-ping.
     this.pending = {
@@ -466,6 +480,10 @@ export class PlayerSystems {
    * practice every self event is delivered to self anyway (you stand at its origin); the one that
    * is not is the E-ping's far end, which is genuinely part of the same emission and genuinely
    * part of how loud that ping made you.
+   *
+   * So the hold is EMISSION-TIME and the far end refreshes it: vision §3.8's readout answers "how
+   * loud am I", a beam still in flight has not finished making you loud, and it lands as a 30 m
+   * event that anything near it can hear. A long beam therefore keeps the ring lit past the press.
    */
   private hearSelf(e: SoundEvent): void {
     if (e.source !== 'self') return;

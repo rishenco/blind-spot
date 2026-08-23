@@ -6,19 +6,29 @@
  * screenshots into `verify-out/` (git-ignored). Asserts boot + console cleanliness on every
  * capture. Milestone 1 verifies the boot screen and the top-down debug view, milestone 2 adds the
  * two scripted movement routes (`?sim=script`, `?sim=script2`) and reads the route out of the
- * debug trail as well as out of the end state. Milestone 3 adds the four FIRST-PERSON captures:
- * the black world, the world after a scripted route has painted it, the world a test detonation
- * lights, and the F3 numbers behind all three.
+ * debug trail as well as out of the end state. Milestone 3 adds the FIRST-PERSON captures: the
+ * black world, the world after a scripted route has painted it, the world a test detonation
+ * lights, and the F3 numbers behind all three. Milestone 4 adds the sonar route (`?sim=script3`)
+ * and runs the detonation at a second window size.
  *
  * Every capture measures TWO inks, and the difference matters:
  *   - `ink`   — the 2D debug overlay canvas (`#overlay canvas`), read with getImageData.
  *   - `glInk` — the first-person WebGL drawing buffer, read with readPixels inside the page
  *               (`window.blindspot.ink()`), which renders and reads back in the same task
- *               because a drawing buffer is undefined the moment you yield. Two thresholds:
- *               `lit` is paint, `any` also catches the 2 m contact shell, which is meant to be
- *               nearly invisible (vision §3.1).
+ *               because a drawing buffer is undefined the moment you yield. Three thresholds and
+ *               one structure: `lit` is paint, `any` also catches the 2 m contact shell, which is
+ *               meant to be nearly invisible (vision §3.1), `white` is saturation, and
+ *               `whiteBlob` is the largest connected run of saturated pixels — the only one of
+ *               the four that can tell a field of separate dots from a sheet.
  * A black screenshot that should show paint is a FAILURE even when every number passes, so the
  * captures are written to be looked at as well as asserted on.
+ *
+ * WHAT MAKES AN INK FRACTION COMPARABLE AT ALL. The near-field splat cap is a fraction of frame
+ * HEIGHT (looks/debug), so a capped dot's area scales as H² while the number of dots a surface
+ * puts on screen scales as W/H — their product is W·H, and a coverage FRACTION is therefore a
+ * property of the image rather than of the window. That is what lets a fence be written once and
+ * mean the same thing in every window, and `fp-detonation` is run at two materially different
+ * viewports to assert it instead of assuming it.
  *
  *   node scripts/verify.mjs [--no-build] [--port 4180]
  */
@@ -85,14 +95,105 @@ function serve(dir, port) {
 
 const problems = [];
 const note = (m) => console.log(`  ${m}`);
+const pct = (v) => `${(v * 100).toFixed(3)}%`;
+
+function assertAll(name, table) {
+  for (const [label, ok] of Object.entries(table)) {
+    if (!ok) problems.push(`${name}: failed check "${label}"`);
+  }
+}
+
+/**
+ * The reference viewport every measured figure in this file is quoted at, and one materially
+ * different in BOTH size and aspect (1.60 vs 1.78) for the scale-stability pair.
+ */
+const VIEWPORT = { width: 1600, height: 1000 };
+const VIEWPORT_SMALL = { width: 1280, height: 720 };
+
+/**
+ * One capped dot's area in pixels, at a frame `h` px tall — the unit the structural fences below
+ * are written in, so that they say the same thing at every window size.
+ *
+ * The near-field cap is a fraction of frame HEIGHT and the splat is round (the dot fragment shader
+ * discards outside r = 0.5), so a dot drawn at the cap covers π·(frac·h/2)² px. The fraction is
+ * read out of the look rather than copied into this file: it is look-private tuning (visual-brief
+ * §2), and a gate that hard-codes the number it is measuring against stops measuring the day the
+ * number moves.
+ */
+const capMatch = /const SPLAT_CAP_FRAC = ([0-9.]+)/.exec(
+  await readFile(join(ROOT, 'src/looks/debug/index.ts'), 'utf8'),
+);
+if (!capMatch) throw new Error('SPLAT_CAP_FRAC not found in src/looks/debug/index.ts');
+const SPLAT_CAP_FRAC = Number(capMatch[1]);
+const dotArea = (h) => Math.PI * ((SPLAT_CAP_FRAC * h) / 2) ** 2;
+
+/**
+ * ANTI-SHEET GUARD, in dot areas (vision §12: "visual porridge must be structurally impossible").
+ *
+ * A coverage percentage cannot tell a cloud from a sheet: a frame of separate saturated dots and a
+ * frame with one saturated rectangle can read the same percentage, and only the second has lost
+ * the near-field read. So the largest connected run of saturated pixels is fenced instead, in
+ * units of one capped dot.
+ *
+ * DERIVATION. Measured, at the peak of a point-blank detonation: 1.03 dot areas at 1600×1000,
+ * 1.06 at 1280×720, 1.04 at 1920×1080, 1.03 at 1366×768 — one dot, everywhere, because capped
+ * dots at a 46 px lattice pitch cannot touch. (Just over 1.00 because a rasterised disc covers a
+ * few more pixels than πr².) The threshold is set an order of magnitude above that: a dozen dots
+ * would have to fuse into one connected region before it trips, which no measured frame comes
+ * within 11× of. The failure it exists for is far above even that — building the same capture
+ * with the cap lifted (splats at their raw footprint, the pre-cap behaviour) puts the largest blob
+ * at 478 dot areas at 1600×1000 and 353 at 1280×720, i.e. 40× and 29× over this line.
+ */
+const SHEET_BLOB_DOTS = 12;
+
+/** How far two ink fractions measured at different viewports may disagree (see the header). */
+const SCALE_TOL = 0.15;
+
+/**
+ * In-page recorder, installed before the page's own scripts. One row per frame —
+ * [sim time, painted dots, energy, audible radius] — plus the worst white frame inside the sim
+ * seconds `inkFrom .. inkTo`.
+ *
+ * Ink is a full render plus a readback, so it is sampled across the window a capture actually
+ * asks about and not for the whole route. The rest is four numbers a frame and costs nothing.
+ */
+function traceScript(win) {
+  window.__trace = [];
+  window.__peak = null;
+  window.__peakT = -1;
+  const tick = () => {
+    const bs = window.blindspot;
+    if (bs) {
+      const t = bs.sim.time;
+      const ps = bs.sim.playerSystems;
+      window.__trace.push([t, bs.field.paintedDots, ps.energy, ps.audibleRadius]);
+      if (t >= win.inkFrom && t <= win.inkTo) {
+        const ink = bs.ink();
+        if (!window.__peak || ink.white > window.__peak.white) {
+          window.__peak = ink;
+          window.__peakT = t;
+        }
+      }
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
 
 async function capture(browser, name, query, checks, opts = {}) {
-  const page = await browser.newPage({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1 });
+  const viewport = opts.viewport ?? VIEWPORT;
+  const page = await browser.newPage({ viewport, deviceScaleFactor: 1 });
   const errors = [];
   page.on('console', (m) => {
     if (m.type() === 'error') errors.push(`console: ${m.text()}`);
   });
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+
+  // Watch the run from its first frame. A scripted route is over before an `evaluate` issued from
+  // node could install anything, and everything a sonar capture needs to see happens mid-route:
+  // the painted count in the silence before the press, the dip in the reactor, the halo's peak.
+  // An init script runs before the page's own scripts do, so no frame is missed.
+  if (opts.trace) await page.addInitScript(traceScript, opts.trace);
 
   await page.goto(`http://127.0.0.1:${PORT}/index.html${query}`, { waitUntil: 'load' });
   await page.waitForFunction(() => Boolean(window.blindspot), null, { timeout: 15000 });
@@ -102,6 +203,32 @@ async function capture(browser, name, query, checks, opts = {}) {
     await page.waitForFunction(() => window.blindspot.script?.done === true, null, { timeout: 60000 });
   }
   await page.waitForTimeout(600);
+
+  let trace = null;
+  if (opts.trace) {
+    trace = await page.evaluate((quietUntil) => {
+      const rows = window.__trace;
+      let minEnergy = Infinity;
+      let maxAudible = 0;
+      let paintedQuiet = -1;
+      let gap = 0;
+      for (let i = 0; i < rows.length; i++) {
+        minEnergy = Math.min(minEnergy, rows[i][2]);
+        maxAudible = Math.max(maxAudible, rows[i][3]);
+        if (rows[i][0] < quietUntil) paintedQuiet = rows[i][1];
+        if (i > 0) gap = Math.max(gap, rows[i][0] - rows[i - 1][0]);
+      }
+      return {
+        rows: rows.length,
+        gap,
+        paintedQuiet,
+        minEnergy,
+        maxAudible,
+        peak: window.__peak,
+        peakT: window.__peakT,
+      };
+    }, opts.trace.quietUntil);
+  }
 
   // ---------------------------------------------------------------------------------------
   // F7 through the REAL key (engine-plan §10, §11). Not `blindspot.detonate()`: the point of
@@ -118,31 +245,56 @@ async function capture(browser, name, query, checks, opts = {}) {
         ink: window.blindspot.ink(),
       }));
     const before = await sample();
-    // Watch `paintPending` on every frame from here on. This is the STRUCTURAL discriminator for
-    // the schedule (review A5): a blast that was painted whole inside `hear()` would show a peak
-    // of zero, because it would already be finished before the next frame ever ran. A wall-clock
-    // ceiling cannot tell those two apart — a fast machine passes it either way.
-    await page.evaluate(() => {
-      window.__pendPeak = 0;
-      window.__pendFrames = 0;
-      const until = performance.now() + 1500;
+    // Watch every frame from here on, through the flash and out the other side. Two different
+    // things need per-frame sampling, and neither survives being read once:
+    //
+    //   `paintPending` is the STRUCTURAL discriminator for the schedule: a blast painted whole
+    //   inside `hear()` would show a peak of zero, because it would be finished before the next
+    //   frame ever ran. A wall-clock ceiling cannot tell those two apart — a fast machine passes
+    //   it either way.
+    //
+    //   WHITE peaks in the first tenth of a second and is half gone a second later. The peak is
+    //   the only honest reading of saturation, and the peak FRAME is kept whole — its blob
+    //   included — so the anti-sheet guard runs on the worst frame rather than a convenient one.
+    //   The peak's instant is measured from the frame the detonation first appears on the bus,
+    //   not from the keypress, which node cannot time inside the page.
+    await page.evaluate((flashMs) => {
+      const st = { pendPeak: 0, pendFrames: 0, frames: 0, blastAt: 0, peakMs: -1, peak: null, done: false };
+      window.__watch = st;
+      const until = performance.now() + flashMs;
       const tick = () => {
-        const n = window.blindspot.stats().paintPending;
-        if (n > window.__pendPeak) window.__pendPeak = n;
-        if (n > 0) window.__pendFrames++;
+        const s = window.blindspot.stats();
+        if (s.paintPending > st.pendPeak) st.pendPeak = s.paintPending;
+        if (s.paintPending > 0) st.pendFrames++;
+        if (!st.blastAt && window.blindspot.sim.bus.counts.detonation > 0) st.blastAt = performance.now();
+        const ink = window.blindspot.ink();
+        st.frames++;
+        if (!st.peak || ink.white > st.peak.white) {
+          st.peak = ink;
+          st.peakMs = st.blastAt ? Math.round(performance.now() - st.blastAt) : -1;
+        }
         if (performance.now() < until) requestAnimationFrame(tick);
+        else st.done = true;
       };
       requestAnimationFrame(tick);
-    });
+    }, 1500);
     await page.keyboard.press('F7');
     // A detonation's wavefront takes paintRadius / WAVE_SPEED_DETONATION = 22/140 = 157 ms to
     // finish arriving, plus the late bound a patch is released on (one patch radius plus the
-    // fuzz allowance, ~21 ms) — call it 180 ms (vision §3.3, engine-plan §3–§4). Wait well past
-    // it, then read the settled world.
+    // fuzz allowance, ~21 ms) — call it 180 ms (vision §3.3, engine-plan §3–§4). So a second
+    // later `after` is the SETTLED world: every dot the blast painted is on screen and none of
+    // them is fresh. That is what it is asserted on — coverage, not brightness.
     await page.waitForTimeout(1000);
     const after = await sample();
-    const schedule = await page.evaluate(() => ({ peak: window.__pendPeak, frames: window.__pendFrames }));
-    blast = { before, after, schedule };
+    await page.waitForFunction(() => window.__watch.done === true, null, { timeout: 30000 });
+    const watch = await page.evaluate(() => window.__watch);
+    blast = {
+      before,
+      after,
+      peak: watch.peak,
+      peakMs: watch.peakMs,
+      schedule: { peak: watch.pendPeak, frames: watch.pendFrames, inkFrames: watch.frames },
+    };
   }
 
   const state = await page.evaluate(() => {
@@ -189,6 +341,9 @@ async function capture(browser, name, query, checks, opts = {}) {
       // shell's own edge is at 2 m — a thin arc at the bottom. A shell measured from the EYE
       // instead reaches only 1.05 m of floor and would leave this box completely black.
       feetInk: window.blindspot.ink([0.3, 0.0, 0.4, 0.16]),
+      // The control: the same box lifted to eye level, where a body-measured shell reaches
+      // nothing at all. Two boxes make the claim falsifiable; one only says "there is ink".
+      eyeInk: window.blindspot.ink([0.3, 0.42, 0.4, 0.16]),
       solids: sim.world.solids.length,
       walkables: sim.world.walkables.length,
       steps: sim.steps,
@@ -241,21 +396,37 @@ async function capture(browser, name, query, checks, opts = {}) {
     `painted ${st.paintedDots} dots · ${st.paintedEdgeVerts} edge verts · heard ${st.heard}` +
       ` missed ${st.missed} · paint worst ${st.paintMaxMs.toFixed(2)} ms/frame · pending ${st.paintPending}`,
   );
+  const dots = (ink) => (ink.whiteBlob / dotArea(ink.height)).toFixed(2);
   note(
-    `first-person ink lit ${(state.glInk.lit * 100).toFixed(3)}% · any ${(state.glInk.any * 100).toFixed(3)}%` +
-      ` · white ${(state.glInk.white * 100).toFixed(3)}%` +
+    `first-person ink lit ${pct(state.glInk.lit)} · any ${pct(state.glInk.any)}` +
+      ` · white ${pct(state.glInk.white)} (blob ${dots(state.glInk)} dots)` +
       ` · ${state.glInk.width}x${state.glInk.height} · look ${st.look} · ${st.drawCalls} draw calls` +
       ` · ${st.fps.toFixed(1)} fps`,
   );
   if (blast) {
     note(
       `F7 detonation: painted ${blast.before.painted} → ${blast.after.painted} dots · ink lit ` +
-        `${(blast.before.ink.lit * 100).toFixed(3)}% → ${(blast.after.ink.lit * 100).toFixed(3)}%` +
-        ` · white ${(blast.after.ink.white * 100).toFixed(3)}%`,
+        `${pct(blast.before.ink.lit)} → ${pct(blast.after.ink.lit)} · settled white ${pct(blast.after.ink.white)}`,
+    );
+    note(
+      `  peak white ${pct(blast.peak.white)} at +${blast.peakMs} ms · any there ${pct(blast.peak.any)}` +
+        ` · largest white blob ${blast.peak.whiteBlob} px = ${dots(blast.peak)} dots` +
+        ` · ${blast.schedule.inkFrames} frames sampled`,
     );
     note(
       `  schedule: pending peaked at ${blast.schedule.peak} patches over ${blast.schedule.frames} frames` +
         ` · drained to ${blast.after.pending}`,
+    );
+  }
+  if (trace) {
+    note(
+      `trace: ${trace.rows} frames (worst sim gap ${trace.gap.toFixed(3)} s) · painted ${trace.paintedQuiet}` +
+        ` before the first press → ${st.paintedDots} · reactor low ${trace.minEnergy.toFixed(2)}` +
+        ` · halo peak ${trace.maxAudible.toFixed(2)} m`,
+    );
+    note(
+      `  flash peak white ${pct(trace.peak.white)} at sim t ${trace.peakT.toFixed(2)} s` +
+        ` · any there ${pct(trace.peak.any)} · largest white blob ${dots(trace.peak)} dots`,
     );
   }
   note(`player ${state.pos.map(f2).join(' ')} · ${state.stance} · hands ${state.hands} · fall ${f2(state.lastFall)} m`);
@@ -294,10 +465,8 @@ async function capture(browser, name, query, checks, opts = {}) {
       typeof hotkeys.before === 'boolean' && hotkeys.flipped === !hotkeys.before;
     universal['F6 again restores it'] = hotkeys.restored === hotkeys.before;
   }
-  for (const [label, ok] of Object.entries({ ...universal, ...checks(state, blast) })) {
-    if (!ok) problems.push(`${name}: failed check "${label}"`);
-  }
-  return state;
+  assertAll(name, { ...universal, ...checks(state, blast, trace) });
+  return { ...state, blast, trace };
 }
 
 async function main() {
@@ -428,19 +597,22 @@ async function main() {
       'nothing has been heard yet': s.stats.heard === 0 && s.events === 0,
       'nothing has been painted': s.stats.paintedDots === 0 && s.stats.paintedEdgeVerts === 0,
       'the world is black': s.glInk.lit === 0,
-      // Measured 0.057% (was 1.245% before the dot cap: the shell's dots are the closest in the
-      // game, so they are the ones the cap shrinks hardest — same dots, ~1/22 the ink). The floor
-      // catches a shell that stopped drawing; the ceiling catches one that grew into a lantern,
-      // which would be law 1 broken — free light nobody paid for, and it also catches the cap
-      // being lifted back off, which would put this straight back over a percent.
+      // Measured 0.057% here, and 0.051%–0.057% across six window sizes from 800×500 to
+      // 1920×1080 — the band is a property of the image, not of this viewport (see the header:
+      // the cap scales with frame height, so a coverage fraction does not move with the window).
+      // The floor catches a shell that stopped drawing; the ceiling catches one that grew into a
+      // lantern, which would be law 1 broken — free light nobody paid for — and it also catches
+      // the cap being lifted back off, which puts this straight over a percent.
       'the contact shell is drawn': s.glInk.any > 0.0003,
       'the contact shell is only a shell': s.glInk.any < 0.002,
       // Vision §3.1, the part a whole-frame fraction cannot see: the shell is measured from the
       // BODY. Measured 0.892% inside the bottom-centre box against 0.057% over the whole frame,
       // and exactly 0 in the same box at eye level — the ink is where the feet are. An
       // eye-measured shell reaches 1.05 m of floor, all of it below the bottom of the frame, and
-      // would read 0 here while the whole-frame fence above still passed on the walls.
+      // would read 0 in the low box while the whole-frame fence above still passed on the walls.
+      // The eye box is the control: without it, "there is ink somewhere low" is the whole claim.
       'the shell reaches the floor at your feet': s.feetInk.any > 0.003,
+      'and nothing at all at eye level': s.eyeInk.any === 0,
       'the bake found geometry': s.stats.surfels > 50_000 && s.stats.patches > 1_000,
       'the bake found holds to draw as lines': s.stats.holds > 0 && s.stats.edges > s.stats.holds,
     }));
@@ -473,68 +645,116 @@ async function main() {
         'the canvas is not black': s.glInk.lit > 0.0005,
         'the canvas is not flooded': s.glInk.any > 0.004 && s.glInk.any < 0.018,
         // Vision §12, the other end of the same band: a mid-route first-person frame is mostly
-        // 3-15 m geometry, where nothing should saturate at all. Anything above a percent here
-        // means near-field splats have grown back into a sheet and eaten the depth cues.
-        // Measured 0.000% — the bound is left where it was, because it is a law and not a
-        // baseline, and it is the number the near-field rework had to hold.
+        // 3-15 m geometry, where nothing should saturate at all. A law, not a baseline — the
+        // worst white this build produces is recorded once, on `fp-detonation`, and this frame is
+        // nowhere near it. The blob guard rides along: it is the measure that would notice near
+        // splats fusing back into a sheet even at a coverage the fraction is happy with.
         'nothing on the route saturates to white': s.glInk.white < 0.05,
+        'and no white sheet anywhere in it': s.glInk.whiteBlob <= SHEET_BLOB_DOTS * dotArea(s.glInk.height),
       }),
       { scripted: true },
     );
 
     // (c) F7 through the real key, from the spawn. One detonation, one bus event, and a world
-    // that was black a second ago is lit — the loudest map-paint in the game (vision §6).
-    await capture(
-      browser,
-      'fp-detonation',
-      '',
-      (s, blast) => ({
-        'F7 emitted exactly one detonation': s.counts.detonation === 1,
-        'it went out on the ordinary bus': s.events === 1,
-        'the listener heard its own blast': s.stats.heard === 1 && s.stats.missed === 0,
-        'it was black before': blast.before.painted === 0 && blast.before.ink.lit === 0,
-        'the blast painted geometry': blast.after.painted > 1_000,
-        'the blast lit the screen': blast.after.ink.lit > blast.before.ink.lit + 0.01,
-        // Vision §12: "depth cues live only inside the cyan band", "splats sized to voxel
-        // footprint". A point-blank blast is the worst case for near-field ink — the wall three
-        // metres from your face is lit at full intensity all at once — and when the splats
-        // overlap into a solid sheet the band collapses: no depth, no structure, just a lit
-        // rectangle. What stops that is the dot cap (looks/debug `SPLAT_CAP_PX`): a near dot is
-        // held at 12 px while its lattice neighbour is 46 px away, so the near field opens out
-        // into separate dots instead of closing into halftone. The pure-white fraction is what
-        // the failure looks like from the outside: 41.4% of the frame at full white when splats
-        // were drawn at literal footprint, 3.2% now, and every white pixel that is left is a
-        // single capped dot rather than a piece of sheet.
-        'the near field is a cloud, not a white sheet': blast.after.ink.white < 0.05,
-        // Measured 7.4%, re-baselined from 49.7%. The same 4659 dots are drawn either way — this
-        // number is the difference between a dot at its footprint and a dot at the cap, nothing
-        // else, and it scales as the square of the cap (3.5% at 8 px, 9.6% at 14 px), which is
-        // what makes it a usable fence at all. The band, not just an upper bound: `any` collapsing
-        // means the blast stopped painting, `any` back near half the frame means the cap is gone.
-        'and it did not flood the screen': blast.after.ink.any > 0.04 && blast.after.ink.any < 0.12,
-        // ---- the schedule, asserted structurally ---------------------------------------------
-        // A detonation's 5286 patches are released over the ~180 ms its wavefront takes to
-        // cross, so `paintPending` must be non-zero on the frames in between. If a future change
-        // ever paints the sphere whole inside `hear()` again, the peak goes to zero and this
-        // fails on any machine, fast or slow — which the wall-clock ceiling below cannot do.
-        'the blast was spread over frames, not painted whole': blast.schedule.peak > 100,
-        'it took more than one frame to arrive': blast.schedule.frames >= 2,
-        // …and it drains: a second after the blast nothing is still waiting on its wave.
-        'the blast finished arriving': blast.after.pending === 0,
-        'nothing was still queued before it went off': blast.before.pending === 0,
-        // ---- machine-dependent smoke bound ---------------------------------------------------
-        // NOT a discriminator, and deliberately labelled as one that is not: it is a wall-clock
-        // number on a headless SwiftShader box, so it says nothing portable and passes trivially
-        // on fast hardware. It is kept only to catch a gross regression — a frame that suddenly
-        // spends a tenth of a second painting is a hitch at the loudest moment in the game
-        // (engine-plan §10, vision §12 "60 fps"), and this notices. The real contract — converges
-        // to a picture that depends only on the event set, never paints ahead of a wavefront,
-        // never leaves due work behind, hands one frame only the slice its wave released — is
-        // pinned deterministically in test/paint.spec.ts.
-        'smoke bound (machine-dependent): no frame spends 18 ms painting': s.stats.paintMaxMs < 18,
-      }),
-      { detonate: true },
+    // that was black a second ago is lit — the loudest map-paint in the game (vision §6). Run
+    // TWICE, at two window sizes: every fence here is a fraction, and a fraction that moves with
+    // the window is not a fence at all. The pair is compared below.
+    const detonationChecks = (s, blast) => ({
+      'F7 emitted exactly one detonation': s.counts.detonation === 1,
+      'it went out on the ordinary bus': s.events === 1,
+      'the listener heard its own blast': s.stats.heard === 1 && s.stats.missed === 0,
+      'it was black before': blast.before.painted === 0 && blast.before.ink.lit === 0,
+      'the blast painted geometry': blast.after.painted > 1_000,
+      'the blast lit the screen': blast.after.ink.lit > blast.before.ink.lit + 0.01,
+      // Vision §12: "depth cues live only inside the cyan band", "splats sized to voxel
+      // footprint". A point-blank blast is the worst case for near-field ink — the wall three
+      // metres from your face is lit at full intensity all at once — and when the splats overlap
+      // into a solid sheet the band collapses: no depth, no structure, just a lit rectangle.
+      // What stops that is the dot cap (looks/debug `SPLAT_CAP_FRAC`): a near dot is held at 12 px
+      // of a 1000 px frame while its lattice neighbour is 46 px away, so the near field opens out
+      // into separate dots instead of closing into halftone.
+      //
+      // THE CANONICAL WORST WHITE: 4.844% of the frame, at 1600×1000, on the first frame sampled
+      // after the blast reaches the bus (+45..70 ms — one frame of quantisation, not a range in
+      // the image). That is the largest saturated fraction this build produces anywhere; every
+      // other white fence in the tree is a law, not a measurement. And it is a FLASH: the same
+      // frame reads ~3% a second later, which is why the peak is sampled per frame instead of
+      // photographed once at the settle, where it would read 40% low.
+      //
+      // Saturation itself is intended (visual-brief §2): fresh paint in this deliberately
+      // achromatic look tops out at white, and the near field is meant to be brightest at the
+      // instant it arrives. What is NOT allowed is contiguity, which is what the guard below
+      // measures — a saturated dot is a dot; a saturated region is porridge.
+      'the flash stays inside the saturation bound': blast.peak.white <= 0.06,
+      'the near field is a cloud, not a white sheet':
+        blast.peak.whiteBlob <= SHEET_BLOB_DOTS * dotArea(blast.peak.height),
+      // Coverage at the settle, when every dot the blast painted is on screen: measured 7.364%
+      // here and 6.834% at 1280×720. The band, not just an upper bound — `any` collapsing means
+      // the blast stopped painting, `any` back near half the frame means the cap is gone (it
+      // reads 49.7% with splats drawn at their raw footprint).
+      'and it did not flood the screen': blast.after.ink.any > 0.04 && blast.after.ink.any < 0.12,
+      // ---- the schedule, asserted structurally ---------------------------------------------
+      // A detonation's 5286 patches are released over the ~180 ms its wavefront takes to
+      // cross, so `paintPending` must be non-zero on the frames in between. If a future change
+      // ever paints the sphere whole inside `hear()` again, the peak goes to zero and this
+      // fails on any machine, fast or slow — which the wall-clock ceiling below cannot do.
+      'the blast was spread over frames, not painted whole': blast.schedule.peak > 100,
+      'it took more than one frame to arrive': blast.schedule.frames >= 2,
+      // …and it drains: a second after the blast nothing is still waiting on its wave.
+      'the blast finished arriving': blast.after.pending === 0,
+      'nothing was still queued before it went off': blast.before.pending === 0,
+      // ---- machine-dependent smoke bound ---------------------------------------------------
+      // NOT a discriminator, and deliberately labelled as one that is not: it is a wall-clock
+      // number on a headless SwiftShader box, so it says nothing portable and passes trivially
+      // on fast hardware. It is kept only to catch a gross regression — a frame that suddenly
+      // spends a tenth of a second painting is a hitch at the loudest moment in the game
+      // (engine-plan §10, vision §12 "60 fps"), and this notices. The real contract — converges
+      // to a picture that depends only on the event set, never paints ahead of a wavefront,
+      // never leaves due work behind, hands one frame only the slice its wave released — is
+      // pinned deterministically in test/paint.spec.ts.
+      'smoke bound (machine-dependent): no frame spends 18 ms painting': s.stats.paintMaxMs < 18,
+    });
+    const det = await capture(browser, 'fp-detonation', '', detonationChecks, { detonate: true });
+    const detSmall = await capture(browser, 'fp-detonation-small', '', detonationChecks, {
+      detonate: true,
+      viewport: VIEWPORT_SMALL,
+    });
+
+    // ---- (c2) the same blast, measured at two window sizes ---------------------------------
+    // The instrument that makes every fraction above meaningful. With the cap in absolute pixels
+    // the white FRACTION scaled as 1/(W·H) — the identical scene saturated half again as much of
+    // a 1366×768 frame as of a 1600×1000 one, so the fence measured the harness's window as much
+    // as it measured the renderer, and passed or failed partly by luck.
+    // With the cap a fraction of frame height, the residual difference is aspect only (vertical
+    // FOV is fixed, so a wider frame adds horizontal content at the same dot size): measured 7.7%
+    // apart on peak white and 7.5% on settled coverage between 1.60 and 1.78 aspect, against a
+    // tolerance of 15%. A cap that went back to absolute pixels would land ~74% apart here.
+    const rel = (a, b) => Math.abs(a - b) / Math.max(1e-9, (a + b) / 2);
+    const dWhite = rel(det.blast.peak.white, detSmall.blast.peak.white);
+    const dAny = rel(det.blast.after.ink.any, detSmall.blast.after.ink.any);
+    console.log(`- scale stability ${VIEWPORT.width}x${VIEWPORT.height} vs ${VIEWPORT_SMALL.width}x${VIEWPORT_SMALL.height}`);
+    note(
+      `peak white ${pct(det.blast.peak.white)} vs ${pct(detSmall.blast.peak.white)}` +
+        ` — ${(dWhite * 100).toFixed(1)}% apart (tolerance ${(SCALE_TOL * 100).toFixed(0)}%)`,
     );
+    note(
+      `settled coverage ${pct(det.blast.after.ink.any)} vs ${pct(detSmall.blast.after.ink.any)}` +
+        ` — ${(dAny * 100).toFixed(1)}% apart`,
+    );
+    note(
+      `largest white blob ${(det.blast.peak.whiteBlob / dotArea(det.blast.peak.height)).toFixed(2)} vs ` +
+        `${(detSmall.blast.peak.whiteBlob / dotArea(detSmall.blast.peak.height)).toFixed(2)} dot areas` +
+        ` (limit ${SHEET_BLOB_DOTS})`,
+    );
+    assertAll('scale-stability', {
+      'peak white is the same fraction of a small frame as of a large one': dWhite <= SCALE_TOL,
+      'so is the settled coverage': dAny <= SCALE_TOL,
+      // In dot areas the blob is not just stable, it is the SAME NUMBER — one dot, at any window.
+      // That is the whole claim of the near-field rework, stated as a measurement.
+      'and the largest white blob is one dot at either size':
+        det.blast.peak.whiteBlob <= SHEET_BLOB_DOTS * dotArea(det.blast.peak.height) &&
+        detSmall.blast.peak.whiteBlob <= SHEET_BLOB_DOTS * dotArea(detSmall.blast.peak.height),
+    });
 
     // (d) The F3 numbers themselves (engine-plan §10: fps, frame ms, surfel count, painted count,
     // draw calls, event/s). Parsed out of the very strings the overlay prints, on the mantle
@@ -549,6 +769,7 @@ async function main() {
           const m = new RegExp(`${after}\\s+([0-9.]+)`).exec(line(word));
           return m ? Number(m[1]) : NaN;
         };
+        const inkDots = (s.glInk.any * s.glInk.width * s.glInk.height) / dotArea(s.glInk.height);
         return {
           'route ran to the end': s.scriptDone === true,
           'ended on top of the machinery row': Math.abs(s.pos[1] - 2.2) < 0.01,
@@ -565,18 +786,79 @@ async function main() {
           // Headless swiftshader is not a GPU, so this is a liveness floor, not the 60 fps target
           // of vision §12 — a stalled loop or a frame in the seconds reads as broken here.
           'the frame loop is alive': s.stats.fps > 5 && s.stats.frameMs < 200,
-          // Measured 0.007% lit / 0.721% any, re-baselined from 3.4% / 78.5%. This vantage is a
-          // metre from a wall the route never painted, so what fills the frame is the contact
-          // shell and almost nothing else — which is why `lit` is now a single dot's worth and is
-          // no longer asserted here (fp-script is where painted route geometry is fenced). `any`
-          // is the honest measurement of this frame, and it is a sharp one: a wall at 1 m has a
-          // 106 px lattice pitch, so capped 12 px dots cover pi*36/106^2 = 1.0% of the area they
-          // sit on, and the grazing floor and ceiling bring the frame total to 0.72%.
-          'the shell fills the near wall without flooding it': s.glInk.any > 0.004 && s.glInk.any < 0.02,
-          'the near wall stays a cloud': s.glInk.white < 0.05,
+          // The one structural reading of this frame, and deliberately not a fraction: ink
+          // measured in DOT AREAS is a count of the dots actually drawn, so it means the same
+          // thing at any window size (a fraction only survives scaling; this survives the aspect
+          // change too). This vantage is a metre from a wall the route never painted, so what
+          // fills the frame is the contact shell and almost nothing else — which is why `lit` is
+          // a single dot's worth here and painted route geometry is fenced on fp-script instead.
+          // Measured 102 dot areas at 1600×1000 and 99 at 1280×720: a wall at 1 m has a 106 px
+          // lattice pitch, so each capped dot covers ~1% of the area it sits on. The band is a
+          // factor of ~1.6 either way — the shell going dark and the shell growing into a lantern
+          // both trip it, and neither can hide behind a window size.
+          'the shell fills the near wall without flooding it': inkDots > 60 && inkDots < 160,
+          'the near wall stays a cloud, not a sheet':
+            s.glInk.white < 0.05 && s.glInk.whiteBlob <= SHEET_BLOB_DOTS * dotArea(s.glInk.height),
         };
       },
       { scripted: true },
+    );
+
+    // ---------------------------------------------------------------------------------------
+    // Milestone 4: the sonar route (core/debug.ts SCRIPTS `ping`). The only capture where paint
+    // is bought with the reactor instead of with footfalls, and the only one that exercises E and
+    // Q at all: engine-plan §10's beats are "Q the room, then E real geometry", and everything
+    // downstream of a press — energy, cooldown, halo, the far end at beam impact — is invisible
+    // to a route that only walks.
+    //
+    // The route walks south out of A, stops on the tank's centre line, goes quiet for over a
+    // second, Q-pings the room and then E-pings the tank 10 m away. The silence before the first
+    // press is what makes the paint delta exact: nothing is in flight, so the count sampled just
+    // before the press is stable and everything above it was bought by the two pings.
+    // ---------------------------------------------------------------------------------------
+    await capture(
+      browser,
+      'fp-ping',
+      '?sim=script3',
+      (s, _blast, t) => ({
+        'route ran to the end': s.scriptDone === true,
+        'ended on the tank’s centre line': Math.abs(s.pos[0] - 3) < 0.05 && Math.abs(s.pos[2] - 15.62) < 0.5,
+        'both presses were made': s.counts.qPing === 1 && s.counts.ePing === 2,
+        // Two ePing rows for one press is the far end (engine-plan §6): the beam's impact centre
+        // re-radiates as its own event. It is a real event on the bus, it is delivered — and it
+        // paints nothing, because a far end's paint radius is zero (test/paint.spec.ts pins that
+        // the pipeline hears it and enqueues no patch). The delta below is what proves it here:
+        // if the far end painted its own sphere the route's total would not be this number.
+        'every sound on the route was delivered': s.stats.heard === 9 && s.stats.missed === 0,
+        // Exact on both sides. The route is a fixed input list, paint is a pure function of the
+        // delivered events and every walk class is instant, so the count in the quiet second
+        // before the first press is 1191 on every machine, and the two pings add exactly 6810
+        // dots on top of it. A ">" here would let the Q-ping go missing and still pass.
+        'the world was already painted by the walk in': t.paintedQuiet === 1191,
+        'and the two pings painted exactly their own wavefronts': s.stats.paintedDots === 8001,
+        'the ping also painted the holds it found': s.stats.paintedEdgeVerts === 330,
+        // Vision §3.8: the halo is what you are audible at, and an E-ping is the loudest thing a
+        // silent player does — 30 m at both ends of the beam. Sampled per frame, so this is the
+        // peak over the whole run and not wherever the last frame happened to land.
+        'the halo lit to the E-ping’s own range': Math.abs(t.maxAudible - 30) < 0.01,
+        // Vision §4: Q costs 10, E costs 18, the bar regenerates at 6/s. Full at the Q (100 → 90),
+        // back to 99 over the 1.5 s to the E, then 81 — the low-water mark of the run. The frame
+        // sampler can only catch it within one frame of regeneration (≤ 0.4), hence the band; what
+        // it is really fencing is that a press costs the bar something and costs it the RIGHT
+        // amount. A ping that stopped charging reads 100 here.
+        'the reactor paid for both pings': t.minEnergy > 80.5 && t.minEnergy < 82.5,
+        // The saturation law, on the frame that actually flashes: sampled every frame from just
+        // before the Q to a second after the E. The tank is 10 m away so this is nowhere near the
+        // point-blank worst case (fp-detonation), but it is the only ping flash the gate photographs.
+        'the ping flash stays inside the saturation bound': t.peak.white <= 0.06,
+        'and paints dots, not a sheet': t.peak.whiteBlob <= SHEET_BLOB_DOTS * dotArea(t.peak.height),
+      }),
+      {
+        scripted: true,
+        // Sim seconds: the pings are at 5.0 (Q) and 6.5 (E), the route ends at 7.5. `quietUntil`
+        // is the instant the paint delta is measured from — inside the silence, before the press.
+        trace: { quietUntil: 5.0, inkFrom: 4.9, inkTo: 8.2 },
+      },
     );
   } finally {
     await browser.close();

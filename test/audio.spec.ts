@@ -15,9 +15,22 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { AudioEngine } from '../src/core/audio.js';
-import { AUDIO_MASTER_GAIN, EV, HALO_FULL_M } from '../src/core/const.js';
+import { AudioEngine, type DeliveredFeed } from '../src/core/audio.js';
+import {
+  AUDIO_MASTER_GAIN,
+  COYOTE_TIME,
+  EPING_FAR_HEAR,
+  EV,
+  HALO_FULL_M,
+  HEARING_BASE,
+  SIM_STEP,
+} from '../src/core/const.js';
 import { EventBus, type SoundClass, type SoundEvent } from '../src/core/events.js';
+import type { MapDef, Solid } from '../src/core/map/types.js';
+import type { MoveInput } from '../src/core/movement.js';
+import { PaintPipeline } from '../src/core/paint.js';
+import { Sim } from '../src/core/sim.js';
+import { bakeSurfels } from '../src/core/surfels.js';
 
 // ------------------------------------------------------------------------------------------
 // A recording WebAudio stub — enough surface for audio.ts, and it remembers every value set.
@@ -100,8 +113,36 @@ function makeStub(rec: Rec) {
   return StubCtx;
 }
 
+/**
+ * A stand-in for the DELIVERED feed audio actually subscribes to (`PaintPipeline.onDelivered`):
+ * republishes everything a bus carries, at a chosen delivery quality.
+ *
+ * The engine no longer listens to raw emission — the gate that decides audibility lives in
+ * core/paint.ts and is computed once (engine-plan §4, §8) — so a probe about what a sound SOUNDS
+ * LIKE has to hand it a delivered event. Quality 1 is "heard at the source", which is what every
+ * pre-existing synth expectation below was written against. The gate itself is pinned in
+ * test/paint.spec.ts, and the end-to-end claim that audio never sounds what paint missed is
+ * pinned at the bottom of this file against a real pipeline.
+ */
+class BusFeed implements DeliveredFeed {
+  private readonly fns = new Set<(e: SoundEvent) => void>();
+
+  constructor(bus: EventBus, private readonly quality = 1) {
+    bus.on((e) => {
+      for (const fn of this.fns) fn({ ...e, quality: this.quality });
+    });
+  }
+
+  onDelivered(fn: (e: SoundEvent) => void): () => void {
+    this.fns.add(fn);
+    return () => {
+      this.fns.delete(fn);
+    };
+  }
+}
+
 /** Run `body` with a stubbed AudioContext and hand it the recording. */
-function withAudio(body: (bus: EventBus, engine: AudioEngine, rec: Rec) => void): void {
+function withAudio(body: (bus: EventBus, engine: AudioEngine, rec: Rec) => void, quality = 1): void {
   const rec: Rec = { nodes: [], calls: [], starts: [] };
   const g = globalThis as { AudioContext?: unknown };
   const had = 'AudioContext' in g;
@@ -109,9 +150,10 @@ function withAudio(body: (bus: EventBus, engine: AudioEngine, rec: Rec) => void)
   g.AudioContext = makeStub(rec);
   const engine = new AudioEngine();
   const bus = new EventBus();
+  const feed = new BusFeed(bus, quality);
   try {
     engine.resume();
-    engine.attach(bus);
+    engine.attach(feed);
     rec.nodes.length = 0;
     rec.calls.length = 0;
     rec.starts.length = 0;
@@ -150,7 +192,7 @@ describe('audio is a pure consumer of the bus (engine-plan §8)', () => {
       expect(engine.available).toBe(false);
       expect(engine.running).toBe(false);
       engine.resume(); // must not throw
-      engine.attach(bus);
+      engine.attach(new BusFeed(bus));
       for (const c of ['walkStep', 'sprintStep', 'landing', 'slide'] as SoundClass[]) bus.emit(ev(c));
       expect(engine.played).toBe(0);
       expect(bus.emitted).toBe(4); // the bus is unaffected by audio being absent
@@ -193,8 +235,9 @@ describe('audio is a pure consumer of the bus (engine-plan §8)', () => {
 
   it('attach() replaces its subscription instead of stacking them', () => {
     withAudio((bus, engine) => {
-      engine.attach(bus);
-      engine.attach(bus);
+      const feed = new BusFeed(bus);
+      engine.attach(feed);
+      engine.attach(feed);
       bus.emit(ev('walkStep'));
       expect(engine.played).toBe(1); // not 3
       engine.detach();
@@ -414,5 +457,131 @@ describe('the halo hum tracks audibleRadius (vision §3.8, engine-plan §8)', ()
       const back = rec.calls.filter(([k]) => k.endsWith('gain.setTarget')).map(([, v]) => v);
       expect(back).toContain(AUDIO_MASTER_GAIN);
     });
+  });
+});
+
+// ==========================================================================================
+// Delivery: the ears hear what the LISTENER received, and only that
+// ==========================================================================================
+
+const box = (
+  id: string,
+  kind: Solid['kind'],
+  x0: number,
+  y0: number,
+  z0: number,
+  x1: number,
+  y1: number,
+  z1: number,
+): Solid => ({ type: 'box', id, kind, min: [x0, y0, z0], max: [x1, y1, z1] });
+
+/** A hall whose only wall is 39 m down it: the beam lands well outside your own 30 m hearing. */
+const longHall: MapDef = {
+  name: 'long hall',
+  solids: [box('floor', 'floor', 0, -1, 0, 50, 0, 20), box('far wall', 'wall', 40, 0, 0, 40.4, 6, 20)],
+  ladders: [],
+  props: [],
+  doors: [],
+  dogRoutes: [],
+  spawn: { pos: [1, 0, 5], yaw: 0 },
+  air: [{ min: [0, 0, 0], max: [50, 6, 20] }],
+  markers: [],
+  bounds: { min: [0, -1, 0], max: [50, 6, 20] },
+};
+
+const NEUTRAL: MoveInput = {
+  forward: 0,
+  right: 0,
+  jumpPressed: false,
+  crouch: false,
+  sprint: false,
+  yawDelta: 0,
+  pitchDelta: 0,
+};
+
+describe('audio obeys the delivery gate (engine-plan §4, §8)', () => {
+  it('MUST NOT sound a far end 38.95 m away that its own paint pipeline scored as missed', () => {
+    // `AudioEngine.play` used to short-circuit on `e.source === 'self'` with no audibility test.
+    // That was sound while every self event originated AT the player. The E-ping's far end broke
+    // it: a self event up to 40 m away, which the delivery gate
+    // (`d <= max(HEARING_BASE, hearRadius)`) rejects past 30 m. The ears and the dots would then
+    // disagree about the same event — which is exactly what engine-plan §8 forbids ("audio is a
+    // consumer of the same bus — never a separate truth") and what vision §1.2 calls a lie.
+    const rec: Rec = { nodes: [], calls: [], starts: [] };
+    const g = globalThis as { AudioContext?: unknown };
+    const had = 'AudioContext' in g;
+    const prev = g.AudioContext;
+    g.AudioContext = makeStub(rec);
+    const audio = new AudioEngine();
+    try {
+      const sim = new Sim(longHall);
+      const p = sim.player;
+      p.x = 1;
+      p.y = 0;
+      p.z = 5;
+      p.yaw = 0;
+      p.pitch = 0;
+      p.vx = p.vy = p.vz = 0;
+      p.grounded = true;
+      sim.movement.apexY = 0;
+      sim.movement.coyote = COYOTE_TIME;
+      sim.bus.reset();
+
+      const field = bakeSurfels(sim.world);
+      const paint = new PaintPipeline(field, sim.world);
+      paint.attach(sim.bus);
+      audio.resume();
+      audio.attach(paint);
+      const before = audio.played;
+
+      const seen: SoundEvent[] = [];
+      const off = sim.bus.on((e) => seen.push(e));
+      paint.setListener(p.x, p.y + sim.movement.eyeTarget, p.z);
+      sim.playerSystems.intent.pingE = true;
+      for (let i = 0; i < Math.round(1.0 / SIM_STEP); i++) {
+        Object.assign(sim.input, NEUTRAL);
+        sim.step(SIM_STEP);
+      }
+      off();
+
+      const far = seen.find((e) => e.variant === 'far')!;
+      const d = Math.hypot(far.origin[0] - p.x, far.origin[2] - p.z);
+      // The premise, asserted rather than assumed: the far end really is out of earshot.
+      expect(d).toBeGreaterThan(Math.max(HEARING_BASE, EPING_FAR_HEAR));
+      expect(paint.missed).toBe(1);
+
+      // …so exactly one ping was audible: the one that left your own head.
+      expect(audio.played - before).toBe(1);
+    } finally {
+      audio.dispose();
+      if (had) g.AudioContext = prev;
+      else delete g.AudioContext;
+    }
+  });
+
+  it('MUST play a delivered sound at the strength it arrived with, and never at zero', () => {
+    // Vision §3.4: distance and a wall make a sound quieter, not different. The E-ping's return is
+    // the case that matters — the same wall answering from 5 m and from 30 m has to read as a
+    // RANGE, not as a beep that either happens or does not. `quality` is the event's own delivery
+    // number (core/math.ts `eventQuality`), and it is the only input to this.
+    const farGain = (quality: number): number => {
+      let gain = 0;
+      withAudio(
+        (bus, _e, rec) => {
+          bus.emit(ev('ePing', { variant: 'far' } as Partial<SoundEvent>));
+          for (const [k, v] of rec.calls) if (k.endsWith('gain.linearRamp')) gain = v;
+        },
+        quality,
+      );
+      return gain;
+    };
+    const point = farGain(1);
+    const mid = farGain(0.5);
+    const rim = farGain(0);
+    expect(mid).toBeLessThan(point);
+    expect(rim).toBeLessThan(mid);
+    // Delivery is the world's statement that you heard it, and `quality` hits 0 exactly AT the
+    // hear radius — so the rim of audibility is a hint, never silence.
+    expect(rim).toBeGreaterThan(0);
   });
 });

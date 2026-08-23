@@ -10,8 +10,13 @@
  * Covered so far: the self classes movement emits — footsteps, landings, slides, the mantle scuff
  * (and the jump takeoff, which reuses the footstep rows) — plus both pings and the halo hum. Dog
  * gait, clatter, chain and the beacon arrive with their milestones; unhandled classes are ignored
- * here rather than faked. Delivery is not modelled yet either (M3 owns walls/quality), so this
- * plays what the player themselves emitted, at the player's own position.
+ * here rather than faked.
+ *
+ * What is played is what the LISTENER RECEIVED, not what the bus carried: this subscribes to the
+ * delivered feed (`PaintPipeline.onDelivered`), so the delivery predicate — engine-plan §4's
+ * `d <= max(HEARING_BASE, hearRadius)` and `walls <= 1` — is computed in exactly one file and the
+ * ears cannot claim a sound the dots never got. It matters from M4 on: the E-ping's far end is a
+ * SELF event that happens up to 40 m away, and past 30 m you are simply not there to hear it.
  *
  * The halo hum is the ONE thing here that is not triggered by an event, and it cannot be: vision
  * §3.8 asks for a continuous readout of how loud you are, so it is a held oscillator steered from
@@ -23,12 +28,33 @@
  */
 
 import { AUDIO_MASTER_GAIN, EV, HALO_FULL_M } from './const.js';
-import type { EventBus, SoundEvent } from './events.js';
+import type { SoundEvent } from './events.js';
 import { clamp01, invLerp, makeRng } from './math.js';
 
 type Ctor = new () => AudioContext;
 
+/**
+ * What audio listens to: one listener's DELIVERED events, `quality` filled in.
+ * `PaintPipeline` (core/paint.ts) is the implementation and owns the gate.
+ *
+ * Structural rather than an import of the class, so core/audio.ts stays a leaf: this file knows
+ * about a feed of delivered sound and nothing about surfels, worlds or wall counting.
+ */
+export interface DeliveredFeed {
+  onDelivered(fn: (e: SoundEvent) => void): () => void;
+}
+
 const NOISE_SECONDS = 0.5;
+
+/**
+ * The quietest a DELIVERED sound may be played at, as a fraction of its class gain.
+ *
+ * `quality` (core/math.ts `eventQuality`) reaches 0 exactly at the hear radius, so scaling by it
+ * alone would make the edge of audibility silent — and delivery is the world's own statement that
+ * you heard the thing. So the scalar spans [floor, 1]: at the rim a ping's return is a hint, at
+ * point blank it is the full sound, and nothing that got here vanishes.
+ */
+const DELIVERY_FLOOR = 0.08;
 
 /**
  * The hum's pitch and volume at silence and at full scale (vision §3.8: "a matching hum pitch",
@@ -68,10 +94,10 @@ export class AudioEngine {
     return this.muted;
   }
 
-  /** Subscribe to the bus. Safe to call before `resume()`; safe where WebAudio does not exist. */
-  attach(bus: EventBus): void {
+  /** Follow a delivered feed. Safe before `resume()`; safe where WebAudio does not exist. */
+  attach(feed: DeliveredFeed): void {
     this.unsubscribe?.();
-    this.unsubscribe = bus.on((e) => this.play(e));
+    this.unsubscribe = feed.onDelivered((e) => this.play(e));
   }
 
   detach(): void {
@@ -144,36 +170,41 @@ export class AudioEngine {
     const master = this.master;
     const noise = this.noise;
     if (!ctx || !master || !noise || ctx.state !== 'running') return;
-    // M2: only what the player themselves emits. M3's delivery pass decides audibility for the
-    // rest, and this filter becomes "quality > 0".
+    // Only the player's own classes have voices so far; a dog's gait and a prop's clatter get
+    // their own synths with their milestones and are ignored rather than faked until then.
+    // Audibility is NOT decided here — everything reaching this point already passed the
+    // delivery gate in paint.ts (see the header).
     if (e.source !== 'self') return;
 
+    // How well it arrived, as a gain scalar. One number for every class: a sound heard from the
+    // far side of the room, or through a wall, is the same sound quieter (vision §3.4).
+    const v = DELIVERY_FLOOR + (1 - DELIVERY_FLOOR) * clamp01(e.quality);
     const t = ctx.currentTime;
     switch (e.class) {
       case 'crouchStep':
-        this.tick(t, 0.1, 1500, 0.035, e.fuzzSeed);
+        this.tick(t, 0.1 * v, 1500, 0.035, e.fuzzSeed);
         break;
       case 'walkStep':
-        this.tick(t, 0.26, 900, 0.05, e.fuzzSeed);
+        this.tick(t, 0.26 * v, 900, 0.05, e.fuzzSeed);
         break;
       case 'sprintStep':
-        this.tick(t, 0.45, 620, 0.07, e.fuzzSeed);
+        this.tick(t, 0.45 * v, 620, 0.07, e.fuzzSeed);
         break;
       case 'landing':
         // `intensity` is a constant of the class; the PAINT RADIUS is what the fall height moves
         // (vision §3.3: landing paints 8 m at the threshold, 14 m at the top of the scale). Read
         // the strength back out of it so a 2 m step-down and an 8 m plunge do not sound alike —
         // the ears and the dots have to agree about how loud you just were (§3.8).
-        this.thud(t, clamp01(invLerp(EV.landing.paint, EV.landing.paintMax, e.paintRadius)), e.fuzzSeed);
+        this.thud(t, clamp01(invLerp(EV.landing.paint, EV.landing.paintMax, e.paintRadius)), e.fuzzSeed, v);
         break;
       case 'slide':
-        this.scrape(t, 0.22, 0.22, 2200, 700, e.fuzzSeed);
+        this.scrape(t, 0.22 * v, 0.22, 2200, 700, e.fuzzSeed);
         break;
       case 'mantle':
         // A braced heave onto a ledge: one short, dry, upward scuff. Same machinery as the slide
         // (a swept low-pass over noise) with its own character — shorter, quieter, and sweeping
         // UP rather than down, so it never reads as "you are sliding".
-        this.scrape(t, 0.14, 0.1, 900, 2600, e.fuzzSeed);
+        this.scrape(t, 0.14 * v, 0.1, 900, 2600, e.fuzzSeed);
         break;
       case 'ePing':
         // Engine-plan §8: a chirp rising 300 -> 1400 Hz over 90 ms. The `far` variant is the same
@@ -181,12 +212,15 @@ export class AudioEngine {
         // and late by the wavefront's real flight time. That delay is not dressing: it is the
         // beam's range read out in your ears, and it is honest because it comes from the event's
         // own timestamp, not from a scripted echo (vision §1.2).
-        if (e.variant === 'far') this.chirp(t, 0.055, 300, 1400, 0.13, 1400);
-        else this.chirp(t, 0.24, 300, 1400, 0.09, 9000);
+        //
+        // `v` is what makes the return read as a RANGE rather than a beep: the same wall answering
+        // from 5 m is present and from 30 m is a whisper, off the event's own delivery numbers.
+        if (e.variant === 'far') this.chirp(t, 0.055 * v, 300, 1400, 0.13, 1400);
+        else this.chirp(t, 0.24 * v, 300, 1400, 0.09, 9000);
         break;
       case 'qPing':
         // A soft 500 Hz pulse: the room-read, deliberately blunt next to the E-ping's question.
-        this.pulse(t, 0.2, 500, 0.16);
+        this.pulse(t, 0.2 * v, 500, 0.16);
         break;
       default:
         return;
@@ -262,15 +296,15 @@ export class AudioEngine {
   }
 
   /** A landing: the tick plus a body — a low sine dropping in pitch. */
-  private thud(t: number, strength: number, seed: number): void {
+  private thud(t: number, strength: number, seed: number, vol: number): void {
     const ctx = this.ctx!;
-    this.tick(t, 0.35 + 0.35 * strength, 380, 0.12, seed);
+    this.tick(t, (0.35 + 0.35 * strength) * vol, 380, 0.12, seed);
     const osc = ctx.createOscillator();
     osc.type = 'sine';
     osc.frequency.setValueAtTime(95, t);
     osc.frequency.exponentialRampToValueAtTime(42, t + 0.18);
     const g = ctx.createGain();
-    g.gain.setValueAtTime(0.25 + 0.35 * strength, t);
+    g.gain.setValueAtTime((0.25 + 0.35 * strength) * vol, t);
     g.gain.exponentialRampToValueAtTime(0.0005, t + 0.26);
     osc.connect(g).connect(this.master!);
     osc.start(t);

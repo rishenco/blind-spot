@@ -889,12 +889,26 @@ export interface ScriptSegment {
   readonly note?: string;
 }
 
+/**
+ * One press of E or Q on the route's own timeline. A ping is not part of the movement intent —
+ * it is a separate edge-triggered latch the step consumes (core/player.ts) — so it gets its own
+ * track rather than a field on `ScriptSegment`: a route may ping while holding any movement, or
+ * while holding none, and the two must not have to be authored in lockstep.
+ */
+export interface ScriptPing {
+  /** Sim time the key goes down. Fired for exactly one step, like a real keypress. */
+  readonly at: number;
+  readonly mode: 'e' | 'q';
+  readonly note?: string;
+}
+
 export interface ScriptDef {
   readonly id: string;
   readonly title: string;
   /** Sim time at which the route is finished and input goes quiet. */
   readonly end: number;
   readonly segments: readonly ScriptSegment[];
+  readonly pings?: readonly ScriptPing[];
 }
 
 /**
@@ -902,7 +916,8 @@ export interface ScriptDef {
  *
  * `corridor` is choreography 1–2: sprint C end to end, slide the duct, jump, then drop into the
  * pit on purpose and climb out the silent way. `mantle` is the B-hall traverse to the listening
- * post of choreography 5 — the machinery row's top is at exactly MANTLE_MAX_HEIGHT.
+ * post of choreography 5 — the machinery row's top is at exactly MANTLE_MAX_HEIGHT. `ping` is the
+ * sonar beat: walk somewhere quiet, read the room, then ask one directed question of the tank.
  */
 export const SCRIPTS: Record<string, ScriptDef> = {
   corridor: {
@@ -938,6 +953,34 @@ export const SCRIPTS: Record<string, ScriptDef> = {
       { at: 5.3, note: 'standing on the row — the listening post' },
     ],
   },
+  /**
+   * The sonar beat (vision §3.5): the only route whose paint is bought with the reactor rather
+   * than with footfalls.
+   *
+   * It walks due south out of A along x = 3 — clear of the column rows at x = 6 — and stops on
+   * the tank's own centre line (the tank is a Ø6 cylinder at (16, 16), the map's one large
+   * silhouette). Then it goes quiet for over a second, so everything the walk painted has landed
+   * before the first ping and the ping's own contribution is measurable as a delta.
+   *
+   * Q first: the room-read, 360° and 12 m, from a body that is standing still. Then a square turn
+   * onto the tank and E: a 25° cone whose axis lands on the tank's near face 10 m away — real
+   * geometry, so the beam has a real impact centre to make its far end at (engine-plan §6). The
+   * two are 1.5 s apart, twice the shared cooldown, so neither is refused.
+   */
+  ping: {
+    id: 'ping',
+    title: 'B hall: walk quiet · Q the room · E the tank',
+    end: 7.5,
+    segments: [
+      { at: 0.0, yaw: Math.PI / 2, forward: 1, note: 'walk south out of A through door [d]' },
+      { at: 3.6, note: 'stop on the tank’s centre line and let the room go quiet' },
+      { at: 5.8, yaw: 0, note: 'square up on the tank' },
+    ],
+    pings: [
+      { at: 5.0, mode: 'q', note: 'Q — read the room' },
+      { at: 6.5, mode: 'e', note: 'E — one directed question, at the tank' },
+    ],
+  },
 };
 
 /** `?sim=` values, so the query string can stay human ( `?sim=script` = the corridor route ). */
@@ -947,14 +990,19 @@ export const SCRIPT_ALIASES: Record<string, string> = {
   corridor: 'corridor',
   script2: 'mantle',
   mantle: 'mantle',
+  script3: 'ping',
+  ping: 'ping',
 };
 
 export class ScriptedInput {
   readonly def: ScriptDef;
   private readonly sim: Sim;
   private next = 0;
+  private nextPing = 0;
   done = false;
   note = '';
+  /** Pings the route has actually pressed, so a harness can tell "not yet" from "refused". */
+  pressed = 0;
 
   constructor(sim: Sim, def: ScriptDef) {
     this.sim = sim;
@@ -975,6 +1023,20 @@ export class ScriptedInput {
       if (s.jump) input.jumpPressed = true;
       if (s.yaw !== undefined) input.yawDelta = angleDelta(this.sim.player.yaw, s.yaw);
       this.note = s.note ?? '';
+    }
+    // The ping track sets the same latch a keydown sets, for one step, and lets the step decide:
+    // a scripted route is subject to the cooldown and the reactor exactly as a player is, so a
+    // route that presses too fast records a refusal rather than a free ping (vision §3.5, §4).
+    const pings = this.def.pings;
+    if (pings) {
+      while (this.nextPing < pings.length && pings[this.nextPing]!.at <= t) {
+        const p = pings[this.nextPing]!;
+        this.nextPing++;
+        this.pressed++;
+        if (p.mode === 'e') this.sim.playerSystems.intent.pingE = true;
+        else this.sim.playerSystems.intent.pingQ = true;
+        if (p.note) this.note = p.note;
+      }
     }
     if (!this.done && t >= this.def.end) {
       this.done = true;

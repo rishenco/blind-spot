@@ -24,6 +24,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import mainSource from '../src/main.ts?raw';
 import {
   COYOTE_TIME,
   ENERGY_EPING,
@@ -42,6 +43,7 @@ import {
 } from '../src/core/const.js';
 import type { SoundEvent } from '../src/core/events.js';
 import { inCone } from '../src/core/math.js';
+import { pointInSolid } from '../src/core/map/build.js';
 import type { MoveInput } from '../src/core/movement.js';
 import { Sim } from '../src/core/sim.js';
 import type { MapDef, Solid } from '../src/core/map/types.js';
@@ -76,6 +78,13 @@ const gym: MapDef = {
   air: [{ min: [0, 0, 0], max: [60, 6, 20] }],
   markers: [],
   bounds: { min: [0, -1, 0], max: [60, 6, 20] },
+};
+
+/** The same hall with nothing in it: a horizontal beam here hits no surface, ever. */
+const openHall: MapDef = {
+  ...gym,
+  name: 'open hall',
+  solids: [box('floor', 'floor', 0, -1, 0, 60, 0, 20)],
 };
 
 const NEUTRAL: MoveInput = {
@@ -124,6 +133,23 @@ function record(sim: Sim, body: () => void): SoundEvent[] {
   }
   return seen;
 }
+
+/**
+ * The comparable fingerprint of one event: everything a consumer can act on. Two runs that
+ * produce the same list of these are indistinguishable to paint, audio and (from M5) dogs.
+ */
+const trace = (e: SoundEvent): string =>
+  [
+    e.class,
+    e.variant ?? '-',
+    e.source,
+    e.time.toFixed(9),
+    e.origin[0].toFixed(9),
+    e.origin[1].toFixed(9),
+    e.origin[2].toFixed(9),
+    e.paintRadius.toFixed(6),
+    e.hearRadius.toFixed(6),
+  ].join('|');
 
 // ==========================================================================================
 // Energy (vision §4)
@@ -176,6 +202,56 @@ describe('the reactor is one bar that gates pings and nothing else (vision §4)'
     // …and it does NOT fire later once the bar refills. There is no queue.
     idle(sim, 2);
     expect(sim.bus.counts.ePing).toBe(0);
+  });
+
+  it('MUST not arm the cooldown with a refusal — a poor bar may not halve your ping rate', () => {
+    const sim = new Sim(gym);
+    place(sim, 5, 0, 5);
+    sim.bus.now = 100;
+    sim.playerSystems.energy = ENERGY_EPING - 0.01;
+    expect(sim.playerSystems.ping('e').refused).toBe('energy');
+
+    // Pay the bar back and the very NEXT call fires, with no wait. A refusal that started the
+    // 0.75 s cooldown would silently cost you a ping every time the reactor dipped.
+    sim.playerSystems.energy = ENERGY_MAX;
+    expect(sim.playerSystems.ping('e').refused).toBeNull();
+  });
+
+  it('MUST produce bit-identical motion and an identical sound trace at 0 energy and at full', () => {
+    // Vision §4:118 "Empty bar blocks pings and actives only; it never stops you from moving",
+    // and law 5 forbids rationing movement. Comparing positions alone would miss a reactor that
+    // changed the GAIT — this compares every event the run published, byte for byte.
+    const run = (energy: number): { pos: [number, number, number]; events: string[] } => {
+      const sim = new Sim(gym);
+      place(sim, 5, 0, 5, 0);
+      sim.playerSystems.energy = energy;
+      const events = record(sim, () => {
+        for (let i = 0; i < steps(2); i++) {
+          Object.assign(sim.input, NEUTRAL, { forward: 1, sprint: true, jumpPressed: i === 60 });
+          sim.step(SIM_STEP);
+        }
+      }).map(trace);
+      return { pos: [sim.player.x, sim.player.y, sim.player.z], events };
+    };
+
+    const flat = run(0);
+    const full = run(ENERGY_MAX);
+    expect(flat.pos).toEqual(full.pos);
+    expect(flat.events).toEqual(full.events);
+    expect(flat.events.filter((t) => t.startsWith('sprintStep')).length).toBeGreaterThan(2);
+  });
+
+  it('MUST never let the bar go negative, and still charge the cheaper ping from a floored bar', () => {
+    const sim = new Sim(gym);
+    place(sim, 5, 0, 5);
+    sim.playerSystems.energy = 0;
+    idle(sim, 0.5); // regen 6/s: 3 units, not enough for a Q
+    expect(sim.playerSystems.energy).toBeGreaterThan(0);
+    expect(sim.playerSystems.energy).toBeLessThan(ENERGY_QPING);
+    expect(sim.playerSystems.ping('q').refused).toBe('energy');
+    idle(sim, 2);
+    expect(sim.playerSystems.ping('q').refused).toBeNull();
+    expect(sim.playerSystems.energy).toBeGreaterThanOrEqual(0);
   });
 
   it('lets the cheaper ping through while the dearer one is refused', () => {
@@ -307,6 +383,47 @@ describe('pings are sounds on the ordinary bus (vision §1.1, §3.3)', () => {
     expect(sim.playerSystems.ping('q').refused).toBeNull();
   });
 
+  it('MUST report the cooldown, not the empty bar, when both would refuse', () => {
+    // A documented choice in src/core/player.ts: the cooldown has a known expiry and the bar may
+    // resolve at any moment, so the caller — and through it the HUD — is told the deterministic
+    // reason. Two reasons for one silence would make the readout a coin flip.
+    const sim = new Sim(gym);
+    place(sim, 5, 0, 5);
+    sim.bus.now = 100;
+    expect(sim.playerSystems.ping('q').refused).toBeNull();
+    sim.playerSystems.energy = 0;
+    expect(sim.playerSystems.ping('q').refused).toBe('cooldown');
+    expect(sim.playerSystems.ping('e').refused).toBe('cooldown');
+  });
+
+  it('MUST drop a press made during the cooldown instead of queuing it', () => {
+    const sim = new Sim(gym);
+    place(sim, 5, 0, 5);
+    const seen = record(sim, () => {
+      sim.playerSystems.intent.pingQ = true;
+      idle(sim, 0.1);
+      sim.playerSystems.intent.pingQ = true; // inside the 0.75 s cooldown: refused, not queued
+      idle(sim, 2.0);
+    });
+    // A queued ping would fire itself from a pose you have already left, and cost energy you
+    // never chose to spend at that instant (vision §3.5 "manual only").
+    expect(seen.filter((e) => e.class === 'qPing')).toHaveLength(1);
+    expect(sim.playerSystems.intent.pingQ).toBe(false); // and the latch was cleared either way
+  });
+
+  it('MUST hold the key-repeat guard in the boot layer, so a held key is not autofire', () => {
+    // The core latch fires once per SET intent; nothing in core stops a keydown handler from
+    // setting it 30 times a second. The guard is `if (e.repeat) return;` in main.ts's keydown
+    // listener, and it is the only thing between a held E and a ping every 0.75 s forever.
+    const at = mainSource.indexOf("window.addEventListener('keydown'");
+    expect(at).toBeGreaterThanOrEqual(0);
+    const keydown = mainSource.slice(at);
+    const guard = keydown.indexOf('if (e.repeat) return;');
+    const setsPing = keydown.indexOf('intent.pingE');
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(setsPing).toBeGreaterThan(guard);
+  });
+
   it('fires from the INTENT inside a step, exactly once per press', () => {
     // The keyboard latches an intent; the step consumes it. A press collected between two steps
     // must fire once, inside a step, with that step's clock — never twice, never from a pose the
@@ -361,6 +478,58 @@ describe('the E-ping is heard at both ends of the beam (vision §3.3, engine-pla
     expect(far!.origin[2]).toBeCloseTo(5, 6);
   });
 
+  it('MUST land on the NEAR FACE of the surface it hit, never inside it', () => {
+    // The backoff is a law with a reason, not a fudge: an origin buried in the slab is excluded
+    // from its own wall count (`originSolids` in paint.ts) and would then be heard through the
+    // wall for free. src/core/player.ts owns the 0.05 m; this pins the number and the consequence.
+    const sim = new Sim(gym);
+    place(sim, 5, 0, 5, 0);
+    idle(sim, PING_COOLDOWN);
+    const far = fireAtWall(sim).find((e) => e.variant === 'far')!;
+    const [fx, fy, fz] = far.origin;
+
+    expect(fx).toBeLessThan(25); // outside the slab, on your side of it
+    expect(25 - fx).toBeCloseTo(0.05, 6); // the back-off in player.ts
+    for (const s of sim.world.solids) expect(pointInSolid(s, fx, fy, fz)).toBe(false);
+  });
+
+  it('MUST trace identically whether the sim is stepped 1 or 3 fixed steps per call', () => {
+    // The far end is the only event in the game that is SCHEDULED rather than emitted in the step
+    // that caused it. Frame cadence must not reach it: a beam released mid-frame has to land at
+    // the same sim instant, at the same place, however the host grouped its steps (engine-plan
+    // §2's fixed step is the whole point).
+    const PING_AT = 10;
+    const TOTAL = 120;
+
+    const a = new Sim(gym);
+    place(a, 5, 0, 5, 0);
+    const traceA = record(a, () => {
+      for (let i = 1; i <= TOTAL; i++) {
+        Object.assign(a.input, NEUTRAL, { forward: 1, sprint: true });
+        if (i === PING_AT) a.playerSystems.intent.pingE = true;
+        a.step(SIM_STEP);
+      }
+    }).map(trace);
+
+    const b = new Sim(gym);
+    place(b, 5, 0, 5, 0);
+    const traceB = record(b, () => {
+      while (b.steps < TOTAL) {
+        Object.assign(b.input, NEUTRAL, { forward: 1, sprint: true });
+        if (b.steps === PING_AT - 1) b.playerSystems.intent.pingE = true;
+        b.advance(SIM_STEP * 3);
+      }
+    }).map(trace);
+
+    // If this ever fails, the grouping assumption below broke before the determinism claim did.
+    expect(b.steps).toBe(TOTAL);
+    expect(a.time).toBeCloseTo(b.time, 12);
+    expect(traceB).toEqual(traceA);
+    // …and the run actually exercised what it claims to: a beam, its far end, and footsteps.
+    expect(traceA.filter((t) => t.startsWith('ePing|far'))).toHaveLength(1);
+    expect(traceA.filter((t) => t.startsWith('sprintStep')).length).toBeGreaterThan(0);
+  });
+
   it('is heard EPING_FAR_HEAR and paints nothing at all', () => {
     const sim = new Sim(gym);
     place(sim, 5, 0, 5, 0);
@@ -399,19 +568,48 @@ describe('the E-ping is heard at both ends of the beam (vision §3.3, engine-pla
     expect(farTime).toBeLessThan(outTime + flight + SIM_STEP + 1e-9);
   });
 
-  it('sits at the full 40 m when the beam hits nothing', () => {
+  it('MUST emit no far end at all when the beam hits nothing', () => {
+    // Engine-plan §6 puts the far end "at beam impact center". With no impact there is no impact
+    // centre, and vision law 2 (doc/vision.md:21) says every sound has a real physical source: the
+    // far end is a noise made BY the struck surface, so an unstruck beam is silent. A miss is
+    // answered by hearing nothing come back — there is deliberately no compensating cue.
     const sim = new Sim(gym);
-    place(sim, 5, 0, 5, Math.PI / 2); // facing +z, down 15 m of open hall… and out of the map
-    // Aim along the long clear axis instead: back down the hall, away from the wall.
-    sim.player.yaw = Math.PI;
+    place(sim, 5, 0, 5, Math.PI); // −x: 5 m of hall, then the world's edge, which is not a solid
     idle(sim, PING_COOLDOWN);
     const seen = record(sim, () => {
       sim.playerSystems.intent.pingE = true;
       idle(sim, 1.0);
     });
-    const far = seen.find((e) => e.variant === 'far')!;
-    // Nothing solid within 40 m in −x from x = 5 except the world's edge, which is not a solid.
-    expect(Math.hypot(far.origin[0] - 5, far.origin[2] - 5)).toBeCloseTo(EV.ePing.paint, 3);
+    expect(seen.filter((e) => e.class === 'ePing' && e.variant !== 'far')).toHaveLength(1);
+    expect(seen.filter((e) => e.variant === 'far')).toHaveLength(0);
+  });
+
+  it('MUST never publish a far end outside the map, where the open direction runs off the edge', () => {
+    // The same law, sharper. From x = 5 facing −x the far end used to be published at x = −35,
+    // 35 m outside `bounds.min` — a hearable sound in the void, and once dogs exist (M5) an alarm
+    // from thin air.
+    const sim = new Sim(gym);
+    place(sim, 5, 0, 5, Math.PI);
+    idle(sim, PING_COOLDOWN);
+    const far = record(sim, () => {
+      sim.playerSystems.intent.pingE = true;
+      idle(sim, 1.0);
+    }).find((e) => e.variant === 'far');
+    expect(far).toBeUndefined();
+  });
+
+  it('MUST emit no far end in a hall with no surface in reach at all', () => {
+    // The gym's floor is under the beam, never in it (pitch 0). `openHall` removes the wall too,
+    // so nothing anywhere can be struck: the whole 40 m of reach reaches nothing.
+    const sim = new Sim(openHall);
+    place(sim, 5, 0, 5, 0); // +x down 55 m of empty hall
+    idle(sim, PING_COOLDOWN);
+    const seen = record(sim, () => {
+      sim.playerSystems.intent.pingE = true;
+      idle(sim, 1.0);
+    });
+    expect(seen.filter((e) => e.class === 'ePing' && e.variant !== 'far')).toHaveLength(1);
+    expect(seen.filter((e) => e.variant === 'far')).toHaveLength(0);
   });
 
   it('emits exactly one far end per E-ping, and a Q-ping has none', () => {
@@ -434,7 +632,10 @@ describe('the E-ping is heard at both ends of the beam (vision §3.3, engine-pla
     // PING_COOLDOWN is 0.75 s. If that ever stops being true this test is the alarm.
     expect(EV.ePing.paint / WAVE_SPEED_E).toBeLessThan(PING_COOLDOWN);
     const sim = new Sim(gym);
-    place(sim, 5, 0, 5, Math.PI); // the open direction: the longest possible beam
+    // Down the hall at the wall's FAR face: 32.6 m of flight, the longest beam this fixture can
+    // produce that actually lands on something — and a beam that lands on nothing schedules
+    // nothing at all, so the open direction would exercise no pending slot.
+    place(sim, 58, 0, 5, Math.PI);
     idle(sim, PING_COOLDOWN);
     const seen = record(sim, () => {
       for (let i = 0; i < 4; i++) {
@@ -501,6 +702,42 @@ describe('the halo says exactly how loud you are (vision §3.8)', () => {
     idle(sim, 1);
     sim.bus.emit({ class: 'detonation', source: 'detonation', x: 5, y: 0, z: 5 });
     expect(sim.playerSystems.audibleRadius).toBe(0);
+    // Somebody else's noise is not your loudness, however close it is standing.
+    sim.bus.emit({ class: 'dogGait', source: 'dog', variant: 'chase', x: 5, y: 0, z: 5 });
+    expect(sim.playerSystems.audibleRadius).toBe(0);
+  });
+
+  it('MUST run on sim seconds only: the same steps grouped differently give the same readout', () => {
+    // 102 is a multiple of 3, so both cadences stop on exactly the same step and the comparison is
+    // of the halo model, not of how far past the finish line each loop ran. A halo that decayed on
+    // real seconds would read differently on a 144 Hz monitor than on a 60 Hz one.
+    const run = (perCall: number): { r: number; steps: number } => {
+      const sim = new Sim(gym);
+      place(sim, 5, 0, 5);
+      sim.playerSystems.intent.pingQ = true;
+      while (sim.steps < 102) sim.advance(SIM_STEP * perCall);
+      return { r: sim.playerSystems.audibleRadius, steps: sim.steps };
+    };
+    const grouped = run(3);
+    const single = run(1);
+    expect(grouped.steps).toBe(single.steps);
+    expect(grouped.r).toBeCloseTo(single.r, 12);
+    expect(single.r).toBeLessThan(EV.qPing.hear); // it really was decaying by now
+  });
+
+  it('DOCUMENTS: the far end refreshes the hold, so a long beam keeps you loud past the ping', () => {
+    // The halo is EMISSION-time (engine-plan §6): it follows everything you emit, and the far end
+    // of a 20 m beam is emitted 0.235 s after the ping, extending the 1.2 s max-hold by that much.
+    // That is the honest readout — the beam is still travelling, and the room it lands in is about
+    // to hear you (vision §3.3 "heard 30 m at both ends"). Pinned so a change is a decision.
+    const sim = new Sim(gym);
+    place(sim, 5, 0, 5, 0);
+    idle(sim, PING_COOLDOWN);
+    sim.playerSystems.intent.pingE = true;
+    const flight = 19.95 / WAVE_SPEED_E;
+    idle(sim, HALO_WINDOW + flight - 4 * SIM_STEP);
+    // More than HALO_WINDOW after the ping itself, yet still pinned at full loudness.
+    expect(sim.playerSystems.audibleRadius).toBe(EV.ePing.hear);
   });
 
   it('flares on a ping: an E-ping makes you loud, and the halo says so', () => {
@@ -577,10 +814,54 @@ describe('the hands rig poses the verb movement is running (visual-brief §1.6)'
     expect(heights[heights.length - 1]!).toBeLessThan(Math.max(...heights));
   });
 
+  it('MUST write the exact elbow-wrist MIDPOINT, mirrored in x for the left arm', () => {
+    // This is the assertion with the discriminating power. The envelope below bounds the
+    // half-length in (0.05, 0.6) — which the whole authored bone also satisfies, so moving
+    // `forearm.pos` onto the ELBOW would sail through it while the look drew a double-length
+    // forearm out of the frame. These are the REST key's own numbers, hand-checkable against
+    // `REST` in src/core/player.ts: wrist [0.24, −0.92, −0.3], elbow [0.32, −1.22, −0.16].
+    const sim = new Sim(gym);
+    const h = sim.playerSystems.hands;
+    expect(h.visibility).toBe(0);
+
+    expect(h.right.hand.pos[0]).toBeCloseTo(0.24, 9);
+    expect(h.right.hand.pos[1]).toBeCloseTo(-0.92, 9);
+    expect(h.right.hand.pos[2]).toBeCloseTo(-0.3, 9);
+    expect(h.right.forearm.pos[0]).toBeCloseTo(0.28, 9);
+    expect(h.right.forearm.pos[1]).toBeCloseTo(-1.07, 9);
+    expect(h.right.forearm.pos[2]).toBeCloseTo(-0.23, 9);
+
+    expect(h.left.hand.pos[0]).toBeCloseTo(-0.24, 9);
+    expect(h.left.forearm.pos[0]).toBeCloseTo(-0.28, 9);
+    expect(h.left.forearm.pos[1]).toBeCloseTo(-1.07, 9);
+
+    // The look recovers the bone's length as 2 × |forearm − hand| (see test/looks.spec.ts). That
+    // is only the real elbow→wrist length while the midpoint law above holds.
+    const half = Math.hypot(
+      h.right.forearm.pos[0] - h.right.hand.pos[0],
+      h.right.forearm.pos[1] - h.right.hand.pos[1],
+      h.right.forearm.pos[2] - h.right.hand.pos[2],
+    );
+    expect(half * 2).toBeCloseTo(Math.hypot(0.32 - 0.24, -1.22 + 0.92, -0.16 + 0.3), 9);
+  });
+
+  it('MUST keep both bones on one axis, and both arms mirrored about the eye, at rest', () => {
+    const sim = new Sim(gym);
+    const h = sim.playerSystems.hands;
+    expect(h.right.forearm.rot).toEqual(h.right.hand.rot);
+    expect(h.left.forearm.rot).toEqual(h.left.hand.rot);
+    expect(h.left.hand.pos[0]).toBeCloseTo(-h.right.hand.pos[0], 12);
+    expect(h.left.hand.pos[1]).toBeCloseTo(h.right.hand.pos[1], 12);
+  });
+
   it('keeps both arms attached to their own bones, always', () => {
     // The forearm bone is the elbow-wrist MIDPOINT and the hand bone is the wrist, so a look can
     // recover the arm's length as twice the distance between them. A pose that broke that would
     // draw a forearm that fails to reach its own hand.
+    //
+    // The half-length bound here is an ENVELOPE over the whole animation, not the midpoint law:
+    // the authored bone is not rigid (it foreshortens as the elbow swings), so no tighter constant
+    // is honest across a mantle. The law itself is pinned exactly, on the rest key, above.
     const sim = new Sim(gym);
     place(sim, 5.2, 0, 15, 0);
     for (let i = 0; i < steps(3); i++) {

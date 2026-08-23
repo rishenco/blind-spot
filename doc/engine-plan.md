@@ -236,9 +236,12 @@ Strafe-jumping stays expressive and stays finite.
   pings only. (vision §4)
 - **Pings:** shared 0.75 s cooldown. E: cone 25°, 40 m. Q: sphere 12 m. Both emit their
   own hearable event (E hearable at both ends — implement as second virtual event at beam
-  impact center, hear 30 m, once the front arrives; paints nothing extra).
+  impact center, hear 30 m, once the front arrives; paints nothing extra). Point-blank, the
+  far end is legal-by-design: firing at a wall a metre away yields two real events ~32 ms
+  apart at effectively the same place, because the wall genuinely re-radiates next to you.
 - **Halo model:** `audibleRadius(t)` = smoothed max over the last 1.2 s of self-emitted
   hearRadius, decaying; drives reticle ring brightness (looks) and hum pitch (audio).
+  Emission-time, far end included — a long beam keeps you loud until it lands.
 - **Hands:** state machine (`none | mantle | ladder | vault`) with phase 0..1; core
   provides a simple boxy robot hand/forearm rig (positions/rotations for 2 hands); looks
   own its material/styling.

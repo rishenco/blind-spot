@@ -7,8 +7,11 @@
  * do not know about each other:
  *
  *   Sim  ──emit──▶  EventBus  ──▶  PaintPipeline (delivery + paint into the shared buffers)
- *                       └──────▶  AudioEngine
+ *                                        └──delivered──▶  AudioEngine · LookHost's stains
  *                                      SurfelField's two geometries ──▶ LookHost ──▶ the screen
+ *
+ * Audio hangs off the DELIVERED feed rather than off the bus: what you hear and what you see are
+ * the same events, filtered by the same gate, computed once (engine-plan §4, §8).
  *
  * Nothing in `core/` imports a look, and no look writes to the sim. The bake and the paint
  * pipeline are attached HERE rather than inside `Sim`, exactly like the audio engine: a Sim is a
@@ -41,7 +44,7 @@ import { Sim } from './core/sim.js';
 import type { Stance } from './core/sim.js';
 import { bakeSurfels, type SurfelField } from './core/surfels.js';
 import { LOOK_BY_KEY, LookHost, resolveLookId, type LookId } from './looks/index.js';
-import type { LookContext } from './looks/types.js';
+import type { LookContext, PlayerView } from './looks/types.js';
 
 const params = new URLSearchParams(window.location.search);
 
@@ -55,7 +58,6 @@ const sim = new Sim(sampleMap);
 const debug = new DebugOverlay(overlayRoot, sim);
 const rig = new CameraRig();
 const audio = new AudioEngine();
-audio.attach(sim.bus);
 
 // ---------------------------------------------------------------------------------------
 // Bake + paint
@@ -77,6 +79,7 @@ const paint = new PaintPipeline(field, sim.world);
 // assert zero calls. Nothing here depends on the number — it is a readout, not an input.
 paint.profile = true;
 paint.attach(sim.bus);
+audio.attach(paint);
 
 /**
  * THE LISTENER is the player, and it is set from the SIM pose rather than the interpolated one.
@@ -155,7 +158,7 @@ const FLOOR_SPAN = 12.0;
  * surfel geometries are — it is four bones rewritten every step, and a per-frame deep copy would
  * buy nothing the contract's "a look never mutates core state" does not already promise.
  */
-const playerView = {
+const playerView: { -readonly [K in keyof PlayerView]: PlayerView[K] } = {
   pos: renderPos as readonly [number, number, number],
   stance: 'stand' as Stance,
   speed: 0,
@@ -163,6 +166,7 @@ const playerView = {
   energy: sim.playerSystems.energy,
   energyMax: sim.playerSystems.energyMax,
   hands: sim.playerSystems.hands,
+  lastPing: sim.playerSystems.lastPing,
 };
 
 const reduceFlashing =
@@ -219,6 +223,7 @@ if (renderer) {
     playerView.audibleRadius = ps.audibleRadius;
     playerView.energy = ps.energy;
     playerView.energyMax = ps.energyMax;
+    playerView.lastPing = ps.lastPing;
 
     ctx.floorCentre = renderPos[1] + 1.6;
     ctx.floorSpan = FLOOR_SPAN;
@@ -439,6 +444,12 @@ requestAnimationFrame(frame);
  *             §3.2 puts every depth cue inside the cyan band — a saturated pixel has thrown its
  *             depth cue away, and a field of them is the porridge. Verify asserts it stays small.
  *
+ * A COVERAGE FRACTION CANNOT TELL A CLOUD FROM A SHEET. A frame of separate saturated dots and a
+ * frame with one saturated rectangle can read the same percentage, and only the second one has
+ * lost the near-field read (visual-brief §2 "dots stay dots"). So the white pixels are also
+ * measured structurally: `whiteBlob` is the largest connected run of them, which is one dot's
+ * area while the near field is a cloud and grows without bound the moment splats fuse.
+ *
  * `rect` restricts the count to a fraction of the frame, given as [x, y, w, h] in 0..1 with the
  * origin at the BOTTOM-LEFT (readPixels' own origin, not the screenshot's). A whole-frame fraction
  * cannot tell where the ink is, and one of the things worth asserting — that the contact shell is
@@ -450,12 +461,65 @@ interface InkReport {
   lit: number;
   any: number;
   white: number;
+  /** Saturated pixels as a raw count, and the largest connected run of them. Both in pixels. */
+  whitePx: number;
+  whiteBlob: number;
   width: number;
   height: number;
 }
 
+// Reused across calls: the per-frame allocation would otherwise be megabytes of garbage on every
+// sampled frame, which is exactly the frames a peak measurement wants to be cheap on.
+let blobMask = new Uint8Array(0);
+let blobStack = new Int32Array(0);
+
+/**
+ * Largest 4-connected run of saturated pixels in `blobMask`, in pixels. Consumes the mask.
+ *
+ * FOUR-connected on purpose: two round splats that meet only at a corner are still two splats, and
+ * counting them as one would make the measure drift upward with density rather than with fusion.
+ * A sheet is solid, so it is caught either way.
+ */
+function largestWhiteBlob(w: number, h: number): number {
+  const mask = blobMask;
+  const n = w * h;
+  if (blobStack.length < n) blobStack = new Int32Array(n);
+  const stack = blobStack;
+  let best = 0;
+  for (let seed = 0; seed < n; seed++) {
+    if (mask[seed] !== 1) continue;
+    mask[seed] = 2;
+    let top = 0;
+    stack[top++] = seed;
+    let size = 0;
+    while (top > 0) {
+      const i = stack[--top]!;
+      size++;
+      const x = i % w;
+      if (x > 0 && mask[i - 1] === 1) {
+        mask[i - 1] = 2;
+        stack[top++] = i - 1;
+      }
+      if (x < w - 1 && mask[i + 1] === 1) {
+        mask[i + 1] = 2;
+        stack[top++] = i + 1;
+      }
+      if (i >= w && mask[i - w] === 1) {
+        mask[i - w] = 2;
+        stack[top++] = i - w;
+      }
+      if (i + w < n && mask[i + w] === 1) {
+        mask[i + w] = 2;
+        stack[top++] = i + w;
+      }
+    }
+    if (size > best) best = size;
+  }
+  return best;
+}
+
 function measureInk(rect?: readonly [number, number, number, number]): InkReport {
-  if (!renderer || !looks) return { lit: 0, any: 0, white: 0, width: 0, height: 0 };
+  if (!renderer || !looks) return { lit: 0, any: 0, white: 0, whitePx: 0, whiteBlob: 0, width: 0, height: 0 };
   looks.render();
   const gl = renderer.getContext();
   const bw = gl.drawingBufferWidth;
@@ -466,20 +530,31 @@ function measureInk(rect?: readonly [number, number, number, number]): InkReport
   const h = rect ? Math.max(1, Math.min(bh - y, Math.round(rect[3] * bh))) : bh;
   const px = new Uint8Array(w * h * 4);
   gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const n = w * h;
+  if (blobMask.length < n) blobMask = new Uint8Array(n);
   let lit = 0;
   let any = 0;
   let white = 0;
-  for (let i = 0; i < px.length; i += 4) {
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
     const r = px[i]!;
     const g = px[i + 1]!;
     const b = px[i + 2]!;
     const sum = r + g + b;
     if (sum > 60) lit++;
     if (sum > 8) any++;
-    if (r >= WHITE_LEVEL && g >= WHITE_LEVEL && b >= WHITE_LEVEL) white++;
+    const sat = r >= WHITE_LEVEL && g >= WHITE_LEVEL && b >= WHITE_LEVEL;
+    blobMask[p] = sat ? 1 : 0;
+    if (sat) white++;
   }
-  const n = w * h;
-  return { lit: lit / n, any: any / n, white: white / n, width: w, height: h };
+  return {
+    lit: lit / n,
+    any: any / n,
+    white: white / n,
+    whitePx: white,
+    whiteBlob: white === 0 ? 0 : largestWhiteBlob(w, h),
+    width: w,
+    height: h,
+  };
 }
 
 declare global {

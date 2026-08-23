@@ -26,7 +26,7 @@
 import type { BufferGeometry, PerspectiveCamera, WebGLRenderer } from 'three';
 import type { CoreConstants } from '../core/const.js';
 import type { SoundEvent } from '../core/events.js';
-import type { HandsPose, RigArm, RigBone } from '../core/player.js';
+import type { HandsPose, PingResult, RigArm, RigBone } from '../core/player.js';
 import type { Stance } from '../core/sim.js';
 
 /** One frozen pose of a moving thing, for motion smear (vision §3.7). M5 fills these. */
@@ -67,6 +67,16 @@ export type HandsView = HandsPose;
 export type RigArmView = RigArm;
 export type RigBoneView = RigBone;
 
+/**
+ * The last press of E or Q as core resolved it: which mode, the event if it fired, why it did
+ * not if it did not, and the sim instant either way (core/player.ts `PingResult`).
+ *
+ * A refusal makes no sound, so it is the one thing in the game that a look has to say out loud —
+ * silence after a press is otherwise indistinguishable from a dead key. Core owns the reason and
+ * the timestamp; a look owns whether and how it shows them, and for how long.
+ */
+export type PingView = PingResult;
+
 export interface PlayerView {
   /** INTERPOLATED render position — feet (engine-plan §11.1: never the raw sim pose). */
   readonly pos: readonly [number, number, number];
@@ -79,6 +89,8 @@ export interface PlayerView {
   readonly energy: number;
   readonly energyMax: number;
   readonly hands: HandsView;
+  /** Null until the first press of either ping this run. See `PingView`. */
+  readonly lastPing: PingView | null;
 }
 
 /**

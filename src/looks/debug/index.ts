@@ -45,6 +45,16 @@ const NEVER_PAINTED = -1.0e8;
 const RIM_PULSE = 0.4;
 
 /**
+ * How long a REFUSED ping's reason stays on the printed readout, seconds.
+ *
+ * A refusal emits nothing — no event, no chirp, no rim (vision §3.5: refused, never queued) — so
+ * it is the one press in the game whose answer is silence, and silence is indistinguishable from
+ * a dead key. Long enough to read after a mistimed double-tap, short enough that it is gone before
+ * the next honest ping. Text, not a symbol: this look's job is to be literal.
+ */
+const REFUSAL_SHOW = 0.6;
+
+/**
  * Cross-section of the rig's prisms, metres. The hand is stubbier and slightly wider.
  *
  * These are small because of where the elbow ends up, not because a robot's arm is thin. The rig
@@ -71,7 +81,7 @@ const HAND_ALPHA = 0.36;
 const LINE_LIFT = 0.02;
 
 /**
- * THE DOT CAP, in device-independent pixels. Visual-brief §2 "Near field: dots stay dots".
+ * THE DOT CAP, as a fraction of FRAME HEIGHT. Visual-brief §2 "Near field: dots stay dots".
  *
  * A splat is drawn at its projected footprint only up to this ceiling. Vision §12's "splats sized
  * to voxel footprint" is a CEILING — a dot never grows past its own cell — and not a mandate to
@@ -80,17 +90,26 @@ const LINE_LIFT = 0.02;
  * built on. The near field reads as a crisp sparse lattice over black, with the 2 m contact shell
  * under it; "nearby reads as a cloud" is bought with density and brightness, never with disc size.
  *
- * 12 px is chosen against the lattice's own screen pitch, which is the only scale that matters
- * here: at 1600x1000 with FOV 92 a neighbouring surfel sits `483 * 0.22 / depth` px away, so the
- * cap binds from 8.9 m inward (face-on; sooner at grazing angles, where the equal-area radius is
- * smaller). At 9 m dots are ~12 px at a ~12 px pitch — still a continuous surface — and they open
- * out into visibly separate dots as you close, which is the near-field read the ruling asks for.
- * Below ~8 px the mid-field breaks into a starfield; above ~14 px the discs return.
+ * RELATIVE, not absolute, because the only scale that matters here is the lattice's own SCREEN
+ * PITCH, and that is set by the frame's height: the footprint is `uProjScale * spacing / depth`
+ * and `uProjScale` is `viewH/2 / tan(fov/2)`, so both the pitch and the footprint scale with
+ * height and the cap has to scale with them or it means something different in every window. At
+ * 1000 px tall this is 12 px, which is where it was tuned: with FOV 92 a neighbouring surfel sits
+ * `483 * 0.22 / depth` px away, so the cap binds from 8.9 m inward (face-on; sooner at grazing
+ * angles, where the equal-area radius is smaller). At 9 m dots are ~12 px at a ~12 px pitch —
+ * still a continuous surface — and they open out into visibly separate dots as you close. Below
+ * ~0.008 of height the mid-field breaks into a starfield; above ~0.014 the discs return.
+ *
+ * CONSEQUENCE, recorded rather than fixed: below ~250 px of frame height the cap falls under the
+ * absolute SPLAT_NEAR_PX/SPLAT_MIN_PX floors and the floors win, so a very small window can flood
+ * again. That is vision §12's own floor law ("splats >= 2-3 px and temporally stable" — a
+ * sub-pixel dot dies in stream compression) being paid for, not a defect in this cap: the two
+ * laws genuinely conflict at postage-stamp sizes and the floor is the one that must hold.
  *
  * The cap also removes an artifact for free: WebGL culls a point whose CENTRE leaves the viewport,
  * so a huge splat popped out at the frame edge while half of it was still on screen.
  */
-const SPLAT_CAP_PX = 12;
+const SPLAT_CAP_FRAC = 0.012;
 
 const DOT_VERT = /* glsl */ `
 attribute float dither;
@@ -176,8 +195,13 @@ void main() {
   // The two px constants are FLOORS on the same footprint (visual-brief §2 "splats >= 2-3 px and
   // temporally stable" — a sub-pixel dot dies in stream compression and shimmers). The floor
   // relaxes with distance because the far field is meant to thin toward a drawing: near dots hold
-  // uSplatNear, far dots may go down to uSplatMin. Floors are far below the cap by construction,
-  // so the clamp below can never invert.
+  // uSplatNear, far dots may go down to uSplatMin.
+  //
+  // The floor is raised over the cap rather than assumed to sit under it. GLSL leaves clamp
+  // UNDEFINED when its low bound exceeds its high one, and the two operands are owned by different
+  // modules — the floors are core constants, the cap is private to this look and now scales with
+  // the window — so "they cannot cross" is not something this shader is allowed to believe. Where
+  // they do cross, the floor wins (see SPLAT_CAP_FRAC).
   //
   // Foreshortening: the cell is a square in the SURFACE, so what it covers on screen is an ellipse
   // with semi-axes a and a*|n.v| — a floor seen edge-on covers a fraction of what the same cell
@@ -188,7 +212,8 @@ void main() {
   vec3 toCam = normalize(uCamPos - position);
   float foot = uProjScale * uSpacing / max(0.05, -mv.z);
   foot *= sqrt(clamp(abs(dot(normal, toCam)), 0.15, 1.0));
-  float size = clamp(foot, mix(uSplatNear, uSplatMin, far), uSplatCap);
+  float floorPx = mix(uSplatNear, uSplatMin, far);
+  float size = clamp(foot, floorPx, max(uSplatCap, floorPx));
 
   // Contact shell (vision §3.1): the only geometry visible without sound. Faint, 2 m, always on.
   alpha = max(alpha, shellAlpha(position));
@@ -430,7 +455,7 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
           uPixelRatio: { value: 1 },
           uSplatMin: { value: c.constants.SPLAT_MIN_PX },
           uSplatNear: { value: c.constants.SPLAT_NEAR_PX },
-          uSplatCap: { value: SPLAT_CAP_PX },
+          uSplatCap: { value: SPLAT_CAP_FRAC * viewH },
         },
         vertexShader: DOT_VERT,
         fragmentShader: DOT_FRAG,
@@ -594,9 +619,12 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
       readoutAcc += dt;
       if (readoutAcc >= 0.1) {
         readoutAcc = 0;
+        // Core resolved the press and stamped it; the look only decides how long to show it.
+        const lp = p.lastPing;
+        const refusal = lp && lp.refused && now - lp.at < REFUSAL_SHOW ? ` · ${lp.refused}` : '';
         readout.textContent =
           `audible ${p.audibleRadius.toFixed(1).padStart(5)} m    ` +
-          `⚡ ${p.energy.toFixed(0).padStart(3)}/${p.energyMax}`;
+          `⚡ ${p.energy.toFixed(0).padStart(3)}/${p.energyMax}${refusal}`;
       }
     },
 
@@ -611,6 +639,9 @@ export function createDebugLook(id = 'debug', title = 'debug', note = ''): Look 
       viewH = Math.max(1, h);
       const dpr = ctx ? ctx.renderer.getPixelRatio() : 1;
       setUniform(dotMat, 'uPixelRatio', dpr);
+      // CSS px, like every other term in the size math — the DPR multiply happens once, in the
+      // shader, and applying it here as well would square it.
+      setUniform(dotMat, 'uSplatCap', SPLAT_CAP_FRAC * viewH);
       const vp = [viewW * dpr, viewH * dpr];
       setUniform(lineMat, 'uViewport', vp);
       setUniform(holdMat, 'uViewport', vp);

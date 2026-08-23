@@ -84,7 +84,11 @@ thrilling at parkour speed?** Everything below serves that. Three competing art 
   crisp sparse lattice over black with the 2 m contact shell under it; "nearby reads as a
   cloud" is achieved by density and brightness, never by disc size. Vision §12 "splats
   sized to voxel footprint" is a ceiling (a dot never grows past its cell), not a mandate
-  to fill the cell at any range.
+  to fill the cell at any range. A loud flash may briefly saturate individual fresh dots —
+  bounded at ≤6 % of the reference frame at its peak, and never as contiguous sheets (the
+  largest saturated region stays one dot's area) — which is what "brightness carries the
+  near read" costs in a look with no headroom above white; art looks keep freshness inside
+  their own ramp's headroom instead.
 - **Comfort:** FOV 80–110 (sprint kick stays inside), no motion blur, reduce-flashing mode
   must remain implementable (no school may depend on strobing), chroma-not-luminance pulses,
   ping spacing ≥0.75 s, splats ≥2–3 px and temporally stable.

@@ -28,6 +28,8 @@ import {
   DITHER_GAIN,
   EV,
   HEARING_BASE,
+  PING_COOLDOWN,
+  SIM_STEP,
   WALL1_INTENSITY,
   WALL1_QUALITY,
   WALL1_RADIUS,
@@ -41,6 +43,7 @@ import { eventQuality } from '../src/core/math.js';
 import { buildWorld } from '../src/core/map/build.js';
 import type { MapDef, Solid, SolidKind } from '../src/core/map/types.js';
 import { applyEvent, deliverTo, fuzzVector, PaintPipeline, RangeAccum, withDelivery } from '../src/core/paint.js';
+import { Sim } from '../src/core/sim.js';
 import { bakeSurfels, UNPAINTED, type SurfelField } from '../src/core/surfels.js';
 
 // ------------------------------------------------------------------------------------------
@@ -1527,5 +1530,54 @@ describe('a new sound never un-draws the map (vision §3.6)', () => {
       expect(field.paintedDots, `after ${k + 1} steps`).toBe(ever);
     }
     expect(ever).toBeGreaterThan(500);
+  });
+});
+
+// ------------------------------------------------------------------------------------------
+
+describe('a zero-radius event is heard and blind (engine-plan §6)', () => {
+  /** Fire one E-ping down the paint gym at wallA and return the far end it scheduled. */
+  const farEnd = (): { sim: Sim; far: SoundEvent } => {
+    const sim = new Sim(gymMap);
+    const p = sim.player;
+    p.x = 2;
+    p.y = 0;
+    p.z = 6;
+    p.yaw = 0; // +x, into wallA's near face at 9.8
+    p.pitch = 0;
+    sim.bus.now = PING_COOLDOWN;
+    let far: SoundEvent | null = null;
+    const off = sim.bus.on((e) => {
+      if (e.variant === 'far') far = e;
+    });
+    sim.playerSystems.intent.pingE = true;
+    for (let i = 0; i < 60; i++) sim.step(SIM_STEP);
+    off();
+    expect(far, 'the beam has to have landed on wallA').not.toBeNull();
+    return { sim, far: far! };
+  };
+
+  it('MUST deliver the E far end to a listener standing on it and still light nothing', () => {
+    // The cone already painted everything the beam swept. A sphere at the impact centre would hand
+    // the player geometry around a corner they never illuminated — vision §3.1 prices every metre
+    // of light, so the far end buys hearing only. The listener is placed exactly ON the origin:
+    // the most favourable case there is for the event to paint something.
+    const { sim, far } = farEnd();
+    expect(far.paintRadius).toBe(0);
+
+    const fresh = bakeSurfels(sim.world);
+    const pipe = new PaintPipeline(fresh, sim.world);
+    pipe.setListener(far.origin[0], far.origin[1], far.origin[2]);
+    expect(fresh.paintedDots).toBe(0);
+
+    const delivered = pipe.hear(far);
+    pipe.pump(far.time + 10);
+
+    expect(delivered).not.toBeNull(); // hearable…
+    expect(pipe.heard).toBe(1);
+    expect(pipe.missed).toBe(0);
+    expect(fresh.paintedDots).toBe(0); // …and blind.
+    expect(fresh.paintedEdgeVerts).toBe(0);
+    expect(pipe.pendingPatches).toBe(0);
   });
 });
