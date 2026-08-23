@@ -136,6 +136,12 @@ export const ACCEL_AIR = 10;
 /** Source-style air-strafe cap: how much speed a single air-accel tick may add along wishdir. */
 export const AIR_WISH_CAP = 1.6;
 export const FRICTION_GROUND = 52;
+/**
+ * Speed above the stance's own cap bleeds off at this rate instead of being clamped away
+ * (vision §5 "movement stays genuinely good", engine-plan §5 momentum). A slide-jump landing at
+ * 7.5 m/s keeps most of it for ~0.7 s of sprinting rather than snapping back to 6.0 in a tick.
+ */
+export const OVERSPEED_DECAY = 2.2;
 export const GRAVITY = 22;
 export const JUMP_VELOCITY = 7.0;
 export const COYOTE_TIME = 0.12;
@@ -157,11 +163,25 @@ export const SLIDE_DECAY = 2.2;
 export const SLIDE_MIN_SPEED = SPEED_CROUCH;
 export const SLIDE_TILT_DEG = 4.0;
 export const SLIDE_STRIDE = 0.5;
+/** How fast a slide may be steered, rad/s. At 7.5 m/s this is a ~3.7 m carve radius. */
+export const SLIDE_STEER_RATE = 2.0;
 
 export const MANTLE_SCAN_AHEAD = 1.0;
 export const MANTLE_MAX_HEIGHT = 2.2;
 export const MANTLE_MIN_HEIGHT = 0.4;
 export const MANTLE_DURATION = 0.45;
+/**
+ * At or below this a ledge is a VAULT: it triggers automatically when you run into it and is
+ * over fast enough to keep your speed. Above it, up to MANTLE_MAX_HEIGHT, it is a MANTLE and
+ * needs a jump press — nobody wants to be auto-climbed onto a 2 m machine they were running past.
+ */
+export const VAULT_MAX_HEIGHT = 1.2;
+export const VAULT_DURATION = 0.28;
+
+/** Grab if the wish direction points at the ladder plane at least this much (dot product). */
+export const LADDER_ATTACH_DOT = 0.25;
+/** How far past the ladder plane the top-out places you, looking for a supported landing. */
+export const LADDER_EXIT_REACH = 0.9;
 
 export const STRIDE_CROUCH = 1.3;
 export const STRIDE_WALK = 1.9;
@@ -185,6 +205,10 @@ export const FOV_SMOOTH = 6.0;
 export const HEAD_BOB_MAX = 0.035;
 export const LANDING_DIP_MAX = 0.16;
 export const LANDING_DIP_DECAY = 7.0;
+/** Eye-height approach rate for crouch/stand transitions (1/s). */
+export const EYE_SMOOTH = 12.0;
+/** Camera roll approach rate for the slide tilt (1/s). */
+export const TILT_SMOOTH = 8.0;
 export const PITCH_LIMIT = Math.PI * 0.5 - 0.02;
 export const MOUSE_SENSITIVITY = 0.0022;
 

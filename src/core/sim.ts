@@ -1,14 +1,21 @@
 /**
  * Fixed-step (60 Hz) simulation orchestration (engine-plan §2).
  *
- * Milestone 1 owns only the skeleton: the world, sim time, and the player state that the
- * debug view reads. Movement (M2), paint (M3), player systems (M4) and the dog (M5) plug their
- * updates into `step()`; consumers only ever see the read-only `SimView`.
+ * The sim owns the world, the clock, the player, the event bus and the systems that write to
+ * them. Consumers only ever see the read-only `SimView`. Milestone 2 plugs movement in; paint
+ * (M3), player systems (M4) and the dog (M5) join the same `step()`.
+ *
+ * Order inside a step is deliberate: the bus clock is stamped first so every event emitted this
+ * tick carries this tick's time, then movement runs (and emits). Systems that CONSUME events —
+ * paint, audio — are listeners on the bus, so they see events in emission order, inside the
+ * step that produced them.
  */
 
 import { SIM_MAX_STEPS, SIM_STEP } from './const.js';
+import { EventBus } from './events.js';
 import { buildWorld, type World } from './map/build.js';
 import type { MapDef } from './map/types.js';
+import { makeInput, MovementController, type MoveInput } from './movement.js';
 
 export type Stance = 'stand' | 'crouch' | 'slide' | 'air' | 'ladder';
 
@@ -33,6 +40,8 @@ export interface SimView {
   readonly world: World;
   readonly map: MapDef;
   readonly player: Readonly<PlayerState>;
+  readonly bus: EventBus;
+  readonly movement: MovementController;
   readonly time: number;
   readonly steps: number;
 }
@@ -41,6 +50,10 @@ export class Sim {
   readonly world: World;
   readonly map: MapDef;
   readonly player: PlayerState;
+  readonly bus = new EventBus();
+  readonly movement: MovementController;
+  /** Intent for the next step. The boot layer (or the scripted harness) writes it. */
+  readonly input: MoveInput = makeInput();
   time = 0;
   steps = 0;
   private accumulator = 0;
@@ -60,6 +73,7 @@ export class Sim {
       stance: 'stand',
       grounded: true,
     };
+    this.movement = new MovementController(this.world, this.player, this.bus);
   }
 
   /** Feed real elapsed seconds; runs whole fixed steps and clamps runaway catch-up. */
@@ -78,6 +92,8 @@ export class Sim {
   step(dt: number): void {
     this.time += dt;
     this.steps++;
+    this.bus.now = this.time;
+    this.movement.update(dt, this.input);
   }
 
   /** Fraction of a step left over, for render-side interpolation. */
@@ -86,6 +102,14 @@ export class Sim {
   }
 
   view(): SimView {
-    return { world: this.world, map: this.map, player: this.player, time: this.time, steps: this.steps };
+    return {
+      world: this.world,
+      map: this.map,
+      player: this.player,
+      bus: this.bus,
+      movement: this.movement,
+      time: this.time,
+      steps: this.steps,
+    };
   }
 }

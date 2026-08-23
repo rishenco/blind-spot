@@ -15,7 +15,7 @@ import type { Sim } from './sim.js';
 import type { CollisionSolid, World } from './map/build.js';
 import { solidAt } from './map/build.js';
 import type { DoorDef, MapDef } from './map/types.js';
-import { yawToForward } from './math.js';
+import { angleDelta, yawToForward } from './math.js';
 
 // Palette. Event-layer hues follow vision §3.2 (self amber, dog red-orange, prop pale yellow,
 // objective gold) so the debug map teaches the same colour language as the game.
@@ -44,6 +44,7 @@ const C = {
   beacon: '#ffd54a',
   route: '#ff8a5c',
   player: '#ffb347',
+  trail: 'rgba(255,179,71,0.45)',
   zoneLabel: '#8fd8ee',
   poiLabel: '#6f97a8',
   title: '#cdeffb',
@@ -51,6 +52,10 @@ const C = {
 } as const;
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+/** Player-trail sampling: one breadcrumb per this many metres, this many kept. */
+const TRAIL_MIN_STEP = 0.3;
+const TRAIL_MAX = 1200;
 
 type SolidClass = 'sub' | 'over' | 'duck' | 'climb' | 'block';
 
@@ -110,6 +115,15 @@ export class DebugOverlay {
   private acc = 0;
   private fps = 0;
   private frameMs = 0;
+
+  /**
+   * Breadcrumbs of where the player has actually been (x, z pairs). A screenshot proves a dot
+   * was drawn; the trail is what proves the ROUTE — `npm run verify`'s scripted movement
+   * captures are read against it.
+   */
+  private readonly trail: number[] = [];
+  private trailLastX = NaN;
+  private trailLastZ = NaN;
 
   constructor(root: HTMLElement, sim: Sim) {
     this.sim = sim;
@@ -174,13 +188,22 @@ export class DebugOverlay {
       this.frames = 0;
       this.acc = 0;
     }
+    this.sampleTrail();
     if (this.state.stats) {
       const p = this.sim.player;
+      const m = this.sim.movement;
+      const bus = this.sim.bus;
+      const c = bus.counts;
+      const e = bus.last;
       this.statsEl.textContent = [
         `fps        ${this.fps.toFixed(0).padStart(5)}   ${this.frameMs.toFixed(2)} ms`,
         `sim        ${this.sim.time.toFixed(2)} s   ${this.sim.steps} steps`,
         `solids     ${this.sim.world.solids.length}  walkable tops ${this.sim.world.walkables.length}`,
         `player     ${p.x.toFixed(2)} ${p.y.toFixed(2)} ${p.z.toFixed(2)}  yaw ${((p.yaw * 180) / Math.PI).toFixed(0)}°`,
+        `stance     ${p.stance.padEnd(6)} ${m.speedXZ.toFixed(2)} m/s  ground ${p.grounded ? 'yes' : 'no '}  gait ${m.gait}`,
+        `verbs      hands ${m.hands.padEnd(6)} stagger ${m.staggerTime.toFixed(2)}  last fall ${m.lastFall.toFixed(2)} m`,
+        `events     ${bus.emitted}  walk ${c.walkStep} sprint ${c.sprintStep} crouch ${c.crouchStep} slide ${c.slide} land ${c.landing}`,
+        `last       ${e ? `${e.class} @ ${e.time.toFixed(2)}s  paint ${e.paintRadius.toFixed(1)} hear ${e.hearRadius.toFixed(1)}` : '—'}`,
         `map        ${this.sim.map.name}`,
       ].join('\n');
     }
@@ -190,6 +213,16 @@ export class DebugOverlay {
   dispose(): void {
     this.canvas.remove();
     this.statsEl.remove();
+  }
+
+  private sampleTrail(): void {
+    const p = this.sim.player;
+    const moved = Math.hypot(p.x - this.trailLastX, p.z - this.trailLastZ);
+    if (Number.isFinite(moved) && moved < TRAIL_MIN_STEP) return;
+    this.trailLastX = p.x;
+    this.trailLastZ = p.z;
+    this.trail.push(p.x, p.z);
+    if (this.trail.length > TRAIL_MAX * 2) this.trail.splice(0, this.trail.length - TRAIL_MAX * 2);
   }
 
   // ----------------------------------------------------------------------------------------
@@ -625,6 +658,17 @@ export class DebugOverlay {
     const px = X(p.x);
     const pz = Z(p.z);
     const r = Math.max(4, S(0.35));
+
+    if (this.trail.length >= 4) {
+      ctx.strokeStyle = C.trail;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(X(this.trail[0]!), Z(this.trail[1]!));
+      for (let i = 2; i < this.trail.length; i += 2) ctx.lineTo(X(this.trail[i]!), Z(this.trail[i + 1]!));
+      ctx.stroke();
+    }
+
     ctx.strokeStyle = C.player;
     ctx.fillStyle = 'rgba(255,179,71,0.22)';
     ctx.lineWidth = 1.5;
@@ -640,8 +684,9 @@ export class DebugOverlay {
     ctx.font = `9px ${MONO}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    this.reserve(px - r - 2, pz - r - 2, px + r + 12 + ctx.measureText('SPAWN').width, pz + r + 2);
-    ctx.fillText('SPAWN', px + r + 6, pz - 9);
+    const tag = this.sim.player.stance.toUpperCase();
+    this.reserve(px - r - 2, pz - r - 2, px + r + 12 + ctx.measureText(tag).width, pz + r + 2);
+    ctx.fillText(tag, px + r + 6, pz - 9);
   }
 
   private drawChrome(): void {
@@ -670,6 +715,7 @@ export class DebugOverlay {
       ['beacon (objective)', C.beacon, 'dot'],
       ['dog route', C.route, 'line'],
       ['player', C.player, 'dot'],
+      ['player trail', C.trail, 'line'],
     ];
     const y0 = this.h - 46;
     let x = 14;
@@ -710,3 +756,123 @@ export class DebugOverlay {
 
 /** Doors that a walker can actually use — the map-sanity specs and the view share this filter. */
 export const walkableDoors = (map: MapDef): DoorDef[] => map.doors.filter((d) => d.walkable);
+
+// ------------------------------------------------------------------------------------------
+// Scripted input (`?sim=script`) — the movement harness
+// ------------------------------------------------------------------------------------------
+
+/**
+ * A deterministic input timeline, keyed on SIM time (never wall-clock), driving the same
+ * `MoveInput` a human's keyboard drives. It is the seed of engine-plan §10's `?autotest`: M6
+ * grows it into the full demo (pings, aging, top-down), M2 uses it to prove the verbs move a
+ * body along a known route in `npm run verify`.
+ *
+ * A segment REPLACES the whole intent — an omitted field means "not held" — so a route reads as
+ * a list of what you are doing at each moment, with no leftover state from the segment before.
+ */
+export interface ScriptSegment {
+  /** Sim time this intent takes effect. */
+  readonly at: number;
+  /** Absolute target yaw; applied through the same look path as the mouse. */
+  readonly yaw?: number;
+  readonly forward?: number;
+  readonly right?: number;
+  readonly sprint?: boolean;
+  readonly crouch?: boolean;
+  /** One jump press at the segment boundary. */
+  readonly jump?: boolean;
+  readonly note?: string;
+}
+
+export interface ScriptDef {
+  readonly id: string;
+  readonly title: string;
+  /** Sim time at which the route is finished and input goes quiet. */
+  readonly end: number;
+  readonly segments: readonly ScriptSegment[];
+}
+
+/**
+ * Routes over `doc/sample-map.md` §4's suggested choreography.
+ *
+ * `corridor` is choreography 1–2: sprint C end to end, slide the duct, jump, then drop into the
+ * pit on purpose and climb out the silent way. `mantle` is the B-hall traverse to the listening
+ * post of choreography 5 — the machinery row's top is at exactly MANTLE_MAX_HEIGHT.
+ */
+export const SCRIPTS: Record<string, ScriptDef> = {
+  corridor: {
+    id: 'corridor',
+    title: 'C corridor: sprint · slide · jump · drop · ladder',
+    end: 12.0,
+    segments: [
+      { at: 0.0, yaw: -Math.PI / 2, forward: 1, note: 'walk north onto the door line' },
+      { at: 0.55, note: 'settle' },
+      { at: 0.85, yaw: 0, forward: 1, sprint: true, note: 'sprint east through door [a]' },
+      { at: 3.1, forward: 1, sprint: true, jump: true, note: 'jump — 1.1 m, under the landing threshold' },
+      { at: 4.2, forward: 1, sprint: true, crouch: true, note: 'slide under the duct at x 24' },
+      { at: 5.3, forward: 1, sprint: true, note: 'stand up, run at the pit' },
+      { at: 6.6, note: 'walked off the lip: 2.8 m drop into the trench' },
+      { at: 8.6, yaw: 0, forward: 1, note: 'grab the trench ladder and climb (silent)' },
+      { at: 11.5, note: 'back on the corridor floor' },
+    ],
+  },
+  mantle: {
+    id: 'mantle',
+    title: 'B hall: cross the machine hall · mantle the machinery row',
+    end: 7.6,
+    segments: [
+      { at: 0.0, yaw: Math.PI / 2, forward: 1, note: 'walk south through door [d]' },
+      { at: 1.4, yaw: 1.0, forward: 1, sprint: true, note: 'sprint south-east past the columns' },
+      { at: 5.2, yaw: Math.PI / 2, forward: 1, note: 'square up to the machinery row' },
+      { at: 5.8, yaw: Math.PI / 2, forward: 1, jump: true, note: 'mantle the 2.2 m row' },
+      { at: 6.6, note: 'standing on the row — the listening post' },
+    ],
+  },
+};
+
+/** `?sim=` values, so the query string can stay human ( `?sim=script` = the corridor route ). */
+export const SCRIPT_ALIASES: Record<string, string> = {
+  script: 'corridor',
+  script1: 'corridor',
+  corridor: 'corridor',
+  script2: 'mantle',
+  mantle: 'mantle',
+};
+
+export class ScriptedInput {
+  readonly def: ScriptDef;
+  private readonly sim: Sim;
+  private next = 0;
+  done = false;
+  note = '';
+
+  constructor(sim: Sim, def: ScriptDef) {
+    this.sim = sim;
+    this.def = def;
+  }
+
+  /** Call immediately before every fixed step. */
+  sync(): void {
+    const t = this.sim.time;
+    const input = this.sim.input;
+    while (this.next < this.def.segments.length && this.def.segments[this.next]!.at <= t) {
+      const s = this.def.segments[this.next]!;
+      this.next++;
+      input.forward = s.forward ?? 0;
+      input.right = s.right ?? 0;
+      input.sprint = s.sprint ?? false;
+      input.crouch = s.crouch ?? false;
+      if (s.jump) input.jumpPressed = true;
+      if (s.yaw !== undefined) input.yawDelta = angleDelta(this.sim.player.yaw, s.yaw);
+      this.note = s.note ?? '';
+    }
+    if (!this.done && t >= this.def.end) {
+      this.done = true;
+      input.forward = 0;
+      input.right = 0;
+      input.sprint = false;
+      input.crouch = false;
+      this.note = 'done';
+    }
+  }
+}
