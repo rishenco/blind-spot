@@ -4,6 +4,7 @@
  *
  *   M   top-down orthographic debug view — must read as doc/sample-map.md §1
  *   F3  stats
+ *   F6  toggle dog 2's optional patrol (solid when live, dashed when not)
  *
  * The top-down view is drawn on a 2D canvas rather than through the WebGL scene: it is a
  * technical drawing (hatching, dashes, labels, tick rulers) whose only job is to be compared
@@ -142,6 +143,17 @@ export class DebugOverlay {
   toggleStats(): void {
     this.state.stats = !this.state.stats;
     this.statsEl.style.display = this.state.stats ? 'block' : 'none';
+  }
+
+  /**
+   * F6: flip the second patrol on/off. The route draws solid when live and dashed when not, so
+   * the plan can be read either way (sample-map §3 authors dog 2 as the optional second patrol).
+   */
+  toggleDog2(): void {
+    const route = this.sim.map.dogRoutes.find((r) => r.id === 'dog2');
+    if (!route) return;
+    route.defaultOn = !route.defaultOn;
+    if (this.state.topDown) this.draw();
   }
 
   resize(w: number, h: number): void {
@@ -569,7 +581,10 @@ export class DebugOverlay {
         }
       }
       const head = route.waypoints[0]!;
-      const tag = on ? 'DOG 1' : 'DOG 2 (F6)';
+      // Tag from the route's own id, never from its on/off state — F6 flips `defaultOn`, and a
+      // label derived from that would rename the dogs every time it is pressed.
+      const n = route.id.replace(/^dog/, '');
+      const tag = route.id === 'dog2' ? `DOG ${n} (F6)` : `DOG ${n}`;
       this.reserveText(tag, X(head.x) + S(0.2), Z(head.z) + 13);
       ctx.fillText(tag, X(head.x) + S(0.2), Z(head.z) + 13);
       ctx.globalAlpha = 1;

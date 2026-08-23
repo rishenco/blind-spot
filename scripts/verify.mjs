@@ -87,6 +87,21 @@ async function capture(browser, name, query, checks) {
 
   const state = await page.evaluate(() => {
     const sim = window.blindspot.sim;
+    // Ink coverage of the debug overlay canvas: the fraction of pixels carrying any real
+    // luminance. A screenshot proves a file was written, not that anything was DRAWN — an
+    // empty canvas, a black-on-black palette or a crash mid-draw all still screenshot fine.
+    // Low ink = the drawing is missing; very high ink = a runaway fill has flooded it.
+    let ink = 0;
+    const canvas = document.querySelector('#overlay canvas');
+    if (canvas) {
+      const g = canvas.getContext('2d');
+      const d = g.getImageData(0, 0, canvas.width, canvas.height).data;
+      let lit = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i] + d[i + 1] + d[i + 2] > 60) lit++;
+      }
+      ink = lit / (d.length / 4);
+    }
     return {
       boot: document.getElementById('boot')?.classList.contains('hidden') ?? false,
       topDown: window.blindspot.debug.state.topDown,
@@ -94,6 +109,7 @@ async function capture(browser, name, query, checks) {
       walkables: sim.world.walkables.length,
       steps: sim.steps,
       map: sim.map.name,
+      ink,
       webgl: Boolean(document.querySelector('#app canvas')),
     };
   });
@@ -105,6 +121,7 @@ async function capture(browser, name, query, checks) {
   console.log(`- ${name}${query || ''}`);
   note(`map ${state.map} · ${state.solids} solids · ${state.walkables} walkable tops · ${state.steps} sim steps`);
   note(`boot hidden ${state.boot} · top-down ${state.topDown} · webgl canvas ${state.webgl}`);
+  note(`overlay ink ${(state.ink * 100).toFixed(2)}%`);
   note(`screenshot ${shot}`);
   if (!state.webgl) console.warn('  !! WebGL canvas missing — headless GPU unavailable, overlay-only run');
   for (const e of errors) problems.push(`${name}: ${e}`);
@@ -136,8 +153,12 @@ async function main() {
     await capture(browser, 'topdown', '?topdown&stats', (s) => ({
       'top-down open': s.topDown,
       'map loaded': s.map === 'Dock Approach',
-      'solids baked': s.solids > 40,
-      'walkable tops found': s.walkables > 10,
+      // Exact, not a floor: these are the authored counts of "Dock Approach" (test/map.spec.ts
+      // pins the same two numbers). Update BOTH deliberately when the map changes — a drifting
+      // ">" would let a whole zone go missing without failing anything.
+      'solids baked': s.solids === 63,
+      'walkable tops found': s.walkables === 21,
+      'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
     }));
   } finally {
     await browser.close();

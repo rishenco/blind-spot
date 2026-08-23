@@ -45,6 +45,20 @@ curtain) · **[d]** A→B at z=6, x 2.5..4.1 · **[e]** B→D1 at x=24, z 10..11
 D1→D2 at z=16, x 40..41.6 (can field) · **[g]** B→E at z=26, x 0.3..1.9 · **[h]** E→D2 at
 x=26, z 27..28.6 · A→C at x=6, z 0.3..1.9.
 
+### §1 sketch errata
+
+The ASCII plan above is a sketch, not the spec. Where it disagrees with the door list and
+the §2 prose, those govern — and the sketch is wrong in three places:
+
+- The `║` column running down through zone B at x ≈ 9 (rows z 6..26) is a drafting artefact
+  of the sketch's character grid. **There is no wall there.** B is one open machine hall
+  (§2 B), the door list gives that wall no door, and dog 2's B-hall loop (§3) would be cut
+  in half by it. The engine deliberately does not build it.
+- The `[d]` label sits on the z=10 row; the door itself is at **z=6**, per the door list
+  (A's south wall — A is x 0..6, z 0..6).
+- §3's "Loop ≈ 75 s" for dog 1 is arithmetic drift: the route is 69.6 m, which at 3.0 m/s
+  is 23.2 s of walking, plus the 4 + 6 + 3 = 13 s of pauses — **≈ 36 s**, not 75 s.
+
 ## 2. Zones and what each one tests
 
 ### A — Spawn Dock (x 0..6, z 0..6)

@@ -13,6 +13,9 @@ import type { MapDef } from './map/types.js';
 export type Stance = 'stand' | 'crouch' | 'slide' | 'air' | 'ladder';
 
 export interface PlayerState {
+  /** Position is the capsule's FEET: x/z are the axis centre, y is the sole — not the centre and
+   *  not the eye (eye is y + EYE_HEIGHT). The spawn [3, 0, 3] therefore stands ON the interior
+   *  floor, whose top is y = 0. */
   x: number;
   y: number;
   z: number;

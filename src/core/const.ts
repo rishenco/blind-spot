@@ -28,6 +28,12 @@ export const DITHER_GAIN = 1.0;
 export const THIN_GAIN = 1.0;
 /** A hold must sit at least this far above/below the adjacent standing surface. */
 export const HOLD_MIN_STEP = 0.7;
+/**
+ * …and no further than this: above the mantle limit (MANTLE_MAX_HEIGHT 2.2) plus a reach margin
+ * a lip is scenery, not a hold, and drawing it as a bright micro-line would promise a traversal
+ * the movement code will refuse (vision §5 "dots are matter, lines are holds").
+ */
+export const HOLD_MAX_STEP = 2.6;
 /** Overhead lips (duct undersides) need at least this much clearance to count as holds. */
 export const HOLD_MIN_CLEARANCE = 0.6;
 
@@ -203,7 +209,16 @@ export const HALO_DECAY = 9.0;
 // ---------------------------------------------------------------------------------------------
 
 export const DOG_SPEED_PATROL = 3.0;
-export const DOG_TURN_RATE = 3.2;
+export const DOG_SPEED_INVESTIGATE = 4.5;
+export const DOG_SPEED_CHASE = 7.0;
+/**
+ * Vision §6 states the dog's steering limit as a 3 m TURN RADIUS, not an angular rate: "its 3 m
+ * turn radius means corners and verticality beat it". Radius is the invariant — the angular rate
+ * follows from the gait in use and is derived at the point of use as `speed / DOG_TURN_RADIUS`
+ * rad/s (7.0 m/s chase => 2.33 rad/s; 3.0 m/s patrol => 1.0 rad/s). Storing a single rate would
+ * silently give the chase gait a tighter radius than the design allows.
+ */
+export const DOG_TURN_RADIUS = 3.0;
 /** A gait event every this many metres travelled. */
 export const DOG_GAIT_STRIDE = 0.8;
 /** Silence for this long turns the frozen cloud into a cooling ghost (vision §3.7). */

@@ -21,9 +21,21 @@
  *    corner. The west run is extended north to z 3.8 so the mezzanine is one continuous L —
  *    the only authored vertical access (the z=23 ladder) has to reach the gantry beam.
  * 3. The west run carries a 1 m hatch at the z=23 ladder so the climber arrives ON the catwalk
- *    instead of under it.
- * 4. Crate (41.8, z 7) is authored verbatim and therefore overlaps the 2.0 stack by 0.4 m in z
- *    (the doc calls it "adjacent"). The mantle chain 1.2 -> 2.0 -> 3.3 is unaffected.
+ *    instead of under it. The hatch is only as wide as the ladder's own x-footprint: the deck
+ *    is authored as three pieces (north of the hatch, south of it, and a continuous strip on
+ *    the +x side) so the climber, who faces +x, always steps off onto solid deck.
+ * 4. Crate (41.8, z 7) is nudged to z 7.4 — the doc calls it "adjacent" to the 2.0 stack, and
+ *    the verbatim z 7 would bury it 0.4 m inside the stack. At 7.4 its z-min (6.8) is exactly
+ *    the stack's z-max. The mantle chain 1.2 -> 2.0 -> 3.3 is unaffected.
+ * 5. The doc's §1 sketch draws a wall (a `║` column at x ~9) down through zone B. Nothing else
+ *    in the doc supports it: §2 B describes one open machine hall, the door list gives B no
+ *    door on such a wall, and dog 2's B-hall loop would be cut in half by it. It is a drafting
+ *    artefact of the sketch's column spacing and is deliberately NOT built (recorded as an
+ *    errata note in doc/sample-map.md §1).
+ * 6. Dog 2's north leg is authored at z 11.5, not the doc's z 10: at z 10 the leg runs straight
+ *    through the full-height columns at (12,10) and (18,10) — a patrol that cannot be walked.
+ *    z 11.5 clears the columns (z-max 10.3) and stays well north of the tank (z-min 13), so the
+ *    B-hall loop keeps its shape and every leg is now obstacle-free at dog height.
  */
 
 import type {
@@ -295,11 +307,14 @@ push(box('machinery-row', 'machine', 4, 0, 24, 20, 2.2, 26));
 
 /**
  * Mezzanine catwalk (derivations 2 and 3): west run extended north to z 3.8 to join the north
- * run, and split by a 1 m hatch at the z=23 ladder.
+ * run, and pierced by a 1 m hatch at the z=23 ladder. The hatch is only as wide as the ladder's
+ * own x-footprint (x 0..0.9), so the three pieces below are: deck north of the hatch, deck south
+ * of it, and a continuous +x strip (x 0.9..1.6) the climber steps off onto.
  */
 const CW_Y0 = CATWALK_TOP - CATWALK_THICK;
-push(box('catwalk-west-n', 'catwalk', 0, CW_Y0, 3.8, 1.6, CATWALK_TOP, 22.5));
-push(box('catwalk-west-s', 'catwalk', 0, CW_Y0, 23.5, 1.6, CATWALK_TOP, 26));
+push(box('catwalk-west-w-n', 'catwalk', 0, CW_Y0, 3.8, 0.9, CATWALK_TOP, 22.5));
+push(box('catwalk-west-w-s', 'catwalk', 0, CW_Y0, 23.5, 0.9, CATWALK_TOP, 26));
+push(box('catwalk-west-e', 'catwalk', 0.9, CW_Y0, 3.8, 1.6, CATWALK_TOP, 26));
 push(box('catwalk-north', 'catwalk', 0, CW_Y0, 2.2, 10, CATWALK_TOP, 3.8));
 
 /** Gantry beam: 0.7 mantle up from the north catwalk run; its south end is a 4.2 m free drop. */
@@ -316,8 +331,9 @@ for (const [cx, cz] of [
   [34, 5],
   [38, 9],
   [28, 14],
-  // Derivation 4: authored verbatim, so it overlaps the 2.0 stack by 0.4 m in z.
-  [41.8, 7],
+  // Derivation 4: nudged from the doc's z 7 to z 7.4 so it sits flush against the 2.0 stack
+  // (crate z-min 6.8 == stack z-max 6.8) instead of 0.4 m inside it.
+  [41.8, 7.4],
 ] as const) {
   push(box(`crate-${cx}-${cz}`, 'crate', cx - CRATE / 2, 0, cz - CRATE / 2, cx + CRATE / 2, CRATE, cz + CRATE / 2));
 }
@@ -396,11 +412,14 @@ const dogRoutes: DogRouteDef[] = [
     id: 'dog2',
     speed: 3.0,
     defaultOn: false,
-    // NOTE for the dog implementer: the doc's B-hall rectangle runs straight through the
-    // columns at (12,10), (18,10), (12,20), (18,20). The follower must steer around them.
+    // Derivation 6: the doc's north leg (z 10) runs straight through the columns at (12,10)
+    // and (18,10), so it is authored at z 11.5 instead. The other three legs are clear as
+    // drawn — x 22 and x 10 both miss the column rows (x 5.7..6.3 / 11.7..12.3 / 17.7..18.3)
+    // and the tank (x 13..19), and the south leg at z 22 misses the z=20 column row and the
+    // machinery row (z 24..26). Every leg is straight-line walkable at dog height.
     waypoints: [
-      { x: 10, z: 10, pause: 2 },
-      { x: 22, z: 10, pause: 2 },
+      { x: 10, z: 11.5, pause: 2 },
+      { x: 22, z: 11.5, pause: 2 },
       { x: 22, z: 22, pause: 2 },
       { x: 10, z: 22, pause: 2 },
     ],

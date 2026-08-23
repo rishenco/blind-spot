@@ -93,6 +93,10 @@ export function angleDelta(a: number, b: number): number {
 /**
  * Cone membership for the E-ping. `angleDeg` is the FULL cone angle (engine-plan §3 step 1
  * resolves the ambiguity: 25 deg cone means +-12.5 deg around the aim direction).
+ *
+ * The aim direction is normalised here, so callers may pass a raw (unnormalised) aim — a
+ * yaw/pitch forward, a look-at difference, a scaled beam vector. The zero vector has no
+ * direction and is never in cone.
  */
 export function inCone(
   ox: number,
@@ -106,19 +110,32 @@ export function inCone(
   pz: number,
   angleDeg: number,
 ): boolean {
+  const dLen = Math.hypot(dx, dy, dz);
+  if (dLen < 1e-9) return false;
   const vx = px - ox;
   const vy = py - oy;
   const vz = pz - oz;
   const len = Math.hypot(vx, vy, vz);
   if (len < 1e-6) return true;
-  const c = (vx * dx + vy * dy + vz * dz) / len;
+  const c = (vx * dx + vy * dy + vz * dz) / (len * dLen);
   return c >= Math.cos((angleDeg * 0.5 * Math.PI) / 180);
 }
 
-/** Signal quality delivered to the listener (engine-plan §4). */
-export function eventQuality(dist: number, hearRadius: number, walls: number, hearingBase: number, wall1Quality: number): number {
+/**
+ * Signal quality delivered to the listener (engine-plan §4, verbatim):
+ *
+ *   quality = clamp01(1 - dist / hearRadius) * (walls === 0 ? 1 : walls === 1 ? 0.45 : 0)
+ *
+ * `hearRadius` is the EVENT's own audible radius (vision §3.3) and is the only denominator:
+ * a crouch step (hear 2 m) heard from 1 m away is at half its range no matter how far the
+ * listener can hear. Folding the listener's range in here would make every quiet class read
+ * as loud, and quality is what drives stain definition (visual-brief §1.13).
+ *
+ * Whether an event is delivered AT ALL is a separate gate — `dist <= max(HEARING_BASE,
+ * hearRadius)` — and belongs to the event bus (M3's events.ts), never to this formula.
+ */
+export function eventQuality(dist: number, hearRadius: number, walls: number, wall1Quality: number): number {
   if (walls >= 2) return 0;
-  const range = Math.max(hearRadius, hearingBase);
-  const q = clamp01(1 - dist / range);
+  const q = clamp01(1 - dist / hearRadius);
   return q * (walls === 0 ? 1 : wall1Quality);
 }

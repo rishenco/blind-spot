@@ -18,7 +18,7 @@
  *   raycast / segmentClear / countWalls         — sight/hearing lines (vision §3.4)
  */
 
-import { OCCLUDER_MIN_CHORD, STEP_UP_MAX } from '../const.js';
+import { GROUND_PROBE_FRAC, OCCLUDER_MIN_CHORD, STEP_UP_MAX } from '../const.js';
 import type { AirVolume, LadderDef, MapDef, Solid, SolidKind } from './types.js';
 
 // ------------------------------------------------------------------------------------------
@@ -70,12 +70,24 @@ export interface LadderVolume {
 export interface World {
   readonly map: MapDef;
   readonly solids: readonly CollisionSolid[];
-  /** Solids that block sound. Currently every solid; kinds are kept so paint can filter. */
+  /**
+   * Solids that block sound (`countWalls` reads this, never `solids`). Its own array, so M3 can
+   * narrow it to sound-occluding kinds without touching the collision set. INVARIANT: it stays
+   * index-aligned with `solids`, because the broadphase indexes both — a future narrowing masks
+   * entries out inside `countWalls`, it never re-packs the array.
+   */
   readonly occluders: readonly CollisionSolid[];
   readonly walkables: readonly WalkableTop[];
   readonly ladders: readonly LadderVolume[];
   readonly air: readonly AirVolume[];
-  readonly bounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
+  readonly bounds: {
+    readonly minX: number;
+    readonly minY: number;
+    readonly minZ: number;
+    readonly maxX: number;
+    readonly maxY: number;
+    readonly maxZ: number;
+  };
   /** Uniform XZ broadphase grid. */
   readonly grid: Grid;
 }
@@ -90,8 +102,14 @@ interface Grid {
 }
 
 const GRID_CELL = 2.0;
-/** Tolerance that keeps "standing exactly on a top face" from reading as a horizontal overlap. */
-const EPS_Y = 1e-3;
+/**
+ * One straddle tolerance for BOTH axes' overlap tests (1 mm). It is what keeps "standing
+ * exactly on a top face" and "head exactly at a ceiling" reading as touching rather than
+ * overlapping. 1e-3 over the arithmetic 1e-6: depenetration pushes out by EPS and then has to
+ * agree that the body is clear, and a sub-millimetre residue must never re-trigger a push. The
+ * horizontal and vertical tests share it so they can never disagree about the same body.
+ */
+const EPS_STRADDLE = 1e-3;
 const EPS = 1e-6;
 
 // ------------------------------------------------------------------------------------------
@@ -228,16 +246,25 @@ export function buildWorld(map: MapDef): World {
   const world: World = {
     map,
     solids,
-    occluders: solids,
+    // Its own array (World.occluders): index-aligned with `solids` today, narrowable by kind
+    // in M3 without disturbing collision.
+    occluders: solids.slice(),
     walkables: [],
     ladders: map.ladders.map(ladderVolume),
     air: map.air,
     bounds,
     grid,
   };
+  /**
+   * Top of the authored interior — the highest playable air (map/types.ts `air`). Anything
+   * whose top face is at or above it is the roof of the level, not a surface anything can ever
+   * stand on, so it is not a walkable and must not feed hold-line derivation.
+   */
+  const interiorTop = map.air.length ? Math.max(...map.air.map((a) => a.max[1])) : Infinity;
   // Walkable tops: every top face with at least one point not buried under another solid.
   const walkables: WalkableTop[] = [];
   for (const s of solids) {
+    if (s.maxY >= interiorTop - EPS) continue;
     const probeY = s.maxY + 0.05;
     const exposed = topFaceProbes(s).some((p) => solidAt(world, p[0], probeY, p[1], s.index) === null);
     if (!exposed) continue;
@@ -275,8 +302,17 @@ export function queryXZ(world: World, minX: number, minZ: number, maxX: number, 
   return out;
 }
 
-const scratchA: number[] = [];
-const scratchB: number[] = [];
+/**
+ * Candidate-list pool. Every query borrows its own buffer and returns it in a `finally`, so
+ * queries nest safely: `ledgeProbe` iterating candidates while `capsuleOverlaps` runs, or a
+ * `countWalls` filter that asks the world a question mid-iteration (M3's paint step does
+ * exactly that). A shared module scratch made those cases silently return wrong answers.
+ */
+const pool: number[][] = [];
+const take = (): number[] => pool.pop() ?? [];
+const give = (a: number[]): void => {
+  if (pool.length < 8) pool.push(a);
+};
 
 // ------------------------------------------------------------------------------------------
 // Point / overlap tests
@@ -292,13 +328,18 @@ function pointInSolid(s: CollisionSolid, x: number, y: number, z: number): boole
 
 /** The solid containing a point, or null. `skipIndex` lets the bake ignore one solid. */
 export function solidAt(world: World, x: number, y: number, z: number, skipIndex = -1): CollisionSolid | null {
-  queryXZ(world, x, z, x, z, scratchA);
-  for (const idx of scratchA) {
-    if (idx === skipIndex) continue;
-    const s = world.solids[idx]!;
-    if (pointInSolid(s, x, y, z)) return s;
+  const buf = take();
+  try {
+    queryXZ(world, x, z, x, z, buf);
+    for (const idx of buf) {
+      if (idx === skipIndex) continue;
+      const s = world.solids[idx]!;
+      if (pointInSolid(s, x, y, z)) return s;
+    }
+    return null;
+  } finally {
+    give(buf);
   }
-  return null;
 }
 
 /** XZ penetration of a disc (x,z,r) into a solid's footprint, or null if they do not overlap. */
@@ -356,25 +397,35 @@ function xzOverlaps(s: CollisionSolid, x: number, z: number, r: number): boolean
 
 export function capsuleOverlaps(world: World, x: number, feetY: number, z: number, r: number, h: number): boolean {
   const top = feetY + h;
-  queryXZ(world, x - r, z - r, x + r, z + r, scratchA);
-  for (const idx of scratchA) {
-    const s = world.solids[idx]!;
-    if (top <= s.minY + EPS_Y || feetY >= s.maxY - EPS_Y) continue;
-    if (xzOverlaps(s, x, z, r)) return true;
+  const buf = take();
+  try {
+    queryXZ(world, x - r, z - r, x + r, z + r, buf);
+    for (const idx of buf) {
+      const s = world.solids[idx]!;
+      if (top <= s.minY + EPS_STRADDLE || feetY >= s.maxY - EPS_STRADDLE) continue;
+      if (xzOverlaps(s, x, z, r)) return true;
+    }
+    return false;
+  } finally {
+    give(buf);
   }
-  return false;
 }
 
 export function overlapSolids(world: World, x: number, feetY: number, z: number, r: number, h: number): CollisionSolid[] {
   const top = feetY + h;
   const hits: CollisionSolid[] = [];
-  queryXZ(world, x - r, z - r, x + r, z + r, scratchA);
-  for (const idx of scratchA) {
-    const s = world.solids[idx]!;
-    if (top <= s.minY + EPS_Y || feetY >= s.maxY - EPS_Y) continue;
-    if (xzOverlaps(s, x, z, r)) hits.push(s);
+  const buf = take();
+  try {
+    queryXZ(world, x - r, z - r, x + r, z + r, buf);
+    for (const idx of buf) {
+      const s = world.solids[idx]!;
+      if (top <= s.minY + EPS_STRADDLE || feetY >= s.maxY - EPS_STRADDLE) continue;
+      if (xzOverlaps(s, x, z, r)) hits.push(s);
+    }
+    return hits;
+  } finally {
+    give(buf);
   }
-  return hits;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -402,27 +453,37 @@ export function groundUnder(
   const ceilY = feetY + tol;
   const floorY = feetY - maxDrop;
   let best: GroundHit | null = null;
-  queryXZ(world, x - r, z - r, x + r, z + r, scratchA);
-  for (const idx of scratchA) {
-    const s = world.solids[idx]!;
-    if (s.maxY > ceilY || s.maxY < floorY) continue;
-    if (!xzOverlaps(s, x, z, r)) continue;
-    if (!best || s.maxY > best.y) best = { y: s.maxY, solid: s };
+  const buf = take();
+  try {
+    queryXZ(world, x - r, z - r, x + r, z + r, buf);
+    for (const idx of buf) {
+      const s = world.solids[idx]!;
+      if (s.maxY > ceilY || s.maxY < floorY) continue;
+      if (!xzOverlaps(s, x, z, r)) continue;
+      if (!best || s.maxY > best.y) best = { y: s.maxY, solid: s };
+    }
+    return best;
+  } finally {
+    give(buf);
   }
-  return best;
 }
 
 /** Clear height above `feetY` over the footprint, capped at `maxRise`. */
 export function headroom(world: World, x: number, z: number, feetY: number, r: number, maxRise: number): number {
   let best = maxRise;
-  queryXZ(world, x - r, z - r, x + r, z + r, scratchA);
-  for (const idx of scratchA) {
-    const s = world.solids[idx]!;
-    if (s.minY < feetY + EPS_Y || s.minY - feetY >= best) continue;
-    if (!xzOverlaps(s, x, z, r)) continue;
-    best = s.minY - feetY;
+  const buf = take();
+  try {
+    queryXZ(world, x - r, z - r, x + r, z + r, buf);
+    for (const idx of buf) {
+      const s = world.solids[idx]!;
+      if (s.minY < feetY + EPS_STRADDLE || s.minY - feetY >= best) continue;
+      if (!xzOverlaps(s, x, z, r)) continue;
+      best = s.minY - feetY;
+    }
+    return best;
+  } finally {
+    give(buf);
   }
-  return best;
 }
 
 export interface LedgeHit {
@@ -459,18 +520,23 @@ export function ledgeProbe(
   const px = x + (forwardX / len) * ahead;
   const pz = z + (forwardZ / len) * ahead;
   let best: LedgeHit | null = null;
-  // Materialised: the clearance test below re-enters the broadphase.
-  const candidates = queryXZ(world, px - r, pz - r, px + r, pz + r, scratchA).slice();
-  for (const idx of candidates) {
-    const s = world.solids[idx]!;
-    const height = s.maxY - feetY;
-    if (height < minH - EPS || height > maxH + EPS) continue;
-    if (!xzOverlaps(s, px, pz, r)) continue;
-    if (best && s.maxY <= best.topY) continue;
-    if (capsuleOverlaps(world, px, s.maxY + EPS_Y * 2, pz, r, standHeight)) continue;
-    best = { x: px, z: pz, topY: s.maxY, height, solid: s };
+  // The clearance test below re-enters the broadphase; the pooled buffer makes that safe.
+  const buf = take();
+  try {
+    queryXZ(world, px - r, pz - r, px + r, pz + r, buf);
+    for (const idx of buf) {
+      const s = world.solids[idx]!;
+      const height = s.maxY - feetY;
+      if (height < minH - EPS || height > maxH + EPS) continue;
+      if (!xzOverlaps(s, px, pz, r)) continue;
+      if (best && s.maxY <= best.topY) continue;
+      if (capsuleOverlaps(world, px, s.maxY + EPS_STRADDLE * 2, pz, r, standHeight)) continue;
+      best = { x: px, z: pz, topY: s.maxY, height, solid: s };
+    }
+    return best;
+  } finally {
+    give(buf);
   }
-  return best;
 }
 
 export function ladderAt(world: World, x: number, feetY: number, z: number, r: number, h = 0): LadderVolume | null {
@@ -509,7 +575,14 @@ export interface MoveResult {
   requestedXZ: number;
 }
 
-/** Push a capsule out of anything it is intersecting. Horizontal first, then vertical. */
+/**
+ * Push a capsule out of anything it is intersecting. Horizontal first, then vertical.
+ *
+ * `moved` says the body was pushed at all; `resolved` says it actually ended up clear. They
+ * differ where the iteration budget runs out or a body is wedged between opposed faces (a
+ * crusher, a too-tight duct) — callers that must not leave a body inside geometry check
+ * `resolved`, not `moved`.
+ */
 export function resolvePenetration(
   world: World,
   x: number,
@@ -518,7 +591,7 @@ export function resolvePenetration(
   r: number,
   h: number,
   iterations = 4,
-): { x: number; y: number; z: number; moved: boolean } {
+): { x: number; y: number; z: number; moved: boolean; resolved: boolean } {
   let px = x;
   let py = feetY;
   let pz = z;
@@ -536,7 +609,7 @@ export function resolvePenetration(
     py += hit.dy;
     moved = true;
   }
-  return { x: px, y: py, z: pz, moved };
+  return { x: px, y: py, z: pz, moved, resolved: !capsuleOverlaps(world, px, py, pz, r, h) };
 }
 
 function deepestXZ(
@@ -549,30 +622,40 @@ function deepestXZ(
 ): { depth: number; nx: number; nz: number } | null {
   const top = feetY + h;
   let best: { depth: number; nx: number; nz: number } | null = null;
-  queryXZ(world, x - r, z - r, x + r, z + r, scratchB);
-  for (const idx of scratchB) {
-    const s = world.solids[idx]!;
-    if (top <= s.minY + EPS_Y || feetY >= s.maxY - EPS_Y) continue;
-    const p = xzPenetration(s, x, z, r);
-    if (p && (!best || p.depth > best.depth)) best = p;
+  const buf = take();
+  try {
+    queryXZ(world, x - r, z - r, x + r, z + r, buf);
+    for (const idx of buf) {
+      const s = world.solids[idx]!;
+      if (top <= s.minY + EPS_STRADDLE || feetY >= s.maxY - EPS_STRADDLE) continue;
+      const p = xzPenetration(s, x, z, r);
+      if (p && (!best || p.depth > best.depth)) best = p;
+    }
+    return best;
+  } finally {
+    give(buf);
   }
-  return best;
 }
 
 function deepestY(world: World, x: number, feetY: number, z: number, r: number, h: number): { dy: number } | null {
   const top = feetY + h;
   let best: { dy: number } | null = null;
-  queryXZ(world, x - r, z - r, x + r, z + r, scratchB);
-  for (const idx of scratchB) {
-    const s = world.solids[idx]!;
-    if (top <= s.minY + EPS || feetY >= s.maxY - EPS) continue;
-    if (!xzOverlaps(s, x, z, r)) continue;
-    const up = s.maxY - feetY;
-    const down = top - s.minY;
-    const dy = up <= down ? up + EPS : -(down + EPS);
-    if (!best || Math.abs(dy) > Math.abs(best.dy)) best = { dy };
+  const buf = take();
+  try {
+    queryXZ(world, x - r, z - r, x + r, z + r, buf);
+    for (const idx of buf) {
+      const s = world.solids[idx]!;
+      if (top <= s.minY + EPS_STRADDLE || feetY >= s.maxY - EPS_STRADDLE) continue;
+      if (!xzOverlaps(s, x, z, r)) continue;
+      const up = s.maxY - feetY;
+      const down = top - s.minY;
+      const dy = up <= down ? up + EPS : -(down + EPS);
+      if (!best || Math.abs(dy) > Math.abs(best.dy)) best = { dy };
+    }
+    return best;
+  } finally {
+    give(buf);
   }
-  return best;
 }
 
 interface SlideResult {
@@ -660,6 +743,12 @@ function moveY(
 export interface MoveOptions {
   /** Max ledge the body walks up without jumping. 0 disables step-up. */
   stepUp?: number;
+  /**
+   * Footprint radius of the support probe. Defaults to `r * GROUND_PROBE_FRAC` — the same ring
+   * the grounded check uses (const.ts), so "what step-up lands on" and "what holds you up" are
+   * one answer and you cannot be stepped onto a lip you would then fall off.
+   */
+  probeRadius?: number;
 }
 
 /**
@@ -679,6 +768,7 @@ export function moveCapsule(
   opts: MoveOptions = {},
 ): MoveResult {
   const stepUp = opts.stepUp ?? STEP_UP_MAX;
+  const probeR = opts.probeRadius ?? r * GROUND_PROBE_FRAC;
   const requested = Math.hypot(dx, dz);
   let y = feetY;
 
@@ -690,7 +780,7 @@ export function moveCapsule(
     if (!capsuleOverlaps(world, x, raisedY, z, r, h)) {
       const lifted = slideXZ(world, x, raisedY, z, dx, dz, r, h);
       if (lifted.travel > flat.travel + 1e-4) {
-        const ground = groundUnder(world, lifted.x, lifted.z, raisedY, r, stepUp + 0.05);
+        const ground = groundUnder(world, lifted.x, lifted.z, raisedY, probeR, stepUp + 0.05);
         if (ground && ground.y >= y - EPS && ground.y <= raisedY + EPS) {
           steppedUp = ground.y - y;
           y = ground.y;
@@ -727,9 +817,20 @@ export interface RayHit {
   readonly nx: number;
   readonly ny: number;
   readonly nz: number;
+  /**
+   * The ray started INSIDE this solid, so `t` is 0 and the normal is the reversed ray
+   * direction rather than a real face. Consumers that mean "what did I hit out there" must
+   * skip these; consumers that mean "am I embedded" want exactly these.
+   */
+  readonly inside: boolean;
 }
 
-/** Entry/exit parameters of a segment through a solid, or null. t is in [0,1] of a->b. */
+/**
+ * Entry/exit parameters of the infinite line a->b against a solid, or null if it misses.
+ * t is the UNCLAMPED parameter along a->b (1 == b), so t0 < 0 means `a` is already inside the
+ * solid — the fact `raycast` needs to report `inside`. Callers clamp to the span they care
+ * about.
+ */
 function segmentInterval(
   s: CollisionSolid,
   ax: number,
@@ -742,8 +843,8 @@ function segmentInterval(
   const dx = bx - ax;
   const dy = by - ay;
   const dz = bz - az;
-  let t0 = 0;
-  let t1 = 1;
+  let t0 = -Infinity;
+  let t1 = Infinity;
 
   // y slab (shared by both shapes)
   if (Math.abs(dy) < EPS) {
@@ -797,13 +898,29 @@ function segmentInterval(
   return { t0, t1 };
 }
 
-function surfaceNormal(s: CollisionSolid, x: number, y: number, z: number): [number, number, number] {
+/**
+ * Unit normal of the face the sample point sits on. `ux,uy,uz` is the (unit) ray direction,
+ * used only for the degenerate case below — a normal must never come back zero-length, or
+ * every reflection/facing test downstream silently produces NaN.
+ */
+function surfaceNormal(
+  s: CollisionSolid,
+  x: number,
+  y: number,
+  z: number,
+  ux: number,
+  uy: number,
+  uz: number,
+): [number, number, number] {
   if (s.shape === 'cyl') {
     if (y >= s.maxY - 1e-4) return [0, 1, 0];
     if (y <= s.minY + 1e-4) return [0, -1, 0];
     const dx = x - s.cx;
     const dz = z - s.cz;
-    const d = Math.hypot(dx, dz) || 1;
+    const d = Math.hypot(dx, dz);
+    // On the axis (a ray starting inside the cylinder): there is no radial direction, so face
+    // the ray that asked.
+    if (d < EPS) return [-ux, -uy, -uz];
     return [dx / d, 0, dz / d];
   }
   const eps = 1e-4;
@@ -815,7 +932,10 @@ function surfaceNormal(s: CollisionSolid, x: number, y: number, z: number): [num
   return [0, 0, 1];
 }
 
-/** Nearest solid hit along a ray. A solid the origin is already inside reports a hit at t = 0. */
+/**
+ * Nearest solid hit along a ray. A solid the origin is already inside reports a hit at t = 0
+ * with `inside: true` — see `RayHit.inside`.
+ */
 export function raycast(
   world: World,
   ox: number,
@@ -834,20 +954,26 @@ export function raycast(
   const bx = ox + ux * maxDist;
   const by = oy + uy * maxDist;
   const bz = oz + uz * maxDist;
-  queryXZ(world, Math.min(ox, bx), Math.min(oz, bz), Math.max(ox, bx), Math.max(oz, bz), scratchA);
+  const buf = take();
   let best: RayHit | null = null;
-  for (const idx of scratchA) {
-    const s = world.solids[idx]!;
-    const iv = segmentInterval(s, ox, oy, oz, bx, by, bz);
-    if (!iv) continue;
-    if (iv.t1 < 0 || iv.t0 > 1) continue;
-    const t = iv.t0 < 0 ? 0 : iv.t0;
-    const dist = t * maxDist;
-    if (best && dist >= best.t) continue;
-    const [nx, ny, nz] = surfaceNormal(s, ox + ux * dist, oy + uy * dist, oz + uz * dist);
-    best = { t: dist, solid: s, nx, ny, nz };
+  try {
+    queryXZ(world, Math.min(ox, bx), Math.min(oz, bz), Math.max(ox, bx), Math.max(oz, bz), buf);
+    for (const idx of buf) {
+      const s = world.solids[idx]!;
+      const iv = segmentInterval(s, ox, oy, oz, bx, by, bz);
+      if (!iv) continue;
+      if (iv.t1 < 0 || iv.t0 > 1) continue;
+      const inside = iv.t0 < 0;
+      const t = inside ? 0 : iv.t0;
+      const dist = t * maxDist;
+      if (best && dist >= best.t) continue;
+      const [nx, ny, nz] = surfaceNormal(s, ox + ux * dist, oy + uy * dist, oz + uz * dist, ux, uy, uz);
+      best = { t: dist, solid: s, nx, ny, nz, inside };
+    }
+    return best;
+  } finally {
+    give(buf);
   }
-  return best;
 }
 
 /** True when nothing solid lies between the two points. */
@@ -870,9 +996,12 @@ export function segmentClear(
 }
 
 /**
- * How many distinct solid runs the segment crosses (vision §3.4: 0 walls full, 1 wall damped,
- * >=2 nothing). Abutting or overlapping solids merge into one run, so a wall plus its own door
- * lintel is one wall, never two. Grazes shorter than OCCLUDER_MIN_CHORD are ignored.
+ * How many distinct occluder runs the segment crosses (vision §3.4: 0 walls full, 1 wall
+ * damped, >=2 nothing). Abutting or overlapping solids merge into one run, so a wall plus its
+ * own door lintel is one wall, never two. Grazes shorter than OCCLUDER_MIN_CHORD are ignored.
+ *
+ * Reads `world.occluders`, not `world.solids`. `filter` may itself query the world — the paint
+ * step does — because the candidate buffer is pooled per call, never shared.
  */
 export function countWalls(
   world: World,
@@ -888,16 +1017,21 @@ export function countWalls(
   if (len < EPS) return 0;
   const minT = OCCLUDER_MIN_CHORD / len;
   const intervals: Array<[number, number]> = [];
-  queryXZ(world, Math.min(ax, bx), Math.min(az, bz), Math.max(ax, bx), Math.max(az, bz), scratchA);
-  for (const idx of scratchA) {
-    const s = world.solids[idx]!;
-    if (filter && !filter(s)) continue;
-    const iv = segmentInterval(s, ax, ay, az, bx, by, bz);
-    if (!iv) continue;
-    const t0 = Math.max(0, iv.t0);
-    const t1 = Math.min(1, iv.t1);
-    if (t1 - t0 < minT) continue;
-    intervals.push([t0, t1]);
+  const buf = take();
+  try {
+    queryXZ(world, Math.min(ax, bx), Math.min(az, bz), Math.max(ax, bx), Math.max(az, bz), buf);
+    for (const idx of buf) {
+      const s = world.occluders[idx]!;
+      if (filter && !filter(s)) continue;
+      const iv = segmentInterval(s, ax, ay, az, bx, by, bz);
+      if (!iv) continue;
+      const t0 = Math.max(0, iv.t0);
+      const t1 = Math.min(1, iv.t1);
+      if (t1 - t0 < minT) continue;
+      intervals.push([t0, t1]);
+    }
+  } finally {
+    give(buf);
   }
   if (intervals.length === 0) return 0;
   intervals.sort((p, q) => p[0] - q[0]);

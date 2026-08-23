@@ -6,7 +6,7 @@
  * arrive in M3, the look registry and its 1/2/3 switching with them. Everything the
  * milestone has to show is the top-down debug view on the M key.
  *
- * Keys:  M  top-down debug view    F3  stats
+ * Keys:  M  top-down debug view    F3  stats    F6  toggle dog 2's patrol on the plan
  * Query: ?topdown  open with the top-down view already up (deterministic headless capture)
  */
 
@@ -76,6 +76,10 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'F3':
       debug.toggleStats();
+      e.preventDefault();
+      break;
+    case 'F6':
+      debug.toggleDog2();
       e.preventDefault();
       break;
     default:

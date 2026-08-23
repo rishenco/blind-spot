@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildWorld,
   capsuleOverlaps,
+  countWalls,
   groundUnder,
   headroom,
   ladderAt,
@@ -24,7 +25,13 @@ import {
 } from '../src/core/map/build.js';
 import type { MapDef, Solid } from '../src/core/map/types.js';
 import { sampleMap } from '../src/core/map/sampleMap.js';
-import { CAPSULE_RADIUS, HEIGHT_CROUCH, HEIGHT_STAND, STEP_UP_MAX } from '../src/core/const.js';
+import {
+  CAPSULE_RADIUS,
+  GROUND_PROBE_FRAC,
+  HEIGHT_CROUCH,
+  HEIGHT_STAND,
+  STEP_UP_MAX,
+} from '../src/core/const.js';
 
 const R = CAPSULE_RADIUS;
 const H = HEIGHT_STAND;
@@ -90,9 +97,23 @@ describe('broadphase', () => {
     expect(out.map((i) => fx.solids[i]!.id)).toContain('ground');
   });
 
-  it('is re-entrant: a query inside a query does not corrupt the outer one', () => {
+  it('ledgeProbe survives its own nested query', () => {
     // ledgeProbe iterates candidates while calling capsuleOverlaps, which queries again.
     expect(ledgeProbe(fx, 0, 0, -3.2, 0, -1, R, H, { ahead: 1.0 })?.solid.id).toBe('ledge');
+  });
+
+  it('is re-entrant: a caller-supplied filter may query the world', () => {
+    // Segment from corridor C south through the C/B wall and the D1/D2 wall = 2 walls.
+    const plain = countWalls(world, 28, 1.5, 1, 28, 1.5, 20);
+    expect(plain).toBe(2);
+    // An always-true filter must be a pure no-op whatever it does internally. M3's paint step
+    // ("count penetrated walls against OCCLUDER boxes") will pass exactly this kind of
+    // predicate, and a predicate that consults the world is the normal case, not a stunt.
+    const withFilter = countWalls(world, 28, 1.5, 1, 28, 1.5, 20, (s) => {
+      solidAt(world, 0, 100, 0); // any nested query at all
+      return s !== null;
+    });
+    expect(withFilter).toBe(plain);
   });
 });
 
@@ -193,6 +214,22 @@ describe('collide and slide', () => {
     expect(m.x).toBeCloseTo(2 - R, 2);
   });
 
+  it('takes the support-probe radius from the caller', () => {
+    // Passing the default explicitly must be indistinguishable from omitting it.
+    const implicit = moveCapsule(fx, 0.5, 0, 0, 3, 0, 0, R, H, { stepUp: STEP_UP_MAX });
+    const explicit = moveCapsule(fx, 0.5, 0, 0, 3, 0, 0, R, H, {
+      stepUp: STEP_UP_MAX,
+      probeRadius: R * GROUND_PROBE_FRAC,
+    });
+    expect(explicit).toEqual(implicit);
+
+    // A wider probe sees the step from further back: lifted to x 1.7 the default ring
+    // (0.245 m) stops 0.055 m short of the step's face at x 2, a full-radius ring reaches it.
+    const wide = moveCapsule(fx, 0.5, 0, 0, 1.2, 0, 0, R, H, { stepUp: STEP_UP_MAX, probeRadius: R });
+    expect(wide.steppedUp).toBeCloseTo(0.3, 6);
+    expect(wide.y).toBeCloseTo(0.3, 6);
+  });
+
   it('falls onto the surface below and reports the landing', () => {
     const m = moveCapsule(fx, 0, 3, 0, 0, -5, 0, R, H);
     expect(m.hitGround).toBe(true);
@@ -230,7 +267,27 @@ describe('depenetration', () => {
   it('leaves a clear body alone', () => {
     const p = resolvePenetration(fx, 0, 0, 0, R, H);
     expect(p.moved).toBe(false);
+    expect(p.resolved).toBe(true);
     expect([p.x, p.y, p.z]).toEqual([0, 0, 0]);
+  });
+
+  it('reports whether the body actually came free, not merely that it moved', () => {
+    // `resolved` is the caller's contract: it always agrees with the capsule test at the
+    // position handed back, however many push iterations it took to get there.
+    for (const [w, x, y, z] of [
+      [fx, 3, 0, 0],
+      [fx, 6, 1, 8],
+      [fx, 0, 0, 0],
+      [fx, 4, 0.5, -5],
+      [world, 16, 1, 16],
+      [world, 3, 0, 3],
+    ] as const) {
+      const p = resolvePenetration(w, x, y, z, R, H);
+      expect(p.resolved, `${x},${y},${z}`).toBe(!capsuleOverlaps(w, p.x, p.y, p.z, R, H));
+    }
+    // Zero iterations cannot free anything, and must say so.
+    const none = resolvePenetration(fx, 3, 0, 0, R, H, 0);
+    expect([none.moved, none.resolved]).toEqual([false, false]);
   });
 
   it('resolves a body standing inside the sample map tank', () => {
@@ -320,5 +377,27 @@ describe('rays', () => {
     expect(hit?.solid.kind).toBe('floor');
     expect(hit?.t).toBeCloseTo(1.6, 6);
     expect(hit?.ny).toBe(1);
+  });
+
+  it('always returns a unit-length normal, even on the axis of a cylinder', () => {
+    // Origin exactly on the tank's axis (16, 16): the radial normal is a zero vector there,
+    // so the ray direction reversed is the only meaningful answer.
+    const axis = raycast(world, 16, 3, 16, 1, 0, 0, 10);
+    expect(axis?.solid.id).toBe('tank');
+    expect(Math.hypot(axis!.nx, axis!.ny, axis!.nz)).toBeCloseTo(1, 6);
+    expect([axis!.nx, axis!.ny, axis!.nz]).toEqual([-1, -0, -0]);
+
+    const outside = raycast(world, 10, 3, 16, 1, 0, 0, 10);
+    expect(Math.hypot(outside!.nx, outside!.ny, outside!.nz)).toBeCloseTo(1, 6);
+  });
+
+  it('flags a ray that starts inside a solid, and reports t = 0 for it', () => {
+    const inside = raycast(world, 16, 3, 16, 1, 0, 0, 10);
+    expect(inside?.inside).toBe(true);
+    expect(inside?.t).toBe(0);
+
+    const outside = raycast(fx, 0, 0.2, 0, 1, 0, 0, 10);
+    expect(outside?.inside).toBe(false);
+    expect(outside?.t).toBeCloseTo(2, 6);
   });
 });

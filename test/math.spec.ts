@@ -15,7 +15,7 @@ import {
   smoothstep,
   yawToForward,
 } from '../src/core/math.js';
-import { HEARING_BASE, SURFEL_SPACING, WALL1_QUALITY } from '../src/core/const.js';
+import { EV, HEARING_BASE, SURFEL_SPACING, WALL1_QUALITY } from '../src/core/const.js';
 
 describe('scalars', () => {
   it('clamps', () => {
@@ -144,23 +144,71 @@ describe('cone membership (E-ping: 25° full angle => ±12.5°)', () => {
     expect(inCone(0, 0, 0, fx, fy, fz, 10, 8, 0, 25)).toBe(false);
     expect(inCone(0, 0, 0, fx, fy, fz, 10, 0.5, 0, 25)).toBe(true);
   });
+
+  it('normalises the aim for the caller, and rejects a zero aim', () => {
+    // A raw look-at difference or a scaled beam vector answers the same as the unit forward.
+    expect(inCone(0, 0, 0, fx * 37, fy * 37, fz * 37, 10, 0.5, 0, 25)).toBe(true);
+    expect(inCone(0, 0, 0, fx * 0.01, fy * 0.01, fz * 0.01, 10, 8, 0, 25)).toBe(false);
+    expect(inCone(0, 0, 0, 0, 0, 0, 10, 0, 0, 25)).toBe(false);
+  });
 });
 
-describe('event quality (vision §3.4)', () => {
+/** engine-plan §4, verbatim: `quality = clamp01(1 - d/hearRadius) * (walls===0 ? 1 : walls===1 ? 0.45 : 0)`. */
+const planQuality = (d: number, hearRadius: number, walls: number): number => {
+  if (walls >= 2) return 0;
+  return Math.max(0, Math.min(1, 1 - d / hearRadius)) * (walls === 0 ? 1 : 0.45);
+};
+
+/** engine-plan §4: "delivered iff `d <= max(HEARING_BASE, hearRadius)`" — a SEPARATE gate that
+ *  belongs to the event bus (M3), never to the quality formula. */
+const planDelivered = (d: number, hearRadius: number): boolean => d <= Math.max(HEARING_BASE, hearRadius);
+
+describe('event quality (vision §3.4, engine-plan §4)', () => {
   it('is full at the origin and zero past the range', () => {
-    expect(eventQuality(0, 24, 0, HEARING_BASE, WALL1_QUALITY)).toBe(1);
-    expect(eventQuality(30, 24, 0, HEARING_BASE, WALL1_QUALITY)).toBe(0);
+    expect(eventQuality(0, 24, 0, WALL1_QUALITY)).toBe(1);
+    expect(eventQuality(30, 24, 0, WALL1_QUALITY)).toBe(0);
   });
 
-  it('never exceeds the listener base range', () => {
-    // A quiet event (hear 2 m) heard by an 18 m listener still uses the larger range.
-    expect(eventQuality(9, 2, 0, HEARING_BASE, WALL1_QUALITY)).toBeCloseTo(0.5, 12);
+  it('uses the EVENT hearRadius as the only denominator', () => {
+    // A crouch step (hearRadius 2 m) heard from 1 m away is at HALF its own audible range —
+    // the listener's 18 m base range must not widen the denominator.
+    expect(eventQuality(1, EV.crouchStep.hear, 0, WALL1_QUALITY)).toBeCloseTo(0.5, 12);
+    expect(eventQuality(9, 2, 0, WALL1_QUALITY)).toBe(0);
+  });
+
+  it('reaches 0 at the class hearRadius for every quiet class', () => {
+    for (const [name, ev] of Object.entries(EV)) {
+      if (ev.hear >= HEARING_BASE) continue;
+      expect(
+        eventQuality(ev.hear, ev.hear, 0, WALL1_QUALITY),
+        `${name} (hear ${ev.hear} m) must deliver quality 0 at its own hearRadius`,
+      ).toBeCloseTo(0, 12);
+    }
+  });
+
+  it('separates loud from quiet at the same listener distance', () => {
+    // visual-brief §1.13 drives stain definition from quality: a sprint step (24 m) and a
+    // crouch step (2 m) heard from 1.5 m must not read alike.
+    const loud = eventQuality(1.5, EV.sprintStep.hear, 0, WALL1_QUALITY);
+    const quiet = eventQuality(1.5, EV.crouchStep.hear, 0, WALL1_QUALITY);
+    expect(loud - quiet).toBeGreaterThan(0.3);
+  });
+
+  it('agrees with the plan across the whole class table (0 and 1 wall)', () => {
+    for (const ev of Object.values(EV)) {
+      for (const walls of [0, 1] as const) {
+        for (const d of [0, 0.5, 1, 3, 8, 17.9]) {
+          if (!planDelivered(d, ev.hear)) continue;
+          expect(eventQuality(d, ev.hear, walls, WALL1_QUALITY)).toBeCloseTo(planQuality(d, ev.hear, walls), 12);
+        }
+      }
+    }
   });
 
   it('damps through one wall and stops dead at two', () => {
-    const clear = eventQuality(9, 18, 0, HEARING_BASE, WALL1_QUALITY);
-    expect(eventQuality(9, 18, 1, HEARING_BASE, WALL1_QUALITY)).toBeCloseTo(clear * WALL1_QUALITY, 12);
-    expect(eventQuality(9, 18, 2, HEARING_BASE, WALL1_QUALITY)).toBe(0);
-    expect(eventQuality(1, 60, 3, HEARING_BASE, WALL1_QUALITY)).toBe(0);
+    const clear = eventQuality(9, 18, 0, WALL1_QUALITY);
+    expect(eventQuality(9, 18, 1, WALL1_QUALITY)).toBeCloseTo(clear * WALL1_QUALITY, 12);
+    expect(eventQuality(9, 18, 2, WALL1_QUALITY)).toBe(0);
+    expect(eventQuality(1, 60, 3, WALL1_QUALITY)).toBe(0);
   });
 });

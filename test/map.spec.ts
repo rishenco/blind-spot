@@ -17,13 +17,16 @@ import {
   ladderAt,
   segmentClear,
   solidAt,
+  type World,
 } from '../src/core/map/build.js';
 import { MAP_D, MAP_H, MAP_W, sampleMap } from '../src/core/map/sampleMap.js';
 import type { DoorDef } from '../src/core/map/types.js';
-import { CAPSULE_RADIUS, HEIGHT_STAND } from '../src/core/const.js';
+import { CAN_RADIUS, CAPSULE_RADIUS, HEIGHT_CROUCH, HEIGHT_STAND } from '../src/core/const.js';
 
 const world = buildWorld(sampleMap);
 const R = CAPSULE_RADIUS;
+/** Height a dog's ears/body occupy — the y the patrol legs are checked at. */
+const DOG_Y = 0.5;
 const walkableDoors = sampleMap.doors.filter((d) => d.walkable);
 
 /** Point on a door's centreline, `off` metres along the wall's normal. */
@@ -153,15 +156,32 @@ describe('vertical features', () => {
     expect([l?.yBase, l?.yTop]).toEqual([-2.8, 0]);
   });
 
-  it('puts the mezzanine ladder under the catwalk hatch', () => {
-    const l = ladderAt(world, 0.5, 0, 23, R);
-    expect(l?.def.id).toBe('ladder-mezzanine');
-    expect(l?.yTop).toBe(3.5);
-    // The hatch: no slab over the ladder, slab immediately north and south of it.
-    expect(solidAt(world, 0.8, 3.4, 23)).toBeNull();
-    expect(solidAt(world, 0.8, 3.4, 22)?.id).toBe('catwalk-west-n');
-    expect(solidAt(world, 0.8, 3.4, 24)?.id).toBe('catwalk-west-s');
-    expect(groundUnder(world, 0.8, 22, 3.5, R, 0.5)?.y).toBe(3.5);
+  it('opens the catwalk hatch over the ladder and lands the climber on deck (derivation 3)', () => {
+    const l = world.ladders.find((v) => v.def.id === 'ladder-mezzanine');
+    expect(l).toBeTruthy();
+    expect(l!.yTop).toBe(3.5);
+    expect(ladderAt(world, 0.5, 0, 23, R)?.def.id).toBe('ladder-mezzanine');
+
+    // (a) The hatch is open over the ladder's own x-footprint, and only there. Slab returns
+    //     immediately north and south of it, and the +x dismount strip runs straight through.
+    for (const x of [l!.minX + 0.05, (l!.minX + l!.maxX) / 2, l!.maxX - 0.05]) {
+      expect(solidAt(world, x, 3.4, 23), `hatch @ x${x}`).toBeNull();
+    }
+    expect(solidAt(world, 0.5, 3.4, 22)?.id).toBe('catwalk-west-w-n');
+    expect(solidAt(world, 0.5, 3.4, 24)?.id).toBe('catwalk-west-w-s');
+    expect(solidAt(world, 1.2, 3.4, 23)?.id).toBe('catwalk-west-e');
+
+    // (b) The climber faces +x, so they step off one capsule radius clear of the rungs — and
+    //     there is deck under them at catwalk height, not a 3.5 m drop.
+    const stepX = l!.maxX + R;
+    const dismount = groundUnder(world, stepX, 23, 3.5, R, 0.6);
+    expect(dismount?.y).toBe(3.5);
+    expect(dismount?.solid.id).toBe('catwalk-west-e');
+    expect(capsuleOverlaps(world, stepX, 3.5, 23, R, HEIGHT_STAND)).toBe(false);
+
+    // The deck stays continuous either side of the hatch.
+    expect(groundUnder(world, 0.5, 22, 3.5, R, 0.5)?.y).toBe(3.5);
+    expect(groundUnder(world, 0.5, 24, 3.5, R, 0.5)?.y).toBe(3.5);
   });
 
   it('runs the mezzanine as one continuous L (derivation 2)', () => {
@@ -188,10 +208,13 @@ describe('vertical features', () => {
     expect(groundUnder(world, 44, 7, 3.3, R, 0.4)?.y).toBe(3.3);
   });
 
-  it('leaves the slide duct at 1.2 m — crouch height, not stand height', () => {
+  it('leaves the slide duct at 1.2 m — crouchable, not standable', () => {
+    const duct = world.solids.find((s) => s.id === 'duct')!;
+    expect(duct.minY).toBeGreaterThan(HEIGHT_CROUCH);
+    expect(duct.minY).toBeLessThan(HEIGHT_STAND);
     expect(headroom(world, 24, 1, 0, R, 5)).toBeCloseTo(1.2, 6);
     expect(capsuleOverlaps(world, 24, 0, 1, R, HEIGHT_STAND)).toBe(true);
-    expect(capsuleOverlaps(world, 24, 0, 1, R, 1.1)).toBe(false);
+    expect(capsuleOverlaps(world, 24, 0, 1, R, HEIGHT_CROUCH)).toBe(false);
   });
 
   it('makes the machinery row a 2.2 m listening post', () => {
@@ -253,12 +276,20 @@ describe('props and routes', () => {
     }
   });
 
-  it('leaves a crouch lane through the can field', () => {
+  it('leaves a straight crouch lane through the can field into door [f]', () => {
+    // doc §2 D2: "crouch line through is authored to exist". A body of radius R must clear
+    // every can (radius CAN_RADIUS) somewhere inside the 1.6 m opening, on a straight line.
     const field = sampleMap.props.filter((p) => p.type === 'can' && p.id.startsWith('can-field'));
     expect(field).toHaveLength(6);
-    // ~0.95 m of clear x at the [f] doorway, between the west and east clusters.
-    const inLane = field.filter((p) => p.type === 'can' && Math.abs(p.x - 40.95) < 0.47);
-    expect(inLane).toHaveLength(0);
+    const door = sampleMap.doors.find((d) => d.id === 'f')!;
+    const need = R + CAN_RADIUS;
+    let best = -1;
+    for (let x = door.from + R; x <= door.to - R; x += 0.005) {
+      let clear = Infinity;
+      for (const c of field) clear = Math.min(clear, Math.abs(x - (c as { x: number }).x));
+      if (clear > best) best = clear;
+    }
+    expect(best).toBeGreaterThan(need);
   });
 
   it('hangs the chain curtain in door [c]', () => {
@@ -303,6 +334,42 @@ describe('props and routes', () => {
   it('flags dog 2 as off by default', () => {
     expect(sampleMap.dogRoutes.find((r) => r.id === 'dog2')?.defaultOn).toBe(false);
   });
+
+  it('walks every patrol leg of every route without crossing a solid (derivation 6)', () => {
+    // A dog navigates to the next waypoint in a straight line; a leg that penetrates geometry
+    // is an unwalkable patrol, not a steering problem for M5 to solve.
+    const bad: string[] = [];
+    for (const route of sampleMap.dogRoutes) {
+      const wps = route.waypoints;
+      for (let i = 0; i < wps.length; i++) {
+        const a = wps[i]!;
+        const b = wps[(i + 1) % wps.length]!;
+        const walls = countWalls(world, a.x, DOG_Y, a.z, b.x, DOG_Y, b.z);
+        if (walls > 0) bad.push(`${route.id} (${a.x},${a.z})->(${b.x},${b.z}) crosses ${walls}`);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it('keeps dog 2 on the floor and clear of the B-hall columns and the tank', () => {
+    const route = sampleMap.dogRoutes.find((r) => r.id === 'dog2')!;
+    // Derivation 6: the doc's z=10 north leg runs through the columns at (12,10) and (18,10).
+    expect(route.waypoints.filter((w) => w.z === 11.5)).toHaveLength(2);
+    const wps = route.waypoints;
+    for (let i = 0; i < wps.length; i++) {
+      const a = wps[i]!;
+      const b = wps[(i + 1) % wps.length]!;
+      const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 0.25));
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        const x = a.x + (b.x - a.x) * t;
+        const z = a.z + (b.z - a.z) * t;
+        const where = `dog2 @ ${x.toFixed(2)},${z.toFixed(2)}`;
+        expect(groundUnder(world, x, z, 0, 0.3, 0.5)?.y, `${where} ground`).toBe(0);
+        expect(capsuleOverlaps(world, x, 0, z, 0.3, 0.9), `${where} body`).toBe(false);
+      }
+    }
+  });
 });
 
 describe('built world', () => {
@@ -315,7 +382,9 @@ describe('built world', () => {
       'trench-floor',
       'crate-27-6',
       'crate-stack',
-      'catwalk-west-n',
+      'catwalk-west-w-n',
+      'catwalk-west-w-s',
+      'catwalk-west-e',
       'catwalk-north',
       'gantry-beam',
       'high-shelf',
@@ -332,9 +401,126 @@ describe('built world', () => {
     expect(ids.has('w-a-east:sill-mez-e')).toBe(false);
   });
 
+  it('drops tops at or above the interior ceiling', () => {
+    // The ceiling slab's own top (y 7.4) is outside the playable volume: nothing stands on the
+    // roof, and a walkable there would feed M3's hold lines a surface no body can reach.
+    const interiorTop = Math.max(...sampleMap.air.map((a) => a.max[1]));
+    for (const w of world.walkables) expect(w.y, w.solid.id).toBeLessThan(interiorTop);
+    expect(new Set(world.walkables.map((w) => w.solid.id)).has('ceiling')).toBe(false);
+  });
+
+  it('holds the authored counts (update these deliberately when the map changes)', () => {
+    expect(world.solids).toHaveLength(63);
+    expect(world.walkables).toHaveLength(21);
+  });
+
   it('indexes every solid in the broadphase', () => {
     expect(world.solids).toHaveLength(sampleMap.solids.length);
     world.solids.forEach((s, i) => expect(s.index).toBe(i));
-    expect(world.occluders.length).toBe(world.solids.length);
+  });
+
+  it('keeps occluders in their own array, index-aligned with solids', () => {
+    // countWalls reads `occluders`, never `solids`. M3 may narrow it to the kinds that really
+    // block sound; the collision set must not change when it does, so it must not be the
+    // SAME array — an alias would make that filtering silently delete collision geometry.
+    expect(world.occluders).not.toBe(world.solids);
+    expect(world.occluders).toEqual(world.solids);
+    world.occluders.forEach((s, i) => expect(s).toBe(world.solids[i]));
+  });
+
+  it('declares the world bounds readonly', () => {
+    // A compile-time guarantee, not Object.freeze: the assignment below is a runtime no-op and
+    // must be a type error. Drop the `readonly` modifiers and `npm run typecheck` fails on the
+    // now-unused @ts-expect-error, which is exactly the alarm we want.
+    const b: World['bounds'] = world.bounds;
+    // @ts-expect-error bounds fields are readonly
+    b.minX = b.minX;
+    expect(world.bounds.minX).toBeCloseTo(-0.4, 9);
+  });
+});
+
+describe('authored solid overlaps (engine-plan §10)', () => {
+  /**
+   * Overlaps that are authored on purpose. Two families, both forced by sample-map §0:
+   *
+   *   (a) wall-run T-junctions — a run authored as explicit segments ends INSIDE the run it
+   *       meets, because both are 0.4 thick and centred on their plan coordinate; and
+   *   (b) a mass that runs out to the wall CENTRELINE it abuts ("every zone rectangle in the
+   *       doc is the nominal rectangle out to those centrelines"), lapping 0.2 m into it.
+   *
+   * Anything not on this list is a mistake: the point of the spec is that a new overlap —
+   * crate into crate, deck into column — cannot appear unnoticed.
+   */
+  const ALLOWED = new Set([
+    // (a) T-junctions and corner joins between wall runs
+    'w-c-south:pre-b|w-a-east:pre-mez-e',
+    'w-c-south:pre-b|w-a-east:sill-mez-e',
+    'w-c-south:pre-c|w-b-d1:pre-e',
+    'w-listening:end|w-e-d2:pre-h',
+    // (b) masses authored out to the centreline of the wall they abut
+    'w-c-south:pre-b|catwalk-north',
+    'w-listening:pre-g|catwalk-west-w-s',
+    'w-listening:lintel-g|catwalk-west-w-s',
+    'w-listening:lintel-g|catwalk-west-e',
+    'w-listening:end|machinery-row',
+    'w-listening:end|mass-block',
+    'w-b-d1:end|mass-block',
+    'w-e-d2:pre-h|mass-block',
+  ]);
+
+  it('has no unintended interpenetration anywhere inside the building', () => {
+    // The envelope is excluded: things resting on the floor slab or tucked under the ceiling
+    // are not authoring errors, they are the building.
+    const envelope = new Set(['shell-w', 'shell-e', 'shell-n', 'shell-s', 'ceiling']);
+    const interior = world.solids.filter((s) => !envelope.has(s.id) && s.kind !== 'floor');
+    const bad: string[] = [];
+    for (let i = 0; i < interior.length; i++) {
+      for (let k = i + 1; k < interior.length; k++) {
+        const a = interior[i]!;
+        const b = interior[k]!;
+        const ox = Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX);
+        const oy = Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY);
+        const oz = Math.min(a.maxZ, b.maxZ) - Math.max(a.minZ, b.minZ);
+        if (ox <= 1e-6 || oy <= 1e-6 || oz <= 1e-6) continue;
+        if (ALLOWED.has(`${a.id}|${b.id}`)) continue;
+        bad.push(`${a.id} x ${b.id} (${ox.toFixed(3)} x ${oy.toFixed(3)} x ${oz.toFixed(3)} m)`);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it('keeps the allowlist honest — every entry is still a real overlap', () => {
+    const by = new Map(world.solids.map((s) => [s.id, s]));
+    for (const pair of ALLOWED) {
+      const [aId, bId] = pair.split('|') as [string, string];
+      const a = by.get(aId);
+      const b = by.get(bId);
+      expect(a, aId).toBeTruthy();
+      expect(b, bId).toBeTruthy();
+      const ox = Math.min(a!.maxX, b!.maxX) - Math.max(a!.minX, b!.minX);
+      const oy = Math.min(a!.maxY, b!.maxY) - Math.max(a!.minY, b!.minY);
+      const oz = Math.min(a!.maxZ, b!.maxZ) - Math.max(a!.minZ, b!.minZ);
+      expect(Math.min(ox, oy, oz), pair).toBeGreaterThan(1e-6);
+    }
+  });
+
+  it('never lets two crates interpenetrate (derivation 4)', () => {
+    const crates = world.solids.filter((s) => s.kind === 'crate');
+    const bad: string[] = [];
+    for (let i = 0; i < crates.length; i++) {
+      for (let k = i + 1; k < crates.length; k++) {
+        const a = crates[i]!;
+        const b = crates[k]!;
+        const ox = Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX);
+        const oy = Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY);
+        const oz = Math.min(a.maxZ, b.maxZ) - Math.max(a.minZ, b.minZ);
+        if (ox > 1e-6 && oy > 1e-6 && oz > 1e-6) bad.push(`${a.id} x ${b.id}`);
+      }
+    }
+    expect(bad).toEqual([]);
+    // …and the nudged crate really does sit flush against the 2.0 stack, not away from it.
+    const crate = world.solids.find((s) => s.id === 'crate-41.8-7.4')!;
+    const stack = world.solids.find((s) => s.id === 'crate-stack')!;
+    expect(crate.minZ).toBeCloseTo(stack.maxZ, 9);
   });
 });

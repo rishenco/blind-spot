@@ -106,7 +106,11 @@ export interface RouteWaypoint {
 export interface DogRouteDef {
   readonly id: string;
   readonly speed: number;
-  readonly defaultOn: boolean;
+  /**
+   * Whether this route is live. Mutable on purpose: the debug view's F6 toggle flips it so the
+   * second patrol can be read on and off the plan, and M5's spawner will read the same field.
+   */
+  defaultOn: boolean;
   /** Cyclic: the follower loops from the last waypoint back to the first. */
   readonly waypoints: readonly RouteWaypoint[];
 }
