@@ -7,10 +7,11 @@
  * debug view (M) with the player moving on it, the F3 readout, and the sound of your own feet.
  *
  * Keys:  WASD move · Shift sprint · Ctrl/C crouch (slide at speed) · Space jump/mantle
- *        M top-down debug view · F3 stats · F6 dog 2 on the plan · B head bob · 0 mute
+ *        M top-down debug view · F3 stats · F6 dog 2 on the plan · B camera motion · 0 mute
  * Query: ?topdown   open with the top-down view up (deterministic headless capture)
  *        ?stats     open with the F3 readout up
- *        ?nobob     start with head bob off (comfort law, vision §12)
+ *        ?nobob     start with camera motion off — bob, landing dip and slide roll, one
+ *                   switch (comfort law, vision §12)
  *        ?sim=script  run a scripted movement route instead of reading the keyboard
  *                     (script|script1|corridor, script2|mantle — see core/debug.ts SCRIPTS)
  */
@@ -64,9 +65,15 @@ try {
   console.warn('WebGL unavailable — running overlay-only.', err);
 }
 
+const renderPos: [number, number, number] = [0, 0, 0];
+
 function syncCamera(): void {
   const p = sim.player;
-  camera.position.set(p.x, p.y + rig.eyeOffset, p.z);
+  // Draw the INTERPOLATED pose, not the raw one (sim.renderPos): the sim is a fixed 60 Hz and
+  // the display is whatever it is, so on a fast monitor most frames run no step at all. Look
+  // angles come straight from the player — see the note on Sim.prevX about aim latency.
+  sim.renderPos(renderPos);
+  camera.position.set(renderPos[0], renderPos[1] + rig.eyeOffset, renderPos[2]);
   camera.rotation.set(p.pitch, yawToThreeRotationY(p.yaw), rig.roll, 'YXZ');
   if (Math.abs(camera.fov - rig.fov) > 0.005) {
     camera.fov = rig.fov;
@@ -128,7 +135,7 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault();
       break;
     case 'KeyB':
-      rig.bobEnabled = !rig.bobEnabled;
+      rig.motionEffects = !rig.motionEffects;
       break;
     case 'Digit0':
       audio.toggleMute();
@@ -164,19 +171,22 @@ function frame(now: number): void {
   const dtMs = Math.min(250, now - last);
   last = now;
 
-  let simDt: number;
   if (script) {
     for (let i = 0; i < SCRIPT_STEPS_PER_FRAME; i++) {
       script.sync();
       sim.step(SIM_STEP);
     }
-    simDt = SCRIPT_STEPS_PER_FRAME * SIM_STEP;
   } else {
     readKeyboard();
-    simDt = sim.advance(dtMs / 1000) * SIM_STEP;
+    sim.advance(dtMs / 1000);
   }
 
-  rig.update(simDt || dtMs / 1000, sim.movement);
+  // The rig is a RENDER-side smoother, so it is charged with real elapsed time, every frame,
+  // whether or not a sim step ran. Charging it with the sim time consumed instead double-counted
+  // on catch-up frames and starved it on fast ones: at 144 Hz it was fed 6.60 s over 4.17 s of
+  // wall clock, which is why the landing dip was 8x weaker there than at 60 Hz. Smoothers are
+  // wall-clock things; only the sim is allowed to care about the fixed step.
+  rig.update(dtMs / 1000, sim.movement);
   syncCamera();
   renderer?.render(scene, camera);
   debug.update(dtMs);
@@ -185,7 +195,7 @@ function frame(now: number): void {
 
 if (params.has('topdown')) debug.setTopDown(true);
 if (params.has('stats')) debug.toggleStats();
-if (params.has('nobob')) rig.bobEnabled = false;
+if (params.has('nobob')) rig.motionEffects = false;
 
 boot?.classList.add('hidden');
 syncCamera();

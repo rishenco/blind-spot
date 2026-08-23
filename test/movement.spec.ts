@@ -770,7 +770,7 @@ describe('camera energy (visual-brief §1.8) and the comfort laws (vision §12)'
   it('can switch head bob off entirely', () => {
     const sim = fresh();
     const rig = new CameraRig();
-    rig.bobEnabled = false;
+    rig.motionEffects = false;
     place(sim, 2, 0, 45);
     for (let i = 0; i < steps(2); i++) {
       Object.assign(sim.input, SPRINT);

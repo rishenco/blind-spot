@@ -26,10 +26,10 @@ import {
   LANDING_DIP_MAX,
   SIM_STEP,
   SLIDE_TILT_DEG,
-} from '../../src/core/const.js';
-import { CameraRig, type MoveInput } from '../../src/core/movement.js';
-import { Sim } from '../../src/core/sim.js';
-import type { MapDef, Solid } from '../../src/core/map/types.js';
+} from '../src/core/const.js';
+import { CameraRig, type MoveInput } from '../src/core/movement.js';
+import { Sim } from '../src/core/sim.js';
+import type { MapDef, Solid } from '../src/core/map/types.js';
 
 const box = (
   id: string,

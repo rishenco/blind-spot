@@ -7,7 +7,8 @@
  * "your own footsteps are your headlights" honest instead of decorative: the tick in your ears
  * and the dots on your screen are the same fact, delivered twice.
  *
- * Milestone 2 covers the self classes movement emits — footsteps, landings, slides. Pings, gait,
+ * Milestone 2 covers the self classes movement emits — footsteps, landings, slides, the mantle
+ * scuff (and the jump takeoff, which reuses the footstep rows). Pings, gait,
  * clatter, chain, hum and the beacon arrive with their milestones; unhandled classes are ignored
  * here rather than faked. Delivery is not modelled yet either (M3 owns walls/quality), so this
  * plays what the player themselves emitted, at the player's own position.
@@ -120,7 +121,13 @@ export class AudioEngine {
         this.thud(t, clamp01(invLerp(EV.landing.paint, EV.landing.paintMax, e.paintRadius)), e.fuzzSeed);
         break;
       case 'slide':
-        this.scrape(t, 0.22);
+        this.scrape(t, 0.22, 0.22, 2200, 700, e.fuzzSeed);
+        break;
+      case 'mantle':
+        // A braced heave onto a ledge: one short, dry, upward scuff. Same machinery as the slide
+        // (a swept low-pass over noise) with its own character — shorter, quieter, and sweeping
+        // UP rather than down, so it never reads as "you are sliding".
+        this.scrape(t, 0.14, 0.1, 900, 2600, e.fuzzSeed);
         break;
       default:
         return;
@@ -162,22 +169,31 @@ export class AudioEngine {
     osc.stop(t + 0.28);
   }
 
-  /** A slide: overlapping low-passed noise, one per 0.5 m — the events themselves make it continuous. */
-  private scrape(t: number, gain: number): void {
+  /**
+   * A swept-filter noise grain: the slide's scrape (one per 0.5 m — the events themselves make it
+   * continuous) and the mantle's scuff.
+   *
+   * `seed` is the event's own jitter and is NOT optional in spirit: a slide emits ~15 of these a
+   * second and they overlap. Identical overlapping noise grains do not sum to noise, they sum to
+   * a periodic comb — the slide would ring rather than hiss. So the seed moves the playback rate,
+   * the filter corner AND the offset into the noise buffer, exactly as `tick` does for footsteps.
+   */
+  private scrape(t: number, gain: number, dur: number, fromHz: number, toHz: number, seed: number): void {
     const ctx = this.ctx!;
     const src = ctx.createBufferSource();
     src.buffer = this.noise!;
+    src.playbackRate.value = 0.85 + seed * 0.3;
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.setValueAtTime(2200, t);
-    lp.frequency.exponentialRampToValueAtTime(700, t + 0.22);
+    lp.frequency.setValueAtTime(fromHz * (0.9 + seed * 0.2), t);
+    lp.frequency.exponentialRampToValueAtTime(toHz * (0.9 + seed * 0.2), t + dur);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.03);
-    g.gain.exponentialRampToValueAtTime(0.0005, t + 0.24);
+    g.gain.linearRampToValueAtTime(gain, t + Math.min(0.03, dur * 0.3));
+    g.gain.exponentialRampToValueAtTime(0.0005, t + dur + 0.02);
     src.connect(lp).connect(g).connect(this.master!);
-    src.start(t, 0.05);
-    src.stop(t + 0.26);
+    src.start(t, seed * (NOISE_SECONDS - dur - 0.05));
+    src.stop(t + dur + 0.04);
   }
 }
 

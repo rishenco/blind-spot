@@ -105,6 +105,8 @@ export class DebugOverlay {
   private holes: Array<[number, number, number, number]> | null = null;
   /** Occupied text boxes for this frame — annotations yield to authored labels, never overlap. */
   private readonly labels: Array<[number, number, number, number]> = [];
+  /** The drawn plan's pixel rect [left, top, right, bottom], recomputed each `draw()`. */
+  private plan: [number, number, number, number] = [0, 0, 0, 0];
   private dpr = 1;
   private w = 0;
   private h = 0;
@@ -143,7 +145,7 @@ export class DebugOverlay {
     this.statsEl.style.cssText =
       `position:fixed;right:12px;bottom:96px;font:11px/1.5 ${MONO};color:${C.dim};` +
       'white-space:pre;pointer-events:none;display:none;text-shadow:0 0 6px #000;' +
-      `background:rgba(4,7,10,0.86);border:1px solid ${C.wallFill};border-radius:3px;padding:6px 9px;`;
+      `background:${C.bg};border:1px solid ${C.wallFill};border-radius:3px;padding:6px 9px;`;
     root.appendChild(this.statsEl);
 
     this.resize(window.innerWidth, window.innerHeight);
@@ -267,6 +269,20 @@ export class DebugOverlay {
     this.reserve(cx - w / 2 - 3, cy - half, cx + w / 2 + 3, cy + half);
   }
 
+  /**
+   * Slide a label box of half-size `half` back inside the drawn plan — and therefore inside the
+   * canvas, which the plan sits within. A height note or a marker is an annotation ABOUT the map
+   * and reads as nonsense hanging off its east wall ("HIGH SHELF y3.3" and "y3.05–3.3" both ran
+   * past the edge at x 43.6). If the label is wider than the plan itself, leave it where it was
+   * and let `isFree` decide — a clamp that cannot succeed must not make things worse.
+   */
+  private clampLabel(centre: number, half: number, axis: 0 | 1): number {
+    const [l, t, r, b] = this.plan;
+    const lo = Math.max(2, axis === 0 ? l : t) + half;
+    const hi = Math.min(axis === 0 ? this.w - 2 : this.h - 2, axis === 0 ? r : b) - half;
+    return hi < lo ? centre : Math.min(Math.max(centre, lo), hi);
+  }
+
   private isFree(x0: number, y0: number, x1: number, y1: number): boolean {
     if (x0 < 2 || x1 > this.w - 2 || y0 < 2 || y1 > this.h - 2) return false;
     for (const [a0, b0, a1, b1] of this.labels) {
@@ -292,6 +308,7 @@ export class DebugOverlay {
     const X = (x: number): number => v.ox + x * v.scale;
     const Z = (z: number): number => v.oy + z * v.scale;
     const S = (m: number): number => m * v.scale;
+    this.plan = [X(map.bounds.min[0]), Z(map.bounds.min[2]), X(map.bounds.max[0]), Z(map.bounds.max[2])];
 
     // interior ground
     ctx.fillStyle = C.interior;
@@ -453,9 +470,9 @@ export class DebugOverlay {
       else if (cls === 'climb') text = `h${s.maxY}`;
       if (!text) continue;
 
-      const cx = X((s.minX + s.maxX) / 2);
-      const cy = Z((s.minZ + s.maxZ) / 2);
       const half = ctx.measureText(text).width / 2 + 3;
+      const cx = this.clampLabel(X((s.minX + s.maxX) / 2), half, 0);
+      const cy = this.clampLabel(Z((s.minZ + s.maxZ) / 2), 6, 1);
       let placed: number | null = null;
       for (const dy of [0, -11, 11, -22, 22]) {
         if (this.isFree(cx - half, cy + dy - 6, cx + half, cy + dy + 6)) {
@@ -646,13 +663,14 @@ export class DebugOverlay {
       ctx.font = zone ? `bold 12px ${MONO}` : `9px ${MONO}`;
       const text = m.label;
       const wpx = ctx.measureText(text).width;
-      // Authored labels always draw; the box is pulled inside the canvas and nudged off
+      // Authored labels always draw; the box is pulled inside the drawn plan and nudged off
       // anything already placed (a door pip, a route tag) without leaving its own feature.
-      const cx = Math.min(Math.max(X(m.x), wpx / 2 + 6), this.w - wpx / 2 - 6);
-      let cy = Math.min(Math.max(Z(m.z), 52), this.h - 70);
+      const cx = this.clampLabel(X(m.x), wpx / 2 + 6, 0);
+      const cy0 = Math.min(Math.max(this.clampLabel(Z(m.z), 8, 1), 52), this.h - 70);
+      let cy = cy0;
       for (const dy of [0, -12, 12, -24, 24]) {
-        if (this.isFree(cx - wpx / 2 - 4, cy + dy - 8, cx + wpx / 2 + 4, cy + dy + 8)) {
-          cy += dy;
+        if (this.isFree(cx - wpx / 2 - 4, cy0 + dy - 8, cx + wpx / 2 + 4, cy0 + dy + 8)) {
+          cy = cy0 + dy;
           break;
         }
       }

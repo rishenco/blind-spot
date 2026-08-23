@@ -11,22 +11,26 @@
  * Everything runs on the fixed 60 Hz step (sim.ts). One step, in order:
  *
  *   1. look           mouse deltas -> yaw/pitch (consumed, so a catch-up frame cannot double-apply)
- *   2. timers         stagger, coyote, jump buffer
+ *   2. timers         stagger, coyote, jump buffer, approach latch
  *   3. exclusive      mantle glide / ladder climb own the step outright and return early
  *   4. stance         slide entry+decay+exit, crouch/stand gated on headroom
- *   5. verbs          mantle/vault trigger (BEFORE jump: a ledge you are facing wins), jump
- *   6. accelerate     ground accel or Source-style air accel, gravity
+ *   5. verbs          mantle/vault trigger (BEFORE jump: a ledge you are facing wins) -> mantle
+ *                     event; jump -> takeoff step event
+ *   6. accelerate     ground accel or Source-style air accel, overspeed bleed, gravity
  *   7. move           collide-and-slide with step-up (map/build.ts owns the geometry)
  *   8. land           grounded transition -> landing event (+ stagger > 4 m)
  *   9. stride         distance accumulators -> footstep / slide events
  *
- * Emission order inside a step is therefore always: landing before stride/slide. Consumers may
- * rely on that (M3 paint, audio).
+ * Emission order inside a step is therefore always: verb events (mantle, jump takeoff) first,
+ * then landing, then stride/slide. Consumers may rely on that (M3 paint, audio). A takeoff and a
+ * landing can never share a step: the jump sets vy = +JUMP_VELOCITY and gravity only takes
+ * GRAVITY*dt off it, so the body is unambiguously airborne when phase 8 runs.
  */
 
 import {
   ACCEL_AIR,
   ACCEL_GROUND,
+  APPROACH_LATCH_TIME,
   EV,
   AIR_WISH_CAP,
   CAPSULE_RADIUS,
@@ -38,6 +42,9 @@ import {
   FOV_SMOOTH,
   FOV_SPRINT_KICK,
   FRICTION_GROUND,
+  GLIDE_ARC_SAMPLES,
+  GLIDE_XZ_START,
+  GLIDE_Y_END,
   GRAVITY,
   GROUND_PROBE_FRAC,
   GROUND_SNAP,
@@ -96,10 +103,41 @@ import type { PlayerState } from './sim.js';
 
 const PROBE_R = CAPSULE_RADIUS * GROUND_PROBE_FRAC;
 const EPS = 1e-6;
+/**
+ * How far the eye sits below the crown of the capsule. Identical standing (1.70 - 1.62) and
+ * crouched (1.10 - 1.02), which makes it the natural margin for holding the camera off a
+ * ceiling: the eye keeps exactly the clearance from a duct that it keeps from your own head.
+ */
+const EYE_HEAD_GAP = HEIGHT_STAND - EYE_STAND;
 
 export type Gait = 'crouch' | 'walk' | 'sprint';
 /** Rig state for the hands (engine-plan §6 — M4 builds the rig; M2 provides the trigger). */
 export type HandsState = 'none' | 'mantle' | 'vault' | 'ladder';
+
+/**
+ * How loud a body moving at `speed` is, per the vision §5 speed bands (1.7 / 3.5 / 6.0 m/s).
+ *
+ * The KEYS choose your target speed; the BODY chooses your volume. Those are not the same thing
+ * and deriving the event class from the keys is a lie the moment they disagree — inherited
+ * overspeed (a slide-jump landing at 7.4 m/s with no sprint key held) would whisper walk-step
+ * paint while travelling faster than a sprint, and a sprint key held against a wall at 0.2 m/s
+ * would shout. Vision §1.2: the system never lies. Vision §3.8 makes this load-bearing rather
+ * than pedantic — the M4 Halo IS "brightness = your current audible radius", so the class the
+ * emitter picks has to be true of the body by construction, not by intent.
+ *
+ * A crouched STANCE still forces the crouch row: sneaking is a posture, and a crouched body
+ * never publishes more than crouch-step paint however fast something else made it travel.
+ */
+export function gaitForSpeed(speed: number, crouched: boolean): Gait {
+  if (crouched) return 'crouch';
+  if (speed <= SPEED_CROUCH + EPS) return 'crouch';
+  if (speed <= SPEED_WALK + EPS) return 'walk';
+  return 'sprint';
+}
+
+/** The vision §3.3 footstep row for a gait. */
+export const stepClass = (gait: Gait): SoundClass =>
+  gait === 'crouch' ? 'crouchStep' : gait === 'sprint' ? 'sprintStep' : 'walkStep';
 
 /**
  * One frame of intent. `jumpPressed` and the look deltas are EDGE values: the controller
@@ -181,9 +219,16 @@ export class MovementController {
    * The speed we were carrying into that wall, sampled BEFORE the collision response zeroed it.
    * A vault triggers on the step after the block, by which time the run is already gone from the
    * velocity — handing this back on exit is what stops a knee-high crate from confiscating a
-   * sprint (law 5). Zero whenever we are not blocked.
+   * sprint (law 5).
+   *
+   * LATCHED, not sampled: it is held for APPROACH_LATCH_TIME after contact rather than being
+   * dropped the instant `blockedForward` goes false. A mantle is triggered by a jump PRESS, and
+   * the press lands wherever the player's hand lands — one frame late and the un-latched version
+   * handed back whatever the wall had left of your run (measured: 0.667 m/s instead of 3.5). The
+   * window matches the jump buffer's forgiveness on the other side of the same input.
    */
   private approachSpeed = 0;
+  private approachLatch = 0;
 
   constructor(world: World, player: PlayerState, bus: EventBus) {
     this.world = world;
@@ -199,6 +244,16 @@ export class MovementController {
   /** Eye offset above the feet for the current posture (the rig smooths toward this). */
   get eyeTarget(): number {
     return this.crouched || this.sliding ? EYE_CROUCH : EYE_STAND;
+  }
+
+  /**
+   * Ceiling clearance above the feet, in metres, saturating just above a standing body — the
+   * same probe the stand-up gate uses. The camera rig clamps the eye against it so a smoothed
+   * eye height can never lag its way through a duct the capsule has already ducked under.
+   */
+  get clearance(): number {
+    const p = this.player;
+    return headroom(this.world, p.x, p.z, p.y, CAPSULE_RADIUS, HEIGHT_STAND + 0.05);
   }
 
   /** Metres between footstep events at the current gait (vision §3.3 / engine-plan §5). */
@@ -219,6 +274,8 @@ export class MovementController {
 
     // 2. timers ----------------------------------------------------------------------------
     this.staggerTime = Math.max(0, this.staggerTime - dt);
+    this.approachLatch = Math.max(0, this.approachLatch - dt);
+    if (this.approachLatch <= 0) this.approachSpeed = 0;
     if (input.jumpPressed) {
       this.jumpBuffer = JUMP_BUFFER;
       input.jumpPressed = false;
@@ -313,6 +370,14 @@ export class MovementController {
       (p.grounded || this.coyote > 0) &&
       this.canFit(p.x, p.y + 0.02, p.z, this.height)
     ) {
+      // A jump is a shove against the floor, so law 1 applies: it costs a sound. It is emitted at
+      // TAKEOFF — the shove is the noise, the airborne body is silent, and the landing has its
+      // own row. Class comes from the body's speed as the feet leave (the same §5 bands the
+      // stride emitter uses), FLOORED AT WALK: a standing vertical hop is still a forceful push
+      // off the plates and is never crouch-quiet. No new §3.3 row — it reuses the step rows.
+      // (See doc/engine-plan.md §5; vision §3.3 addendum pending playtest.)
+      const takeoff = gaitForSpeed(Math.hypot(p.vx, p.vz), false);
+      this.emit(takeoff === 'sprint' ? 'sprintStep' : 'walkStep');
       p.vy = JUMP_VELOCITY;
       p.grounded = false;
       this.coyote = 0;
@@ -324,49 +389,56 @@ export class MovementController {
 
     // --- accelerate -----------------------------------------------------------------------
     if (this.sliding) {
+      // A slide runs its own decay law (SLIDE_DECAY, steerSlide) and is deliberately allowed
+      // above every gait cap — the bleed below would double-decay it.
       this.steerSlide(dt, wx, wz, wishMag);
-    } else if (p.grounded) {
-      const cap = staggered
-        ? SPEED_CROUCH
-        : this.crouched
+    } else {
+      // Choosing a gait needs traction, so the cap is a GROUND concept. In the air there is no
+      // gait to pick and the cap is simply the fastest one: air control may redirect velocity
+      // freely (that is the whole point of air-strafing) but it may never ADD net speed past
+      // SPEED_SPRINT. Without that ceiling the projection trick that the ground branch already
+      // defends against works unopposed in the air — measured 19.4 m/s after 10 s of circle
+      // strafing, 30.8 m/s after 30 s, from a 6.0 m/s sprint.
+      const cap = !p.grounded
+        ? SPEED_SPRINT
+        : staggered || this.crouched
           ? SPEED_CROUCH
           : input.sprint && input.forward > 0
             ? SPEED_SPRINT
             : SPEED_WALK;
-      const wishSpeed = cap * wishMag;
       const before = Math.hypot(p.vx, p.vz);
-      if (wishSpeed > 0.01) {
+      const wishSpeed = cap * wishMag;
+      if (p.grounded && wishSpeed > 0.01) {
         accelerate(p, wx, wz, wishSpeed, ACCEL_GROUND * dt);
         // `accelerate` only measures your speed ALONG wishdir, so any velocity across it is
         // invisible to the cap. Rub a wall at angle t and the projection equilibrates at
-        // cap / cos(t) — 11 m/s against a 6 m/s sprint. Ground accel may therefore never RAISE
-        // your speed past the gait cap; overspeed can only be inherited (a slide, a landing,
-        // a boost) and, per the bleed below, only ever decays.
-        const ceiling = Math.max(cap, before);
-        const after = Math.hypot(p.vx, p.vz);
-        if (after > ceiling + EPS) {
-          p.vx *= ceiling / after;
-          p.vz *= ceiling / after;
-        }
-      } else {
+        // cap / cos(t) — 11 m/s against a 6 m/s sprint. Accel may therefore never RAISE your
+        // speed past the cap; overspeed can only be inherited (a slide, a landing, a boost)
+        // and, per the bleed below, only ever decays.
+        clampSpeed(p, Math.max(cap, before));
+      } else if (p.grounded) {
         const s = Math.hypot(p.vx, p.vz);
         if (s > EPS) {
           const ns = Math.max(0, s - FRICTION_GROUND * dt);
           p.vx *= ns / s;
           p.vz *= ns / s;
         }
+      } else if (wishMag > 0.01) {
+        // Source-style air control: you may only add speed along wishdir until your velocity
+        // along it reaches AIR_WISH_CAP. Strafing turns you; holding forward does nothing.
+        accelerate(p, wx, wz, Math.min(SPEED_SPRINT * wishMag, AIR_WISH_CAP), ACCEL_AIR * dt);
+        clampSpeed(p, Math.max(cap, before));
       }
-      // Excess speed bleeds instead of being clamped (const.ts OVERSPEED_DECAY).
+      // Excess speed bleeds instead of being clamped (const.ts OVERSPEED_DECAY) — and it bleeds
+      // IN THE AIR TOO. This runs after the jump verb has already set `grounded = false`, so the
+      // take-off frame of a bunny hop is bled like any other: inherited overspeed decays whether
+      // or not your feet are down, and hopping can no longer freeze a 7.46 m/s slide boost.
       const s = Math.hypot(p.vx, p.vz);
       if (s > cap + EPS) {
         const ns = Math.max(cap, s - OVERSPEED_DECAY * dt);
         p.vx *= ns / s;
         p.vz *= ns / s;
       }
-    } else if (wishMag > 0.01) {
-      // Source-style air control: you may only add speed along wishdir until your velocity
-      // along it reaches AIR_WISH_CAP. Strafing turns you; holding forward does nothing.
-      accelerate(p, wx, wz, Math.min(SPEED_SPRINT * wishMag, AIR_WISH_CAP), ACCEL_AIR * dt);
     }
 
     p.vy -= GRAVITY * dt;
@@ -401,7 +473,12 @@ export class MovementController {
     }
     this.blockedForward =
       res.hitWall && wishMag > 0.1 && res.travelXZ < res.requestedXZ - 1e-3 && wx * res.wallNX + wz * res.wallNZ < 0;
-    this.approachSpeed = this.blockedForward ? approach : 0;
+    if (this.blockedForward) {
+      // Latch, don't sample: hold the pre-collision approach speed for a window (the timer at
+      // phase 2 expires it) so a mantle pressed a few frames after contact still exits running.
+      this.approachSpeed = Math.max(this.approachSpeed, approach);
+      this.approachLatch = APPROACH_LATCH_TIME;
+    }
 
     if (res.hitCeiling && p.vy > 0) p.vy = 0;
 
@@ -433,12 +510,11 @@ export class MovementController {
     p.stance = !grounded ? 'air' : this.sliding ? 'slide' : this.crouched ? 'crouch' : 'stand';
 
     // --- gait + emitters ------------------------------------------------------------------
+    // The gait — and therefore both the event class and the stride length — is read off the
+    // BODY, not off the keyboard (see `gaitForSpeed`). The keys still choose the target speed
+    // above; they just no longer get to declare how loud the result was.
     this.speedXZ = Math.hypot(p.vx, p.vz);
-    this.gait = this.crouched
-      ? 'crouch'
-      : input.sprint && input.forward > 0 && this.speedXZ > SPEED_WALK
-        ? 'sprint'
-        : 'walk';
+    this.gait = gaitForSpeed(this.speedXZ, this.crouched);
 
     const moved = Math.hypot(p.x - x0, p.z - z0);
     if (this.sliding) {
@@ -452,7 +528,7 @@ export class MovementController {
       let len = this.strideLength;
       while (this.strideAccum >= len) {
         this.strideAccum -= len;
-        this.emit(this.gait === 'crouch' ? 'crouchStep' : this.gait === 'sprint' ? 'sprintStep' : 'walkStep');
+        this.emit(stepClass(this.gait));
         len = this.strideLength;
       }
     }
@@ -494,8 +570,14 @@ export class MovementController {
     const fall = Math.max(0, this.apexY - y);
     this.apexY = y;
     this.lastFall = fall;
-    this.strideAccum = 0;
     if (fall <= LANDING_MIN_FALL) return;
+    // Below the landing threshold nothing happened worth hearing, so nothing is spent either:
+    // the banked stride survives. Clearing it here made every step-down, kerb, ramp lip and
+    // 1-frame ground-snap swallow the distance already walked toward the next footstep —
+    // measured 0 events over 300 m of stepped corridor, a silent sprint, which is law 1
+    // ("no free intel") failing in the player's favour. Only a real landing spends the bank,
+    // and it spends it by replacing it with a louder event.
+    this.strideAccum = 0;
 
     // vision §5: NO fall damage, ever. A big drop costs a 0.3 s stagger and a loud flash.
     const t = clamp01(invLerp(LANDING_MIN_FALL, LANDING_MAX_FALL, fall));
@@ -533,10 +615,21 @@ export class MovementController {
     // Tall ledges are never automatic — running past a 2 m machine must not climb it.
     if (!vault && !wantsJump && !falling) return false;
 
+    // The whole arc has to be clear, not just its endpoint. `ledgeProbe` proves a standing body
+    // FITS ON TOP; it says nothing about the path taken to get there, and the glide is authored
+    // rather than simulated, so nothing downstream will catch a body that sweeps through a slab
+    // on the way up. Decide here and never abort mid-glide: a refused mantle leaves you standing
+    // at the wall with your run intact, a cancelled one drops you out of an animation.
+    if (!this.arcClear(p.x, p.y, p.z, hit.x, hit.topY, hit.z)) return false;
+
     this.jumpBuffer = 0;
     this.crouched = false;
     this.height = HEIGHT_STAND;
     const speed = Math.max(Math.hypot(p.vx, p.vz), this.approachSpeed);
+    // A braced heave onto a ledge is a real, audible act (law 1). Emitted HERE rather than in
+    // `startGlide` because `startGlide` is also the ladder top-out, and a ladder is silent from
+    // end to end (vision §5). See const.ts EV.mantle — proposed §3.3 addendum, pending playtest.
+    this.emit('mantle');
     this.startGlide(
       hit.x,
       hit.topY,
@@ -545,6 +638,20 @@ export class MovementController {
       vault ? 'vault' : 'mantle',
       vault ? speed : Math.min(speed, SPEED_WALK),
     );
+    return true;
+  }
+
+  /** Is every point of the authored arc from here to (tx,ty,tz) free for a standing capsule? */
+  private arcClear(fx: number, fy: number, fz: number, tx: number, ty: number, tz: number): boolean {
+    for (let i = 1; i <= GLIDE_ARC_SAMPLES; i++) {
+      const t = i / GLIDE_ARC_SAMPLES;
+      const txz = smoothstep(GLIDE_XZ_START, 1, t);
+      const tyy = smoothstep(0, GLIDE_Y_END, t);
+      const x = lerp(fx, tx, txz);
+      const y = lerp(fy, ty, tyy);
+      const z = lerp(fz, tz, txz);
+      if (capsuleOverlaps(this.world, x, y, z, CAPSULE_RADIUS, HEIGHT_STAND)) return false;
+    }
     return true;
   }
 
@@ -582,17 +689,20 @@ export class MovementController {
   }
 
   /**
-   * The glide is authored, not simulated: rise first, then step in. `ledgeProbe` already proved
-   * a standing body fits on the destination, so the only collision work left is a safety
-   * de-penetration on arrival.
+   * The glide is authored, not simulated: rise first, THEN step in — the two curves no longer
+   * overlap (const.ts GLIDE_Y_END / GLIDE_XZ_START). With the old shape the body began moving
+   * forward at t 0.25 while it was still only ~28 % of the way up, which drove the capsule
+   * straight through the face of the very ledge it was climbing on 44 % of the sample map's
+   * legal mantles. Nothing simulates this path, so its shape IS its collision model; the verb
+   * additionally validates the whole arc up front (`arcClear`) before committing to it.
    */
   private stepGlide(dt: number): void {
     const p = this.player;
     const g = this.glide!;
     g.t += dt;
     const t = clamp01(g.t / g.dur);
-    const ty = smoothstep(0, 0.65, t);
-    const txz = smoothstep(0.25, 1, t);
+    const ty = smoothstep(0, GLIDE_Y_END, t);
+    const txz = smoothstep(GLIDE_XZ_START, 1, t);
     const nx = lerp(g.fromX, g.toX, txz);
     const ny = lerp(g.fromY, g.toY, ty);
     const nz = lerp(g.fromZ, g.toZ, txz);
@@ -602,7 +712,13 @@ export class MovementController {
     p.x = nx;
     p.y = ny;
     p.z = nz;
-    this.speedXZ = Math.hypot(p.vx, p.vz);
+    // The readout reports the speed you will LEAVE with, for the whole glide and not just its
+    // last frame (see the exit below, which has always done this). `p.vx/p.vz` still carry the
+    // authored curve's true instantaneous velocity for anyone who wants it, but `speedXZ` means
+    // "how fast is this body travelling as a body" — it is what the gait derivation, the FOV
+    // kick and the F3 line read, and a shaped interpolation spikes to ~3x its own average
+    // (6.65 m/s across a 1 m step-in) without the body having gained any speed at all.
+    this.speedXZ = g.exitSpeed;
     this.handsPhase = t;
 
     if (t < 1) return;
@@ -796,6 +912,15 @@ function accelerate(p: PlayerState, wx: number, wz: number, wishSpeed: number, m
   p.vz += wz * a;
 }
 
+/** Scale horizontal velocity down to `ceiling` if it exceeds it. Direction is preserved. */
+function clampSpeed(p: PlayerState, ceiling: number): void {
+  const s = Math.hypot(p.vx, p.vz);
+  if (s > ceiling + EPS) {
+    p.vx *= ceiling / s;
+    p.vz *= ceiling / s;
+  }
+}
+
 function wrapAngle(a: number): number {
   let v = (a + Math.PI) % (Math.PI * 2);
   if (v < 0) v += Math.PI * 2;
@@ -811,43 +936,60 @@ function wrapAngle(a: number): number {
  * dip, slides tilt. No motion blur." — visual-brief §1.8.
  *
  * Comfort laws (vision §12) are structural here: FOV stays inside 80–110, bob is capped at
- * HEAD_BOB_MAX and can be switched off entirely (`bobEnabled`), and nothing flashes.
+ * HEAD_BOB_MAX, nothing flashes, and ONE switch (`motionEffects`, bound to KeyB and ?nobob)
+ * turns off every uncommanded camera motion — bob, landing dip and slide roll together. Vision
+ * §12 says "toggleable bob/shake", not "toggleable bob"; a player who needs the switch needs all
+ * of it, and a half-off comfort mode is the worst of both. The cost is real and accepted: with
+ * effects off, the slide's direction cue (below) goes with them. Comfort wins.
  */
 export class CameraRig {
   eyeY = EYE_STAND;
   fov = FOV_BASE;
-  /** Radians. */
+  /** Radians. Positive = rolled toward your right. */
   roll = 0;
   /** Downward eye offset from a landing, metres. */
   dip = 0;
   bobY = 0;
-  bobEnabled = true;
+  /** The single comfort switch: bob + landing dip + slide roll. */
+  motionEffects = true;
 
   update(dt: number, m: MovementController): void {
-    this.eyeY = damp(this.eyeY, m.eyeTarget, EYE_SMOOTH, dt);
+    // The eye may never rise above what the body's own ceiling allows. Crouching under a duct
+    // moves the capsule instantly but the eye only DAMPS down, so for a few frames the camera
+    // was inside the duct (measured 1.495 m of eye under 1.30 m of clearance) — the one place
+    // this renderer can show you the inside of a solid, which vision §1.2 does not permit.
+    // EYE_HEAD_GAP is how far the eye sits below the crown of the capsule in both stances.
+    const lid = Math.max(EYE_CROUCH, m.clearance - EYE_HEAD_GAP);
+    this.eyeY = Math.min(damp(this.eyeY, m.eyeTarget, EYE_SMOOTH, dt), lid);
 
     const fast = clamp01(invLerp(SPEED_WALK, SPEED_SPRINT, m.speedXZ));
     this.fov = damp(this.fov, FOV_BASE + FOV_SPRINT_KICK * fast, FOV_SMOOTH, dt);
 
-    // Slide tilt: a base lean plus the lateral component of the carve.
+    // Slide tilt: signed and symmetric, so the roll IS the carve. A straight slide reads exactly
+    // level, a left carve mirrors a right one, and the tilt is therefore readable as direction
+    // rather than as "a slide is happening" — which the halo, the FOV and the scrape all say
+    // already. (The old base lean tilted a straight slide to one side for no physical reason,
+    // and left/right differed by 40x: 3.28° against -0.08°.)
     let rollTarget = 0;
-    if (m.sliding) {
+    if (m.sliding && this.motionEffects) {
       const p = m.player;
       const s = Math.hypot(p.vx, p.vz);
       const [fx, , fz] = yawToForward(p.yaw);
       const lateral = s > EPS ? clamp((p.vx * -fz + p.vz * fx) / s, -1, 1) : 0;
-      rollTarget = ((SLIDE_TILT_DEG * (0.4 + 0.6 * lateral)) * Math.PI) / 180;
+      rollTarget = (SLIDE_TILT_DEG * lateral * Math.PI) / 180;
     }
     this.roll = damp(this.roll, rollTarget, TILT_SMOOTH, dt);
 
+    // The impulse is consumed either way — a comfort user must not accumulate a dip that fires
+    // the moment they switch effects back on.
     if (m.landingImpulse > 0) {
-      this.dip = Math.max(this.dip, LANDING_DIP_MAX * m.landingImpulse);
+      if (this.motionEffects) this.dip = Math.max(this.dip, LANDING_DIP_MAX * m.landingImpulse);
       m.landingImpulse = 0;
     }
     this.dip = damp(this.dip, 0, LANDING_DIP_DECAY, dt);
 
     // Head cadence locked to the footfall emitter: the bob and the step sound share one phase.
-    if (this.bobEnabled && m.player.grounded && !m.sliding) {
+    if (this.motionEffects && m.player.grounded && !m.sliding) {
       const phase = (m.strideAccum / m.strideLength) * Math.PI * 2;
       const amp = HEAD_BOB_MAX * clamp01(m.speedXZ / SPEED_SPRINT);
       this.bobY = damp(this.bobY, -Math.abs(Math.sin(phase)) * amp, EYE_SMOOTH, dt);

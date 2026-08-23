@@ -27,6 +27,7 @@ export const SOUND_CLASSES = [
   'sprintStep',
   'landing',
   'slide',
+  'mantle',
   'propKnock',
   'chainRattle',
   'qPing',
@@ -107,6 +108,8 @@ export function classDefaults(cls: SoundClass, variant?: SoundVariant): ClassDef
       return EV.landing;
     case 'slide':
       return EV.slide;
+    case 'mantle':
+      return EV.mantle;
     case 'propKnock':
       return EV.propKnock;
     case 'chainRattle':
@@ -240,14 +243,21 @@ export class EventBus {
     return out;
   }
 
-  /** Drops history and tallies; listeners stay subscribed. Used by specs and by run restarts. */
+  /**
+   * Drops history and tallies; listeners stay subscribed. Used by specs and by run restarts.
+   *
+   * `nextId` deliberately does NOT reset: ids stay monotonic for the life of the bus. A consumer
+   * that keeps derived state keyed by event id (M3 paint splats, the M4 stain layer) would
+   * otherwise see a post-reset event collide with a pre-reset one it is still holding, and
+   * `fuzzSeed = hash1(id)` would replay the same jitter — the same footstep landing in the same
+   * fuzzed place twice, which is vision §1.2's "the system never lies" quietly failing.
+   */
   reset(): void {
     this.ring.fill(null);
     this.head = 0;
     this.stored = 0;
     this.emitted = 0;
     this.last = null;
-    this.nextId = 1;
     for (const k of SOUND_CLASSES) this.counts[k] = 0;
   }
 }

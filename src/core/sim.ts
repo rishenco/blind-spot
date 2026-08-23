@@ -13,6 +13,7 @@
 
 import { SIM_MAX_STEPS, SIM_STEP } from './const.js';
 import { EventBus } from './events.js';
+import { clamp01, lerp } from './math.js';
 import { buildWorld, type World } from './map/build.js';
 import type { MapDef } from './map/types.js';
 import { makeInput, MovementController, type MoveInput } from './movement.js';
@@ -57,15 +58,32 @@ export class Sim {
   time = 0;
   steps = 0;
   private accumulator = 0;
+  /**
+   * The body's pose at the START of the most recent step. The sim runs at a fixed 60 Hz but the
+   * renderer does not: on a 144 Hz display more than half of all frames run zero steps, and
+   * drawing the raw pose on those frames shows the same image twice or three times in a row —
+   * 60 Hz judder on a 144 Hz screen, in a game whose whole pitch is that movement feels good.
+   * `renderPos()` blends this with the current pose by `alpha`. Yaw and pitch are deliberately
+   * NOT interpolated: look input is applied at the top of the step it arrives in, and blending
+   * it backwards would add up to a full step of aim latency to every mouse movement.
+   */
+  private prevX: number;
+  private prevY: number;
+  private prevZ: number;
 
   constructor(map: MapDef) {
-    this.map = map;
-    this.world = buildWorld(map);
+    // A Sim OWNS its map. Handed the caller's object by reference, `sampleMap` becomes a live
+    // singleton every run writes through — the debug overlay's dog toggle already mutates it,
+    // and vision §11's per-run randomisation ("dog patrols, cell placement, cache and trap
+    // arming randomized per run") will write to it for real. The second run of a session would
+    // then start from the first run's leftovers. One clone at the door makes that impossible.
+    this.map = structuredClone(map);
+    this.world = buildWorld(this.map);
     this.player = {
-      x: map.spawn.pos[0],
-      y: map.spawn.pos[1],
-      z: map.spawn.pos[2],
-      yaw: map.spawn.yaw,
+      x: this.map.spawn.pos[0],
+      y: this.map.spawn.pos[1],
+      z: this.map.spawn.pos[2],
+      yaw: this.map.spawn.yaw,
       pitch: 0,
       vx: 0,
       vy: 0,
@@ -74,6 +92,9 @@ export class Sim {
       grounded: true,
     };
     this.movement = new MovementController(this.world, this.player, this.bus);
+    this.prevX = this.player.x;
+    this.prevY = this.player.y;
+    this.prevZ = this.player.z;
   }
 
   /** Feed real elapsed seconds; runs whole fixed steps and clamps runaway catch-up. */
@@ -90,6 +111,9 @@ export class Sim {
 
   /** One fixed tick. Systems are added here milestone by milestone. */
   step(dt: number): void {
+    this.prevX = this.player.x;
+    this.prevY = this.player.y;
+    this.prevZ = this.player.z;
     this.time += dt;
     this.steps++;
     this.bus.now = this.time;
@@ -99,6 +123,21 @@ export class Sim {
   /** Fraction of a step left over, for render-side interpolation. */
   get alpha(): number {
     return this.accumulator / SIM_STEP;
+  }
+
+  /**
+   * Where the body should be DRAWN this frame: the previous and current sim poses blended by
+   * `alpha`. Every renderer reads this, never `player.x/y/z` — the raw pose is the simulation's
+   * truth at 60 Hz, this is the picture. `alpha` is 0 immediately after a step and rises toward
+   * 1 as the next one approaches, so the result is never extrapolated past a pose the sim
+   * actually produced.
+   */
+  renderPos(out: [number, number, number] = [0, 0, 0]): [number, number, number] {
+    const a = clamp01(this.alpha);
+    out[0] = lerp(this.prevX, this.player.x, a);
+    out[1] = lerp(this.prevY, this.player.y, a);
+    out[2] = lerp(this.prevZ, this.player.z, a);
+    return out;
   }
 
   view(): SimView {

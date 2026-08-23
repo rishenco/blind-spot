@@ -105,6 +105,14 @@ export const EV = {
   /** landing paint 8..14 by fall height; hear 28 */
   landing: { paint: 8, paintMax: 14, hear: 28, intensity: 1.0, wave: Infinity },
   slide: { paint: 5, hear: 16, intensity: 0.7, wave: Infinity },
+  /**
+   * PROPOSED vision §3.3 addendum, pending playtest — see doc/engine-plan.md §5. A mantle or
+   * vault is a braced shove against a ledge, so law 1 says it has a price; the numbers here are a
+   * FIRST-PASS TUNING GUESS, not a vision quote: 3 m paint / 7 m heard sits between a crouch step
+   * (1.5/2) and a walk step (4/11), which is what a deliberate braced motion should cost. A ladder
+   * climb stays silent — that one IS a vision §5 law.
+   */
+  mantle: { paint: 3, hear: 7, intensity: 0.45, wave: Infinity },
   /** prop paint 8..12 by impulse; hear 25 */
   propKnock: { paint: 8, paintMax: 12, hear: 25, intensity: 0.85, wave: Infinity },
   chainRattleLoud: { paint: 10, hear: 25, intensity: 0.8, wave: Infinity },
@@ -177,6 +185,26 @@ export const MANTLE_DURATION = 0.45;
  */
 export const VAULT_MAX_HEIGHT = 1.2;
 export const VAULT_DURATION = 0.28;
+/**
+ * Glide curve shape (movement.ts `stepGlide`). The authored arc is NOT simulated, so it is the
+ * only place a body can move without the collide-and-slide seeing it: it must therefore climb
+ * BEFORE it translates, or the capsule sweeps through the ledge it is climbing. Y is finished by
+ * GLIDE_Y_END and XZ does not start until GLIDE_XZ_START — up first, over second, never both.
+ */
+export const GLIDE_Y_END = 0.5;
+export const GLIDE_XZ_START = 0.5;
+/**
+ * How many points along the arc the verb tests for clearance before committing. The whole path is
+ * validated up front (a glide is never aborted half-way), so the spacing has to be fine enough
+ * that nothing thinner than the capsule can hide between two samples: 1/16 of t.
+ */
+export const GLIDE_ARC_SAMPLES = 16;
+/**
+ * A mantle triggered a few frames AFTER you ran into the wall must exit with the speed you
+ * arrived at, not the ~0 you were left with by the collision. The pre-contact approach speed is
+ * held this long (comparable to JUMP_BUFFER) so a late jump press is still a running mantle.
+ */
+export const APPROACH_LATCH_TIME = 0.2;
 
 /** Grab if the wish direction points at the ladder plane at least this much (dot product). */
 export const LADDER_ATTACH_DOT = 0.25;
