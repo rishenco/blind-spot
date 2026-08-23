@@ -1,5 +1,5 @@
 /**
- * M2 ADVERSARIAL REVIEW — speed caps and the noise economy.
+ * Speed caps and the noise economy — what a body can reach, and what it pays to get there.
  *
  * Contract under test:
  *   vision §5    crouch 1.7 · walk 3.5 · sprint 6.0 m/s. Sprint is the top speed of a body.
@@ -11,7 +11,11 @@
  *   vision TL;DR "your own footsteps are your headlights; whatever lets you see also gives you away."
  *   const.ts     OVERSPEED_DECAY — "Excess speed bleeds instead of being clamped."
  *
- * Labels: PIN = passes today, pins verified-correct behaviour. BUG = fails today, on purpose.
+ * Three review findings live here and each probe names the one it pins:
+ *   B1  the air branch had no ceiling and the overspeed bleed sat inside the grounded branch, so
+ *       a bunny-hop compounded speed without limit and never paid the bleed.
+ *   B2a `land()` zeroed the banked stride on EVERY touchdown, so a hopping body was silent.
+ *   B3  the footstep class was read off the held keys instead of off the body's speed.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -28,7 +32,7 @@ import {
   SPEED_WALK,
   STRIDE_SPRINT,
 } from '../src/core/const.js';
-import type { MoveInput } from '../src/core/movement.js';
+import { gaitForSpeed, stepClass, type MoveInput } from '../src/core/movement.js';
 import { Sim } from '../src/core/sim.js';
 import type { MapDef, Solid } from '../src/core/map/types.js';
 
@@ -49,7 +53,7 @@ const box = (
  * speed probes is the middle of the plate, far from every solid.
  */
 const gym: MapDef = {
-  name: 'review speed gym',
+  name: 'speed gym',
   solids: [
     box('floor', 'floor', 0, -1, 0, 600, 0, 600),
     box('tall', 'wall', 10, 0, 30, 13, 3.6, 36),
@@ -134,18 +138,22 @@ function strafeJump(sim: Sim, seconds: number): { peak: number; distance: number
 }
 
 // ==========================================================================================
-// BUG — the air branch has no ceiling, so a strafe-jump compounds without limit
+// The ceiling holds in the air too (review finding B1)
 // ==========================================================================================
 
-describe('BUG · air acceleration has no speed ceiling (vision §5: sprint 6.0 m/s is the top speed)', () => {
+describe('air acceleration obeys the same ceiling as the ground (vision §5: 6.0 m/s is the top speed)', () => {
   /**
-   * movement.ts:345-350 caps the GROUND branch at `max(cap, before)` so accel can never raise
-   * you past your gait. movement.ts:366-370 (the air branch) has no such ceiling, and the
-   * OVERSPEED_DECAY bleed at :360 lives inside the `p.grounded` branch — which a bhop never
-   * enters, because the jump at :318 sets `p.grounded = false` BEFORE the branch is chosen.
-   * Expected per vision §5: a body tops out at 6.0 m/s. Actual: it compounds indefinitely.
+   * B1. The ground branch has always capped accel at `max(cap, before)` — accel may hold a speed
+   * you already have but never raise you past your gait. The air branch had no such ceiling, and
+   * the OVERSPEED_DECAY bleed lived INSIDE the `p.grounded` branch, which a bunny-hop never
+   * enters: the jump verb clears `p.grounded` before the branch is chosen. So the two holes
+   * compounded — a strafe-jump gained a little every frame and never paid any of it back.
+   *
+   * The fix hoists the bleed out of the grounded branch (it now runs on every frame, airborne
+   * included, so the bunny-hop frame pays it) and gives the air branch the same
+   * `ceiling = max(cap, before)` guard.
    */
-  it('expected: strafe-jumping never exceeds SPEED_SPRINT — actual: it passes 30 m/s in 30 s', () => {
+  it('strafe-jumping never exceeds SPEED_SPRINT, however long it is held', () => {
     const sim = fresh();
     place(sim, LANE[0], 0, LANE[1]);
     drive(sim, 1.5, SPRINT);
@@ -154,7 +162,7 @@ describe('BUG · air acceleration has no speed ceiling (vision §5: sprint 6.0 m
     expect(peak).toBeLessThanOrEqual(SPEED_SPRINT + 1e-6);
   });
 
-  it('expected: bounded — actual: speed still climbing after 30 s (no asymptote at all)', () => {
+  it('has an asymptote: 10 s and 30 s of strafe-jumping end at the same speed', () => {
     const a = fresh();
     place(a, LANE[0], 0, LANE[1]);
     drive(a, 1.5, SPRINT);
@@ -167,15 +175,14 @@ describe('BUG · air acceleration has no speed ceiling (vision §5: sprint 6.0 m
     strafeJump(b, 30);
     const at30 = b.movement.speedXZ;
 
-    // If there were any ceiling the two would converge. They do not: ~18 m/s vs ~31 m/s.
     expect(at30).toBeLessThan(at10 + 1);
+    expect(at30).toBeLessThanOrEqual(SPEED_SPRINT + 1e-6);
   });
 
-  it('expected: the OVERSPEED_DECAY bleed applies to inherited speed — actual: a bhop skips it', () => {
-    // Slide-boost past the sprint cap, then hold jump. const.ts:359 calls the bleed the reason
-    // overspeed "only ever decays" — but the bleed lives inside the `p.grounded` branch, and the
-    // jump at movement.ts:317 clears `p.grounded` BEFORE that branch is chosen, so a body that
-    // re-presses jump on every touchdown never runs it even once.
+  it('the OVERSPEED_DECAY bleed still runs while airborne, so a bhop cannot bank a boost', () => {
+    // Slide-boost past the sprint cap, then hold jump for 5 s. const.ts calls the bleed the reason
+    // overspeed "only ever decays": at 2.2 m/s² five seconds is far more than enough to give the
+    // whole boost back, and holding jump must not be a way to opt out of it.
     const sim = fresh();
     place(sim, LANE[0], 0, LANE[1]);
     drive(sim, 1.5, SPRINT);
@@ -187,43 +194,49 @@ describe('BUG · air acceleration has no speed ceiling (vision §5: sprint 6.0 m
       Object.assign(sim.input, NEUTRAL, { ...SPRINT, jumpPressed: true });
       sim.step(SIM_STEP);
     }
-    // 5 s at OVERSPEED_DECAY 2.2 m/s² should have taken it back to the gait cap long ago;
-    // instead the boost is retained to the last digit.
     expect(sim.movement.speedXZ).toBeLessThanOrEqual(SPEED_SPRINT + OVERSPEED_DECAY * SIM_STEP);
   });
 });
 
 // ==========================================================================================
-// BUG — a bunny-hopping body is completely silent
+// A hopping body pays for its ground (review findings B2a and B2b)
 // ==========================================================================================
 
-describe('BUG · a hopping body emits nothing at all (vision §1 law 1, §3.3, TL;DR "footsteps are your headlights")', () => {
+describe('hopping is not a silent traversal mode (vision §1 law 1, TL;DR "footsteps are your headlights")', () => {
   /**
-   * movement.ts:497 — `land()` sets `this.strideAccum = 0` on EVERY touchdown, before the
-   * `fall <= LANDING_MIN_FALL` early-out. A 1.1 m hop is not a landing event, so the distance
-   * banked between hops is silently discarded and the accumulator can never reach a stride.
-   * Combined with the air-accel hole above, "run fast and hold space" is a free, silent,
-   * unbounded-speed traversal mode — the exact thing law 1 forbids.
+   * B2a. `land()` zeroed `strideAccum` on EVERY touchdown, above the `fall <= LANDING_MIN_FALL`
+   * early-out — so a 1.1 m hop, which publishes no landing at all, still confiscated the distance
+   * banked between hops and the accumulator could never reach a stride. Combined with B1, "run
+   * fast and hold space" was free, silent, unbounded-speed traversal: exactly what law 1 forbids.
+   * The fix moves the reset BELOW the early-out, so only a real landing spends the bank.
+   *
+   * B2b. On top of that, the jump verb itself now publishes at takeoff — the shove against the
+   * floor is a real sound, and it is what makes a hop audible on the way UP as well as down.
    */
-  it('expected: covering 300 m publishes footsteps — actual: 30 s of strafe-jumping emits ZERO events', () => {
+  it('30 s of strafe-jumping crosses a floor and is heard doing it', () => {
     const sim = fresh();
     place(sim, LANE[0], 0, LANE[1]);
     drive(sim, 1.5, SPRINT);
     sim.bus.reset();
-    const { distance } = strafeJump(sim, 30);
-    expect(distance).toBeGreaterThan(300); // this part is true: it really does cross a whole floor
+    const { distance, peak } = strafeJump(sim, 30);
+    // Law 5: capping the speed must not cripple the movement. 30 s still covers 180 m.
+    expect(distance).toBeGreaterThan(170);
+    expect(peak).toBeLessThanOrEqual(SPEED_SPRINT + 1e-6);
     expect(sim.bus.emitted).toBeGreaterThan(0);
   });
 
-  it('expected: hopping in a straight line is at least as loud as running it — actual: silent', () => {
+  it('hopping the same ground is heard on every hop, at the sprint row', () => {
     const hop = fresh();
     place(hop, LANE[0], 0, LANE[1]);
     drive(hop, 1.5, SPRINT);
     hop.bus.reset();
     const hx = hop.player.x;
+    let takeoffs = 0;
     for (let i = 0; i < steps(6); i++) {
+      const wasGrounded = hop.player.grounded;
       Object.assign(hop.input, NEUTRAL, { ...SPRINT, jumpPressed: true });
       hop.step(SIM_STEP);
+      if (wasGrounded && !hop.player.grounded) takeoffs++;
     }
     const hopDistance = hop.player.x - hx;
 
@@ -237,21 +250,22 @@ describe('BUG · a hopping body emits nothing at all (vision §1 law 1, §3.3, T
 
     // Same ground covered at the same gait…
     expect(hopDistance).toBeGreaterThan(runDistance * 0.9);
-    // …so it must not be quieter. It is: 0 events against ~13.
+    expect(takeoffs).toBeGreaterThan(4);
+    // …and every shove is paid for: at least one event per hop (B2b), never fewer.
     expect(run.bus.emitted).toBeGreaterThan(5);
-    expect(hop.bus.emitted).toBeGreaterThan(0);
+    expect(hop.bus.emitted).toBeGreaterThanOrEqual(takeoffs);
+    // …at the loudest row a body that fast can publish, not a quieter one (B3).
+    expect(hop.bus.counts.sprintStep).toBe(hop.bus.emitted);
   });
 
-  it('expected: land() only discards the banked stride for a real landing — actual: for any touchdown', () => {
-    // movement.ts:497 zeroes `strideAccum` above the `fall <= LANDING_MIN_FALL` early-out, so a
-    // touchdown that publishes NOTHING still confiscates the distance already banked. Measure the
-    // ground covered between the touchdown and the next footstep: with 0.05 m left in the bank it
-    // should be a few centimetres; it is a whole fresh stride.
+  it('land() only discards the banked stride for a real landing (B2a)', () => {
+    // Bank a stride, then take a 0.3 m step-down — far below LANDING_MIN_FALL (2 m), so `land()`
+    // publishes nothing. Measure the ground covered between the touchdown and the next footstep:
+    // with 0.05 m left in the bank it must be a few centimetres, not a whole fresh stride.
     const sim = fresh();
     place(sim, LANE[0], 0, LANE[1]);
     drive(sim, 1.5, SPRINT);
     sim.movement.strideAccum = STRIDE_SPRINT - 0.05; // one tick short of publishing
-    // A 0.3 m step-down: far below LANDING_MIN_FALL (2 m), so `land()` emits nothing…
     sim.player.y = 0.3;
     sim.player.grounded = false;
     sim.player.stance = 'air';
@@ -271,25 +285,29 @@ describe('BUG · a hopping body emits nothing at all (vision §1 law 1, §3.3, T
     }
     expect(sim.bus.counts.landing).toBe(0); // correct: 0.3 m is not a landing
     expect(stepX).toBeGreaterThan(0); // a footstep did eventually publish
-    // …but only after re-earning the whole stride the drop threw away.
     expect(stepX - touchdownX).toBeLessThan(0.5);
   });
 });
 
 // ==========================================================================================
-// BUG — gait is read off the keyboard, not off the body
+// The class comes off the body, not off the keyboard (review finding B3)
 // ==========================================================================================
 
-describe('BUG · footstep class comes from held keys, not from speed (vision §3.3, §3.8 Halo)', () => {
+describe('footstep class is derived from speed, not from held keys (vision §3.3, §3.8 Halo)', () => {
   /**
-   * movement.ts:437-441 —
-   *   gait = crouched ? 'crouch' : (input.sprint && input.forward > 0 && speedXZ > SPEED_WALK)
-   *                                 ? 'sprint' : 'walk'
-   * Nothing there consults how fast the body is actually going, so the published class (and with
-   * it the paint radius and the radius a dog hears) is a function of what the player is holding.
-   * §3.8 promises the opposite: the Halo's brightness IS your audible radius, always.
+   * B3. The gait used to read
+   *   crouched ? 'crouch' : (input.sprint && input.forward > 0 && speedXZ > SPEED_WALK) ? …
+   * which consults the KEYBOARD, so the published class — and with it the paint radius and the
+   * radius a dog hears — was a function of what the player was holding rather than of how fast
+   * the body was actually moving. §3.8 promises the opposite: the Halo's brightness IS your
+   * audible radius, always, so releasing shift for one tick must not halve it.
+   *
+   * The fix derives the gait from `speedXZ` against the §5 bands (≤ SPEED_CROUCH → crouch,
+   * ≤ SPEED_WALK → walk, else sprint), with a crouched STANCE still forcing crouch; the stride
+   * length follows the same derived gait. Keys still choose the TARGET speed — they just no
+   * longer get to lie about the result.
    */
-  it('expected: a 5.96 m/s step is a sprintStep — actual: release shift for one tick and it is a walkStep', () => {
+  it('a 5.96 m/s step is a sprintStep even with shift released for one tick', () => {
     const sim = fresh();
     place(sim, LANE[0], 0, LANE[1]);
     drive(sim, 3, SPRINT);
@@ -297,12 +315,12 @@ describe('BUG · footstep class comes from held keys, not from speed (vision §3
     sim.bus.reset();
     drive(sim, SIM_STEP, { forward: 1 }); // shift released for exactly one 16 ms tick
     const e = sim.bus.last!;
-    expect(sim.movement.speedXZ).toBeGreaterThan(SPEED_WALK * 1.5); // still 5.96 m/s
+    expect(sim.movement.speedXZ).toBeGreaterThan(SPEED_WALK * 1.5); // still ~5.96 m/s
     expect(e.class).toBe('sprintStep');
     expect(e.hearRadius).toBe(EV.sprintStep.hear);
   });
 
-  it('expected: no way to cover sprint ground at walk loudness — actual: tap shift, halve your hear radius', () => {
+  it('there is no way to cover sprint ground at walk loudness', () => {
     // Tapping shift off for one tick in six. Identical route, identical distance, identical speed.
     const tapped = fresh();
     place(tapped, LANE[0], 0, LANE[1]);
@@ -334,31 +352,61 @@ describe('BUG · footstep class comes from held keys, not from speed (vision §3
     expect(loudestTapped).toBe(EV.sprintStep.hear);
   });
 
-  it('expected: moving faster than a sprint is at least as loud as a sprint — actual: it is a walkStep', () => {
-    // Slide-jump out at 7.46 m/s, land holding forward only. 24 % faster than a sprint,
-    // published with the walk row: 4 m of paint and 11 m of hearing instead of 7 and 24.
+  it('moving faster than a sprint publishes the sprint row, whatever the keys say', () => {
+    // Slide-boost past the cap and then hold forward ONLY — no shift, so the old keyboard gait
+    // would have called this a walkStep: 4 m of paint and 11 m of hearing for a body doing
+    // 7.4 m/s. The derived gait reads the body instead, and the overspeed window is a sprint.
     const sim = fresh();
     place(sim, LANE[0], 0, LANE[1]);
     drive(sim, 1.5, SPRINT);
-    drive(sim, SIM_STEP, { ...SPRINT, crouch: true });
-    drive(sim, SIM_STEP, { ...SPRINT, crouch: true }, true);
+    drive(sim, SIM_STEP, { ...SPRINT, crouch: true }); // slide boost past SPEED_SPRINT
     sim.bus.reset();
-    let first = null as null | { cls: string; speed: number };
+    let first: null | { cls: string; hear: number; speed: number } = null;
     for (let i = 0; i < steps(2) && !first; i++) {
       Object.assign(sim.input, NEUTRAL, { forward: 1 });
       sim.step(SIM_STEP);
-      if (sim.bus.last) first = { cls: sim.bus.last.class, speed: sim.movement.speedXZ };
+      if (sim.bus.last) {
+        first = {
+          cls: sim.bus.last.class,
+          hear: sim.bus.last.hearRadius,
+          speed: sim.movement.speedXZ,
+        };
+      }
     }
     expect(first!.speed).toBeGreaterThan(SPEED_SPRINT);
     expect(first!.cls).toBe('sprintStep');
+    expect(first!.hear).toBe(EV.sprintStep.hear);
+  });
+
+  it('the three §5 bands map onto the three §3.3 rows, edges included', () => {
+    // The derived gait is the whole of the Halo's promise, so the band edges are pinned on the
+    // mapping itself — a driven body cannot be parked on an exact edge, friction moves it.
+    for (const [speed, cls] of [
+      [0, 'crouchStep'],
+      [0.5, 'crouchStep'],
+      [SPEED_CROUCH, 'crouchStep'],
+      [SPEED_CROUCH + 0.01, 'walkStep'],
+      [SPEED_WALK, 'walkStep'],
+      [SPEED_WALK + 0.01, 'sprintStep'],
+      [SPEED_SPRINT, 'sprintStep'],
+      [SLIDE_BOOST_SPEED, 'sprintStep'],
+      [40, 'sprintStep'],
+    ] as Array<[number, string]>) {
+      expect(stepClass(gaitForSpeed(speed, false)), `${speed} m/s`).toBe(cls);
+    }
+    // A crouched STANCE still forces the crouch row however fast something else made you travel:
+    // sneaking is a posture, and it is the one case where the keys legitimately win.
+    for (const speed of [0, SPEED_WALK, SPEED_SPRINT, SLIDE_BOOST_SPEED]) {
+      expect(stepClass(gaitForSpeed(speed, true)), `crouched at ${speed} m/s`).toBe('crouchStep');
+    }
   });
 });
 
 // ==========================================================================================
-// PIN — the wall-rub fix, broadened
+// Ground accel cannot manufacture speed against geometry (the M2 fix, broadened)
 // ==========================================================================================
 
-describe('PIN · ground accel cannot manufacture speed against geometry (the M2 fix, broadened)', () => {
+describe('ground accel cannot manufacture speed against geometry', () => {
   it('holds at every approach angle and in every gait', () => {
     for (const deg of [5, 10, 20, 30, 45, 60, 75, 85]) {
       for (const [name, patch, cap] of [
@@ -424,10 +472,10 @@ describe('PIN · ground accel cannot manufacture speed against geometry (the M2 
 });
 
 // ==========================================================================================
-// PIN — inherited overspeed, and the parts of air control that are right
+// Inherited overspeed, and the parts of air control that were always right
 // ==========================================================================================
 
-describe('PIN · inherited overspeed decays on the ground, and air control adds nothing forward', () => {
+describe('inherited overspeed decays on the ground, and air control adds nothing forward', () => {
   it('bleeds a slide boost back to the gait cap at OVERSPEED_DECAY', () => {
     const sim = fresh();
     place(sim, LANE[0], 0, LANE[1]);

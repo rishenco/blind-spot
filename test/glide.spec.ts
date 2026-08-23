@@ -1,17 +1,24 @@
 /**
- * M2 ADVERSARIAL REVIEW — the mantle/vault glide, which is authored rather than simulated.
+ * The mantle / vault glide, which is authored rather than simulated.
  *
  * Contract under test:
- *   movement.ts:584  "The glide is authored, not simulated: rise first, then step in.
- *                    `ledgeProbe` already proved a standing body fits on the destination, so the
- *                    only collision work left is a safety de-penetration on arrival."
- *   vision §1.2      "The system never lies. Every blip and sound has a real physical source."
- *   vision §3.1      without sound you perceive only contact geometry — a shell within 2 m of
- *                    your body. Putting the body (and the eye) inside a solid is the one state
- *                    that shell cannot describe.
- *   vision §5        mantle ≤ 2.2 m; movement stays genuinely good (a vault keeps your speed).
+ *   movement.ts  "The glide is authored, not simulated: rise first, THEN step in… Nothing
+ *                simulates this path, so its shape IS its collision model; the verb additionally
+ *                validates the whole arc up front (`arcClear`) before committing to it."
+ *   vision §1.2  "The system never lies. Every blip and sound has a real physical source."
+ *   vision §3.1  without sound you perceive only contact geometry — a shell within 2 m of your
+ *                body. Putting the body (and the eye) inside a solid is the one state that shell
+ *                cannot describe.
+ *   vision §5    mantle ≤ 2.2 m; movement stays genuinely good (a vault keeps your speed).
  *
- * Labels: PIN = passes today, pins verified-correct behaviour. BUG = fails today, on purpose.
+ * Review finding B4. The old curve started translating forward at t 0.25 while the body was only
+ * ~28 % of the way up, which swept the capsule through the face of the very ledge it was climbing
+ * on 700 of the sample map's 1595 legal mantles (worst case: 48 % of the glide spent inside
+ * matter). The ruled fix has two halves and both are pinned below:
+ *   1. reshape — the ascent finishes before the translation begins (GLIDE_Y_END 0.5,
+ *      GLIDE_XZ_START 0.5), which alone takes 700 clips down to 56;
+ *   2. pre-validate — `arcClear` samples the WHOLE arc before the verb commits, and a blocked arc
+ *      is REFUSED outright rather than aborted mid-glide, which takes the remaining 56 to 0.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -19,6 +26,9 @@ import {
   CAPSULE_RADIUS,
   COYOTE_TIME,
   EYE_STAND,
+  GLIDE_ARC_SAMPLES,
+  GLIDE_XZ_START,
+  GLIDE_Y_END,
   HEIGHT_STAND,
   MANTLE_MAX_HEIGHT,
   MANTLE_MIN_HEIGHT,
@@ -47,16 +57,20 @@ const box = (
 ): Solid => ({ type: 'box', id, kind, min: [x0, y0, z0], max: [x1, y1, z1] });
 
 /**
- * Synthetic gym: a 2 m ledge to mantle, an awning hanging over the APPROACH (not over the
- * destination — the destination is what ledgeProbe checks), a knee-high crate to vault, and a
- * 3 m wall that must refuse both.
+ * Synthetic gym, west to east:
+ *   x 10..13  ledge   2 m, with an awning hanging over its APPROACH (not over its top — the top
+ *                     is what `ledgeProbe` checks, and it is clear). The refusal case.
+ *   x 20..23  clean   the same 2 m ledge with nothing overhead. The acceptance case.
+ *   x 30..32  crate   1 m, knee-high: the automatic vault.
+ *   x 50..53  toohigh 4.5 m: out of reach even at the top of a jump.
  */
 const gym: MapDef = {
-  name: 'review glide gym',
+  name: 'glide gym',
   solids: [
     box('floor', 'floor', 0, -1, 0, 80, 0, 80),
     box('ledge', 'machine', 10, 0, 10, 13, 2.0, 16),
     box('awning', 'ceiling', 6, 2.5, 10, 10, 4.6, 16),
+    box('clean', 'machine', 20, 0, 10, 23, 2.0, 16),
     box('crate', 'crate', 30, 0, 10, 32, 1.0, 16),
     box('toohigh', 'wall', 50, 0, 10, 53, 4.5, 16),
   ],
@@ -139,30 +153,147 @@ function eyeDepth(world: World, x: number, y: number, z: number): number {
   return worst;
 }
 
+/**
+ * The authored arc, sampled `n` times — the same two smoothsteps `stepGlide` walks, read from the
+ * same const.ts knobs, so a curve change cannot silently drift away from this file. At
+ * n = GLIDE_ARC_SAMPLES this is exactly what `arcClear` computes.
+ */
+function arcFramesInside(
+  world: World,
+  fx: number,
+  fy: number,
+  fz: number,
+  tx: number,
+  ty: number,
+  tz: number,
+  n: number,
+): number {
+  let inside = 0;
+  for (let i = 1; i <= n; i++) {
+    const t = i / n;
+    const txz = smoothstep(GLIDE_XZ_START, 1, t);
+    const tyy = smoothstep(0, GLIDE_Y_END, t);
+    const x = lerp(fx, tx, txz);
+    const y = lerp(fy, ty, tyy);
+    const z = lerp(fz, tz, txz);
+    if (capsuleOverlaps(world, x, y, z, CAPSULE_RADIUS, HEIGHT_STAND)) inside++;
+  }
+  return inside;
+}
+
+interface SweepRow {
+  legal: number;
+  accepted: number;
+  refused: number;
+  /** Accepted by the 16-sample `arcClear` but caught by a 200-sample replay. */
+  acceptedButDirty: number;
+  worstAcceptedFraction: number;
+  byAffordance: Map<string, { accepted: number; refused: number }>;
+}
+
+/**
+ * Every mantle the controller would accept, from every standable spot on every walkable top of
+ * `map`, at 12 headings — the reviewer's sweep, replayed against the shipped curve and the
+ * shipped acceptance test.
+ */
+function sweep(map: MapDef): SweepRow {
+  const world = buildWorld(map);
+  const row: SweepRow = {
+    legal: 0,
+    accepted: 0,
+    refused: 0,
+    acceptedButDirty: 0,
+    worstAcceptedFraction: 0,
+    byAffordance: new Map(),
+  };
+  for (const w of world.walkables) {
+    for (let x = w.minX + 0.2; x <= w.maxX - 0.2; x += 0.4) {
+      for (let z = w.minZ + 0.2; z <= w.maxZ - 0.2; z += 0.4) {
+        if (capsuleOverlaps(world, x, w.y + 1e-3, z, CAPSULE_RADIUS, HEIGHT_STAND)) continue;
+        for (let a = 0; a < 12; a++) {
+          const yaw = (a / 12) * Math.PI * 2;
+          const hit = ledgeProbe(
+            world,
+            x,
+            w.y,
+            z,
+            Math.cos(yaw),
+            Math.sin(yaw),
+            CAPSULE_RADIUS,
+            HEIGHT_STAND,
+            { ahead: MANTLE_SCAN_AHEAD, minHeight: MANTLE_MIN_HEIGHT, maxHeight: MANTLE_MAX_HEIGHT },
+          );
+          if (!hit) continue;
+          row.legal++;
+          const tally = row.byAffordance.get(hit.solid.id) ?? { accepted: 0, refused: 0 };
+          row.byAffordance.set(hit.solid.id, tally);
+          // What the verb itself decides: GLIDE_ARC_SAMPLES points along the arc.
+          const cheap = arcFramesInside(world, x, w.y, z, hit.x, hit.topY, hit.z, GLIDE_ARC_SAMPLES);
+          if (cheap > 0) {
+            row.refused++;
+            tally.refused++;
+            continue;
+          }
+          row.accepted++;
+          tally.accepted++;
+          // …and what a 200-sample replay of the same arc says about the ones it let through.
+          const fine = arcFramesInside(world, x, w.y, z, hit.x, hit.topY, hit.z, 200);
+          if (fine > 0) {
+            row.acceptedButDirty++;
+            row.worstAcceptedFraction = Math.max(row.worstAcceptedFraction, fine / 200);
+          }
+        }
+      }
+    }
+  }
+  return row;
+}
+
 // ==========================================================================================
-// BUG — nothing checks the PATH, only the destination
+// The arc is checked, not just its endpoint (review finding B4)
 // ==========================================================================================
 
-describe('BUG · the mantle glide sweeps the body through solid matter (vision §1.2)', () => {
-  /**
-   * movement.ts:589-608 interpolates position with `smoothstep` and writes it straight onto the
-   * player: y leads (smoothstep(0, 0.65, t)) and xz lags (smoothstep(0.25, 1, t)), with no
-   * collision test anywhere until `resolvePenetration` on arrival at :613. `ledgeProbe` proved
-   * the DESTINATION is clear; it says nothing about the 0.45 s of travel to reach it.
-   */
-  it('expected: the body never enters a solid — actual: a low awning over the approach is ignored', () => {
+describe('the mantle glide never sweeps the body through solid matter (vision §1.2)', () => {
+  it('refuses a ledge whose approach is roofed, and leaves the player standing where they were', () => {
+    // The awning hangs at 2.5 m over the floor west of the 2 m `ledge`: a standing body fits on
+    // TOP of the ledge (which is all `ledgeProbe` ever promised), but not in the airspace the
+    // ascent has to pass through. B4 says refuse it, and refuse it BEFORE committing.
     const sim = new Sim(gym);
-    const world = sim.world;
     place(sim, 9.5, 0, 13, 0);
-    const t = glideTrace(sim, world, { forward: 1, jumpPressed: true });
-    expect(t.started, 'expected the mantle to trigger').toBe(true);
-    expect(t.framesInside, `${t.framesInside}/${t.frames} glide frames inside a solid`).toBe(0);
+    let everMantled = false;
+    let everInside = false;
+    let topY = 0;
+    for (let i = 0; i < steps(2); i++) {
+      Object.assign(sim.input, NEUTRAL, { forward: 1, jumpPressed: true });
+      sim.step(SIM_STEP);
+      const p = sim.player;
+      everMantled ||= sim.movement.mantling;
+      everInside ||= capsuleOverlaps(sim.world, p.x, p.y, p.z, CAPSULE_RADIUS, sim.movement.height);
+      topY = Math.max(topY, p.y);
+    }
+    expect(everMantled, 'a roofed approach must not start a glide at all').toBe(false);
+    expect(everInside, 'and refusing must not put the body in the awning either').toBe(false);
+    expect(topY, 'never got up onto the ledge').toBeLessThan(2);
+    // Refused, not aborted: the player is standing at the wall with the verb idle, free to jump,
+    // back off or go around — not dropped out of a half-played animation.
+    expect(sim.movement.hands).toBe('none');
+    expect(sim.player.x).toBeLessThan(10);
   });
 
-  it('expected: the shipped sample map never does it — actual: mantling the machinery row does', () => {
+  it('accepts the same ledge with clear air above it, and never enters a solid on the way', () => {
+    const sim = new Sim(gym);
+    place(sim, 19.5, 0, 13, 0);
+    const t = glideTrace(sim, sim.world, { forward: 1, jumpPressed: true });
+    expect(t.started, 'expected the mantle to trigger').toBe(true);
+    expect(t.frames).toBeGreaterThan(10); // a real glide, not a one-frame teleport
+    expect(t.framesInside, `${t.framesInside}/${t.frames} glide frames inside a solid`).toBe(0);
+    expect(sim.player.y).toBeCloseTo(2.0, 2);
+  });
+
+  it('climbs the sample map machinery row cleanly (the Lantern listening post)', () => {
     // machinery-row is `box('machinery-row', 'machine', 4, 0, 24, 20, 2.2, 26)` — the top at
-    // exactly the 2.2 m mantle limit that sample-map calls "the Lantern listening post", and the
-    // same climb verify.mjs drives in its `script2` capture.
+    // exactly the 2.2 m mantle limit, and the same climb verify.mjs drives in its `script2`
+    // capture. It used to put the eye up to 0.6 m inside the machine.
     const sim = new Sim(sampleMap);
     place(sim, 3.4, 0, 24.6, 0); // on the floor, facing +x into the machine's west face
     const t = glideTrace(sim, sim.world, { forward: 1, jumpPressed: true });
@@ -173,66 +304,56 @@ describe('BUG · the mantle glide sweeps the body through solid matter (vision �
     ).toBe(0);
   });
 
-  it('expected: no legal mantle on the sample map penetrates — actual: ~44 % of them do', () => {
-    // Replays movement.ts:589-607 exactly (same two smoothsteps, same lerp) for every mantle the
-    // controller would accept, from every standable spot on every walkable top.
-    const world = buildWorld(sampleMap);
-    let legal = 0;
-    let penetrating = 0;
-    let worstFraction = 0;
-    for (const w of world.walkables) {
-      for (let x = w.minX + 0.2; x <= w.maxX - 0.2; x += 0.4) {
-        for (let z = w.minZ + 0.2; z <= w.maxZ - 0.2; z += 0.4) {
-          if (capsuleOverlaps(world, x, w.y + 1e-3, z, CAPSULE_RADIUS, HEIGHT_STAND)) continue;
-          for (let a = 0; a < 12; a++) {
-            const yaw = (a / 12) * Math.PI * 2;
-            const hit = ledgeProbe(
-              world,
-              x,
-              w.y,
-              z,
-              Math.cos(yaw),
-              Math.sin(yaw),
-              CAPSULE_RADIUS,
-              HEIGHT_STAND,
-              { ahead: MANTLE_SCAN_AHEAD, minHeight: MANTLE_MIN_HEIGHT, maxHeight: MANTLE_MAX_HEIGHT },
-            );
-            if (!hit) continue;
-            legal++;
-            let inside = 0;
-            for (let i = 1; i <= 40; i++) {
-              const t = i / 40;
-              const px = lerp(x, hit.x, smoothstep(0.25, 1, t));
-              const py = lerp(w.y, hit.topY, smoothstep(0, 0.65, t));
-              const pz = lerp(z, hit.z, smoothstep(0.25, 1, t));
-              if (capsuleOverlaps(world, px, py, pz, CAPSULE_RADIUS, HEIGHT_STAND)) inside++;
-            }
-            if (inside > 0) {
-              penetrating++;
-              worstFraction = Math.max(worstFraction, inside / 40);
-            }
-          }
-        }
-      }
-    }
-    expect(legal).toBeGreaterThan(1000); // the sweep really did find mantles to test
+  it('no accepted mantle anywhere on the sample map penetrates (1595-candidate sweep)', () => {
+    const row = sweep(sampleMap);
+    expect(row.legal, 'the sweep really did find mantles to test').toBeGreaterThan(1000);
+    // The headline: nothing the verb commits to ever touches matter.
     expect(
-      penetrating,
-      `${penetrating}/${legal} legal mantles clip; worst spends ${(worstFraction * 100).toFixed(0)} % of the glide inside`,
+      row.acceptedButDirty,
+      `${row.acceptedButDirty}/${row.accepted} accepted mantles clip; ` +
+        `worst spends ${(row.worstAcceptedFraction * 100).toFixed(0)} % of the glide inside`,
     ).toBe(0);
+    // …and the price of that is small: the refusals are genuine low awnings, not a broken verb.
+    expect(row.refused / row.legal, `${row.refused}/${row.legal} refused`).toBeLessThan(0.05);
+  });
+
+  it('the 16-sample arcClear is as strong as a 200-sample replay on the sample map', () => {
+    // `arcClear` is run inside the verb, on the frame the player presses jump, so its sample count
+    // is a budget decision. This pins that GLIDE_ARC_SAMPLES is not too coarse for the shipped
+    // geometry: every arc the cheap test accepts survives a 12x finer replay.
+    const row = sweep(sampleMap);
+    expect(row.acceptedButDirty).toBe(0);
+    expect(GLIDE_ARC_SAMPLES).toBeGreaterThanOrEqual(16);
+  });
+
+  it('every named affordance on the sample map is still mantle-able', () => {
+    // A refusal test that refuses everything would also pass the sweep above. These are the
+    // affordances the map is built around, and each must still accept mantles from real ground.
+    const row = sweep(sampleMap);
+    for (const id of ['machinery-row', 'crate-stack', 'beacon-pedestal', 'gantry-beam', 'high-shelf']) {
+      const tally = row.byAffordance.get(id);
+      expect(tally, `${id} was never a mantle target at all`).toBeDefined();
+      expect(tally!.accepted, `${id}: ${tally!.accepted} accepted / ${tally!.refused} refused`).toBeGreaterThan(0);
+    }
+    // The 2.2 m row and the crate stack carry the two headline climbs, so they get a floor.
+    expect(row.byAffordance.get('machinery-row')!.accepted).toBeGreaterThan(100);
+    expect(row.byAffordance.get('machinery-row')!.refused).toBe(0);
+    expect(row.byAffordance.get('crate-stack')!.accepted).toBeGreaterThan(100);
   });
 });
 
 // ==========================================================================================
-// PIN — what the glide does get right
+// What the verb guarantees once it has committed
 // ==========================================================================================
 
-describe('PIN · the guarantees ledgeProbe really does provide', () => {
+describe('the guarantees ledgeProbe and the glide really do provide', () => {
   it('always lands on a pose that is clear, on the sample map and in the gym', () => {
-    for (const map of [gym, sampleMap]) {
+    for (const [map, start] of [
+      [gym, [19.5, 0, 13]],
+      [sampleMap, [3.4, 0, 24.6]],
+    ] as Array<[MapDef, [number, number, number]]>) {
       const sim = new Sim(map);
       const world = sim.world;
-      const start = map === gym ? ([9.5, 0, 13] as const) : ([3.4, 0, 24.6] as const);
       place(sim, start[0], start[1], start[2], 0);
       glideTrace(sim, world, { forward: 1, jumpPressed: true });
       const p = sim.player;
@@ -276,7 +397,7 @@ describe('PIN · the guarantees ledgeProbe really does provide', () => {
     expect(exitSpeed).toBeGreaterThan(SPEED_SPRINT * 0.8);
 
     const manual = new Sim(gym);
-    place(manual, 9.5, 0, 13, 0);
+    place(manual, 19.5, 0, 13, 0);
     for (let i = 0; i < steps(2); i++) {
       Object.assign(manual.input, NEUTRAL, { forward: 1, sprint: true }); // no jump
       manual.step(SIM_STEP);
@@ -285,16 +406,16 @@ describe('PIN · the guarantees ledgeProbe really does provide', () => {
     expect(manual.player.y).toBeLessThan(0.01); // ran into it and stopped, as designed
   });
 
-  it('a mantle taken on the run exits at exactly SPEED_WALK (movement.ts:546)', () => {
+  it('a mantle taken on the run exits at exactly SPEED_WALK', () => {
     const sim = new Sim(gym);
-    place(sim, 6.5, 0, 13, 0);
+    place(sim, 16.5, 0, 13, 0);
     // Sprint at the ledge and press jump on the frame the probe can first see it — the way the
     // verb is meant to be used. `speed` is then the live sprint, capped to a walk on exit.
     for (let i = 0; i < steps(2); i++) {
       Object.assign(sim.input, NEUTRAL, {
         forward: 1,
         sprint: true,
-        jumpPressed: sim.player.x > 8.7,
+        jumpPressed: sim.player.x > 18.7,
       });
       sim.step(SIM_STEP);
       if (sim.movement.hands === 'mantle') break;
@@ -306,20 +427,29 @@ describe('PIN · the guarantees ledgeProbe really does provide', () => {
     expect(SPEED_SPRINT).toBeGreaterThan(SPEED_WALK); // so the cap really is a tax
   });
 
-  it('NOTE · the same mantle taken a frame late exits at 0.67 m/s (approachSpeed decays in 1 tick)', () => {
-    // movement.ts:404 — `approachSpeed = blockedForward ? approach : 0`, and `approach` is
-    // re-sampled every frame. One frame after contact the wall has already eaten the run, so
-    // `approach` is a single tick of ground accel. Recorded, not asserted as desirable: a player
-    // who runs into a crate and THEN decides to climb it is put on top at a fifth of a walk.
-    const sim = new Sim(gym);
-    place(sim, 6.5, 0, 13, 0);
-    for (let i = 0; i < steps(1); i++) {
-      Object.assign(sim.input, NEUTRAL, { forward: 1, sprint: true }); // run in, do not jump
-      sim.step(SIM_STEP);
+  it('a mantle taken LATE still exits at SPEED_WALK (review finding S5: the approach latch)', () => {
+    // `approachSpeed` used to be `blockedForward ? approach : 0`, re-sampled every frame, so one
+    // frame after contact the wall had already eaten the run and `approach` was a single tick of
+    // ground accel: a player who ran into a crate and THEN decided to climb it was put on top at
+    // 0.67 m/s, a fifth of a walk. S5 latches the approach for APPROACH_LATCH_TIME after contact,
+    // and the latch refreshes while you keep pushing — so hesitating costs nothing.
+    for (const lateFrames of [1, 2, 5, 11, 12, 13, 20]) {
+      const sim = new Sim(gym);
+      place(sim, 16.5, 0, 13, 0);
+      // Run in without jumping until the wall stops the body…
+      for (let i = 0; i < steps(1); i++) {
+        Object.assign(sim.input, NEUTRAL, { forward: 1, sprint: true });
+        sim.step(SIM_STEP);
+      }
+      expect(sim.player.x, `${lateFrames} frames late`).toBeGreaterThan(19.5); // pressed against the face
+      // …then hesitate, still leaning on it, before deciding to climb.
+      for (let i = 0; i < lateFrames; i++) {
+        Object.assign(sim.input, NEUTRAL, { forward: 1, sprint: true });
+        sim.step(SIM_STEP);
+      }
+      glideTrace(sim, sim.world, { forward: 1, sprint: true, jumpPressed: true });
+      expect(sim.player.y, `${lateFrames} frames late`).toBeCloseTo(2.0, 2);
+      expect(sim.movement.speedXZ, `${lateFrames} frames late`).toBeCloseTo(SPEED_WALK, 3);
     }
-    expect(sim.player.x).toBeGreaterThan(9.5); // pressed against the face
-    glideTrace(sim, sim.world, { forward: 1, sprint: true, jumpPressed: true });
-    expect(sim.player.y).toBeCloseTo(2.0, 2);
-    expect(sim.movement.speedXZ).toBeLessThan(SPEED_WALK / 4);
   });
 });

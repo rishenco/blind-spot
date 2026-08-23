@@ -97,7 +97,7 @@ floor alpha (≈0.05) regardless of paint (vision §3.1). No other unpainted vis
 ## 4. Sound events
 
 ```ts
-type SoundClass = 'crouchStep'|'walkStep'|'sprintStep'|'landing'|'slide'|'propKnock'|
+type SoundClass = 'crouchStep'|'walkStep'|'sprintStep'|'landing'|'slide'|'mantle'|'propKnock'|
                   'chainRattle'|'qPing'|'ePing'|'dogGait'|'detonation'|'beaconHum';
 type SourceKind = 'self'|'dog'|'prop'|'objective'|'detonation'|'teammate';
 interface SoundEvent {
@@ -120,6 +120,36 @@ landing 8–14/28, slide 5/16 continuous, prop 8–12/25, Q 12/18, E 40-cone/30,
 2/4/8 by mode, detonation 22-through-floors/60, beacon 3/12). Wave speeds: Q 45, E 85,
 detonation 140 m/s; all step/prop/slide/gait classes instant.
 
+### 4.1 Proposed vision §3.3 addenda (pending playtest)
+
+Vision §3.3 tables the sounds movement makes, but the M2 controller found two verbs the table
+does not name. Design law 1 ("every question has a price") and law 4 ("loud before lethal") both
+say a real physical motion cannot be free, so M2 emits for both. **Neither is a vision quote —
+both are first-pass tuning guesses, marked as such in `const.ts`, to be confirmed or killed by
+the Blindfold Gauntlet (vision §15).**
+
+- **Jump takeoff.** A jump publishes ONE step event at the instant the feet leave, reusing the
+  existing §3.3 step rows rather than inventing a row: the class is the speed-derived gait at
+  takeoff (§5's bands), **floored at walk** — a standing hop is never crouch-quiet. Without this,
+  a hop chain was a silent traversal mode: the airborne frames emit no stride, and a 1.1 m apex
+  is under `LANDING_MIN_FALL`, so bunny-hopping across a floor published nothing at all. That is
+  a hole in law 1 big enough to route a whole run through, and it is the loudest kind of hole:
+  the fastest way to move was also the quietest.
+- **Mantle / vault.** A new `'mantle'` class, paint 3 m / heard 7 m, intensity 0.45 — between a
+  crouch step (1.5/2) and a walk step (4/11), which is what a deliberate braced shove against a
+  ledge should cost. Emitted once, at the moment the verb fires, at the feet, by mantles, vaults
+  and airborne pull-ups alike. Audio is a soft distinct scuff (an upward sweep, where the slide
+  sweeps down) so it never reads as a footstep.
+- **The ladder stays fully silent, top-out included.** That one IS a vision §5 law, not a guess:
+  the pull-up off the top rung reuses the mantle glide and shows `hands === 'mantle'`, but emits
+  nothing. Descending is fast and loud; ascending is slow and quiet, all the way to the deck.
+
+**Emission order within a fixed step is a guarantee, not an accident.** A step runs its verbs
+before it runs its motion, so the order is always: verb events (mantle, then jump takeoff) →
+landing → stride/slide. A takeoff therefore stamps the pose the body had *before* that step's
+move phase, and **a takeoff and a landing can never share a step** (you cannot leave the ground
+and arrive on it in the same tick). M3's paint pass may rely on both.
+
 ## 5. Movement
 
 Verbs and speeds per vision §5: crouch 1.7, walk 3.5, sprint 6.0, ladder 2.5 (silent),
@@ -132,7 +162,19 @@ head cadence (subtle, ≤0.035 m), landing dip, slide tilt ≈ 4°. No motion bl
 Strides (distance-based emitters): crouch 1.3 m, walk 1.9 m, sprint 2.6 m; slide emits
 every 0.5 m; landing event when fall height > 2 m (intensity scales 8→14 m paint by
 height, 0.3 s stagger; > 4 m same, no damage). Collision: swept AABB/capsule vs box set;
-step-up ≤ 0.35.
+step-up ≤ 0.35. Jump takeoffs and mantles emit too — see §4.1.
+
+**Gait is measured, never asked.** Both the stride length and the §3.3 row a footstep publishes
+derive from the body's actual `speedXZ` against the §5 bands (≤1.7 crouch, ≤3.5 walk, else
+sprint), with a crouched stance still forcing crouch. Keys choose a TARGET speed; they do not
+choose a loudness. Otherwise releasing shift for a single tick while still travelling at 5.96
+m/s published a walkStep — sprint ground at half the hear radius, a free stealth exploit that no
+amount of tuning would have closed.
+
+Speed itself is bounded the same way in the air as on the ground: both branches raise the
+ceiling to `max(gaitCap, speedBefore)` — never above — and the `OVERSPEED_DECAY` bleed runs on
+EVERY frame, airborne included, so no jump can bank a boost the ground would have taken back.
+Strafe-jumping stays expressive and stays finite.
 
 ## 6. Player systems
 
@@ -252,3 +294,34 @@ pipeline and remains the fallback.
 Done means: `npm run typecheck && npm test && npm run build && npm run verify` all green,
 and the six §4 "feels" of `doc/visual-brief.md` are experiencable with the debug look.
 ```
+
+### 11.1 What milestone 2 hands milestone 3
+
+Contracts M3 (surfels + paint) may build on without re-deriving them. All are pinned by specs.
+
+- **Event ids are monotonic for the life of a bus** — `reset()` clears history, tallies and
+  `last`, but never the id counter. Anything keyed by event id (a paint splat, a stain, a de-dup
+  cache, later a network ack) stays unambiguous across a run restart, and `fuzzSeed = hash1(id)`
+  never replays the same jitter for two different sounds. (`test/events.spec.ts`)
+- **`SoundClass` gained `'mantle'`** — see §4.1. `bus.counts.mantle` exists; anything that
+  switches exhaustively over the class union must handle it.
+- **Emission order inside a fixed step is guaranteed**: verb events (mantle, jump takeoff) →
+  landing → stride/slide. A takeoff stamps the pre-move pose; a takeoff and a landing never share
+  a step. (§4.1, `test/emitters.spec.ts`)
+- **Delivery fields stay neutral at emission.** `wallsToListener = 0`, `distToListener = 0`,
+  `quality = 1` are M3's to fill PER LISTENER. If M3 starts computing them inside `emit`, the
+  seam has been broken — a co-op bus has many listeners and one emission.
+- **Draw the interpolated pose, never the raw one.** `sim.renderPos(out)` blends the previous
+  step's pose with the current one by `sim.alpha`; `main.ts` reads it every frame. At `alpha === 0`
+  it returns the PREVIOUS pose, which is correct — that is the pose the last completed step
+  produced. Any M3 geometry anchored to the player (the contact shell, the halo, self-paint
+  origins) must use `renderPos`, or it will swim against the camera at non-60 Hz refresh rates.
+  Event ORIGINS are different: they are stamped from `player` inside the step that produced them,
+  and are simulation truth, not picture.
+- **A `Sim` deep-clones its map def** (`structuredClone` in the constructor). Mutating
+  `sim.map` — as the F6 patrol toggle does — touches that Sim's copy only, never the shared
+  module constant and never another Sim. M3's bake must read `sim.map`/`sim.world`, not the
+  imported `sampleMap`, or two sims will disagree about the world they are painting.
+- **The rig is charged the real frame time, once** (`rig.update(dtMs / 1000, …)`), independently
+  of how many fixed steps that frame ran. Camera smoothing is therefore refresh-rate independent;
+  paint aging should be charged the same way rather than per step.

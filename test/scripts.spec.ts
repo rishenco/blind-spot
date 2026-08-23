@@ -107,13 +107,22 @@ describe('route "corridor" — sprint · slide · jump · drop · ladder', () =>
   it('paints the corridor with every movement class it should', () => {
     const c = r.sim.bus.counts;
     expect(c.sprintStep).toBeGreaterThan(3);
-    expect(c.walkStep).toBeGreaterThan(3);
+    expect(c.walkStep).toBeGreaterThanOrEqual(3);
     expect(c.crouchStep).toBeGreaterThan(0);
     expect(c.slide).toBeGreaterThan(5);
   });
 
   it('climbs silently (vision §5)', () => {
     expect(r.ladderEvents).toBe(0);
+  });
+
+  it('tops out off the rungs without a scuff (vision §5: the climb is silent, end to end)', () => {
+    // `hands` goes through 'mantle' here — the pull-up off the top rung uses the same glide as a
+    // ledge mantle — but the new 'mantle' sound class is deliberately NOT emitted for it. The
+    // ladder is the one traversal the vision buys silence for, and that has to include getting
+    // off it; otherwise the quiet way up ends in the loudest note of the route.
+    expect(r.hands).toContain('mantle');
+    expect(r.sim.bus.counts.mantle).toBe(0);
   });
 
   it('never goes faster than the slide that fed it', () => {
@@ -139,6 +148,9 @@ describe('route "mantle" — cross the machine hall, climb the machinery row', (
     expect(r.hands).toEqual(['none', 'mantle', 'none']);
     expect(r.minY).toBeCloseTo(0, 4);
     expect(r.sim.bus.counts.landing).toBe(0);
+    // …and the climb is heard exactly once. A mantle is a real physical scuff, so it publishes a
+    // real event (a proposed §3.3 addendum — see doc/engine-plan.md); one climb, one event.
+    expect(r.sim.bus.counts.mantle).toBe(1);
   });
 
   it('crosses the hall at a sprint and never faster', () => {

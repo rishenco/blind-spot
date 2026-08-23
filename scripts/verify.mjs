@@ -140,8 +140,24 @@ async function capture(browser, name, query, checks, opts = {}) {
       counts: sim.bus.counts,
       trail: { n: trail.length / 2, minX, maxX, minZ, maxZ },
       fov: window.blindspot.rig.fov,
+      dog2On: sim.map.dogRoutes.find((r) => r.id === 'dog2')?.defaultOn ?? null,
     };
   });
+
+  // The debug hotkeys are only reachable here: they live on a `window` keydown listener, and no
+  // DOM environment is installed for vitest. This round trip proves the whole chain — real key,
+  // real handler, real mutation of THIS Sim's own map — and restores the flag it flipped.
+  let hotkeys = null;
+  if (opts.hotkeys) {
+    const read = () =>
+      page.evaluate(() => window.blindspot.sim.map.dogRoutes.find((r) => r.id === 'dog2')?.defaultOn ?? null);
+    const before = await read();
+    await page.keyboard.press('F6');
+    const flipped = await read();
+    await page.keyboard.press('F6');
+    const restored = await read();
+    hotkeys = { before, flipped, restored };
+  }
 
   const shot = join(OUT, `${name}.png`);
   await page.screenshot({ path: shot });
@@ -156,8 +172,10 @@ async function capture(browser, name, query, checks, opts = {}) {
   const c = state.counts;
   note(
     `events ${state.events} — walk ${c.walkStep} sprint ${c.sprintStep} crouch ${c.crouchStep}` +
-      ` slide ${c.slide} land ${c.landing}`,
+      ` slide ${c.slide} land ${c.landing} mantle ${c.mantle}`,
   );
+  note(`fov ${f2(state.fov)}°`);
+  if (hotkeys) note(`F6 dog-2 route ${hotkeys.before} → ${hotkeys.flipped} → ${hotkeys.restored}`);
   if (state.trail.n > 1) {
     const t = state.trail;
     note(`trail ${t.n} crumbs · x ${f2(t.minX)}..${f2(t.maxX)} · z ${f2(t.minZ)}..${f2(t.maxZ)}`);
@@ -165,7 +183,19 @@ async function capture(browser, name, query, checks, opts = {}) {
   note(`screenshot ${shot}`);
   if (!state.webgl) console.warn('  !! WebGL canvas missing — headless GPU unavailable, overlay-only run');
   for (const e of errors) problems.push(`${name}: ${e}`);
-  for (const [label, ok] of Object.entries(checks(state))) {
+
+  // Universal, on every capture: vision §12's comfort floor is "FOV 80–110", and the rig smooths
+  // toward its target every frame, so the only honest place to assert the band is at the end of a
+  // real run in a real browser — standing, sprinting, sliding, mid-route, whatever this one did.
+  const universal = {
+    'fov inside the vision §12 comfort band (80–110)': state.fov >= 80 && state.fov <= 110,
+  };
+  if (hotkeys) {
+    universal['F6 flips dog 2 on this Sim’s own map'] =
+      typeof hotkeys.before === 'boolean' && hotkeys.flipped === !hotkeys.before;
+    universal['F6 again restores it'] = hotkeys.restored === hotkeys.before;
+  }
+  for (const [label, ok] of Object.entries({ ...universal, ...checks(state) })) {
     if (!ok) problems.push(`${name}: failed check "${label}"`);
   }
   return state;
@@ -190,18 +220,27 @@ async function main() {
       'sim is running': s.steps > 0,
       'top-down closed by default': !s.topDown,
     }));
-    await capture(browser, 'topdown', '?topdown&stats', (s) => ({
-      'top-down open': s.topDown,
-      'map loaded': s.map === 'Dock Approach',
-      // Exact, not a floor: these are the authored counts of "Dock Approach" (test/map.spec.ts
-      // pins the same two numbers). Update BOTH deliberately when the map changes — a drifting
-      // ">" would let a whole zone go missing without failing anything.
-      'solids baked': s.solids === 63,
-      'walkable tops found': s.walkables === 21,
-      'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
-      'body has not moved on its own': Math.abs(s.pos[0] - 3) < 0.01 && Math.abs(s.pos[2] - 3) < 0.01,
-      'a silent body paints nothing': s.events === 0,
-    }));
+    await capture(
+      browser,
+      'topdown',
+      '?topdown&stats',
+      (s) => ({
+        'top-down open': s.topDown,
+        'map loaded': s.map === 'Dock Approach',
+        // Exact, not a floor: these are the authored counts of "Dock Approach" (test/map.spec.ts
+        // pins the same two numbers). Update BOTH deliberately when the map changes — a drifting
+        // ">" would let a whole zone go missing without failing anything.
+        'solids baked': s.solids === 63,
+        'walkable tops found': s.walkables === 21,
+        'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
+        'body has not moved on its own': Math.abs(s.pos[0] - 3) < 0.01 && Math.abs(s.pos[2] - 3) < 0.01,
+        'a silent body paints nothing': s.events === 0,
+        // The Sim deep-clones the map def, so F6 must reach a per-Sim copy — a live route the
+        // overlay reads, not the shared module constant. Asserted by the universal hotkey checks.
+        'the running Sim carries its own dog routes': typeof s.dog2On === 'boolean',
+      }),
+      { hotkeys: true },
+    );
 
     // ---------------------------------------------------------------------------------------
     // Milestone 2: the scripted routes. Both are asserted in full by test/scripts.spec.ts; what
@@ -222,6 +261,14 @@ async function main() {
         // and a 2.8 m descent paints nothing at all.
         'heard itself hit the trench floor': s.counts.landing === 1 && Math.abs(s.lastFall - 2.8) < 0.02,
         'sprinted, slid and crouched': s.counts.sprintStep > 3 && s.counts.slide > 5 && s.counts.crouchStep > 0,
+        // `hands` passes through 'mantle' at the top of the ladder — the pull-up reuses the glide
+        // — but vision §5 buys the climb silence, top-out included. Exactly zero.
+        'the ladder top-out stays silent': s.counts.mantle === 0,
+        // The route's one jump (t 3.1, at a sprint) apexes at 1.1 m — under LANDING_MIN_FALL — so
+        // before the takeoff emitter it was a completely silent traversal. Eight sprint rows is
+        // seven strides plus that takeoff; drop the takeoff and this reads seven. A floor, not an
+        // equality: verify keeps stepping for 600 ms after the route reports done.
+        'the jump at the duct is heard leaving the ground': s.counts.sprintStep >= 8,
         'trail crosses the whole corridor': s.trail.maxX - s.trail.minX > 38 && s.trail.maxZ - s.trail.minZ < 3.5,
         'trail was sampled': s.trail.n > 40,
         'top-down open': s.topDown,
@@ -241,6 +288,8 @@ async function main() {
           Math.abs(s.pos[1] - 2.2) < 0.01 && s.pos[0] > 4 && s.pos[0] < 20 && s.pos[2] > 24 && s.pos[2] < 26,
         'ended on its feet': s.stance === 'stand' && s.hands === 'none',
         'climbed rather than fell onto it': s.counts.landing === 0,
+        // One climb, one scuff (the proposed §3.3 addendum — see doc/engine-plan.md §4.1).
+        'the climb was heard exactly once': s.counts.mantle === 1,
         'crossed the hall at a sprint': s.counts.sprintStep > 3,
         'trail crosses the machine hall': s.trail.maxZ - s.trail.minZ > 20,
         'trail was sampled': s.trail.n > 40,

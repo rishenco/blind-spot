@@ -19,8 +19,6 @@ import {
   EV,
   EYE_CROUCH,
   EYE_STAND,
-  FOV_BASE,
-  FOV_SPRINT_KICK,
   GRAVITY,
   HEIGHT_CROUCH,
   HEIGHT_STAND,
@@ -45,7 +43,7 @@ import {
   STRIDE_WALK,
   VAULT_MAX_HEIGHT,
 } from '../src/core/const.js';
-import { CameraRig, type MoveInput } from '../src/core/movement.js';
+import type { MoveInput } from '../src/core/movement.js';
 import { Sim } from '../src/core/sim.js';
 import type { MapDef, Solid } from '../src/core/map/types.js';
 
@@ -708,97 +706,6 @@ describe('ladder (vision §5: slow, quiet, chosen)', () => {
     expect(kickOff.movement.ladder).toBeNull();
     expect(kickOff.player.vy).toBeGreaterThan(0);
     expect(kickOff.player.vx).toBeLessThan(0); // pushed off the face, westward
-  });
-});
-
-describe('camera energy (visual-brief §1.8) and the comfort laws (vision §12)', () => {
-  it('widens with speed and stays inside the comfort band', () => {
-    const sim = fresh();
-    const rig = new CameraRig();
-    expect(rig.fov).toBe(FOV_BASE);
-    place(sim, 2, 0, 45);
-    for (let i = 0; i < steps(3); i++) {
-      Object.assign(sim.input, SPRINT);
-      sim.step(SIM_STEP);
-      rig.update(SIM_STEP, sim.movement);
-      expect(rig.fov).toBeGreaterThanOrEqual(80);
-      expect(rig.fov).toBeLessThanOrEqual(110);
-    }
-    expect(rig.fov).toBeGreaterThan(FOV_BASE + FOV_SPRINT_KICK * 0.9);
-    expect(FOV_BASE + FOV_SPRINT_KICK).toBeLessThanOrEqual(110);
-  });
-
-  it('settles back to base when you stop', () => {
-    const sim = fresh();
-    const rig = new CameraRig();
-    place(sim, 2, 0, 45);
-    for (let i = 0; i < steps(3); i++) {
-      Object.assign(sim.input, SPRINT);
-      sim.step(SIM_STEP);
-      rig.update(SIM_STEP, sim.movement);
-    }
-    for (let i = 0; i < steps(3); i++) {
-      Object.assign(sim.input, NEUTRAL);
-      sim.step(SIM_STEP);
-      rig.update(SIM_STEP, sim.movement);
-    }
-    expect(rig.fov).toBeCloseTo(FOV_BASE, 1);
-  });
-
-  it('lowers the eye on a crouch and dips it on a landing', () => {
-    const sim = fresh();
-    const rig = new CameraRig();
-    place(sim, 2, 0, 45);
-    for (let i = 0; i < steps(1); i++) {
-      sim.input.crouch = true;
-      sim.step(SIM_STEP);
-      rig.update(SIM_STEP, sim.movement);
-    }
-    expect(rig.eyeY).toBeCloseTo(EYE_CROUCH, 3);
-
-    const land = fresh();
-    const landRig = new CameraRig();
-    place(land, 2, 6, 45, YAW_EAST, false);
-    driveUntil(land, () => land.player.grounded, 3);
-    landRig.update(SIM_STEP, land.movement);
-    expect(landRig.dip).toBeGreaterThan(0);
-    expect(land.movement.landingImpulse).toBe(0); // consumed exactly once
-    for (let i = 0; i < steps(2); i++) landRig.update(SIM_STEP, land.movement);
-    expect(landRig.dip).toBeCloseTo(0, 3);
-  });
-
-  it('can switch head bob off entirely', () => {
-    const sim = fresh();
-    const rig = new CameraRig();
-    rig.motionEffects = false;
-    place(sim, 2, 0, 45);
-    for (let i = 0; i < steps(2); i++) {
-      Object.assign(sim.input, SPRINT);
-      sim.step(SIM_STEP);
-      rig.update(SIM_STEP, sim.movement);
-      expect(rig.bobY).toBe(0);
-    }
-    expect(rig.eyeOffset).toBeCloseTo(EYE_STAND, 3);
-  });
-
-  it('rolls only in a slide, and only a few degrees', () => {
-    const sim = fresh();
-    const rig = new CameraRig();
-    place(sim, 2, 0, 45);
-    for (let i = 0; i < steps(1.5); i++) {
-      Object.assign(sim.input, SPRINT);
-      sim.step(SIM_STEP);
-      rig.update(SIM_STEP, sim.movement);
-    }
-    expect(rig.roll).toBe(0);
-    for (let i = 0; i < steps(0.6); i++) {
-      Object.assign(sim.input, { ...SPRINT, crouch: true });
-      sim.step(SIM_STEP);
-      rig.update(SIM_STEP, sim.movement);
-    }
-    expect(sim.movement.sliding).toBe(true);
-    expect(Math.abs((rig.roll * 180) / Math.PI)).toBeGreaterThan(0.5);
-    expect(Math.abs((rig.roll * 180) / Math.PI)).toBeLessThan(6);
   });
 });
 

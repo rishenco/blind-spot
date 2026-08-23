@@ -136,6 +136,25 @@ function drive(sim: Sim, seconds: number, patch: Partial<MoveInput> = {}, press 
   }
 }
 
+/** Hold an intent until something happens. Returns the steps it took; throws if it never does. */
+function driveUntil(
+  sim: Sim,
+  done: () => boolean,
+  limit: number,
+  patch: Partial<MoveInput> = {},
+): number {
+  const n = steps(limit);
+  for (let i = 0; i < n; i++) {
+    Object.assign(sim.input, NEUTRAL, patch);
+    sim.step(SIM_STEP);
+    if (done()) return i + 1;
+  }
+  const p = sim.player;
+  throw new Error(
+    `condition not reached within ${limit}s (at ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`,
+  );
+}
+
 /**
  * Drop from exactly `height` onto the y=0 plate and return the landing event (or null).
  * Nothing here reaches past the public state the debug overlay already writes: position,
@@ -259,12 +278,16 @@ describe('the jump takeoff (review finding B2b — proposed vision §3.3 addendu
   it('publishes exactly one step event on the frame the feet leave', () => {
     const sim = fresh();
     place(sim, 10, 0, 10);
+    const y0 = sim.player.y;
     drive(sim, SIM_STEP, {}, true);
     expect(sim.bus.emitted).toBe(1);
     expect(sim.player.grounded).toBe(false);
     const e = sim.bus.last!;
     expect(e.time).toBe(sim.time); // this step, not the one before it
-    expect(e.origin[1]).toBe(sim.player.y);
+    // The origin is the FLOOR the body shoved against: the takeoff publishes at the verb, which
+    // runs before the step's move phase lifts the feet (movement.ts step order).
+    expect(e.origin[1]).toBe(y0);
+    expect(sim.player.y).toBeGreaterThan(e.origin[1]);
     // The rest of the arc is silent: nothing else publishes until the landing.
     drive(sim, 0.5, {});
     expect(sim.bus.emitted).toBe(1);
@@ -381,10 +404,11 @@ describe('the mantle scuff (deviation 4 — proposed vision §3.3 addendum)', ()
     // VERB and not by `startGlide` — otherwise the ladder would announce its own last metre.
     const sim = new Sim(climbGym);
     place(sim, 21, 0, 17, 0); // facing +x, walking into the tower's west face
-    drive(sim, 2, { forward: 1 });
-    expect(sim.movement.ladder, 'expected to be on the ladder').not.toBeNull();
+    driveUntil(sim, () => sim.movement.ladder !== null, 4, { forward: 1 });
     sim.bus.reset();
-    drive(sim, 5, { forward: 1 });
+    // Climb, top out, and stop the moment the feet are back on something — holding forward past
+    // that would just walk off the far edge of the deck and add a landing to the tally.
+    driveUntil(sim, () => sim.player.grounded, 6, { forward: 1 });
     expect(sim.movement.ladder).toBeNull();
     expect(sim.player.y).toBeCloseTo(4, 2); // it really did top out onto the tower deck
     expect(sim.bus.counts.mantle).toBe(0);

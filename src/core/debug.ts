@@ -639,8 +639,13 @@ export class DebugOverlay {
           ctx.arc(X(wp.x), Z(wp.z), 2, 0, Math.PI * 2);
           ctx.fill();
           ctx.fillStyle = C.route;
-          this.reserveText(`${wp.pause}s`, X(wp.x), Z(wp.z) - 11);
-          ctx.fillText(`${wp.pause}s`, X(wp.x), Z(wp.z) - 11);
+          // Patrols hug the walls by design, so their annotations are the ones most likely to
+          // hang off the plan: dog 1's first waypoint is (2, 28), two metres from the west wall
+          // and two from the south. Clamp both axes, same as the height notes and the markers.
+          const px = this.clampLabel(X(wp.x), this.ctx.measureText(`${wp.pause}s`).width / 2 + 3, 0);
+          const pz = this.clampLabel(Z(wp.z) - 11, 7, 1);
+          this.reserveText(`${wp.pause}s`, px, pz);
+          ctx.fillText(`${wp.pause}s`, px, pz);
         }
       }
       const head = route.waypoints[0]!;
@@ -648,8 +653,10 @@ export class DebugOverlay {
       // label derived from that would rename the dogs every time it is pressed.
       const n = route.id.replace(/^dog/, '');
       const tag = route.id === 'dog2' ? `DOG ${n} (F6)` : `DOG ${n}`;
-      this.reserveText(tag, X(head.x) + S(0.2), Z(head.z) + 13);
-      ctx.fillText(tag, X(head.x) + S(0.2), Z(head.z) + 13);
+      const tx = this.clampLabel(X(head.x) + S(0.2), ctx.measureText(tag).width / 2 + 3, 0);
+      const tz = this.clampLabel(Z(head.z) + 13, 7, 1);
+      this.reserveText(tag, tx, tz);
+      ctx.fillText(tag, tx, tz);
       ctx.globalAlpha = 1;
     }
   }
