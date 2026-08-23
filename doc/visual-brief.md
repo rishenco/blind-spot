@@ -77,6 +77,14 @@ thrilling at parkour speed?** Everything below serves that. Three competing art 
   ~10 s, then visibly dissolves. Never interpolated or predicted.
 - **Distance discipline:** beyond ~20 m bias to edges and cap screen-space density; hard
   window 45 m and ±1 floor (vision §3.6, §12). Near = cloud, far = drawing.
+- **Near field: dots stay dots** *(user ruling, 2026-08-23, on the M3 captures)*. A splat is
+  drawn at its projected footprint only up to a small screen-space cap (order 8–14 px at
+  1080p; each school tunes inside its own brief's stated dot sizes). Literal footprint
+  splatting at arm's length — large soft discs — is rejected. The near field reads as a
+  crisp sparse lattice over black with the 2 m contact shell under it; "nearby reads as a
+  cloud" is achieved by density and brightness, never by disc size. Vision §12 "splats
+  sized to voxel footprint" is a ceiling (a dot never grows past its cell), not a mandate
+  to fill the cell at any range.
 - **Comfort:** FOV 80–110 (sprint kick stays inside), no motion blur, reduce-flashing mode
   must remain implementable (no school may depend on strobing), chroma-not-luminance pulses,
   ping spacing ≥0.75 s, splats ≥2–3 px and temporally stable.
