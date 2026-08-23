@@ -4,10 +4,21 @@
  *
  * Builds, serves `dist/` from a tiny static server, drives it in Playwright chromium and drops
  * screenshots into `verify-out/` (git-ignored). Asserts boot + console cleanliness on every
- * capture. The `?autotest` demo and the surfel/paint assertions arrive with their milestones;
- * milestone 1 verifies the boot screen and the top-down debug view, milestone 2 adds the two
- * scripted movement routes (`?sim=script`, `?sim=script2`) and reads the route out of the
- * debug trail as well as out of the end state.
+ * capture. Milestone 1 verifies the boot screen and the top-down debug view, milestone 2 adds the
+ * two scripted movement routes (`?sim=script`, `?sim=script2`) and reads the route out of the
+ * debug trail as well as out of the end state. Milestone 3 adds the four FIRST-PERSON captures:
+ * the black world, the world after a scripted route has painted it, the world a test detonation
+ * lights, and the F3 numbers behind all three.
+ *
+ * Every capture measures TWO inks, and the difference matters:
+ *   - `ink`   — the 2D debug overlay canvas (`#overlay canvas`), read with getImageData.
+ *   - `glInk` — the first-person WebGL drawing buffer, read with readPixels inside the page
+ *               (`window.blindspot.ink()`), which renders and reads back in the same task
+ *               because a drawing buffer is undefined the moment you yield. Two thresholds:
+ *               `lit` is paint, `any` also catches the 2 m contact shell, which is meant to be
+ *               nearly invisible (vision §3.1).
+ * A black screenshot that should show paint is a FAILURE even when every number passes, so the
+ * captures are written to be looked at as well as asserted on.
  *
  *   node scripts/verify.mjs [--no-build] [--port 4180]
  */
@@ -92,6 +103,28 @@ async function capture(browser, name, query, checks, opts = {}) {
   }
   await page.waitForTimeout(600);
 
+  // ---------------------------------------------------------------------------------------
+  // F7 through the REAL key (engine-plan §10, §11). Not `blindspot.detonate()`: the point of
+  // the capture is that the hotkey is wired, that the event goes out on the ordinary bus with
+  // no special-casing, and that what comes back is paint. Before/after on both sides.
+  // ---------------------------------------------------------------------------------------
+  let blast = null;
+  if (opts.detonate) {
+    const sample = () =>
+      page.evaluate(() => ({
+        painted: window.blindspot.field.paintedDots,
+        detonations: window.blindspot.sim.bus.counts.detonation,
+        ink: window.blindspot.ink(),
+      }));
+    const before = await sample();
+    await page.keyboard.press('F7');
+    // A detonation's wavefront takes paintRadius / WAVE_SPEED_DETONATION = 22/140 = 157 ms to
+    // finish arriving (vision §3.3, engine-plan §4). Wait past it, then read the settled world.
+    await page.waitForTimeout(1000);
+    const after = await sample();
+    blast = { before, after };
+  }
+
   const state = await page.evaluate(() => {
     const sim = window.blindspot.sim;
     const p = sim.player;
@@ -125,6 +158,11 @@ async function capture(browser, name, query, checks, opts = {}) {
     return {
       boot: document.getElementById('boot')?.classList.contains('hidden') ?? false,
       topDown: window.blindspot.debug.state.topDown,
+      // Milestone 3. `stats()` and `extraLines()` are the SAME numbers the F3 panel prints
+      // (core/debug.ts `extraLines`), so asserting on them is asserting on the overlay.
+      stats: window.blindspot.stats(),
+      f3: window.blindspot.debug.extraLines ? window.blindspot.debug.extraLines() : [],
+      glInk: window.blindspot.ink(),
       solids: sim.world.solids.length,
       walkables: sim.world.walkables.length,
       steps: sim.steps,
@@ -168,6 +206,26 @@ async function capture(browser, name, query, checks, opts = {}) {
   note(`map ${state.map} · ${state.solids} solids · ${state.walkables} walkable tops · ${state.steps} sim steps`);
   note(`boot hidden ${state.boot} · top-down ${state.topDown} · webgl canvas ${state.webgl}`);
   note(`overlay ink ${(state.ink * 100).toFixed(2)}%`);
+  const st = state.stats;
+  note(
+    `surfels ${st.surfels} dots · ${st.edges} edges (${st.holds} holds) · ${st.patches} patches` +
+      ` · bake ${st.bakeMs.toFixed(0)} ms`,
+  );
+  note(
+    `painted ${st.paintedDots} dots · ${st.paintedEdgeVerts} edge verts · heard ${st.heard}` +
+      ` missed ${st.missed} · paint worst ${st.paintMaxMs.toFixed(2)} ms`,
+  );
+  note(
+    `first-person ink lit ${(state.glInk.lit * 100).toFixed(3)}% · any ${(state.glInk.any * 100).toFixed(3)}%` +
+      ` · ${state.glInk.width}x${state.glInk.height} · look ${st.look} · ${st.drawCalls} draw calls` +
+      ` · ${st.fps.toFixed(1)} fps`,
+  );
+  if (blast) {
+    note(
+      `F7 detonation: painted ${blast.before.painted} → ${blast.after.painted} dots · ink lit ` +
+        `${(blast.before.ink.lit * 100).toFixed(3)}% → ${(blast.after.ink.lit * 100).toFixed(3)}%`,
+    );
+  }
   note(`player ${state.pos.map(f2).join(' ')} · ${state.stance} · hands ${state.hands} · fall ${f2(state.lastFall)} m`);
   const c = state.counts;
   note(
@@ -190,12 +248,21 @@ async function capture(browser, name, query, checks, opts = {}) {
   const universal = {
     'fov inside the vision §12 comfort band (80–110)': state.fov >= 80 && state.fov <= 110,
   };
+  if (state.webgl) {
+    // Vision §12 caps the point pool at ~1 M and asks for a handful of draw calls, and the bake
+    // is the same on every capture — so the budget is asserted everywhere rather than once.
+    universal['a look is live'] = st.look !== 'none';
+    universal['surfel pool inside the ~1 M point ceiling (vision §12)'] =
+      st.surfels > 0 && st.surfels + st.edges * 2 < 1_000_000;
+    universal['the whole world draws in a handful of calls'] = st.drawCalls > 0 && st.drawCalls <= 8;
+    universal['nothing is painted that was never heard'] = st.paintedDots === 0 || st.heard > 0;
+  }
   if (hotkeys) {
     universal['F6 flips dog 2 on this Sim’s own map'] =
       typeof hotkeys.before === 'boolean' && hotkeys.flipped === !hotkeys.before;
     universal['F6 again restores it'] = hotkeys.restored === hotkeys.before;
   }
-  for (const [label, ok] of Object.entries({ ...universal, ...checks(state) })) {
+  for (const [label, ok] of Object.entries({ ...universal, ...checks(state, blast) })) {
     if (!ok) problems.push(`${name}: failed check "${label}"`);
   }
   return state;
@@ -296,6 +363,107 @@ async function main() {
         'top-down open': s.topDown,
         'top-down drawing has ink': s.ink > 0.02 && s.ink < 0.6,
       }),
+      { scripted: true },
+    );
+
+    // ---------------------------------------------------------------------------------------
+    // Milestone 3: the first person. Four captures, and they are meant to be LOOKED at — the
+    // numbers below only fence off the two ways a renderer lies (an empty frame, a flooded one).
+    // ---------------------------------------------------------------------------------------
+
+    // (a) The black world. Vision §1.3: absence is black. Nothing has made a sound yet, so
+    // nothing may be drawn — except the 2 m contact shell of §3.1, which must be there and must
+    // be almost nothing. `lit` exactly 0 is the law; `any` between a whisper and a smear is the
+    // shell doing its one job.
+    await capture(browser, 'fp-boot', '', (s) => ({
+      'nothing has been heard yet': s.stats.heard === 0 && s.events === 0,
+      'nothing has been painted': s.stats.paintedDots === 0 && s.stats.paintedEdgeVerts === 0,
+      'the world is black': s.glInk.lit === 0,
+      'the contact shell is drawn': s.glInk.any > 0.0005,
+      'the contact shell is only a shell': s.glInk.any < 0.10,
+      'the bake found geometry': s.stats.surfels > 50_000 && s.stats.patches > 1_000,
+      'the bake found holds to draw as lines': s.stats.holds > 0 && s.stats.edges > s.stats.holds,
+    }));
+
+    // (b) The world a route paints. Same map, same script, same seam as `script-corridor` above —
+    // the end pose and the event tallies are re-asserted here so that turning the first person on
+    // is provably a rendering change and not a simulation one.
+    await capture(
+      browser,
+      'fp-script',
+      '?sim=script',
+      (s) => ({
+        'route ran to the end': s.scriptDone === true,
+        'ended east down corridor C': s.pos[0] > 40 && Math.abs(s.pos[1]) < 0.01 && s.pos[2] > 0.4 && s.pos[2] < 1.9,
+        'heard itself hit the trench floor': s.counts.landing === 1 && Math.abs(s.lastFall - 2.8) < 0.02,
+        'the ladder top-out stays silent': s.counts.mantle === 0,
+        'the footsteps were delivered': s.stats.heard > 10 && s.stats.missed === 0,
+        'its own footsteps painted the route': s.stats.paintedDots > 2_000,
+        'holds along the route were painted too': s.stats.paintedEdgeVerts > 0,
+        // Not black, and not a flood. `any` is the whole read (paint + shell); `lit` is paint
+        // bright enough to navigate by. The upper fence catches a runaway splat size.
+        'the canvas is not black': s.glInk.lit > 0.002,
+        'the canvas is not flooded': s.glInk.any > 0.02 && s.glInk.any < 0.75,
+        // Vision §3.6: paint is kept for the whole run. The route's first steps are ~13 s old by
+        // now and must still be on screen, which is what stops `paintedDots` from being a tally
+        // of things that have since gone dark.
+        'painted dots are never evicted': s.stats.paintedDots >= 2_000,
+      }),
+      { scripted: true },
+    );
+
+    // (c) F7 through the real key, from the spawn. One detonation, one bus event, and a world
+    // that was black a second ago is lit — the loudest map-paint in the game (vision §6).
+    await capture(
+      browser,
+      'fp-detonation',
+      '',
+      (s, blast) => ({
+        'F7 emitted exactly one detonation': s.counts.detonation === 1,
+        'it went out on the ordinary bus': s.events === 1,
+        'the listener heard its own blast': s.stats.heard === 1 && s.stats.missed === 0,
+        'it was black before': blast.before.painted === 0 && blast.before.ink.lit === 0,
+        'the blast painted geometry': blast.after.painted > 1_000,
+        'the blast lit the screen': blast.after.ink.lit > blast.before.ink.lit + 0.01,
+        'and did not flood it': blast.after.ink.any < 0.85,
+        // Engine-plan §10 budget: paint runs inside the fixed step, so the loudest event in the
+        // game has to fit in one. A detonation is the worst case there is.
+        'the worst paint call fits inside a 16 ms step': s.stats.paintMaxMs < 16,
+      }),
+      { detonate: true },
+    );
+
+    // (d) The F3 numbers themselves (engine-plan §10: fps, frame ms, surfel count, painted count,
+    // draw calls, event/s). Parsed out of the very strings the overlay prints, on the mantle
+    // route so the panel has a painted world behind it.
+    await capture(
+      browser,
+      'fp-stats',
+      '?sim=script2&stats',
+      (s) => {
+        const line = (word) => s.f3.find((l) => l.startsWith(word)) ?? '';
+        const num = (word, after) => {
+          const m = new RegExp(`${after}\\s+([0-9.]+)`).exec(line(word));
+          return m ? Number(m[1]) : NaN;
+        };
+        return {
+          'route ran to the end': s.scriptDone === true,
+          'ended on top of the machinery row': Math.abs(s.pos[1] - 2.2) < 0.01,
+          'F3 prints the surfel count': /^surfels\s+\d+ dots/.test(line('surfels')),
+          'F3 prints the painted count': /^painted\s+\d+ dots/.test(line('painted')),
+          'F3 prints the paint cost': /^paint\s+[0-9.]+ ms/.test(line('paint ')),
+          'F3 prints draw calls and event rate': /draw calls/.test(line('render')) && /event\/s/.test(line('render')),
+          'F3 prints the halo readout': /m audible/.test(line('halo')),
+          'the F3 surfel count is the baked one': num('surfels', 'surfels') === s.stats.surfels,
+          'the F3 painted count is the painted one': num('painted', 'painted') === s.stats.paintedDots,
+          'F3 painted count is non-zero after a route': s.stats.paintedDots > 1_000,
+          'surfel count inside budget': s.stats.surfels < 1_000_000,
+          // Headless swiftshader is not a GPU, so this is a liveness floor, not the 60 fps target
+          // of vision §12 — a stalled loop or a frame in the seconds reads as broken here.
+          'the frame loop is alive': s.stats.fps > 5 && s.stats.frameMs < 200,
+          'the canvas is not black': s.glInk.any > 0.01,
+        };
+      },
       { scripted: true },
     );
   } finally {

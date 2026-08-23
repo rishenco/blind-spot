@@ -1,42 +1,102 @@
 /**
  * Boot (engine-plan §2).
  *
- * Milestone 2 puts a body in the world: pointer-lock look, the movement verbs, camera energy
- * and procedural step audio. The renderer still draws nothing — surfels arrive in M3, the look
- * registry and its 1/2/3 switching with them — so what the milestone shows is the top-down
- * debug view (M) with the player moving on it, the F3 readout, and the sound of your own feet.
+ * Milestone 3 turns the lights on — or rather, it stops turning them on. The world is baked into
+ * a surfel lattice at boot, the black screen is the truth, and every dot you ever see arrives
+ * because something made a noise. The boot layer's job is to wire four things that deliberately
+ * do not know about each other:
+ *
+ *   Sim  ──emit──▶  EventBus  ──▶  PaintPipeline (delivery + paint into the shared buffers)
+ *                       └──────▶  AudioEngine
+ *                                      SurfelField's two geometries ──▶ LookHost ──▶ the screen
+ *
+ * Nothing in `core/` imports a look, and no look writes to the sim. The bake and the paint
+ * pipeline are attached HERE rather than inside `Sim`, exactly like the audio engine: a Sim is a
+ * cheap thing that specs build by the dozen, and a bake is a hundred thousand dots.
  *
  * Keys:  WASD move · Shift sprint · Ctrl/C crouch (slide at speed) · Space jump/mantle
- *        M top-down debug view · F3 stats · F6 dog 2 on the plan · B camera motion · 0 mute
- * Query: ?topdown   open with the top-down view up (deterministic headless capture)
+ *        0/1/2/3 look (0 = debug) · M top-down debug view · F3 stats · F6 dog 2 on the plan
+ *        F7 test detonation 12 m ahead · B camera motion · N mute
+ * Query: ?look=<debug|phosphor|blueprint|signal>   boot straight into a look (engine-plan §9)
+ *        ?topdown   open with the top-down view up (deterministic headless capture)
  *        ?stats     open with the F3 readout up
  *        ?nobob     start with camera motion off — bob, landing dip and slide roll, one
  *                   switch (comfort law, vision §12)
+ *        ?flat      reduce-flashing comfort mode (vision §12); also honours the OS setting
  *        ?sim=script  run a scripted movement route instead of reading the keyboard
  *                     (script|script1|corridor, script2|mantle — see core/debug.ts SCRIPTS)
  */
 
-import { PerspectiveCamera, Scene, WebGLRenderer } from 'three';
+import { PerspectiveCamera, WebGLRenderer } from 'three';
 import { AudioEngine } from './core/audio.js';
-import { FOV_BASE, MOUSE_SENSITIVITY, SIM_STEP } from './core/const.js';
-import { DebugOverlay, SCRIPTS, SCRIPT_ALIASES, ScriptedInput } from './core/debug.js';
+import {
+  CORE_CONSTANTS,
+  ENERGY_MAX,
+  FOV_BASE,
+  HALO_DECAY,
+  HALO_WINDOW,
+  MOUSE_SENSITIVITY,
+  SIM_STEP,
+} from './core/const.js';
+import { DebugOverlay, SCRIPTS, SCRIPT_ALIASES, ScriptedInput, testDetonation } from './core/debug.js';
+import type { SoundEvent } from './core/events.js';
 import { yawToThreeRotationY } from './core/math.js';
 import { sampleMap } from './core/map/sampleMap.js';
 import { CameraRig } from './core/movement.js';
+import { PaintPipeline } from './core/paint.js';
 import { Sim } from './core/sim.js';
+import type { Stance } from './core/sim.js';
+import { bakeSurfels, type SurfelField } from './core/surfels.js';
+import { LOOK_BY_KEY, LookHost, resolveLookId, type LookId } from './looks/index.js';
+import type { LookContext } from './looks/types.js';
 
 const params = new URLSearchParams(window.location.search);
 
 const app = document.getElementById('app');
+const hud = document.getElementById('hud') as HTMLDivElement | null;
 const overlayRoot = document.getElementById('overlay');
 const boot = document.getElementById('boot');
-if (!app || !overlayRoot) throw new Error('boot: #app / #overlay missing from index.html');
+if (!app || !hud || !overlayRoot) throw new Error('boot: #app / #hud / #overlay missing from index.html');
 
 const sim = new Sim(sampleMap);
 const debug = new DebugOverlay(overlayRoot, sim);
 const rig = new CameraRig();
 const audio = new AudioEngine();
 audio.attach(sim.bus);
+
+// ---------------------------------------------------------------------------------------
+// Bake + paint
+// ---------------------------------------------------------------------------------------
+
+/**
+ * The bake runs synchronously, under the "baking lattice…" boot screen. It is ~200 ms of pure
+ * geometry, once, and doing it synchronously keeps `window.blindspot` valid the instant the
+ * module finishes — which is what the verify harness (and every console session) relies on.
+ *
+ * `sim.world` and not the imported `sampleMap`: a Sim deep-clones its map def, and painting the
+ * module constant would mean painting a world this Sim does not live in (engine-plan §11.1).
+ */
+const field: SurfelField = bakeSurfels(sim.world);
+const paint = new PaintPipeline(field, sim.world);
+// Profiling reads a wall clock, so it is a boot-layer opt-in: the determinism specs run the sim
+// with `performance.now` swapped out and count every call.
+paint.profile = true;
+paint.attach(sim.bus);
+
+/**
+ * THE LISTENER is the player, and it is set from the SIM pose rather than the interpolated one.
+ * Delivery answers "was this event within earshot" — a simulation question, decided inside the
+ * step that emitted the sound. The interpolated pose is for the PICTURE (the camera, the contact
+ * shell, the halo); using it here would make what you can HEAR depend on your refresh rate.
+ *
+ * Ears sit at the head, not the feet: `eyeTarget` is the posture's eye offset, which drops when
+ * you crouch. A one-metre error would not change much through open air, but it decides which
+ * side of a 1.2 m duct lip the listener is on, and that changes the wall count.
+ */
+function syncListener(): void {
+  const p = sim.player;
+  paint.setListener(p.x, p.y + sim.movement.eyeTarget, p.z);
+}
 
 /**
  * Scripted mode steps the sim a FIXED number of times per frame instead of chasing the wall
@@ -52,7 +112,6 @@ const SCRIPT_STEPS_PER_FRAME = 4;
 // still verifies. A failure is reported once, loudly, and never again.
 // ---------------------------------------------------------------------------------------
 
-const scene = new Scene();
 const camera = new PerspectiveCamera(FOV_BASE, 1, 0.05, 200);
 
 let renderer: WebGLRenderer | null = null;
@@ -81,12 +140,110 @@ function syncCamera(): void {
   }
 }
 
+// ---------------------------------------------------------------------------------------
+// The look context (engine-plan §9). Built once, shared by every look, mutated in place.
+// ---------------------------------------------------------------------------------------
+
+/**
+ * The vertical render window (vision §3.6 "within one floor above/below"). "Dock Approach" is a
+ * single floor with a trench under it, so the span is set to cover the whole map from anywhere
+ * inside it: cutting a one-floor map into thirds would be a rendering bug wearing a law's
+ * clothes. The five-floor build sets the centre to the floor the player is on and the span to
+ * one floor either side; the uniform is written every frame from today so nothing has to change
+ * downstream when it starts moving.
+ */
+const FLOOR_SPAN = 12.0;
+
+/** Halo state (vision §3.8). A placeholder for M4's player.ts, which owns the real reactor. */
+let audibleRadius = 0;
+let lastSelfSound = -1e9;
+
+const handsView = { state: 'none' as 'none' | 'mantle' | 'ladder' | 'vault', phase: 0 };
+const playerView = {
+  pos: renderPos as readonly [number, number, number],
+  stance: 'stand' as Stance,
+  speed: 0,
+  audibleRadius: 0,
+  /** M4 builds the reactor. Until then this is honestly zero and prints as a dash. */
+  energy: 0,
+  energyMax: ENERGY_MAX,
+  hands: handsView,
+};
+
+const reduceFlashing =
+  params.has('flat') ||
+  (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+/** A `LookContext` the boot layer may write to; looks receive it as the read-only contract. */
+type MutableLookContext = { -readonly [K in keyof LookContext]: LookContext[K] };
+
+/** Things the frame loop refreshes after the camera and before the look draws. */
+const frameHooks: Array<(dt: number) => void> = [];
+
+let looks: LookHost | null = null;
+const lookId: LookId = resolveLookId(params.get('look'));
+
+if (renderer) {
+  const ctx: MutableLookContext = {
+    renderer,
+    camera,
+    surfelGeom: field.geometry,
+    edgeGeom: field.edgeGeometry,
+    dog: [], // M5
+    events: {
+      subscribe: (cb) => paint.onDelivered(cb),
+      recent: (limit) => paint.recent(limit),
+    },
+    player: playerView,
+    hud,
+    constants: CORE_CONSTANTS,
+    // THE RENDER CLOCK. Interpolated sim time, so it is smooth at any refresh rate and lives on
+    // the same axis as `event.time` — which is what makes `now - paintTime` mean "how long since
+    // that sound got here", and a NEGATIVE age mean "it has not got here yet" (the wavefront).
+    // It leads the drawn pose by up to one step on purpose: an event emitted in the step that is
+    // currently being interpolated must not be stuck at a negative age for a whole frame.
+    time: () => sim.time + sim.alpha * SIM_STEP,
+    reduceFlashing: () => reduceFlashing,
+    floorCentre: 0,
+    floorSpan: FLOOR_SPAN,
+  };
+  looks = new LookHost(ctx, lookId);
+  paint.onDelivered((e: SoundEvent) => looks?.onEvent(e));
+
+  /** Per-frame refresh of everything a look reads off the player. */
+  const syncLookState = (dt: number): void => {
+    const p = sim.player;
+    const m = sim.movement;
+    playerView.stance = p.stance;
+    playerView.speed = m.speedXZ;
+    handsView.state = m.hands;
+    handsView.phase = m.handsPhase;
+
+    // Vision §3.8: the halo is the loudest thing you have emitted recently, held briefly and
+    // then bled away — you always know exactly how loud you are.
+    const now = sim.time;
+    if (now - lastSelfSound > HALO_WINDOW) audibleRadius = Math.max(0, audibleRadius - HALO_DECAY * dt);
+    playerView.audibleRadius = audibleRadius;
+
+    ctx.floorCentre = renderPos[1] + 1.6;
+    ctx.floorSpan = FLOOR_SPAN;
+  };
+  frameHooks.push(syncLookState);
+}
+
+paint.onDelivered((e: SoundEvent) => {
+  if (e.source !== 'self') return;
+  if (e.hearRadius > audibleRadius || sim.time - lastSelfSound > HALO_WINDOW) audibleRadius = e.hearRadius;
+  lastSelfSound = e.time;
+});
+
 function resize(): void {
   const w = window.innerWidth;
   const h = window.innerHeight;
   camera.aspect = w / Math.max(1, h);
   camera.updateProjectionMatrix();
   renderer?.setSize(w, h, false);
+  looks?.resize(w, h);
   debug.resize(w, h);
 }
 
@@ -117,6 +274,16 @@ window.addEventListener('keydown', (e) => {
   firstGesture();
   if (e.repeat) return;
   held.add(e.code);
+
+  // Engine-plan §9 owns the number row: 0 is the debug look, 1/2/3 the authored directions.
+  // (Audio mute moved to N when the looks arrived — the switch protocol is the fixed contract.)
+  const look = LOOK_BY_KEY[e.code];
+  if (look) {
+    looks?.switchTo(look);
+    e.preventDefault();
+    return;
+  }
+
   switch (e.code) {
     case 'Space':
       sim.input.jumpPressed = true;
@@ -134,10 +301,14 @@ window.addEventListener('keydown', (e) => {
       debug.toggleDog2();
       e.preventDefault();
       break;
+    case 'F7':
+      testDetonation(sim);
+      e.preventDefault();
+      break;
     case 'KeyB':
       rig.motionEffects = !rig.motionEffects;
       break;
-    case 'Digit0':
+    case 'KeyN':
       audio.toggleMute();
       break;
     default:
@@ -166,19 +337,26 @@ window.addEventListener('mousemove', (e) => {
 // ---------------------------------------------------------------------------------------
 
 let last = performance.now();
+/** Rolling event rate for the F3 panel (engine-plan §10 "event/s"). */
+let evAcc = 0;
+let evLast = 0;
+let evRate = 0;
 
 function frame(now: number): void {
   const dtMs = Math.min(250, now - last);
   last = now;
+  const dt = dtMs / 1000;
 
   if (script) {
     for (let i = 0; i < SCRIPT_STEPS_PER_FRAME; i++) {
       script.sync();
+      syncListener();
       sim.step(SIM_STEP);
     }
   } else {
     readKeyboard();
-    sim.advance(dtMs / 1000);
+    syncListener();
+    sim.advance(dt);
   }
 
   // The rig is a RENDER-side smoother, so it is charged with real elapsed time, every frame,
@@ -186,12 +364,41 @@ function frame(now: number): void {
   // on catch-up frames and starved it on fast ones: at 144 Hz it was fed 6.60 s over 4.17 s of
   // wall clock, which is why the landing dip was 8x weaker there than at 60 Hz. Smoothers are
   // wall-clock things; only the sim is allowed to care about the fixed step.
-  rig.update(dtMs / 1000, sim.movement);
+  rig.update(dt, sim.movement);
   syncCamera();
-  renderer?.render(scene, camera);
+  for (const hook of frameHooks) hook(dt);
+
+  // One upload per frame, not one per event: a frame that ran four steps and painted eight
+  // sounds hands the GPU a single merged set of ranges.
+  paint.flush();
+  looks?.update(sim.time + sim.alpha * SIM_STEP, dt);
+  looks?.render();
+
+  evAcc += dtMs;
+  if (evAcc >= 500) {
+    evRate = ((sim.bus.emitted - evLast) * 1000) / evAcc;
+    evLast = sim.bus.emitted;
+    evAcc = 0;
+  }
   debug.update(dtMs);
   requestAnimationFrame(frame);
 }
+
+// ---------------------------------------------------------------------------------------
+// F3 extras (engine-plan §10: surfel count, painted count, draw calls, event/s)
+// ---------------------------------------------------------------------------------------
+
+debug.extraLines = () => {
+  const c = field.counts;
+  const calls = renderer ? renderer.info.render.calls : 0;
+  return [
+    `surfels    ${c.surfels} dots  ${c.edges} edges (${c.holds} holds)  ${c.patches} patches`,
+    `painted    ${field.paintedDots} dots  ${field.paintedEdgeVerts} edge verts   bake ${c.ms.toFixed(0)} ms`,
+    `paint      ${paint.lastMs.toFixed(2)} ms  worst ${paint.maxMs.toFixed(2)} ms  heard ${paint.heard} missed ${paint.missed}`,
+    `render     ${calls} draw calls  ${evRate.toFixed(1)} event/s  look ${looks ? looks.id : 'none'}`,
+    `halo       ${audibleRadius.toFixed(1)} m audible`,
+  ];
+};
 
 if (params.has('topdown')) debug.setTopDown(true);
 if (params.has('stats')) debug.toggleStats();
@@ -201,7 +408,37 @@ boot?.classList.add('hidden');
 syncCamera();
 requestAnimationFrame(frame);
 
+// ---------------------------------------------------------------------------------------
 // Handy for the verify script and the browser console.
+// ---------------------------------------------------------------------------------------
+
+/**
+ * Ink coverage of the FIRST-PERSON canvas, read straight out of the drawing buffer.
+ *
+ * A screenshot proves a file was written, not that anything was DRAWN. This renders and reads
+ * back in the same task (a WebGL drawing buffer is undefined the moment you yield) and reports
+ * two thresholds, because this renderer has two legitimately different brightnesses: `lit` is
+ * paint, `any` also catches the 2 m contact shell, which is meant to be nearly invisible.
+ */
+function measureInk(): { lit: number; any: number; width: number; height: number } {
+  if (!renderer || !looks) return { lit: 0, any: 0, width: 0, height: 0 };
+  looks.render();
+  const gl = renderer.getContext();
+  const w = gl.drawingBufferWidth;
+  const h = gl.drawingBufferHeight;
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let lit = 0;
+  let any = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    const sum = px[i]! + px[i + 1]! + px[i + 2]!;
+    if (sum > 60) lit++;
+    if (sum > 8) any++;
+  }
+  const n = w * h;
+  return { lit: lit / n, any: any / n, width: w, height: h };
+}
+
 declare global {
   interface Window {
     blindspot?: {
@@ -210,7 +447,48 @@ declare global {
       rig: CameraRig;
       audio: AudioEngine;
       script: ScriptedInput | null;
+      field: SurfelField;
+      paint: PaintPipeline;
+      looks: LookHost | null;
+      detonate: (distance?: number) => SoundEvent;
+      ink: () => { lit: number; any: number; width: number; height: number };
+      stats: () => Record<string, number | string>;
     };
   }
 }
-window.blindspot = { sim, debug, rig, audio, script };
+
+window.blindspot = {
+  sim,
+  debug,
+  rig,
+  audio,
+  script,
+  field,
+  paint,
+  looks,
+  detonate: (distance?: number) => testDetonation(sim, distance),
+  ink: measureInk,
+  stats: () => {
+    const c = field.counts;
+    const f = debug.frameStats;
+    return {
+      surfels: c.surfels,
+      edges: c.edges,
+      holds: c.holds,
+      patches: c.patches,
+      bakeMs: c.ms,
+      paintedDots: field.paintedDots,
+      paintedEdgeVerts: field.paintedEdgeVerts,
+      paintLastMs: paint.lastMs,
+      paintMaxMs: paint.maxMs,
+      heard: paint.heard,
+      missed: paint.missed,
+      drawCalls: renderer ? renderer.info.render.calls : 0,
+      fps: f.fps,
+      frameMs: f.frameMs,
+      eventRate: evRate,
+      look: looks ? looks.id : 'none',
+      audibleRadius,
+    };
+  },
+};

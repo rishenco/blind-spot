@@ -36,6 +36,13 @@ export const HOLD_MIN_STEP = 0.7;
 export const HOLD_MAX_STEP = 2.6;
 /** Overhead lips (duct undersides) need at least this much clearance to count as holds. */
 export const HOLD_MIN_CLEARANCE = 0.6;
+/**
+ * How far below a lip the bake looks for the "adjacent standing surface" a hold is measured
+ * against. Past this there is no adjacent surface to speak of — the drop is simply a drop.
+ */
+export const HOLD_DROP_SCAN = 12.0;
+/** Ladders are climb volumes, not solids: their rails and rungs are derived hold lines. */
+export const LADDER_RUNG_SPACING = 0.3;
 
 // ---------------------------------------------------------------------------------------------
 // Aging (visual-brief §2 "age is temperature"; vision §3.6)
@@ -69,8 +76,14 @@ export const FAR_BIAS_START = 20.0;
 /** Contact shell: faint always-on shell within 2 m of the body (vision §3.1). */
 export const CONTACT_SHELL_RADIUS = 2.0;
 export const CONTACT_SHELL_ALPHA = 0.05;
-/** Minimum splat size in pixels (visual-brief §2: splats >= 2-3 px, temporally stable). */
+/**
+ * Splat size FLOORS in pixels (visual-brief §2: splats >= 2-3 px, temporally stable). A splat is
+ * sized to its voxel footprint (vision §12); these are the lower bounds on that footprint, and
+ * the bound relaxes with distance so the far field may thin toward a drawing. Sub-pixel dots
+ * shimmer and do not survive stream compression, which is what the floor exists to prevent.
+ */
 export const SPLAT_MIN_PX = 2.2;
+/** Floor for dots inside FAR_BIAS_START — the near field is never allowed to go wiry. */
 export const SPLAT_NEAR_PX = 4.0;
 
 // ---------------------------------------------------------------------------------------------

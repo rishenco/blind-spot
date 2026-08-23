@@ -303,6 +303,57 @@ export function queryXZ(world: World, minX: number, minZ: number, maxX: number, 
 }
 
 /**
+ * The same gather, but only over the grid cells the segment's XZ projection actually crosses
+ * (Amanatides–Woo). A solid that intersects the segment must overlap one of those cells — its
+ * footprint would otherwise have to cross a line it never touches — so this returns exactly the
+ * candidates that matter, and the rectangle query's corners (up to 8× the cells on a long
+ * diagonal) are never visited.
+ *
+ * A segment that only clips a cell CORNER can miss a solid living solely in the diagonal
+ * neighbour. That contact is a zero-length chord, and `countWalls` discards anything shorter than
+ * OCCLUDER_MIN_CHORD anyway: a wall you graze at a single point is not a wall.
+ */
+export function queryXZSegment(world: World, ax: number, az: number, bx: number, bz: number, out: number[]): number[] {
+  out.length = 0;
+  const g = world.grid;
+  if (stamps.length < world.solids.length) stamps = new Int32Array(world.solids.length);
+  const stamp = ++queryStamp;
+  const cell = g.cell;
+  const dx = bx - ax;
+  const dz = bz - az;
+  let ix = Math.floor(ax / cell) - g.x0;
+  let iz = Math.floor(az / cell) - g.z0;
+  const ex = Math.floor(bx / cell) - g.x0;
+  const ez = Math.floor(bz / cell) - g.z0;
+  const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+  const stepZ = dz > 0 ? 1 : dz < 0 ? -1 : 0;
+  const tDeltaX = stepX !== 0 ? Math.abs(cell / dx) : Infinity;
+  const tDeltaZ = stepZ !== 0 ? Math.abs(cell / dz) : Infinity;
+  let tMaxX = stepX !== 0 ? ((ix + g.x0 + (stepX > 0 ? 1 : 0)) * cell - ax) / dx : Infinity;
+  let tMaxZ = stepZ !== 0 ? ((iz + g.z0 + (stepZ > 0 ? 1 : 0)) * cell - az) / dz : Infinity;
+  // Manhattan distance bounds the walk exactly; +2 covers the start cell and float slop.
+  const guard = Math.abs(ex - ix) + Math.abs(ez - iz) + 2;
+  for (let n = 0; n < guard; n++) {
+    if (ix >= 0 && ix < g.nx && iz >= 0 && iz < g.nz) {
+      for (const idx of g.buckets[iz * g.nx + ix]!) {
+        if (stamps[idx] === stamp) continue;
+        stamps[idx] = stamp;
+        out.push(idx);
+      }
+    }
+    if (ix === ex && iz === ez) break;
+    if (tMaxX < tMaxZ) {
+      ix += stepX;
+      tMaxX += tDeltaX;
+    } else {
+      iz += stepZ;
+      tMaxZ += tDeltaZ;
+    }
+  }
+  return out;
+}
+
+/**
  * Candidate-list pool. Every query borrows its own buffer and returns it in a `finally`, so
  * queries nest safely: `ledgeProbe` iterating candidates while `capsuleOverlaps` runs, or a
  * `countWalls` filter that asks the world a question mid-iteration (M3's paint step does
@@ -314,11 +365,30 @@ const give = (a: number[]): void => {
   if (pool.length < 8) pool.push(a);
 };
 
+/**
+ * Same discipline for `countWalls`'s occluder-run spans, which are numeric and bounded: a segment
+ * can cross each occluder at most once, so `world.occluders.length` entries always suffice.
+ */
+const spanPool: Float64Array[] = [];
+const takeSpan = (min: number): Float64Array => {
+  const a = spanPool.pop();
+  return a && a.length >= min ? a : new Float64Array(Math.max(64, min));
+};
+const giveSpan = (a: Float64Array): void => {
+  if (spanPool.length < 8) spanPool.push(a);
+};
+
 // ------------------------------------------------------------------------------------------
 // Point / overlap tests
 // ------------------------------------------------------------------------------------------
 
-function pointInSolid(s: CollisionSolid, x: number, y: number, z: number): boolean {
+/**
+ * Does this one solid contain the point? Exported because the surfel bake tests hundreds of
+ * thousands of lattice samples against a per-face candidate list it gathers ONCE (engine-plan
+ * §3 "cull faces buried inside other solids"); routing each of those through `solidAt` would
+ * re-run the broadphase per sample. Same predicate, no second definition of "inside".
+ */
+export function pointInSolid(s: CollisionSolid, x: number, y: number, z: number): boolean {
   if (y < s.minY || y > s.maxY) return false;
   if (s.shape === 'box') return x >= s.minX && x <= s.maxX && z >= s.minZ && z <= s.maxZ;
   const dx = x - s.cx;
@@ -826,10 +896,23 @@ export interface RayHit {
 }
 
 /**
- * Entry/exit parameters of the infinite line a->b against a solid, or null if it misses.
- * t is the UNCLAMPED parameter along a->b (1 == b), so t0 < 0 means `a` is already inside the
- * solid — the fact `raycast` needs to report `inside`. Callers clamp to the span they care
- * about.
+ * Entry/exit parameters of the last successful `segmentInterval` call. Read them immediately;
+ * the next call overwrites them.
+ */
+let ivT0 = 0;
+let ivT1 = 0;
+
+/**
+ * Entry/exit parameters of the infinite line a->b against a solid; false if it misses. On true,
+ * the interval is in `ivT0` / `ivT1`. t is the UNCLAMPED parameter along a->b (1 == b), so
+ * t0 < 0 means `a` is already inside the solid — the fact `raycast` needs to report `inside`.
+ * Callers clamp to the span they care about.
+ *
+ * Returns through module scope rather than an object, and unrolls its own slab loop, because M3's
+ * paint pass runs it ~60 000 times for one detonation: the object literal, the loop's array
+ * literal and the destructured swaps together allocated a quarter of a million short-lived
+ * objects per blast, which cost more than the arithmetic. The arithmetic itself is unchanged —
+ * same divisions in the same order, so the same floats come out.
  */
 function segmentInterval(
   s: CollisionSolid,
@@ -839,7 +922,7 @@ function segmentInterval(
   bx: number,
   by: number,
   bz: number,
-): { t0: number; t1: number } | null {
+): boolean {
   const dx = bx - ax;
   const dy = by - ay;
   const dz = bz - az;
@@ -848,33 +931,52 @@ function segmentInterval(
 
   // y slab (shared by both shapes)
   if (Math.abs(dy) < EPS) {
-    if (ay < s.minY || ay > s.maxY) return null;
+    if (ay < s.minY || ay > s.maxY) return false;
   } else {
     let ty0 = (s.minY - ay) / dy;
     let ty1 = (s.maxY - ay) / dy;
-    if (ty0 > ty1) [ty0, ty1] = [ty1, ty0];
-    t0 = Math.max(t0, ty0);
-    t1 = Math.min(t1, ty1);
-    if (t0 > t1) return null;
+    if (ty0 > ty1) {
+      const t = ty0;
+      ty0 = ty1;
+      ty1 = t;
+    }
+    if (ty0 > t0) t0 = ty0;
+    if (ty1 < t1) t1 = ty1;
+    if (t0 > t1) return false;
   }
 
   if (s.shape === 'box') {
-    for (const [a, d, lo, hi] of [
-      [ax, dx, s.minX, s.maxX],
-      [az, dz, s.minZ, s.maxZ],
-    ] as const) {
-      if (Math.abs(d) < EPS) {
-        if (a < lo || a > hi) return null;
-        continue;
+    if (Math.abs(dx) < EPS) {
+      if (ax < s.minX || ax > s.maxX) return false;
+    } else {
+      let u0 = (s.minX - ax) / dx;
+      let u1 = (s.maxX - ax) / dx;
+      if (u0 > u1) {
+        const t = u0;
+        u0 = u1;
+        u1 = t;
       }
-      let u0 = (lo - a) / d;
-      let u1 = (hi - a) / d;
-      if (u0 > u1) [u0, u1] = [u1, u0];
-      t0 = Math.max(t0, u0);
-      t1 = Math.min(t1, u1);
-      if (t0 > t1) return null;
+      if (u0 > t0) t0 = u0;
+      if (u1 < t1) t1 = u1;
+      if (t0 > t1) return false;
     }
-    return { t0, t1 };
+    if (Math.abs(dz) < EPS) {
+      if (az < s.minZ || az > s.maxZ) return false;
+    } else {
+      let u0 = (s.minZ - az) / dz;
+      let u1 = (s.maxZ - az) / dz;
+      if (u0 > u1) {
+        const t = u0;
+        u0 = u1;
+        u1 = t;
+      }
+      if (u0 > t0) t0 = u0;
+      if (u1 < t1) t1 = u1;
+      if (t0 > t1) return false;
+    }
+    ivT0 = t0;
+    ivT1 = t1;
+    return true;
   }
 
   // Vertical cylinder: quadratic in XZ.
@@ -884,18 +986,22 @@ function segmentInterval(
   const B = 2 * (ox * dx + oz * dz);
   const C = ox * ox + oz * oz - s.r * s.r;
   if (A < EPS) {
-    if (C > 0) return null;
-    return { t0, t1 };
+    if (C > 0) return false;
+    ivT0 = t0;
+    ivT1 = t1;
+    return true;
   }
   const disc = B * B - 4 * A * C;
-  if (disc < 0) return null;
+  if (disc < 0) return false;
   const sq = Math.sqrt(disc);
   const u0 = (-B - sq) / (2 * A);
   const u1 = (-B + sq) / (2 * A);
-  t0 = Math.max(t0, u0);
-  t1 = Math.min(t1, u1);
-  if (t0 > t1) return null;
-  return { t0, t1 };
+  if (u0 > t0) t0 = u0;
+  if (u1 < t1) t1 = u1;
+  if (t0 > t1) return false;
+  ivT0 = t0;
+  ivT1 = t1;
+  return true;
 }
 
 /**
@@ -960,11 +1066,10 @@ export function raycast(
     queryXZ(world, Math.min(ox, bx), Math.min(oz, bz), Math.max(ox, bx), Math.max(oz, bz), buf);
     for (const idx of buf) {
       const s = world.solids[idx]!;
-      const iv = segmentInterval(s, ox, oy, oz, bx, by, bz);
-      if (!iv) continue;
-      if (iv.t1 < 0 || iv.t0 > 1) continue;
-      const inside = iv.t0 < 0;
-      const t = inside ? 0 : iv.t0;
+      if (!segmentInterval(s, ox, oy, oz, bx, by, bz)) continue;
+      if (ivT1 < 0 || ivT0 > 1) continue;
+      const inside = ivT0 < 0;
+      const t = inside ? 0 : ivT0;
       const dist = t * maxDist;
       if (best && dist >= best.t) continue;
       const [nx, ny, nz] = surfaceNormal(s, ox + ux * dist, oy + uy * dist, oz + uz * dist, ux, uy, uz);
@@ -1002,6 +1107,10 @@ export function segmentClear(
  *
  * Reads `world.occluders`, not `world.solids`. `filter` may itself query the world — the paint
  * step does — because the candidate buffer is pooled per call, never shared.
+ *
+ * Broadphase is `queryXZSegment`, not the segment's bounding rectangle: M3's paint pass asks this
+ * question once per patch, ~4000 times for a single detonation, and a 22 m diagonal covers 121
+ * grid cells as a rectangle against ~15 as a line.
  */
 export function countWalls(
   world: World,
@@ -1016,33 +1125,44 @@ export function countWalls(
   const len = Math.hypot(bx - ax, by - ay, bz - az);
   if (len < EPS) return 0;
   const minT = OCCLUDER_MIN_CHORD / len;
-  const intervals: Array<[number, number]> = [];
   const buf = take();
+  const runsT0 = takeSpan(world.occluders.length);
+  const runsT1 = takeSpan(world.occluders.length);
+  let n = 0;
   try {
-    queryXZ(world, Math.min(ax, bx), Math.min(az, bz), Math.max(ax, bx), Math.max(az, bz), buf);
+    queryXZSegment(world, ax, az, bx, bz, buf);
     for (const idx of buf) {
       const s = world.occluders[idx]!;
       if (filter && !filter(s)) continue;
-      const iv = segmentInterval(s, ax, ay, az, bx, by, bz);
-      if (!iv) continue;
-      const t0 = Math.max(0, iv.t0);
-      const t1 = Math.min(1, iv.t1);
+      if (!segmentInterval(s, ax, ay, az, bx, by, bz)) continue;
+      const t0 = ivT0 < 0 ? 0 : ivT0;
+      const t1 = ivT1 > 1 ? 1 : ivT1;
       if (t1 - t0 < minT) continue;
-      intervals.push([t0, t1]);
+      // Insertion sort on the way in: the list is a handful of entries and this replaces both a
+      // per-call array of pairs and a comparator closure in the paint pass's hottest loop.
+      let i = n;
+      while (i > 0 && runsT0[i - 1]! > t0) {
+        runsT0[i] = runsT0[i - 1]!;
+        runsT1[i] = runsT1[i - 1]!;
+        i--;
+      }
+      runsT0[i] = t0;
+      runsT1[i] = t1;
+      n++;
     }
+    if (n === 0) return 0;
+    let runs = 1;
+    let end = runsT1[0]!;
+    for (let k = 1; k < n; k++) {
+      if (runsT0[k]! > end + 1e-6) runs++;
+      if (runsT1[k]! > end) end = runsT1[k]!;
+    }
+    return runs;
   } finally {
     give(buf);
+    giveSpan(runsT0);
+    giveSpan(runsT1);
   }
-  if (intervals.length === 0) return 0;
-  intervals.sort((p, q) => p[0] - q[0]);
-  let runs = 1;
-  let end = intervals[0]![1];
-  for (let i = 1; i < intervals.length; i++) {
-    const [t0, t1] = intervals[i]!;
-    if (t0 > end + 1e-6) runs++;
-    if (t1 > end) end = t1;
-  }
-  return runs;
 }
 
 // ------------------------------------------------------------------------------------------

@@ -5,15 +5,17 @@
  *   M   top-down orthographic debug view — must read as doc/sample-map.md §1
  *   F3  stats
  *   F6  toggle dog 2's optional patrol (solid when live, dashed when not)
+ *   F7  test detonation 12 m ahead of the camera (`testDetonation`)
  *
  * The top-down view is drawn on a 2D canvas rather than through the WebGL scene: it is a
  * technical drawing (hatching, dashes, labels, tick rulers) whose only job is to be compared
  * against the authored plan, and it must render even where WebGL does not.
  */
 
+import type { SoundEvent } from './events.js';
 import type { Sim } from './sim.js';
 import type { CollisionSolid, World } from './map/build.js';
-import { solidAt } from './map/build.js';
+import { raycast, solidAt } from './map/build.js';
 import type { DoorDef, MapDef } from './map/types.js';
 import { angleDelta, yawToForward } from './math.js';
 
@@ -127,6 +129,14 @@ export class DebugOverlay {
   private trailLastX = NaN;
   private trailLastZ = NaN;
 
+  /**
+   * Extra F3 lines contributed by the boot layer. The overlay lives in `core/` and the paint
+   * pipeline and the look registry do not: engine-plan §10 wants surfel/painted/draw-call counts
+   * on this panel, and a callback is how they get there without `core/debug.ts` importing the
+   * renderer. Returns lines already formatted; called only while the panel is up.
+   */
+  extraLines: (() => readonly string[]) | null = null;
+
   constructor(root: HTMLElement, sim: Sim) {
     this.sim = sim;
     this.canvas = document.createElement('canvas');
@@ -177,6 +187,11 @@ export class DebugOverlay {
     if (this.state.topDown) this.draw();
   }
 
+  /** The rolling frame numbers the F3 panel prints — the verify harness asserts against these. */
+  get frameStats(): { fps: number; frameMs: number } {
+    return { fps: this.fps, frameMs: this.frameMs };
+  }
+
   resize(w: number, h: number): void {
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
     this.w = w;
@@ -202,6 +217,7 @@ export class DebugOverlay {
       const bus = this.sim.bus;
       const c = bus.counts;
       const e = bus.last;
+      const extra = this.extraLines ? this.extraLines() : [];
       this.statsEl.textContent = [
         `fps        ${this.fps.toFixed(0).padStart(5)}   ${this.frameMs.toFixed(2)} ms`,
         `sim        ${this.sim.time.toFixed(2)} s   ${this.sim.steps} steps`,
@@ -212,6 +228,7 @@ export class DebugOverlay {
         `events     ${bus.emitted}  walk ${c.walkStep} sprint ${c.sprintStep} crouch ${c.crouchStep} slide ${c.slide} land ${c.landing}`,
         `last       ${e ? `${e.class} @ ${e.time.toFixed(2)}s  paint ${e.paintRadius.toFixed(1)} hear ${e.hearRadius.toFixed(1)}` : '—'}`,
         `map        ${this.sim.map.name}`,
+        ...extra,
       ].join('\n');
     }
     if (this.state.topDown) this.draw();
@@ -794,6 +811,56 @@ export class DebugOverlay {
 
 /** Doors that a walker can actually use — the map-sanity specs and the view share this filter. */
 export const walkableDoors = (map: MapDef): DoorDef[] => map.doors.filter((d) => d.walkable);
+
+// ------------------------------------------------------------------------------------------
+// F7 — the test detonation (engine-plan §10)
+// ------------------------------------------------------------------------------------------
+
+/** How far back from a hit surface the blast is placed, metres. */
+const DETONATION_BACKOFF = 0.35;
+/** Closest the blast may ever be placed to the eye, metres — a face full of white helps nobody. */
+const DETONATION_MIN = 1.0;
+
+/**
+ * "F7: test detonation 12 m ahead of the camera (paints through floors, white flash class) —
+ * the loudest-flashbulb showcase without dog AI." (engine-plan §10)
+ *
+ * It is a REAL event through the real bus — same class row, same paint path, same delivery gate
+ * as a dog blowing itself up in M5. Nothing about F7 is special-cased downstream, which is the
+ * point: if the flashbulb looks wrong, the pipeline is wrong.
+ *
+ * The one piece of care it needs is aim. "12 m ahead" walks straight into a wall in most of this
+ * map, and a sound emitted INSIDE a solid is a sound with a wall between it and the entire world
+ * — `applyEvent` rescues that case (a blast radiates out of the solid it is buried in) but the
+ * picture is still a smear, so the ray is traced and the blast parked just short of what it hits.
+ * That also makes F7 repeatable: the same stance and aim always produce the same origin.
+ */
+export function testDetonation(sim: Sim, distance = 12): SoundEvent {
+  const p = sim.player;
+  const [fx, , fz] = yawToForward(p.yaw);
+  const cp = Math.cos(p.pitch);
+  // Eye, not feet, and the SIM's posture rather than the rig's smoothed one: an event origin is
+  // simulation truth, not picture (engine-plan §11.1).
+  const ex = p.x;
+  const ey = p.y + sim.movement.eyeTarget;
+  const ez = p.z;
+  const dx = fx * cp;
+  const dy = Math.sin(p.pitch);
+  const dz = fz * cp;
+
+  let reach = distance;
+  const hit = raycast(sim.world, ex, ey, ez, dx, dy, dz, distance);
+  if (hit && !hit.inside) reach = Math.min(reach, hit.t - DETONATION_BACKOFF); // RayHit.t is metres
+  if (reach < DETONATION_MIN) reach = DETONATION_MIN;
+
+  return sim.bus.emit({
+    class: 'detonation',
+    source: 'detonation',
+    x: ex + dx * reach,
+    y: ey + dy * reach,
+    z: ez + dz * reach,
+  });
+}
 
 // ------------------------------------------------------------------------------------------
 // Scripted input (`?sim=script`) — the movement harness
