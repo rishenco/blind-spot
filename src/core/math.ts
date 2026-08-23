@@ -70,6 +70,18 @@ export const latticeIndex = (w: number, spacing: number): number => Math.floor(w
 export const latticeFirstAtOrAfter = (w: number, spacing: number): number =>
   Math.ceil(w / spacing - 0.5);
 
+/**
+ * Yaw convention (engine-wide): yaw 0 looks along +x and yaw increases toward +z.
+ * The sample map's spawn ("facing +x") is therefore yaw 0.
+ */
+export const yawToForward = (yaw: number): [number, number, number] => [Math.cos(yaw), 0, Math.sin(yaw)];
+
+/**
+ * Three.js Object3D.rotation.y that makes a default camera (looking down local -z) face our
+ * yaw. Derived once here so the movement/camera code never re-derives it.
+ */
+export const yawToThreeRotationY = (yaw: number): number => -yaw - Math.PI / 2;
+
 /** Signed angle helper: shortest difference between two yaw angles, in (-pi, pi]. */
 export function angleDelta(a: number, b: number): number {
   let d = (b - a) % (Math.PI * 2);
