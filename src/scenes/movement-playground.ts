@@ -12,7 +12,9 @@ import { registerScene, type LabScene, type SceneCtx } from '../lab/registry';
 import { StaticWorld, aabbFromBounds, type Aabb } from '../core/collision';
 import {
   PlayerController,
+  defaultBobTunables,
   defaultCameraTunables,
+  defaultMantleTunables,
   defaultMovementTunables,
 } from '../player/controller';
 import type { Input } from '../core/input';
@@ -43,7 +45,7 @@ const COLORS = {
   accentBright: 0x49b0c0,
 };
 
-const VARIANTS = ['Full Playground', 'Bare Room', 'Speed Lane'];
+const VARIANTS = ['Full Playground', 'Bare Room', 'Speed Lane', 'Mantle Lane'];
 
 /** Builds a tiling grid/checker texture procedurally — no asset files anywhere. */
 function makeGridTexture(
@@ -140,6 +142,8 @@ export class MovementPlayground implements LabScene {
   private readonly world = new StaticWorld();
   private readonly movement = defaultMovementTunables();
   private readonly cameraTunables = defaultCameraTunables();
+  private readonly bobTunables = defaultBobTunables();
+  private readonly mantleTunables = defaultMantleTunables();
   private player!: PlayerController;
 
   private content = new THREE.Group();
@@ -157,7 +161,13 @@ export class MovementPlayground implements LabScene {
 
     this.addLights();
 
-    this.player = new PlayerController(this.world, this.movement, this.cameraTunables);
+    this.player = new PlayerController(
+      this.world,
+      this.movement,
+      this.cameraTunables,
+      this.bobTunables,
+      this.mantleTunables,
+    );
     this.player.setSpawn(SPAWN, SPAWN_YAW_DEG);
 
     ctx.scene.add(this.content);
@@ -246,6 +256,8 @@ export class MovementPlayground implements LabScene {
       this.buildFullPlayground(b, { crateMat, propMat, accentMat, accentTopMat });
     } else if (this.variantIndex === 2) {
       this.buildSpeedLane(b, { propMat, accentTopMat });
+    } else if (this.variantIndex === 3) {
+      this.buildMantleLane(b, { crateMat, accentTopMat });
     }
 
     this.player.respawn();
@@ -282,13 +294,17 @@ export class MovementPlayground implements LabScene {
       b.add(trim);
     }
 
-    // Stair flight, 12 x 0.25 m risers, straight ahead of the spawn.
+    // Stair flight, 12 x 0.25 m risers, straight ahead of the spawn. Deliberately wide
+    // (z -8..8): the step-up has to hold up when the flight is taken diagonally, and a 60 deg
+    // approach drifts ~11 m sideways over the 6 m run — a narrower bank would send the test
+    // off the side of the stairs instead of measuring the step-up.
     const RISER = 0.25;
     const TREAD = 0.5;
+    const STAIR_W = 16;
     for (let i = 0; i < 12; i++) {
       const top = RISER * (i + 1);
       const cx = -12 + TREAD * i + TREAD / 2;
-      b.box(cx, 0, 0, TREAD, top, 4, accentMat);
+      b.box(cx, 0, 0, TREAD, top, STAIR_W, accentMat);
     }
 
     // Ramp: a real wedge visual over a finely stair-stepped collider (0.1 m steps, well
@@ -386,8 +402,45 @@ export class MovementPlayground implements LabScene {
     }
     b.box(0, 0, -4.3, 44, 0.6, 0.6, mats.propMat);
     b.box(0, 0, 4.3, 44, 0.6, 0.6, mats.propMat);
-    // Hurdles at 0.5 m: jumpable at the default 4.6 m/s jump velocity.
+    // Hurdles at 0.5 m: jumpable at the default 5.4 m/s jump velocity (0.91 m apex), and
+    // deliberately just under the mantle's 0.5 m floor so they stay a jump, not a climb.
     for (const x of [-6, 2, 10]) b.box(x, 0, 0, 0.5, 0.5, 7, mats.propMat);
+  }
+
+  /**
+   * Two clear approach lanes off the spawn, one per climb class, so a mantle can be tested
+   * (and felt) without threading between the full playground's props.
+   *
+   *  - +X (the spawn heading): a 1.0 m ledge 8 m out — a sprint-through vault.
+   *  - -Z (a 90 deg turn):     a 2.2 m block 6 m out — the tallest legal pull-up.
+   */
+  private buildMantleLane(
+    b: Builder,
+    mats: { crateMat: THREE.Material; accentTopMat: THREE.Material },
+  ): void {
+    const { crateMat, accentTopMat } = mats;
+
+    // --- vault lane, straight ahead of the spawn. Wide and deep enough that the landing
+    // scan always finds room on top no matter how the approach drifts, and that the deck is a
+    // real runway (6 m ~ 1 s at a sprint) rather than a lip you are off again before you can
+    // feel — vaulting is supposed to end in speed, not in a second drop.
+    b.box(-10.25, 0, 0, 6, 1.0, 8, crateMat);
+    // A second, taller ledge further down the same lane: a pull-up at the end of a sprint.
+    b.box(-4, 0, 0, 2.5, 1.6, 8, crateMat);
+
+    // --- pull-up lane, 90 deg to the left of the spawn heading. Exactly maxHeight tall.
+    b.box(-20, 0, -6, 5, 2.2, 3, crateMat);
+
+    // Lane markers (visual only) so the screenshots read as "these are the two lanes".
+    for (const [x, z, sx, sz] of [
+      [-16, 0, 0.12, 6],
+      [-20, -2.5, 6, 0.12],
+    ] as const) {
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(sx, 0.02, sz), accentTopMat);
+      stripe.position.set(x, 0.01, z);
+      stripe.receiveShadow = true;
+      b.add(stripe);
+    }
   }
 
   private clearContent(): void {
@@ -430,6 +483,30 @@ export class MovementPlayground implements LabScene {
     m.add(this.movement, 'stepSmoothRate', 1, 40, 0.5).name('stepSmooth (1/s)');
     m.add(this.movement, 'sprintMinForward', 0, 1, 0.05);
 
+    const j = gui.addFolder('Jump feel');
+    j.add(this.movement, 'fallGravityMult', 1, 3, 0.05);
+    j.add(this.movement, 'jumpCutFactor', 0, 1, 0.05);
+    j.add(this.movement, 'landDipMax', 0, 0.4, 0.005);
+    j.add(this.movement, 'landDipRecovery', 1, 20, 0.5).name('landDipRec (1/s)');
+
+    const v = gui.addFolder('View bob');
+    v.add(this.bobTunables, 'enabled');
+    v.add(this.bobTunables, 'vertAmp', 0, 0.15, 0.001);
+    v.add(this.bobTunables, 'latAmp', 0, 0.15, 0.001);
+    v.add(this.bobTunables, 'rollDeg', 0, 3, 0.05);
+    v.add(this.bobTunables, 'strideFreq', 0.5, 4, 0.05).name('strideFreq (Hz @ sprint)');
+    v.add(this.bobTunables, 'crouchScale', 0, 1, 0.05);
+    v.add(this.bobTunables, 'blendRate', 1, 20, 0.5).name('blend (1/s)');
+
+    const mt = gui.addFolder('Mantle');
+    mt.add(this.mantleTunables, 'enabled');
+    mt.add(this.mantleTunables, 'reach', 0.2, 1.5, 0.05);
+    mt.add(this.mantleTunables, 'minHeight', 0.1, 1.5, 0.05);
+    mt.add(this.mantleTunables, 'maxHeight', 0.5, 3.5, 0.05);
+    mt.add(this.mantleTunables, 'lowVaultMaxHeight', 0.3, 2.5, 0.05);
+    mt.add(this.mantleTunables, 'vaultTime', 0.05, 1, 0.01);
+    mt.add(this.mantleTunables, 'pullupTime', 0.1, 1.5, 0.01);
+
     const c = gui.addFolder('Camera');
     c.add(this.cameraTunables, 'fov', 60, 120, 1);
     c.add(this.cameraTunables, 'sprintFovBonus', 0, 25, 0.5);
@@ -445,7 +522,7 @@ export class MovementPlayground implements LabScene {
         variant: () => this.setVariant((this.variantIndex + 1) % VARIANTS.length),
       },
       'variant',
-    ).name('Next variant (1-3)');
+    ).name('Next variant (1-4)');
   }
 
   // ---- lifecycle -----------------------------------------------------------
@@ -470,11 +547,20 @@ export class MovementPlayground implements LabScene {
   private publishHud(): void {
     const s = this.player.state;
     const p = this.player.position;
-    const mode = s.grounded ? (s.stance === 'crouch' ? 'crouch' : s.sprinting ? 'sprint' : 'ground') : 'air';
+    const mode = s.mantling
+      ? 'mantle'
+      : s.grounded
+        ? s.stance === 'crouch'
+          ? 'crouch'
+          : s.sprinting
+            ? 'sprint'
+            : 'ground'
+        : 'air';
     this.ctx.hud.setDebug([
       ['speed', `${s.speed.toFixed(2)} m/s`],
       ['state', `${mode}${s.stance === 'crouch' && !s.grounded ? ' (crouch)' : ''}`],
       ['pos', `${p.x.toFixed(1)} ${p.y.toFixed(2)} ${p.z.toFixed(1)}`],
+      ['steps', `${this.player.stepCount}`],
     ]);
   }
 
@@ -492,11 +578,18 @@ export class MovementPlayground implements LabScene {
       grounded: s.grounded,
       stance: s.stance,
       sprinting: s.sprinting,
+      mantling: s.mantling,
       yawDeg: (this.player.yaw * 180) / Math.PI,
       pitchDeg: (this.player.pitch * 180) / Math.PI,
       sensitivity: this.cameraTunables.sensitivity,
       respawnCount: this.player.respawnCount,
       variant: VARIANTS[this.variantIndex],
+      // Render-layer readouts: what the *camera* is actually doing, which is where head bob
+      // and the landing dip live. Read-only — tooling still drives the game through input.
+      camY: this.ctx.camera.position.y,
+      camRoll: (this.ctx.camera.rotation.z * 180) / Math.PI,
+      steps: this.player.stepCount,
+      landDip: this.player.landDipOffset,
     };
   }
 

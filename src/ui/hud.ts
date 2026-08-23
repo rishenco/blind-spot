@@ -69,7 +69,8 @@ const DEFAULT_HELP: HelpRow[] = [
   { keys: 'W A S D', action: 'move' },
   { keys: 'Shift', action: 'sprint (forward)' },
   { keys: 'C / Ctrl', action: 'crouch' },
-  { keys: 'Space', action: 'jump' },
+  { keys: 'Space', action: 'jump (tap = hop, hold = full)' },
+  { keys: 'Space at a ledge', action: 'climb — vault or pull-up' },
   { keys: 'R', action: 'respawn' },
   { keys: 'Mouse', action: 'look (click to capture, or drag)' },
   { keys: '1 - 9', action: 'scene variant' },
@@ -78,7 +79,7 @@ const DEFAULT_HELP: HelpRow[] = [
 ];
 
 export const DEFAULT_HINT =
-  'WASD move · Shift sprint · C/Ctrl crouch · Space jump · R respawn · H help · ` scenes';
+  'WASD move · Shift sprint · C/Ctrl crouch · Space jump/climb · R respawn · H help · ` scenes';
 
 export class Hud {
   private readonly root: HTMLDivElement;

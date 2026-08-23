@@ -86,7 +86,7 @@ export class StaticWorld {
 }
 
 /** True when the circle of `radius` at (x, z) overlaps the box's XZ footprint. */
-function circleOverlapsFootprint(x: number, z: number, radius: number, b: Aabb): boolean {
+export function circleOverlapsFootprint(x: number, z: number, radius: number, b: Aabb): boolean {
   const cx = x < b.minX ? b.minX : x > b.maxX ? b.maxX : x;
   const cz = z < b.minZ ? b.minZ : z > b.maxZ ? b.maxZ : z;
   const dx = x - cx;
@@ -161,6 +161,108 @@ export function canOccupy(
   const head = feetY + height;
   for (const b of candidates) {
     if (b.maxY <= feetY + EPS || b.minY >= head - EPS) continue;
+    if (circleOverlapsFootprint(x, z, radius, b)) return false;
+  }
+  return true;
+}
+
+/**
+ * Highest box top at or below `ceilY` under the body circle, or -Infinity when the circle
+ * hangs over nothing. `floorY` discards surfaces further down than we care about.
+ */
+export function highestTopUnder(
+  candidates: readonly Aabb[],
+  x: number,
+  z: number,
+  radius: number,
+  floorY: number,
+  ceilY: number,
+): number {
+  let best = -Infinity;
+  for (const b of candidates) {
+    if (b.maxY > ceilY + EPS) continue;
+    if (b.maxY < floorY - EPS) continue;
+    if (b.maxY <= best) continue;
+    if (!circleOverlapsFootprint(x, z, radius, b)) continue;
+    best = b.maxY;
+  }
+  return best;
+}
+
+/** Working state for one horizontal collide-and-slide pass. */
+interface SlidePass {
+  x: number;
+  z: number;
+  vx: number;
+  vz: number;
+  hitWall: boolean;
+}
+
+const slidePlain: SlidePass = { x: 0, z: 0, vx: 0, vz: 0, hitWall: false };
+const slideStepped: SlidePass = { x: 0, z: 0, vx: 0, vz: 0, hitWall: false };
+
+/**
+ * Metres of extra reach the lifted slide must buy before the step-up is committed. Far below
+ * anything a player can feel (0.01 mm), far above double-precision noise: a body grinding along
+ * a riser at a shallow angle only recovers ~1 mm of blocked motion per tick, and the step has to
+ * fire on that. A wall the lift does not clear blocks both passes identically, gains exactly 0,
+ * and is still a wall.
+ */
+const STEP_MIN_GAIN = 1e-5;
+
+/**
+ * Moves (x, z) by (dx, dz) at a fixed feet height, sliding along whatever blocks it.
+ * Boxes whose top is at or below `feetY` are floor, not wall, and never block.
+ */
+function slideXZ(
+  candidates: readonly Aabb[],
+  s: SlidePass,
+  feetY: number,
+  height: number,
+  radius: number,
+  dx: number,
+  dz: number,
+): void {
+  s.x += dx;
+  s.z += dz;
+  for (let iter = 0; iter < 4; iter++) {
+    let touched = false;
+    for (const b of candidates) {
+      if (b.maxY <= feetY + EPS || b.minY >= feetY + height - EPS) continue;
+      const push = circlePush(s.x, s.z, radius, b);
+      if (push === null) continue;
+      s.x += push.nx * push.depth;
+      s.z += push.nz * push.depth;
+      const vn = s.vx * push.nx + s.vz * push.nz;
+      if (vn < 0) {
+        s.vx -= push.nx * vn;
+        s.vz -= push.nz * vn;
+      }
+      s.hitWall = true;
+      touched = true;
+    }
+    if (!touched) break;
+  }
+}
+
+/**
+ * True when raising the body from `feetY` to `feetY + lift` would not drive its head into
+ * anything. Only the newly swept head slab is tested — what is already around the body at
+ * its current height is the horizontal pass's problem, not the lift's.
+ */
+function hasLiftHeadroom(
+  candidates: readonly Aabb[],
+  x: number,
+  z: number,
+  radius: number,
+  feetY: number,
+  height: number,
+  lift: number,
+): boolean {
+  const oldHead = feetY + height;
+  const newHead = oldHead + lift;
+  for (const b of candidates) {
+    if (b.maxY <= oldHead + EPS || b.minY >= newHead - EPS) continue;
     if (circleOverlapsFootprint(x, z, radius, b)) return false;
   }
   return true;
@@ -263,45 +365,87 @@ export function moveBody(
     }
   }
 
-  // ---- horizontal (collide-and-slide with step-up) -------------------------
-  position.x += velocity.x * dt;
-  position.z += velocity.z * dt;
+  // ---- horizontal (collide-and-slide, retried as a swept step) --------------
+  // Two candidate resolutions of the same motion:
+  //   plain   — slide at the current feet height;
+  //   stepped — lift by stepHeight, slide there, then drop back onto whatever is below.
+  // The stepped one wins only when it actually gets further along the intended motion, so a
+  // real wall still stops the body while a stair riser, a kerb or a 0.1 m ramp tread does not.
+  // Because the lifted pass ignores everything whose top is under the raised feet, a cylinder
+  // straddling several treads at once (0.7 m wide body, 0.5 m treads) climbs without stalling.
+  const startX = position.x;
+  const startZ = position.z;
+  const feetY = position.y;
+  const dx = velocity.x * dt;
+  const dz = velocity.z * dt;
 
-  const allowStep = result.grounded || wasGrounded;
-  for (let iter = 0; iter < 4; iter++) {
-    let touched = false;
-    for (const b of candidates) {
-      const feet = position.y;
-      if (b.maxY <= feet + EPS || b.minY >= feet + height - EPS) continue;
-      const push = circlePush(position.x, position.z, radius, b);
-      if (push === null) continue;
+  const plain = slidePlain;
+  plain.x = startX;
+  plain.z = startZ;
+  plain.vx = velocity.x;
+  plain.vz = velocity.z;
+  plain.hitWall = false;
+  slideXZ(candidates, plain, feetY, height, radius, dx, dz);
 
-      const stepTop = b.maxY;
-      if (
-        allowStep &&
-        stepTop > feet &&
-        stepTop <= feet + stepHeight + EPS &&
-        canOccupy(candidates, position.x, stepTop, position.z, radius, height)
-      ) {
-        result.stepUp += stepTop - feet;
-        position.y = stepTop;
-        result.grounded = true;
-        if (velocity.y < 0) velocity.y = 0;
-        touched = true;
-        continue;
+  let stepped = false;
+  const moveLen = Math.hypot(dx, dz);
+  const allowStep = (result.grounded || wasGrounded) && stepHeight > 0 && moveLen > EPS;
+
+  if (allowStep && plain.hitWall) {
+    // How far each pass falls short of where the tick wanted to end up. Distance-to-target,
+    // not progress along the motion: a body already sliding along a riser has had the blocked
+    // component of its velocity zeroed, so the tick's motion is nearly all tangential and a
+    // projection onto it would dilute the (tiny, but real) blocked component below any usable
+    // threshold — which is exactly how a sprint up a stair flight used to pin at a shallow
+    // approach angle. The shortfall vector keeps that component at full size.
+    const targetX = startX + dx;
+    const targetZ = startZ + dz;
+    const plainShort = Math.hypot(targetX - plain.x, targetZ - plain.z);
+    if (
+      plainShort > STEP_MIN_GAIN &&
+      hasLiftHeadroom(candidates, startX, startZ, radius, feetY, height, stepHeight)
+    ) {
+      const liftY = feetY + stepHeight;
+      const s = slideStepped;
+      s.x = startX;
+      s.z = startZ;
+      s.vx = velocity.x;
+      s.vz = velocity.z;
+      s.hitWall = false;
+      slideXZ(candidates, s, liftY, height, radius, dx, dz);
+
+      const steppedShort = Math.hypot(targetX - s.x, targetZ - s.z);
+      if (steppedShort < plainShort - STEP_MIN_GAIN) {
+        // Drop back down. Everything still overlapping the body up there tops out at or below
+        // `liftY` (the lifted slide guaranteed it), so landing on the highest of them is by
+        // construction a legal pose — no second clearance test needed.
+        const top = highestTopUnder(candidates, s.x, s.z, radius, feetY, liftY);
+        position.x = s.x;
+        position.z = s.z;
+        velocity.x = s.vx;
+        velocity.z = s.vz;
+        result.hitWall = s.hitWall;
+        if (top > -Infinity) {
+          if (top > feetY) result.stepUp += top - feetY;
+          position.y = top;
+          result.grounded = true;
+          if (velocity.y < 0) velocity.y = 0;
+        } else {
+          // Stepped over something with nothing behind it (a rail at a platform edge):
+          // keep the height, let gravity and the ground snap sort out the landing.
+          position.y = feetY;
+        }
+        stepped = true;
       }
-
-      position.x += push.nx * push.depth;
-      position.z += push.nz * push.depth;
-      const vn = velocity.x * push.nx + velocity.z * push.nz;
-      if (vn < 0) {
-        velocity.x -= push.nx * vn;
-        velocity.z -= push.nz * vn;
-      }
-      result.hitWall = true;
-      touched = true;
     }
-    if (!touched) break;
+  }
+
+  if (!stepped) {
+    position.x = plain.x;
+    position.z = plain.z;
+    velocity.x = plain.vx;
+    velocity.z = plain.vz;
+    result.hitWall = plain.hitWall;
   }
 
   // ---- ground snap ---------------------------------------------------------

@@ -124,6 +124,51 @@ async function poll(pred, budgetMs = 4000) {
 }
 
 /**
+ * Samples the read-only state once per rendered frame, from inside the page.
+ *
+ * View effects (head bob, the landing dip) live on the render camera, and a driver-side
+ * poll adds a CDP round-trip per sample. Sampling in a rAF loop instead pins the sample
+ * rate to the actual frame rate, which is the best any observer can do.
+ */
+function sampleFrames(ms) {
+  return page.evaluate(
+    (duration) =>
+      new Promise((done) => {
+        const out = [];
+        const t0 = performance.now();
+        const tick = () => {
+          const s = window.__blindspot.getState();
+          const t = performance.now() - t0;
+          out.push({
+            t,
+            camY: s.camY,
+            camRoll: s.camRoll,
+            steps: s.steps,
+            y: s.y,
+            dip: s.landDip,
+            grounded: s.grounded,
+          });
+          if (t < duration) requestAnimationFrame(tick);
+          else done(out);
+        };
+        requestAnimationFrame(tick);
+      }),
+    ms,
+  );
+}
+
+const spread = (values) => Math.max(...values) - Math.min(...values);
+
+/** Switches scene variant by its number key and waits for the rebuild to land. */
+async function setVariant(key, expected) {
+  await page.keyboard.press(key);
+  await poll((s) => s.variant === expected, 4000);
+  await wait(200);
+  const s = await state();
+  check(`variant "${expected}" active`, s.variant === expected, `variant=${s.variant}`);
+}
+
+/**
  * Presses R and waits for the reset to actually land. Headless software rendering runs at
  * 5-20 fps, so a fixed sleep is not enough: poll the respawn counter instead.
  */
@@ -215,12 +260,15 @@ await respawn();
 await page.keyboard.down('Shift');
 await page.keyboard.down('w');
 await poll((s) => Number(s.x) > -17, 3000);
-await page.keyboard.press('Space');
+// Held, not tapped: a tap is cut short on release (see the jump-cut scenario) and only
+// clears ~0.23 m, which is not the jump this shot is meant to show.
+await page.keyboard.down('Space');
 // The arc is only a handful of headless frames, so poll for the airborne sample instead of
 // sleeping and hoping — and shoot immediately, while the player is still up there.
-const jumped = await poll((s) => s.grounded === false && Number(s.y) > 0.2, 2000);
-check('airborne after jump', jumped.grounded === false && Number(jumped.y) > 0.2, `y=${Number(jumped.y).toFixed(2)}`);
+const jumped = await poll((s) => s.grounded === false && Number(s.y) > 0.4, 2000);
+check('airborne after jump', jumped.grounded === false && Number(jumped.y) > 0.4, `y=${Number(jumped.y).toFixed(2)}`);
 await shot('05-jump.png');
+await page.keyboard.up('Space');
 await page.keyboard.up('w');
 await page.keyboard.up('Shift');
 await wait(600);
@@ -244,8 +292,9 @@ await respawn();
 await dragLook(90, sens);
 await wait(150);
 await page.keyboard.down('w');
-await wait(2600);
-const blocked = await state();
+// Poll for "arrived and stalled" rather than sleeping: the assertion is that the crate stops a
+// body still holding W, not that it does so within some wall-clock window.
+const blocked = await poll((s) => Number(s.z) > 3 && Number(s.speed) < 0.6, 8000);
 check(
   'stopped by the crate',
   Number(blocked.z) < 5.0 && Number(blocked.speed) < 0.6,
@@ -258,8 +307,9 @@ await wait(300);
 // --- 08 stairs onto the platform ------------------------------------------
 await respawn();
 await page.keyboard.down('w');
-await wait(5200);
-const onPlatform = await state();
+// Polled, not slept: the sim clamps its per-frame catch-up, so on a slow frame sim time falls
+// behind wall time and a fixed sleep lands the walk one riser short of the deck.
+const onPlatform = await poll((s) => Number(s.y) > 2.9 && s.grounded === true, 12000);
 check(
   'reached the 3 m platform via the stairs',
   Number(onPlatform.y) > 2.9 && onPlatform.grounded === true,
@@ -268,6 +318,224 @@ check(
 await shot('08-platform.png');
 await page.keyboard.up('w');
 await wait(200);
+
+// --- 09-11 stairs taken at an angle ----------------------------------------
+/**
+ * Sprints the stair flight from its foot at `deg` off the perpendicular.
+ *
+ * The approach is deliberately two-phase — walk to the foot, stop, *then* turn and sprint —
+ * so every angle starts from the same place and the timing measures the climb rather than
+ * the run-up. The flight is 16 m wide precisely so a 60 deg line stays on the treads.
+ */
+async function stairRun(label, deg, strafeToZ, shotName) {
+  await respawn();
+  await page.keyboard.down('w');
+  await poll((s) => Number(s.x) > -12.4, 8000);
+  await page.keyboard.up('w');
+  await wait(350);
+  if (strafeToZ !== null) {
+    // Strafe left (-Z) along the bottom riser to the start of the diagonal line.
+    await page.keyboard.down('a');
+    await poll((s) => Number(s.z) < strafeToZ, 8000);
+    await page.keyboard.up('a');
+    await wait(350);
+  }
+  if (deg !== 0) {
+    await dragLook(deg, sens);
+    await wait(150);
+  }
+  const base = await state();
+
+  const t0 = Date.now();
+  await page.keyboard.down('Shift');
+  await page.keyboard.down('w');
+  let onTreads = 0;
+  let speedSum = 0;
+  let top = base;
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    top = await state();
+    const y = Number(top.y);
+    if (y > 0.2 && y < 2.9) {
+      onTreads += 1;
+      speedSum += Number(top.speed);
+    }
+    if (y > 2.9) break;
+  }
+  const elapsed = (Date.now() - t0) / 1000;
+  await shot(shotName);
+  await page.keyboard.up('w');
+  await page.keyboard.up('Shift');
+  await wait(300);
+
+  const avgSpeed = onTreads > 0 ? speedSum / onTreads : 0;
+  // The wall-clock bound is only a coarse "it never pinned" guard — software GL runs anywhere
+  // from 5 to 20 fps, and the sim clamps its catch-up, so wall time is not sim time. The real
+  // quality gate is the sampled average speed below: that one is a sim quantity.
+  check(
+    `${label}: climbed to the 3 m level`,
+    Number(top.y) > 2.9 && elapsed < 9,
+    `y=${Number(top.y).toFixed(2)} in ${elapsed.toFixed(2)} s, from z=${Number(base.z).toFixed(1)} to z=${Number(top.z).toFixed(1)}`,
+  );
+  check(
+    `${label}: stairs did not eat the sprint`,
+    avgSpeed > 3,
+    `${avgSpeed.toFixed(2)} m/s average over ${onTreads} tread samples`,
+  );
+}
+
+await stairRun('stairs head-on', 0, null, '09-stairs-0.png');
+await stairRun('stairs at 30 deg', 30, null, '10-stairs-30.png');
+await stairRun('stairs at 60 deg', 60, -6, '11-stairs-60.png');
+
+// --- 12 vault: a 1 m ledge at a sprint --------------------------------------
+await setVariant('4', 'Mantle Lane');
+await respawn();
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+// The 1.0 m ledge's face is at x = -13.25 and the probe reaches 0.65 m past the body, so
+// anywhere from about -14.2 inwards is a legal climb from the ground.
+await poll((s) => Number(s.x) > -14.15, 6000);
+await page.keyboard.down('Space');
+const vaulting = await poll((s) => s.mantling === true, 2500);
+check('vault started at the 1 m ledge', vaulting.mantling === true, `x=${Number(vaulting.x).toFixed(2)}`);
+await shot('12-vault.png');
+// `grounded` is part of the predicate on purpose: at 6-12 fps a sample can otherwise land in
+// the airborne instant right after the vault exits, or past the far edge of the deck.
+const vaulted = await poll(
+  (s) => s.mantling === false && s.grounded === true && Number(s.y) > 0.9,
+  3000,
+);
+await page.keyboard.up('Space');
+check(
+  'vault finished standing on the ledge',
+  Math.abs(Number(vaulted.y) - 1) < 0.05 && vaulted.grounded === true,
+  `y=${Number(vaulted.y).toFixed(2)} grounded=${vaulted.grounded}`,
+);
+check('vault kept the momentum', Number(vaulted.speed) > 3, `${Number(vaulted.speed).toFixed(2)} m/s on exit`);
+await page.keyboard.up('w');
+await page.keyboard.up('Shift');
+await wait(400);
+
+// --- 13 pull-up: the tallest legal ledge ------------------------------------
+await respawn();
+await dragLook(-90, sens); // face -Z, down the pull-up lane
+await wait(200);
+await page.keyboard.down('w');
+const atBlock = await poll((s) => Number(s.speed) < 0.5 && Number(s.z) < -3, 8000);
+check('walked into the 2.2 m block', Number(atBlock.z) < -3.5, `z=${Number(atBlock.z).toFixed(2)}`);
+await page.keyboard.down('Space');
+const pulling = await poll((s) => s.mantling === true, 2500);
+check('pull-up started', pulling.mantling === true, `y=${Number(pulling.y).toFixed(2)}`);
+await shot('13-pullup.png');
+const pulled = await poll(
+  (s) => s.mantling === false && s.grounded === true && Number(s.y) > 2,
+  3000,
+);
+check(
+  'pull-up finished on top of the 2.2 m block',
+  Math.abs(Number(pulled.y) - 2.2) < 0.05 && pulled.grounded === true,
+  `y=${Number(pulled.y).toFixed(2)} grounded=${pulled.grounded}`,
+);
+await page.keyboard.up('Space');
+await page.keyboard.up('w');
+await wait(400);
+
+// --- 14 jump cut: tap versus hold -------------------------------------------
+await setVariant('2', 'Bare Room');
+
+/** Jumps once from a standstill and returns the highest sampled feet height. */
+async function jumpApex(held) {
+  await respawn();
+  await wait(150);
+  if (held) await page.keyboard.down('Space');
+  else await page.keyboard.press('Space');
+  let apex = 0;
+  let sawAir = false;
+  const deadline = Date.now() + 1600;
+  while (Date.now() < deadline) {
+    const s = await state();
+    apex = Math.max(apex, Number(s.y));
+    if (s.grounded === false) sawAir = true;
+    else if (sawAir) break;
+  }
+  if (held) await page.keyboard.up('Space');
+  await wait(250);
+  return apex;
+}
+
+const taps = [];
+for (let i = 0; i < 3; i++) taps.push(await jumpApex(false));
+const holds = [];
+for (let i = 0; i < 2; i++) holds.push(await jumpApex(true));
+const tapApex = Math.min(...taps);
+const holdApex = Math.max(...holds);
+check(
+  'held jump clears ~0.9 m',
+  holdApex > 0.75 && holdApex < 1.1,
+  `apex ${holdApex.toFixed(2)} m (samples ${holds.map((v) => v.toFixed(2)).join(', ')})`,
+);
+check(
+  'released jump is cut short',
+  tapApex < 0.6 * holdApex,
+  `tap ${tapApex.toFixed(2)} m vs hold ${holdApex.toFixed(2)} m (taps ${taps.map((v) => v.toFixed(2)).join(', ')})`,
+);
+
+// --- 15 head bob -------------------------------------------------------------
+await respawn();
+await wait(400);
+const standing = await sampleFrames(700);
+check(
+  'camera is still when standing still',
+  spread(standing.map((s) => s.camY)) < 0.005,
+  `${(spread(standing.map((s) => s.camY)) * 1000).toFixed(2)} mm over ${standing.length} frames`,
+);
+
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+await wait(400); // let the stride envelope reach full gain before measuring
+const running = await sampleFrames(2000);
+await shot('14-bob.png');
+await page.keyboard.up('w');
+await page.keyboard.up('Shift');
+await wait(300);
+
+const bobSpread = spread(running.map((s) => s.camY));
+const rollSpread = spread(running.map((s) => s.camRoll));
+const stepDelta = running[running.length - 1].steps - running[0].steps;
+const runSeconds = (running[running.length - 1].t - running[0].t) / 1000;
+check(
+  'sprint bobs the camera',
+  bobSpread > 0.02 && bobSpread < 0.09,
+  `${(bobSpread * 1000).toFixed(1)} mm peak-to-peak over ${running.length} frames (2 x vertAmp = 70 mm)`,
+);
+check('sprint rolls the camera', rollSpread > 0.05, `${rollSpread.toFixed(3)} deg peak-to-peak`);
+check(
+  'footfalls land ~2 per stride cycle',
+  stepDelta / runSeconds > 2.4 && stepDelta / runSeconds < 5.2,
+  `${stepDelta} steps in ${runSeconds.toFixed(2)} s = ${(stepDelta / runSeconds).toFixed(2)}/s (2 x strideFreq = 3.8/s)`,
+);
+
+// --- 16 landing dip ----------------------------------------------------------
+await setVariant('1', 'Full Playground');
+await respawn();
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+await poll((s) => Number(s.y) > 2.9, 10000);
+// Straight on across the deck and off the far lip: a 3 m drop, ~9.8 m/s at impact.
+await poll((s) => s.grounded === false && Number(s.y) < 2.95, 6000);
+const falling = await sampleFrames(1600);
+await shot('15-land.png');
+await page.keyboard.up('w');
+await page.keyboard.up('Shift');
+await wait(300);
+
+const dipPeak = Math.max(...falling.map((s) => s.dip));
+const dipTail = falling[falling.length - 1].dip;
+const landed = falling.some((s) => s.grounded === true);
+check('the 3 m drop landed', landed, `${falling.length} frames sampled`);
+check('landing dipped the camera', dipPeak > 0.03, `${(dipPeak * 1000).toFixed(1)} mm dip (max is 120 mm)`);
+check('the dip recovers', dipTail < 0.02, `${(dipTail * 1000).toFixed(2)} mm left after ${(falling[falling.length - 1].t / 1000).toFixed(2)} s`);
 
 // --- report ----------------------------------------------------------------
 check(
