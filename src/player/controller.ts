@@ -13,7 +13,7 @@
  */
 
 import * as THREE from 'three';
-import type { Input } from '../core/input';
+import type { PlayerInputSource } from '../core/inputSource';
 import {
   canOccupy,
   canOccupyWorld,
@@ -661,7 +661,7 @@ export class PlayerController {
   }
 
   /** One fixed simulation tick. */
-  update(dt: number, input: Input): void {
+  update(dt: number, input: PlayerInputSource): void {
     this.prevPosition.copy(this.position);
     this.prevEyeHeight = this.eyeHeight;
     this.prevStepOffset = this.stepOffset;
@@ -688,7 +688,7 @@ export class PlayerController {
   }
 
   /** The ordinary (non-mantling) movement tick. */
-  private simulate(dt: number, input: Input): void {
+  private simulate(dt: number, input: PlayerInputSource): void {
     const m = this.movement;
     const axes = input.moveAxes();
     const hasInput = axes.x !== 0 || axes.y !== 0;
@@ -768,7 +768,7 @@ export class PlayerController {
     if (dip > this.landDipTarget) this.landDipTarget = dip;
   }
 
-  private updateLook(input: Input): void {
+  private updateLook(input: PlayerInputSource): void {
     const { dx, dy } = input.consumeLook();
     if (dx === 0 && dy === 0) return;
     const sens = this.camera.sensitivity * DEG2RAD;
@@ -782,7 +782,7 @@ export class PlayerController {
     else if (this.yaw < -Math.PI) this.yaw += TWO_PI;
   }
 
-  private updateStance(input: Input, forwardAxis: number): void {
+  private updateStance(input: PlayerInputSource, forwardAxis: number): void {
     const m = this.movement;
     const wantsCrouch = input.isDown('crouch');
     if (wantsCrouch && !this.crouched) {
@@ -833,7 +833,7 @@ export class PlayerController {
     this.velocity.z += this.wishDir.z * delta;
   }
 
-  private updateJump(input: Input, dt: number): void {
+  private updateJump(input: PlayerInputSource, dt: number): void {
     const m = this.movement;
     if (input.wasPressed('jump')) {
       this.bufferTimer = m.jumpBuffer;
@@ -869,7 +869,7 @@ export class PlayerController {
    * verb: pressing it starts a climb from the ground, and holding it while airborne keeps
    * looking for a ledge so a jump that comes up short still catches the lip.
    */
-  private tryMantle(input: Input, wishSpeed: number): boolean {
+  private tryMantle(input: PlayerInputSource, wishSpeed: number): boolean {
     if (!this.mantle.enabled) return false;
     const pressed = input.wasPressed('jump');
     const searching = !this.grounded && input.isDown('jump') && this.mantleProbeTimer <= 0;

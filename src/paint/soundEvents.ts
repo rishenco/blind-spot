@@ -39,7 +39,8 @@ export type SoundClass =
 export type WaveGroup = 'step' | 'ping' | 'beam';
 
 /**
- * How fast each group's wavefront expands, m/s. Runtime-tunable from the dev panel.
+ * How fast each group's wavefront expands, m/s. The frozen default; the dev panel tunes a
+ * simulation's own copy (`SoundTunables`), never this.
  *
  * Not the speed of sound: 343 m/s crosses a 30 m room in 90 ms, which at any frame rate is
  * an instant pop — the thing the wave engine exists to abolish. These are *readable* speeds,
@@ -48,11 +49,11 @@ export type WaveGroup = 'step' | 'ping' | 'beam';
  * The beam is the faster of the two because a directed question should feel like a thrown
  * torch, not a released balloon.
  */
-export const WAVE_SPEEDS: Record<WaveGroup, number> = {
+export const WAVE_SPEEDS: Readonly<Record<WaveGroup, number>> = Object.freeze({
   step: 25,
   ping: 25,
   beam: 45,
-};
+});
 
 export interface SoundClassProfile {
   /** Paint radius at intensity 1, metres (§3.3). Tunable at runtime. */
@@ -81,15 +82,43 @@ export interface SoundClassProfile {
  * than in reach, and the E-ping's price (§3.3 right column: dogs hear it at both ends of the
  * beam) is unchanged. The docs get updated when the design settles; until then this comment is
  * the record that the difference is a choice and not a drift.
+ *
+ * **Frozen, and both tables are.** They are the *defaults* every simulation copies from, not
+ * live state: a dev-panel slider bound straight into this object used to tune every `SoundBus`
+ * in the process at once and to make a seeded run irreproducible after anyone had touched the
+ * panel. `defaultSoundTunables()` below hands each run its own copy, and freezing these means
+ * the old mistake throws instead of quietly coming back (module code is strict mode).
  */
-export const SOUND_CLASSES: Record<SoundClass, SoundClassProfile> = {
-  'crouch-step': { paintRadius: 1.5, hearingRadius: 2, coneAngleDeg: 360, intensity: 0.7, wave: 'step' },
-  'walk-step': { paintRadius: 4, hearingRadius: 11, coneAngleDeg: 360, intensity: 0.9, wave: 'step' },
-  'sprint-step': { paintRadius: 7, hearingRadius: 24, coneAngleDeg: 360, intensity: 1.0, wave: 'step' },
-  landing: { paintRadius: 8, hearingRadius: 28, coneAngleDeg: 360, intensity: 1.0, wave: 'step' },
-  'q-ping': { paintRadius: 12, hearingRadius: 18, coneAngleDeg: 360, intensity: 1.05, wave: 'ping' },
-  'e-ping': { paintRadius: 22, hearingRadius: 30, coneAngleDeg: 110, intensity: 1.15, wave: 'beam' },
-};
+export const SOUND_CLASSES: Readonly<Record<SoundClass, Readonly<SoundClassProfile>>> =
+  Object.freeze({
+    'crouch-step': Object.freeze({ paintRadius: 1.5, hearingRadius: 2, coneAngleDeg: 360, intensity: 0.7, wave: 'step' as const }),
+    'walk-step': Object.freeze({ paintRadius: 4, hearingRadius: 11, coneAngleDeg: 360, intensity: 0.9, wave: 'step' as const }),
+    'sprint-step': Object.freeze({ paintRadius: 7, hearingRadius: 24, coneAngleDeg: 360, intensity: 1.0, wave: 'step' as const }),
+    landing: Object.freeze({ paintRadius: 8, hearingRadius: 28, coneAngleDeg: 360, intensity: 1.0, wave: 'step' as const }),
+    'q-ping': Object.freeze({ paintRadius: 12, hearingRadius: 18, coneAngleDeg: 360, intensity: 1.05, wave: 'ping' as const }),
+    'e-ping': Object.freeze({ paintRadius: 22, hearingRadius: 30, coneAngleDeg: 110, intensity: 1.15, wave: 'beam' as const }),
+  });
+
+/**
+ * One simulation's own copy of the two tables above.
+ *
+ * The dev panel writes *here*, which is what makes two `GameSim`s in one process independent and
+ * a seeded run reproducible regardless of what anybody dragged. `SoundBus` reads it on every
+ * emit, so a slider takes effect on the next sound and never retroactively.
+ */
+export interface SoundTunables {
+  readonly classes: Record<SoundClass, SoundClassProfile>;
+  readonly waveSpeeds: Record<WaveGroup, number>;
+}
+
+/** A fresh, independent, mutable copy of the frozen defaults. */
+export function defaultSoundTunables(): SoundTunables {
+  const classes = {} as Record<SoundClass, SoundClassProfile>;
+  for (const key of Object.keys(SOUND_CLASSES) as SoundClass[]) {
+    classes[key] = { ...SOUND_CLASSES[key] };
+  }
+  return { classes, waveSpeeds: { ...WAVE_SPEEDS } };
+}
 
 /** Softest landing that rings out at all, m/s — roughly a 0.8 m drop at the default gravity. */
 export const LANDING_MIN_IMPACT = 5;
@@ -146,10 +175,20 @@ export interface SoundEmitSpec {
 export type SoundListener = (event: SoundEvent) => void;
 
 export class SoundBus {
+  /**
+   * This bus's sound table. Owned by whoever constructed it (the simulation), never shared with
+   * another bus unless a caller deliberately hands the same object to both.
+   */
+  readonly tunables: SoundTunables;
+
   private readonly listeners = new Set<SoundListener>();
   private seq = 0;
   private now = 0;
   private last: SoundEvent | null = null;
+
+  constructor(tunables: SoundTunables = defaultSoundTunables()) {
+    this.tunables = tunables;
+  }
 
   /** Scene clock, in seconds. Set once per tick before anything emits. */
   setTime(seconds: number): void {
@@ -178,7 +217,7 @@ export class SoundBus {
   }
 
   emit(spec: SoundEmitSpec): SoundEvent {
-    const profile = SOUND_CLASSES[spec.class];
+    const profile = this.tunables.classes[spec.class];
     let dx = spec.dirX ?? 0;
     let dy = spec.dirY ?? 0;
     let dz = spec.dirZ ?? 0;
@@ -206,7 +245,7 @@ export class SoundBus {
       dirY: dy,
       dirZ: dz,
       coneAngleDeg: len > 1e-6 ? cone : 360,
-      waveSpeed: Math.max(0.5, spec.waveSpeed ?? WAVE_SPEEDS[profile.wave]),
+      waveSpeed: Math.max(0.5, spec.waveSpeed ?? this.tunables.waveSpeeds[profile.wave]),
       time: this.now,
       seq: this.seq++,
     };
@@ -215,7 +254,13 @@ export class SoundBus {
     return event;
   }
 
-  /** Landing paint radius from touchdown speed — the 8-14 m band of §3.3. */
+  /**
+   * Landing paint radius from touchdown speed — the 8-14 m band of §3.3.
+   *
+   * Static, and reads the frozen default rather than a bus's own table, because the landing band
+   * is not on the dev panel: nothing can tune it, so nothing can make two buses disagree. Give it
+   * a slider one day and it moves onto the instance with the rest of them.
+   */
   static landingRadius(impactSpeed: number): number {
     const t =
       (impactSpeed - LANDING_MIN_IMPACT) / (LANDING_FULL_IMPACT - LANDING_MIN_IMPACT);

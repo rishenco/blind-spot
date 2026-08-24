@@ -79,7 +79,7 @@ export interface SeedConfig {
 }
 
 /** The no-seed-given configuration: streams keep their historical constants. */
-export const DEFAULT_SEED: SeedConfig = { seed: 0, explicit: false };
+export const DEFAULT_SEED: SeedConfig = Object.freeze({ seed: 0, explicit: false });
 
 /**
  * Reads `?seed=` out of a `location.search` string.

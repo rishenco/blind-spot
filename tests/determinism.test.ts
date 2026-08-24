@@ -118,7 +118,6 @@ function runSimulation(withPaint: boolean, seconds = SECONDS): RunResult {
   });
 
   const input = new ScriptedInput();
-  const asInput = input.asInput;
   const trace: number[] = [];
   let clock = 0;
 
@@ -130,7 +129,7 @@ function runSimulation(withPaint: boolean, seconds = SECONDS): RunResult {
       paint.setListener(player.position.x, player.position.y + EAR_HEIGHT, player.position.z);
       paint.advance(clock);
     }
-    player.update(DT, asInput);
+    player.update(DT, input);
     if (tick % TRACE_EVERY === 0) {
       trace.push(player.position.x, player.position.y, player.position.z);
     }

@@ -48,7 +48,9 @@ const CHAMBER_DOOR_X = -1.0;
  * far side of the test crate, a slice of the side chamber that no straight line from the main
  * lane can reach, and the chamber crate that therefore has to stay black until someone walks in.
  */
-export const PROBE_REGIONS: Record<string, readonly [number, number, number, number, number, number]> = {
+export const PROBE_REGIONS: Readonly<
+  Record<string, readonly [number, number, number, number, number, number]>
+> = Object.freeze({
   // The +X face of the 1 m crate: the side the player cannot see when facing it from the spawn.
   crateBack: [TEST_CRATE.x + 0.45, 0, TEST_CRATE.z - 0.55, TEST_CRATE.x + 0.6, 1.0, TEST_CRATE.z + 0.55],
   // The -X face of the same crate: the side that is struck.
@@ -59,7 +61,7 @@ export const PROBE_REGIONS: Record<string, readonly [number, number, number, num
   chamberCrate: [5.1, 0, 6.6, 6.9, 1.7, 8.4],
   // The chokepoint's south doorjamb, 8.7 m from the spawn — where the ring is caught in flight.
   jamb: [-4.5, 0, -2.6, -3.5, 3.0, -1.4],
-};
+});
 
 /** Reveal-mode albedos. Never seen in the dark — this palette only exists for the L key. */
 export const REVEAL_BACKGROUND = 0x0d1216;

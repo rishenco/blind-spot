@@ -413,6 +413,15 @@ export class PaintSystem {
   }
 
   /**
+   * Where the ears currently are. Read-only by convention (it is the live vector, not a copy —
+   * this is a tick path). Exposed so a test can prove *when* in the tick the ears were moved:
+   * the hearing gate answers a different question if the listener lags the body by a frame.
+   */
+  get listenerPosition(): THREE.Vector3 {
+    return this.listener;
+  }
+
+  /**
    * Recomputes the world-units-to-pixels factor for `gl_PointSize`. Depends on the vertical
    * FOV and the drawing buffer height, so it is refreshed every frame rather than cached.
    */
