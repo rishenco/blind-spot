@@ -12,8 +12,8 @@
  * sixty metres away in the dark — appeared not to react at all.
  *
  * So this file now owns no vertices. It is a *driver* over the one shared mask in
- * `StructuredPaint`: every frame it asks the paint to mark the lattice dots and contour pieces
- * inside the reach column as touched (`revealTouch`), and the paint draws exactly those, grey,
+ * `StructuredPaint`: every frame it asks the paint to mark the lattice dots inside the reach
+ * column as touched (`revealTouch`), and the paint draws exactly those, grey,
  * bright under the hand and faint once you have moved on. A wall reacts because a wall has
  * lattice dots like everything else; a crate does not give itself away, because a dot two metres
  * up its far side was never within reach.
@@ -56,8 +56,6 @@ export interface TouchStats {
   near: number;
   /** Mask points felt since the last clear. */
   remembered: number;
-  /** Contour pieces felt since the last clear. */
-  segments: number;
   /** Writes into the mask so far. */
   rebuilds: number;
 }
@@ -70,7 +68,7 @@ export class TouchLayer {
   private lastZ = Number.NaN;
   private on = true;
   private dirty = true;
-  private stats: TouchStats = { near: 0, remembered: 0, segments: 0, rebuilds: 0 };
+  private stats: TouchStats = { near: 0, remembered: 0, rebuilds: 0 };
 
   constructor(
     private readonly paint: StructuredPaint,
@@ -96,7 +94,7 @@ export class TouchLayer {
   clear(): void {
     this.lastX = Number.NaN;
     this.dirty = true;
-    this.stats = { near: 0, remembered: 0, segments: 0, rebuilds: 0 };
+    this.stats = { near: 0, remembered: 0, rebuilds: 0 };
   }
 
   /**
@@ -131,7 +129,6 @@ export class TouchLayer {
     this.stats = {
       near: fresh,
       remembered: s.touchedDots,
-      segments: s.touchedEdges,
       rebuilds: this.stats.rebuilds + 1,
     };
   }

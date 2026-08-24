@@ -483,7 +483,6 @@ const EDGE_VERTEX = /* glsl */ `
   attribute float aPrior;
   attribute float aT;
   attribute float aAccent;
-  attribute float aTouch;
   // The same two bounds a lattice dot carries, on the line the dot's face is bordered by.
   attribute vec2  aRefresh;
 
@@ -491,6 +490,15 @@ const EDGE_VERTEX = /* glsl */ `
   varying float vAlpha;
   varying float vInk;
   varying float vT;
+  /*
+   * 1 only when *this* vertex is drawable. A line is two vertices, and a vertex that is culled
+   * by being shoved outside the clip volume does not remove the line: the segment is clipped at
+   * the frustum instead, and what is left is a long streak from the surviving end toward the
+   * dead one. That is where the "bright wireframe of a whole crate" came from — a 20 cm contour
+   * piece whose far end failed one test drew as a line across the screen. So liveness is carried
+   * into the fragment stage and both ends have to agree, or nothing is drawn.
+   */
+  varying float vLive;
 
   ${RAMP_GLSL}
 
@@ -499,33 +507,26 @@ const EDGE_VERTEX = /* glsl */ `
     vAlpha = 0.0;
     vInk = -1.0;
     vT = aT;
+    vLive = 0.0;
 
-    // A contour nobody has heard is not a dim contour — see the note in the dot shader. The
-    // hand is the one exception, and it draws its own 20 cm piece, grey, and nothing adjoining.
+    /*
+     * The hand does not draw contours at all — only the lidar does.
+     *
+     * The audit of the M1 frames called this "tactile telekinesis in the form of edges": on the
+     * touch frames a crate came back as a bright white wireframe while barely a third of it had
+     * been reached. The mask itself was never wrong (measured: 16 of the crate's 44 contour
+     * pieces, all of them on the face the hand was against). The lie was in the *drawing*: at
+     * arm's length one 20 cm piece covers several hundred pixels, so a dozen honest pieces read
+     * as a complete, confident outline of the whole object — and a piece whose far end failed a
+     * test used to be clipped rather than dropped, which streaked it off the edge of the screen.
+     *
+     * A line says "this crease runs *this way*, that far"; a point says "something is here".
+     * The hand only ever knows the second thing. So touch is points, and nothing else, which is
+     * the option the spec offers outright. The lidar keeps its contours: a beam that reached a
+     * crease really did measure its direction and extent.
+     */
     if (aBirth <= -1.0e8) {
-      if (aTouch < 0.5 || uTouchOn < 0.5 || distance(position, uListener) > uWindowRadius) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        return;
-      }
-      // Distance to the reach *column*, not to a point at eye level. A crate at your shins is
-      // as reachable as a shelf at your shoulder, which is the whole difference between
-      // "I felt something" and "I felt nothing at all".
-      vec3 hd = position - uHand;
-      hd.y -= clamp(hd.y, 0.0, uHandSpan);
-      float td = length(hd);
-      // Flat over most of the reach, fading only at its rim. The earlier curve started dimming
-      // at 45% of the range, which made a felt patch read as three bright dots and a smudge —
-      // technically honest, visually unreadable.
-      float prox = 1.0 - smoothstep(uTouchRange * 0.8, uTouchRange * 1.25, td);
-      float ta = max(prox * uTouchNear, uTouchMemory);
-      if (ta < 0.004) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        return;
-      }
-      vColor = uTouchColor;
-      vAlpha = ta;
-      vInk = 10.0;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
       return;
     }
 
@@ -573,6 +574,7 @@ const EDGE_VERTEX = /* glsl */ `
     col = mix(col, uAccent, aAccent);
     vColor = col * uContourBright * (1.0 + 0.9 * flash);
     vAlpha = alpha;
+    vLive = 1.0;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `;
@@ -584,8 +586,13 @@ const EDGE_FRAGMENT = /* glsl */ `
   varying float vAlpha;
   varying float vInk;
   varying float vT;
+  varying float vLive;
 
   void main() {
+    // Both ends of the piece have to be drawable, or the piece is not drawn at all. On a line
+    // with one live end the interpolant is 1 only exactly at that vertex, so the whole segment
+    // goes; on a fully live line it is 1 everywhere.
+    if (vLive < 0.999) discard;
     // The line draws itself from one end: everything past the ink head is not there yet.
     if (vInk < 0.0 || vT > vInk) discard;
     if (vAlpha <= 0.002) discard;
@@ -776,8 +783,6 @@ export interface StructuredStats {
   lastLateStep: number;
   /** Mask dots the hand has ever been within reach of. */
   touchedDots: number;
-  /** Contour pieces the hand has ever been within reach of. */
-  touchedEdges: number;
   /** Dots the last `revealTouch` call newly reached. */
   lastTouchedDots: number;
   /** Mask items the last `revealTouch` call had to look at. */
@@ -870,7 +875,6 @@ export class StructuredPaint {
   private edgeNb = new Uint8Array(0);
   private edgeMid = new Float32Array(0);
   /** The same channel per contour vertex, written to both ends of a piece at once. */
-  private edgeTouch = new Float32Array(0);
   /** Uniform grids over the mask, so a reach query costs a handful of cells, not the world. */
   private dotGrid: PointGrid | null = null;
   private edgeGrid: PointGrid | null = null;
@@ -918,8 +922,6 @@ export class StructuredPaint {
   /** The hand writes to its own attribute, so it carries its own upload window. */
   private touchDotDirtyMin = Infinity;
   private touchDotDirtyMax = -Infinity;
-  private touchEdgeDirtyMin = Infinity;
-  private touchEdgeDirtyMax = -Infinity;
 
   private stats: StructuredStats = {
     built: false,
@@ -944,7 +946,6 @@ export class StructuredPaint {
     lastLate: 0,
     lastLateStep: 0,
     touchedDots: 0,
-    touchedEdges: 0,
     lastTouchedDots: 0,
     lastTouchTests: 0,
   };
@@ -1419,7 +1420,6 @@ export class StructuredPaint {
     this.edgeAccent = new Float32Array(verts);
     this.edgeRefresh = unbounded(verts);
     this.edgeT = new Float32Array(verts);
-    this.edgeTouch = new Float32Array(verts);
     for (let i = 0; i < this.pieces; i++) {
       this.edgeT[i * 2] = 0;
       this.edgeT[i * 2 + 1] = 1;
@@ -1442,7 +1442,6 @@ export class StructuredPaint {
     this.edgeGeometry.setAttribute('aT', new THREE.BufferAttribute(this.edgeT, 1));
     this.edgeGeometry.setAttribute('aAccent', new THREE.BufferAttribute(this.edgeAccent, 1));
     this.edgeGeometry.setAttribute('aRefresh', new THREE.BufferAttribute(this.edgeRefresh, 2));
-    this.edgeGeometry.setAttribute('aTouch', new THREE.BufferAttribute(this.edgeTouch, 1));
     this.edgeGeometry.setDrawRange(0, verts);
     this.edgeGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
 
@@ -1466,7 +1465,6 @@ export class StructuredPaint {
     this.stats.unlockedDots = 0;
     this.stats.unlockedEdges = 0;
     this.stats.touchedDots = 0;
-    this.stats.touchedEdges = 0;
   }
 
   // ---- look ----------------------------------------------------------------
@@ -1590,26 +1588,10 @@ export class StructuredPaint {
       fresh++;
     }
 
-    this.edgeGrid.candidates(x, midY, z, query, out);
-    tests += out.length;
-    let freshEdges = 0;
-    for (let n = 0; n < out.length; n++) {
-      const k = out[n]!;
-      const v = k * 2;
-      if (this.edgeTouch[v] === 1) continue;
-      const k3 = k * 3;
-      if (near2(this.edgeMid[k3]!, this.edgeMid[k3 + 1]!, this.edgeMid[k3 + 2]!) > r2) continue;
-      this.edgeTouch[v] = 1;
-      this.edgeTouch[v + 1] = 1;
-      this.markTouchEdges(v, v + 1);
-      freshEdges++;
-    }
-
     this.stats.touchedDots += fresh;
-    this.stats.touchedEdges += freshEdges;
     this.stats.lastTouchedDots = fresh;
     this.stats.lastTouchTests = tests;
-    if (fresh > 0 || freshEdges > 0) this.upload();
+    if (fresh > 0) this.upload();
     return fresh;
   }
 
@@ -1625,13 +1607,10 @@ export class StructuredPaint {
     this.edgeRefresh.set(unbounded(this.edgeRefresh.length / 2));
     this.waveMeta.fill(0);
     this.dotTouch.fill(0);
-    this.edgeTouch.fill(0);
     this.markTouchDots(0, this.dotTouch.length - 1);
-    this.markTouchEdges(0, this.edgeTouch.length - 1);
     this.stats.unlockedDots = 0;
     this.stats.unlockedEdges = 0;
     this.stats.touchedDots = 0;
-    this.stats.touchedEdges = 0;
     this.stats.lastTouchedDots = 0;
     this.stats.lastTouchTests = 0;
     this.stats.lastDots = 0;
@@ -2176,11 +2155,6 @@ export class StructuredPaint {
     if (hi > this.touchDotDirtyMax) this.touchDotDirtyMax = hi;
   }
 
-  private markTouchEdges(lo: number, hi: number): void {
-    if (lo < this.touchEdgeDirtyMin) this.touchEdgeDirtyMin = lo;
-    if (hi > this.touchEdgeDirtyMax) this.touchEdgeDirtyMax = hi;
-  }
-
   private upload(): void {
     if (this.dotDirtyMax >= this.dotDirtyMin) {
       const start = this.dotDirtyMin;
@@ -2217,16 +2191,6 @@ export class StructuredPaint {
       attr.needsUpdate = true;
       this.touchDotDirtyMin = Infinity;
       this.touchDotDirtyMax = -Infinity;
-    }
-    if (this.touchEdgeDirtyMax >= this.touchEdgeDirtyMin) {
-      const attr = this.edgeGeometry.getAttribute('aTouch') as THREE.BufferAttribute;
-      attr.addUpdateRange(
-        this.touchEdgeDirtyMin,
-        this.touchEdgeDirtyMax - this.touchEdgeDirtyMin + 1,
-      );
-      attr.needsUpdate = true;
-      this.touchEdgeDirtyMin = Infinity;
-      this.touchEdgeDirtyMax = -Infinity;
     }
   }
 
