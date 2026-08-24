@@ -19,6 +19,7 @@ import {
   canOccupyWorld,
   circleOverlapsFootprint,
   moveBody,
+  sweepSphereWorld,
   type Aabb,
   type BodyShape,
   type StaticWorld,
@@ -110,6 +111,59 @@ export interface MantleTunables {
   pullupTime: number;
 }
 
+/**
+ * The third-person boom. First person stays the primary mode; this is the "let me look at the
+ * thing I am driving" camera, and it is held to gameplay standards: it never clips through
+ * geometry, never pops, and never bobs (the animated body carries the physicality instead).
+ */
+export interface ThirdPersonTunables {
+  /** Boom length behind the pivot when nothing is in the way, metres. */
+  distance: number;
+  /** Right-shoulder offset, metres. Positive puts the body left of centre. */
+  shoulder: number;
+  /** How far the camera rides above the pivot, metres. */
+  height: number;
+  /** Pivot height above the feet — the neck, metres. Follows the crouch. */
+  pivotHeight: number;
+  /** Radius of the sphere swept along the boom for wall avoidance, metres. */
+  probeRadius: number;
+  /** Clearance kept between the camera and whatever the boom hit, metres. */
+  probeMargin: number;
+  /** Shortest the boom is allowed to get, metres. */
+  minDistance: number;
+  /** Exponential rate (1/s) at which the boom grows back out of a squeeze. */
+  growRate: number;
+  /** Exponential rate (1/s) at which the boom pulls in — fast, so nothing ever clips. */
+  shrinkRate: number;
+  /** Seconds for the first-person <-> third-person transition. */
+  transitionTime: number;
+  /** Fraction of the first-person landing dip kept in third person. */
+  landDipScale: number;
+  /** Camera-to-pivot distance below which the body is hidden (never see inside the head). */
+  hideDistance: number;
+  /** Exponential rate (1/s) at which the body turns toward its velocity. */
+  turnRate: number;
+}
+
+/**
+ * Camera roll — the Finals-style lean. Two independent sources, summed then smoothed once:
+ * how hard you are strafing, and how fast you are turning. Stride roll (§BobTunables) is a
+ * third, separate contribution; all three are functions of the current state alone, never
+ * integrated, so the total returns to exactly zero when you stand still.
+ */
+export interface CameraFeelTunables {
+  /** Degrees of roll at a full-speed pure strafe. */
+  strafeRollDeg: number;
+  /** Degrees of roll at (or beyond) `turnRollRefRate`. */
+  turnRollDeg: number;
+  /** Yaw rate that earns the full `turnRollDeg`, rad/s. */
+  turnRollRefRate: number;
+  /** Exponential rate (1/s) at which the summed roll follows its target. */
+  rollSmooth: number;
+  /** Fraction of the lean kept in third person. */
+  thirdPersonScale: number;
+}
+
 export function defaultMovementTunables(): MovementTunables {
   return {
     crouchSpeed: 1.7,
@@ -173,8 +227,37 @@ export function defaultMantleTunables(): MantleTunables {
   };
 }
 
+export function defaultThirdPersonTunables(): ThirdPersonTunables {
+  return {
+    distance: 3.2,
+    shoulder: 0.4,
+    height: 0.35,
+    pivotHeight: 1.5,
+    probeRadius: 0.2,
+    probeMargin: 0.06,
+    minDistance: 0.15,
+    growRate: 10,
+    shrinkRate: 45,
+    transitionTime: 0.25,
+    landDipScale: 0.3,
+    hideDistance: 0.6,
+    turnRate: 10,
+  };
+}
+
+export function defaultCameraFeelTunables(): CameraFeelTunables {
+  return {
+    strafeRollDeg: 1.5,
+    turnRollDeg: 1.0,
+    turnRollRefRate: 2.5,
+    rollSmooth: 8,
+    thirdPersonScale: 0.3,
+  };
+}
+
 export type Stance = 'stand' | 'crouch';
 export type StepTier = 'crouch' | 'walk' | 'sprint';
+export type ViewMode = 'first' | 'third';
 
 export interface PlayerState {
   grounded: boolean;
@@ -224,6 +307,10 @@ const LAND_DIP_MIN_SPEED = 3;
 const LAND_DIP_FULL_SPEED = 13;
 /** Exponential rate (1/s) at which the dip is taken up — fast in, slow out. */
 const LAND_DIP_ATTACK = 50;
+/** Below this horizontal speed the body keeps whatever heading it already had, m/s. */
+const FACING_MIN_SPEED = 0.25;
+/** Exponential rate (1/s) that de-spikes the raw yaw rate before it drives roll. */
+const YAW_RATE_SMOOTH = 14;
 /** Spacing between ledge probes while airborne with jump held, seconds. */
 const MANTLE_PROBE_INTERVAL = 0.06;
 /** Probe sampling step along the forward ray, metres. */
@@ -242,6 +329,69 @@ function clamp01(v: number): number {
 
 function smoothstep(t: number): number {
   return t * t * (3 - 2 * t);
+}
+
+function clampUnit(v: number): number {
+  return v < -1 ? -1 : v > 1 ? 1 : v;
+}
+
+/** Wraps an angle difference into (-π, π]. */
+function wrapAngle(a: number): number {
+  let v = a % TWO_PI;
+  if (v > Math.PI) v -= TWO_PI;
+  else if (v <= -Math.PI) v += TWO_PI;
+  return v;
+}
+
+/** Shortest-arc interpolation between two angles. */
+function lerpAngle(a: number, b: number, t: number): number {
+  return a + wrapAngle(b - a) * t;
+}
+
+/** Camera-space axes in world space. Shared scratch — read it before calling again. */
+interface CameraBasis {
+  fx: number;
+  fy: number;
+  fz: number;
+  rx: number;
+  rz: number;
+  ux: number;
+  uy: number;
+  uz: number;
+  /** Boom offset from the pivot at full length. */
+  ox: number;
+  oy: number;
+  oz: number;
+  /** Length of that offset. */
+  length: number;
+}
+
+const basisScratch: CameraBasis = {
+  fx: 0, fy: 0, fz: 0, rx: 0, rz: 0, ux: 0, uy: 0, uz: 0, ox: 0, oy: 0, oz: 0, length: 0,
+};
+
+/**
+ * Builds the camera's world-space axes at the given look angles plus the third-person boom
+ * offset hung off them. Both the collision sweep (sim tick) and the camera placement (render)
+ * need exactly this, and they must not be allowed to drift apart.
+ */
+function cameraBasis(yaw: number, pitch: number, tp: ThirdPersonTunables): CameraBasis {
+  const b = basisScratch;
+  const cp = Math.cos(pitch);
+  b.fx = -Math.sin(yaw) * cp;
+  b.fy = Math.sin(pitch);
+  b.fz = -Math.cos(yaw) * cp;
+  b.rx = Math.cos(yaw);
+  b.rz = -Math.sin(yaw);
+  // up = right x forward (right has no Y component, so two terms drop out).
+  b.ux = -b.rz * b.fy;
+  b.uy = b.rz * b.fx - b.rx * b.fz;
+  b.uz = b.rx * b.fy;
+  b.ox = -b.fx * tp.distance + b.ux * tp.height + b.rx * tp.shoulder;
+  b.oy = -b.fy * tp.distance + b.uy * tp.height;
+  b.oz = -b.fz * tp.distance + b.uz * tp.height + b.rz * tp.shoulder;
+  b.length = Math.hypot(b.ox, b.oy, b.oz);
+  return b;
 }
 
 export class PlayerController {
@@ -283,6 +433,34 @@ export class PlayerController {
   /** Footfalls emitted since boot — HUD readout and a hook for the sound layer. */
   stepCount = 0;
 
+  // ---- body heading (render-only; the body never steers the physics) ---------
+  private facingYaw = 0;
+  private prevFacingYaw = 0;
+
+  // ---- camera lean ----------------------------------------------------------
+  /** Smoothed yaw rate, rad/s. */
+  private yawRate = 0;
+  /** Smoothed strafe + turn roll, radians. Stride roll is added on top at render time. */
+  private feelRoll = 0;
+  private prevFeelRoll = 0;
+
+  // ---- third-person boom ----------------------------------------------------
+  private viewTarget: ViewMode = 'first';
+  /** 0 = first person, 1 = third person; the transition drives it linearly. */
+  private viewBlendRaw = 0;
+  private prevViewBlendRaw = 0;
+  /** Current boom length along the desired offset direction, metres. */
+  private boom = 0;
+  private prevBoom = 0;
+  private boomTargetLength = 0;
+  /** Full boom length with nothing in the way — the reference the squeeze is measured against. */
+  private boomRestLength = 0;
+
+  /** Where the body should be drawn this frame; written by `applyToCamera`. */
+  readonly renderPosition = new THREE.Vector3();
+  private renderFacing = 0;
+  private renderBodyVisible = false;
+
   // ---- mantle --------------------------------------------------------------
   private mantleActive = false;
   private mantleIsVault = true;
@@ -311,6 +489,8 @@ export class PlayerController {
     readonly camera: CameraTunables,
     readonly bob: BobTunables = defaultBobTunables(),
     readonly mantle: MantleTunables = defaultMantleTunables(),
+    readonly thirdPerson: ThirdPersonTunables = defaultThirdPersonTunables(),
+    readonly feel: CameraFeelTunables = defaultCameraFeelTunables(),
   ) {
     this.colliderHeight = movement.standHeight;
     this.eyeHeight = movement.eyeStand;
@@ -378,6 +558,62 @@ export class PlayerController {
     this.landDip = 0;
     this.prevLandDip = 0;
     this.landDipTarget = 0;
+    this.facingYaw = this.yaw;
+    this.prevFacingYaw = this.yaw;
+    this.yawRate = 0;
+    this.feelRoll = 0;
+    this.prevFeelRoll = 0;
+    // The view mode itself survives a respawn (it is a preference, not sim state); only the
+    // boom is re-seated so it does not sweep across the room from wherever the player died.
+    this.boom = this.thirdPerson.distance;
+    this.prevBoom = this.boom;
+    this.boomTargetLength = this.boom;
+    this.boomRestLength = this.boom;
+  }
+
+  // ---- view mode -----------------------------------------------------------
+
+  /** The mode the camera is heading for; `viewBlend` says how far along it is. */
+  get viewMode(): ViewMode {
+    return this.viewTarget;
+  }
+
+  /** 0 = fully first person, 1 = fully third person. */
+  get viewBlend(): number {
+    return this.viewBlendRaw;
+  }
+
+  toggleView(): void {
+    this.viewTarget = this.viewTarget === 'first' ? 'third' : 'first';
+  }
+
+  setViewMode(mode: ViewMode): void {
+    this.viewTarget = mode;
+  }
+
+  /** Current boom length, metres — shrinks when a wall is behind the player. */
+  get boomLength(): number {
+    return this.boom;
+  }
+
+  /** Boom length the camera would use with nothing in the way, metres. */
+  get boomRest(): number {
+    return this.boomRestLength;
+  }
+
+  /** Length the wall sweep asked for this tick, before smoothing — metres. */
+  get boomTarget(): number {
+    return this.boomTargetLength;
+  }
+
+  /** Smoothed body heading, radians, same convention as `yaw`. */
+  get bodyFacing(): number {
+    return this.renderFacing;
+  }
+
+  /** False whenever the camera is close enough to the head that the body must not be drawn. */
+  get bodyVisible(): boolean {
+    return this.renderBodyVisible;
   }
 
   get state(): PlayerState {
@@ -411,13 +647,23 @@ export class PlayerController {
     this.prevStridePhase = this.stridePhase;
     this.prevBobGain = this.bobGain;
     this.prevLandDip = this.landDip;
+    this.prevFacingYaw = this.facingYaw;
+    this.prevFeelRoll = this.feelRoll;
+    this.prevBoom = this.boom;
+    this.prevViewBlendRaw = this.viewBlendRaw;
 
+    const yawBefore = this.yaw;
     this.updateLook(input);
+    const rawYawRate = dt > 0 ? wrapAngle(this.yaw - yawBefore) / dt : 0;
 
     if (this.mantleActive) this.advanceMantle(dt);
     else this.simulate(dt, input);
 
     this.updateViewEffects(dt);
+    this.updateFacing(dt);
+    this.updateRoll(dt, rawYawRate);
+    this.updateBoom(dt);
+    this.updateViewBlend(dt);
   }
 
   /** The ordinary (non-mantling) movement tick. */
@@ -820,6 +1066,99 @@ export class PlayerController {
     this.currentFov += (targetFov - this.currentFov) * smoothFactor(this.camera.fovSmoothRate, dt);
   }
 
+  /**
+   * The body faces where it is *going*, not where the camera is pointing: there are no strafe
+   * clips, so a movement-facing rig is the one that reads correctly. Standing still keeps the
+   * last heading rather than snapping to the camera.
+   */
+  private updateFacing(dt: number): void {
+    let dirX: number;
+    let dirZ: number;
+    if (this.mantleActive) {
+      dirX = this.mantleDirX;
+      dirZ = this.mantleDirZ;
+    } else {
+      const speed = Math.hypot(this.velocity.x, this.velocity.z);
+      if (speed < FACING_MIN_SPEED) return;
+      dirX = this.velocity.x / speed;
+      dirZ = this.velocity.z / speed;
+    }
+    if (Math.abs(dirX) + Math.abs(dirZ) < 1e-6) return;
+    // Inverse of "forward at yaw f is (-sin f, 0, -cos f)".
+    const target = Math.atan2(-dirX, -dirZ);
+    this.facingYaw = wrapAngle(
+      lerpAngle(this.facingYaw, target, smoothFactor(this.thirdPerson.turnRate, dt)),
+    );
+  }
+
+  /** Strafe lean + turn lean, summed then smoothed once. Never integrated, so never drifts. */
+  private updateRoll(dt: number, rawYawRate: number): void {
+    const f = this.feel;
+    // Lateral speed measured against the camera's right, which is what the player feels.
+    const rightX = Math.cos(this.yaw);
+    const rightZ = -Math.sin(this.yaw);
+    const lateral = this.velocity.x * rightX + this.velocity.z * rightZ;
+    const latNorm = clampUnit(lateral / Math.max(0.1, this.movement.walkSpeed));
+
+    // Raw look deltas arrive in lumps (one mouse event per several ticks, or a whole frame's
+    // worth on the first tick of a slow frame), so the rate is de-spiked before it is used.
+    this.yawRate += (rawYawRate - this.yawRate) * smoothFactor(YAW_RATE_SMOOTH, dt);
+    const turnNorm = clampUnit(this.yawRate / Math.max(0.05, f.turnRollRefRate));
+
+    // Strafing right and turning right both bank right, which is a negative roll about the
+    // camera's forward axis.
+    const target = (-f.strafeRollDeg * latNorm + f.turnRollDeg * turnNorm) * DEG2RAD;
+    this.feelRoll += (target - this.feelRoll) * smoothFactor(f.rollSmooth, dt);
+    if (Math.abs(this.feelRoll) < 1e-7 && Math.abs(target) < 1e-7) this.feelRoll = 0;
+  }
+
+  /**
+   * Keeps the third-person boom out of the walls. The sweep runs every tick regardless of the
+   * current mode so that toggling into third person never starts from a stale length.
+   */
+  private updateBoom(dt: number): void {
+    const tp = this.thirdPerson;
+    const pivotY = this.position.y + tp.pivotHeight + (this.eyeHeight - this.movement.eyeStand);
+
+    // The boom orbits with the look angles, so its direction is rebuilt every tick.
+    const basis = cameraBasis(this.yaw, this.pitch, tp);
+    const rest = basis.length;
+    this.boomRestLength = rest;
+    if (rest < 1e-4) {
+      this.boom = 0;
+      this.boomTargetLength = 0;
+      return;
+    }
+
+    const hit = sweepSphereWorld(
+      this.world,
+      this.position.x,
+      pivotY,
+      this.position.z,
+      basis.ox / rest,
+      basis.oy / rest,
+      basis.oz / rest,
+      rest,
+      tp.probeRadius,
+    );
+    const target =
+      hit >= rest
+        ? rest
+        : Math.min(rest, Math.max(tp.minDistance, hit - tp.probeMargin));
+    this.boomTargetLength = target;
+
+    // Pull in fast, ease back out: the reverse pops, and popping is the whole failure mode.
+    const rate = target < this.boom ? tp.shrinkRate : tp.growRate;
+    this.boom += (target - this.boom) * smoothFactor(rate, dt);
+  }
+
+  /** Linear ramp between the two camera modes; `applyToCamera` eases it. */
+  private updateViewBlend(dt: number): void {
+    const time = this.thirdPerson.transitionTime;
+    const step = time > 0 ? dt / time : 1;
+    this.viewBlendRaw = clamp01(this.viewBlendRaw + (this.viewTarget === 'third' ? step : -step));
+  }
+
   private emitFootstep(halfCycle: number, speed: number): void {
     const m = this.movement;
     this.stepCount++;
@@ -839,7 +1178,17 @@ export class PlayerController {
     });
   }
 
-  /** Per-frame: places the camera, interpolating between the last two sim ticks. */
+  /**
+   * Per-frame: places the camera, interpolating between the last two sim ticks.
+   *
+   * Both camera modes are evaluated and then blended by position, which is what makes the
+   * V toggle a 0.25 s move rather than a cut. Stride bob belongs to the first-person eye only
+   * — in third person the animated body carries the physicality and a bobbing boom just reads
+   * as a wobbly camera — while the landing dip survives at `landDipScale`.
+   *
+   * This is also where the body's render pose is published (`renderPosition`, `bodyFacing`,
+   * `bodyVisible`); the avatar reads it and never touches the simulation.
+   */
   applyToCamera(camera: THREE.PerspectiveCamera, alpha: number): void {
     const a = clamp01(alpha);
     const x = this.prevPosition.x + (this.position.x - this.prevPosition.x) * a;
@@ -848,10 +1197,17 @@ export class PlayerController {
     const eye = this.prevEyeHeight + (this.eyeHeight - this.prevEyeHeight) * a;
     const step = this.prevStepOffset + (this.stepOffset - this.prevStepOffset) * a;
     const dip = this.prevLandDip + (this.landDip - this.prevLandDip) * a;
+    const tp = this.thirdPerson;
+    const blend = smoothstep(
+      this.prevViewBlendRaw + (this.viewBlendRaw - this.prevViewBlendRaw) * a,
+    );
+
+    this.renderPosition.set(x, y, z);
+    this.renderFacing = lerpAngle(this.prevFacingYaw, this.facingYaw, a);
 
     let bobUp = 0;
     let bobSide = 0;
-    let roll = 0;
+    let bobRoll = 0;
     const gain = this.prevBobGain + (this.bobGain - this.prevBobGain) * a;
     if (this.bob.enabled && gain > 1e-4) {
       const phase = this.prevStridePhase + (this.stridePhase - this.prevStridePhase) * a;
@@ -859,17 +1215,46 @@ export class PlayerController {
       // Two dips per cycle (one per footfall), one full sway, roll riding the sway.
       bobUp = this.bob.vertAmp * gain * Math.cos(2 * phase);
       bobSide = this.bob.latAmp * gain * sway;
-      roll = this.bob.rollDeg * DEG2RAD * gain * sway;
+      bobRoll = this.bob.rollDeg * DEG2RAD * gain * sway;
     }
-    // Camera right at this yaw (forward is (-sin, 0, -cos)).
-    const rightX = Math.cos(this.yaw);
-    const rightZ = -Math.sin(this.yaw);
+    const basis = cameraBasis(this.yaw, this.pitch, tp);
 
-    camera.position.set(
-      x + rightX * bobSide,
-      y + eye - step + bobUp - dip,
-      z + rightZ * bobSide,
-    );
+    // First person: the eye, with the full bob and the full landing dip.
+    const eyeX = x + basis.rx * bobSide * (1 - blend);
+    const eyeY = y + eye - step + bobUp * (1 - blend) - dip;
+    const eyeZ = z + basis.rz * bobSide * (1 - blend);
+
+    let camX = eyeX;
+    let camY = eyeY;
+    let camZ = eyeZ;
+    let pivotDistance = 0;
+
+    if (blend > 0) {
+      // Third person: the boom, hung off the neck, already shortened by `updateBoom`.
+      const pivotX = x;
+      const pivotY = y + tp.pivotHeight + (eye - this.movement.eyeStand) - dip * tp.landDipScale;
+      const pivotZ = z;
+      const boom = this.prevBoom + (this.boom - this.prevBoom) * a;
+      const k = basis.length > 1e-4 ? boom / basis.length : 0;
+      const bx = pivotX + basis.ox * k;
+      const by = pivotY + basis.oy * k;
+      const bz = pivotZ + basis.oz * k;
+
+      camX = eyeX + (bx - eyeX) * blend;
+      camY = eyeY + (by - eyeY) * blend;
+      camZ = eyeZ + (bz - eyeZ) * blend;
+      pivotDistance = Math.hypot(camX - pivotX, camY - pivotY, camZ - pivotZ);
+    }
+
+    // One rule covers both "mid-transition" and "squeezed against a wall": if the lens is
+    // inside the head, there is no body to draw.
+    this.renderBodyVisible = blend > 0 && pivotDistance > tp.hideDistance;
+
+    const feelRoll = this.prevFeelRoll + (this.feelRoll - this.prevFeelRoll) * a;
+    const leanScale = 1 + (this.feel.thirdPersonScale - 1) * blend;
+    const roll = bobRoll * (1 - blend) + feelRoll * leanScale;
+
+    camera.position.set(camX, camY, camZ);
     camera.rotation.set(this.pitch, this.yaw, roll, 'YXZ');
     if (Math.abs(camera.fov - this.currentFov) > 1e-3) {
       camera.fov = this.currentFov;

@@ -13,10 +13,13 @@ import { StaticWorld, aabbFromBounds, type Aabb } from '../core/collision';
 import {
   PlayerController,
   defaultBobTunables,
+  defaultCameraFeelTunables,
   defaultCameraTunables,
   defaultMantleTunables,
   defaultMovementTunables,
+  defaultThirdPersonTunables,
 } from '../player/controller';
+import { PlayerAvatar, defaultAvatarTunables, type AvatarPose } from '../player/avatar';
 import type { Input } from '../core/input';
 
 const SCENE_ID = 'movement-playground';
@@ -144,7 +147,24 @@ export class MovementPlayground implements LabScene {
   private readonly cameraTunables = defaultCameraTunables();
   private readonly bobTunables = defaultBobTunables();
   private readonly mantleTunables = defaultMantleTunables();
+  private readonly thirdPersonTunables = defaultThirdPersonTunables();
+  private readonly feelTunables = defaultCameraFeelTunables();
+  private readonly avatarTunables = defaultAvatarTunables();
   private player!: PlayerController;
+  private avatar!: PlayerAvatar;
+  private readonly avatarPose: AvatarPose = {
+    x: 0,
+    y: 0,
+    z: 0,
+    facingYaw: 0,
+    speed: 0,
+    verticalSpeed: 0,
+    grounded: false,
+    crouched: false,
+    mantling: false,
+    landDip: 0,
+    visible: false,
+  };
 
   private content = new THREE.Group();
   private materials: THREE.Material[] = [];
@@ -167,8 +187,17 @@ export class MovementPlayground implements LabScene {
       this.cameraTunables,
       this.bobTunables,
       this.mantleTunables,
+      this.thirdPersonTunables,
+      this.feelTunables,
     );
     this.player.setSpawn(SPAWN, SPAWN_YAW_DEG);
+
+    // The body lives outside `content` so a variant rebuild never disturbs it.
+    this.avatar = new PlayerAvatar(this.avatarTunables);
+    ctx.scene.add(this.avatar.root);
+    this.avatar.load().catch((err: unknown) => {
+      console.warn('[blind-spot] player model failed to load', err);
+    });
 
     ctx.scene.add(this.content);
     this.build(0);
@@ -515,6 +544,42 @@ export class MovementPlayground implements LabScene {
     c.add(this.cameraTunables, 'pitchClampDeg', 45, 89.9, 0.1);
     c.add(this.cameraTunables, 'invertY');
 
+    const tp = gui.addFolder('Camera 3P');
+    tp.add({ toggle: () => this.player.toggleView() }, 'toggle').name('Toggle view (V)');
+    tp.add(this.thirdPersonTunables, 'distance', 1, 8, 0.05);
+    tp.add(this.thirdPersonTunables, 'shoulder', -1.5, 1.5, 0.05);
+    tp.add(this.thirdPersonTunables, 'height', -1, 2, 0.05);
+    tp.add(this.thirdPersonTunables, 'pivotHeight', 0.5, 2.2, 0.05);
+    tp.add(this.thirdPersonTunables, 'probeRadius', 0.05, 0.6, 0.01);
+    tp.add(this.thirdPersonTunables, 'probeMargin', 0, 0.4, 0.01);
+    tp.add(this.thirdPersonTunables, 'minDistance', 0.05, 2, 0.05);
+    tp.add(this.thirdPersonTunables, 'growRate', 1, 40, 0.5).name('grow (1/s)');
+    tp.add(this.thirdPersonTunables, 'shrinkRate', 5, 80, 1).name('shrink (1/s)');
+    tp.add(this.thirdPersonTunables, 'transitionTime', 0.05, 1, 0.01);
+    tp.add(this.thirdPersonTunables, 'landDipScale', 0, 1, 0.05);
+    tp.add(this.thirdPersonTunables, 'hideDistance', 0.1, 2, 0.05);
+    tp.add(this.thirdPersonTunables, 'turnRate', 1, 30, 0.5).name('bodyTurn (1/s)');
+
+    const f = gui.addFolder('Camera feel');
+    f.add(this.feelTunables, 'strafeRollDeg', 0, 8, 0.1);
+    f.add(this.feelTunables, 'turnRollDeg', 0, 6, 0.1);
+    f.add(this.feelTunables, 'turnRollRefRate', 0.5, 8, 0.1).name('turnRef (rad/s)');
+    f.add(this.feelTunables, 'rollSmooth', 1, 25, 0.5).name('rollSmooth (1/s)');
+    f.add(this.feelTunables, 'thirdPersonScale', 0, 1, 0.05).name('3P lean scale');
+
+    const ch = gui.addFolder('Character');
+    ch.add(this.avatarTunables, 'height', 1.2, 2.4, 0.01).onChange(() => this.avatar.refreshScale());
+    ch.add(this.avatarTunables, 'blendRate', 1, 25, 0.5).name('animBlend (1/s)');
+    ch.add(this.avatarTunables, 'walkClipSpeed', 0.5, 4, 0.05);
+    ch.add(this.avatarTunables, 'runClipSpeed', 1, 8, 0.05);
+    ch.add(this.avatarTunables, 'idleFadeSpeed', 0.1, 3, 0.05);
+    ch.add(this.avatarTunables, 'runBlendSpeed', 0.5, 8, 0.05);
+    ch.add(this.avatarTunables, 'minTimeScale', 0.2, 1, 0.05);
+    ch.add(this.avatarTunables, 'maxTimeScale', 1, 4, 0.05);
+    ch.add(this.avatarTunables, 'mantleLeanDeg', -60, 60, 1);
+    ch.add(this.avatarTunables, 'airLeanDegPerMps', -6, 6, 0.1);
+    ch.add(this.avatarTunables, 'leanRate', 1, 25, 0.5).name('lean (1/s)');
+
     const s = gui.addFolder('Scene');
     s.add({ respawn: () => this.player.respawn() }, 'respawn').name('Respawn (R)');
     s.add(
@@ -535,6 +600,7 @@ export class MovementPlayground implements LabScene {
 
   update(dt: number): void {
     if (this.input.wasKeyPressed('KeyR')) this.player.respawn();
+    if (this.input.wasKeyPressed('KeyV')) this.player.toggleView();
     this.player.update(dt, this.input);
 
     this.hudTimer -= dt;
@@ -561,15 +627,38 @@ export class MovementPlayground implements LabScene {
       ['state', `${mode}${s.stance === 'crouch' && !s.grounded ? ' (crouch)' : ''}`],
       ['pos', `${p.x.toFixed(1)} ${p.y.toFixed(2)} ${p.z.toFixed(1)}`],
       ['steps', `${this.player.stepCount}`],
+      [
+        'view',
+        this.player.viewMode === 'third'
+          ? `3P ${this.player.boomLength.toFixed(2)} m · ${this.avatar.animState}`
+          : '1P',
+      ],
     ]);
   }
 
   render(alpha: number): void {
     this.player.applyToCamera(this.ctx.camera, alpha);
+    // Mutated, not rebuilt: this runs every rendered frame.
+    const pose = this.avatarPose;
+    const s = this.player.state;
+    const p = this.player.renderPosition;
+    pose.x = p.x;
+    pose.y = p.y;
+    pose.z = p.z;
+    pose.facingYaw = this.player.bodyFacing;
+    pose.speed = s.speed;
+    pose.verticalSpeed = this.player.velocity.y;
+    pose.grounded = s.grounded;
+    pose.crouched = s.stance === 'crouch';
+    pose.mantling = s.mantling;
+    pose.landDip = this.player.landDipOffset / Math.max(1e-4, this.movement.landDipMax);
+    pose.visible = this.player.bodyVisible;
+    this.avatar.update(pose);
   }
 
   debugState(): Record<string, unknown> {
     const s = this.player.state;
+    const cam = this.ctx.camera;
     return {
       x: this.player.position.x,
       y: this.player.position.y,
@@ -586,16 +675,36 @@ export class MovementPlayground implements LabScene {
       variant: VARIANTS[this.variantIndex],
       // Render-layer readouts: what the *camera* is actually doing, which is where head bob
       // and the landing dip live. Read-only — tooling still drives the game through input.
-      camY: this.ctx.camera.position.y,
-      camRoll: (this.ctx.camera.rotation.z * 180) / Math.PI,
+      camX: cam.position.x,
+      camY: cam.position.y,
+      camZ: cam.position.z,
+      camRoll: (cam.rotation.z * 180) / Math.PI,
       steps: this.player.stepCount,
       landDip: this.player.landDipOffset,
+      // Camera mode + body: what batch 1.2 added, and what its scenarios assert on.
+      view: this.player.viewMode,
+      viewBlend: this.player.viewBlend,
+      boom: this.player.boomLength,
+      boomRest: this.player.boomRest,
+      boomTarget: this.player.boomTarget,
+      boomDefault: this.thirdPersonTunables.distance,
+      facingDeg: (this.player.bodyFacing * 180) / Math.PI,
+      bodyX: this.player.renderPosition.x,
+      bodyY: this.player.renderPosition.y,
+      bodyZ: this.player.renderPosition.z,
+      avatarReady: this.avatar.ready,
+      avatarError: this.avatar.error,
+      avatarVisible: this.avatar.root.visible,
+      anim: this.avatar.animState,
+      animTime: this.avatar.animTime,
+      animWeights: this.avatar.animWeights,
     };
   }
 
   dispose(): void {
     this.clearContent();
     this.ctx.scene.remove(this.content);
+    this.avatar.dispose();
     this.ctx.scene.fog = null;
   }
 }

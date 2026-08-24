@@ -469,6 +469,81 @@ export function moveBody(
   return result;
 }
 
+const sweepScratch: Aabb[] = [];
+
+/**
+ * Sweeps a sphere of `radius` from an origin along a unit direction and returns how far it
+ * travels before touching something (or `maxDist` when the way is clear).
+ *
+ * Boxes are inflated by `radius` and hit with an ordinary ray-slab test — the Minkowski
+ * shortcut. It over-reports at box corners (the inflated box has square corners where the
+ * true swept volume is round), which for its one caller — the third-person boom — is the
+ * safe direction to be wrong in: the camera is pulled in slightly early rather than late.
+ * An origin already inside an inflated box returns 0.
+ */
+export function sweepSphereWorld(
+  world: StaticWorld,
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  maxDist: number,
+  radius: number,
+): number {
+  if (maxDist <= 0) return 0;
+  const ex = ox + dx * maxDist;
+  const ey = oy + dy * maxDist;
+  const ez = oz + dz * maxDist;
+  const candidates = world.query(
+    Math.min(ox, ex) - radius,
+    Math.min(oy, ey) - radius,
+    Math.min(oz, ez) - radius,
+    Math.max(ox, ex) + radius,
+    Math.max(oy, ey) + radius,
+    Math.max(oz, ez) + radius,
+    sweepScratch,
+  );
+
+  let nearest = maxDist;
+  for (const b of candidates) {
+    let tmin = 0;
+    let tmax = nearest;
+    // One slab per axis, indexed rather than vectorised — the Aabb is six plain numbers.
+    for (let axis = 0; axis < 3; axis++) {
+      const o = axis === 0 ? ox : axis === 1 ? oy : oz;
+      const d = axis === 0 ? dx : axis === 1 ? dy : dz;
+      const lo = (axis === 0 ? b.minX : axis === 1 ? b.minY : b.minZ) - radius;
+      const hi = (axis === 0 ? b.maxX : axis === 1 ? b.maxY : b.maxZ) + radius;
+      if (Math.abs(d) < 1e-9) {
+        if (o < lo || o > hi) {
+          tmin = Infinity;
+          break;
+        }
+        continue;
+      }
+      const inv = 1 / d;
+      let t1 = (lo - o) * inv;
+      let t2 = (hi - o) * inv;
+      if (t1 > t2) {
+        const tmp = t1;
+        t1 = t2;
+        t2 = tmp;
+      }
+      if (t1 > tmin) tmin = t1;
+      if (t2 < tmax) tmax = t2;
+      if (tmin > tmax) {
+        tmin = Infinity;
+        break;
+      }
+    }
+    if (tmin < nearest) nearest = tmin;
+    if (nearest <= 0) return 0;
+  }
+  return nearest;
+}
+
 /** Convenience wrapper: can the body stand at this spot given the whole world? */
 export function canOccupyWorld(
   world: StaticWorld,

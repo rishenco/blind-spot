@@ -34,8 +34,10 @@ const STYLE = `
   border-radius: 4px; color: #9fb1bd; white-space: nowrap; max-width: 96vw; overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Sits above the hint line rather than under the reticle: in third person the middle of the
+   screen is where the character is, and the prompt was standing on his head. */
 .bs-capture {
-  position: absolute; top: 50%; left: 50%; transform: translate(-50%, calc(-50% + 46px));
+  position: absolute; bottom: 48px; left: 50%; transform: translateX(-50%);
   padding: 7px 14px; background: rgba(10,14,18,0.72); border: 1px solid var(--bs-edge);
   border-radius: 4px; color: #d8e6ee;
 }
@@ -71,6 +73,7 @@ const DEFAULT_HELP: HelpRow[] = [
   { keys: 'C / Ctrl', action: 'crouch' },
   { keys: 'Space', action: 'jump (tap = hop, hold = full)' },
   { keys: 'Space at a ledge', action: 'climb — vault or pull-up' },
+  { keys: 'V', action: 'view — first / third person' },
   { keys: 'R', action: 'respawn' },
   { keys: 'Mouse', action: 'look (click to capture, or drag)' },
   { keys: '1 - 9', action: 'scene variant' },
@@ -79,7 +82,7 @@ const DEFAULT_HELP: HelpRow[] = [
 ];
 
 export const DEFAULT_HINT =
-  'WASD move · Shift sprint · C/Ctrl crouch · Space jump/climb · R respawn · H help · ` scenes';
+  'WASD move · Shift sprint · C/Ctrl crouch · Space jump/climb · V view · R respawn · H help · ` scenes';
 
 export class Hud {
   private readonly root: HTMLDivElement;

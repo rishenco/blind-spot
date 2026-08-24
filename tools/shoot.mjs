@@ -147,6 +147,10 @@ function sampleFrames(ms) {
             y: s.y,
             dip: s.landDip,
             grounded: s.grounded,
+            speed: s.speed,
+            anim: s.anim,
+            animTime: s.animTime,
+            boom: s.boom,
           });
           if (t < duration) requestAnimationFrame(tick);
           else done(out);
@@ -158,6 +162,54 @@ function sampleFrames(ms) {
 }
 
 const spread = (values) => Math.max(...values) - Math.min(...values);
+const mean = (values) => values.reduce((a, b) => a + b, 0) / Math.max(1, values.length);
+
+/**
+ * Arms a non-blocking in-page observer that records extremes once per rendered frame.
+ *
+ * The blocking `sampleFrames` cannot be used while the driver is also dragging the mouse —
+ * both are page operations and would serialise — so anything that has to be measured *during*
+ * an input gesture (the camera squeezing against a wall as the boom orbits, the roll of a
+ * strafing turn) goes through this instead. It only ever reads `getState()`.
+ */
+async function startProbe() {
+  await page.evaluate(() => {
+    const p = {
+      on: true,
+      samples: 0,
+      minBoom: Infinity,
+      maxBoom: 0,
+      maxAbsRoll: 0,
+      lastRoll: 0,
+      camMinX: Infinity,
+      camMaxX: -Infinity,
+      camMinZ: Infinity,
+      camMaxZ: -Infinity,
+    };
+    window.__probe = p;
+    const tick = () => {
+      const s = window.__blindspot.getState();
+      p.samples++;
+      p.minBoom = Math.min(p.minBoom, s.boom);
+      p.maxBoom = Math.max(p.maxBoom, s.boom);
+      if (Math.abs(s.camRoll) > Math.abs(p.maxAbsRoll)) p.maxAbsRoll = s.camRoll;
+      p.lastRoll = s.camRoll;
+      p.camMinX = Math.min(p.camMinX, s.camX);
+      p.camMaxX = Math.max(p.camMaxX, s.camX);
+      p.camMinZ = Math.min(p.camMinZ, s.camZ);
+      p.camMaxZ = Math.max(p.camMaxZ, s.camZ);
+      if (p.on) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+async function readProbe() {
+  return page.evaluate(() => {
+    window.__probe.on = false;
+    return window.__probe;
+  });
+}
 
 /** Switches scene variant by its number key and waits for the rebuild to land. */
 async function setVariant(key, expected) {
@@ -536,6 +588,273 @@ const landed = falling.some((s) => s.grounded === true);
 check('the 3 m drop landed', landed, `${falling.length} frames sampled`);
 check('landing dipped the camera', dipPeak > 0.03, `${(dipPeak * 1000).toFixed(1)} mm dip (max is 120 mm)`);
 check('the dip recovers', dipTail < 0.02, `${(dipTail * 1000).toFixed(2)} mm left after ${(falling[falling.length - 1].t / 1000).toFixed(2)} s`);
+
+// --- 17 third person: the V toggle -------------------------------------------
+// Everything from here on is batch 1.2: a visible body and the third-person boom.
+await respawn();
+// Off the spawn wall first, so the boom has room and the assertion measures the rest length
+// rather than a legitimate squeeze.
+await page.keyboard.down('w');
+await poll((s) => Number(s.x) > -17, 6000);
+await page.keyboard.up('w');
+await wait(400);
+
+const beforeToggle = await state();
+check(
+  'player model loaded',
+  beforeToggle.avatarReady === true,
+  beforeToggle.avatarReady === true ? 'Xbot.glb parsed' : `error=${beforeToggle.avatarError}`,
+);
+check(
+  'first person is the default',
+  beforeToggle.view === 'first' && Number(beforeToggle.viewBlend) === 0,
+  `view=${beforeToggle.view} blend=${beforeToggle.viewBlend}`,
+);
+
+await page.keyboard.press('v');
+await poll((s) => Number(s.viewBlend) >= 0.999, 4000);
+await wait(350);
+const tpOn = await state();
+check(
+  'V switches to third person',
+  tpOn.view === 'third' && Number(tpOn.viewBlend) >= 0.999,
+  `view=${tpOn.view} blend=${Number(tpOn.viewBlend).toFixed(3)}`,
+);
+
+// Where the camera sits relative to the body it is following.
+const backVec = {
+  x: Number(tpOn.camX) - Number(tpOn.bodyX),
+  z: Number(tpOn.camZ) - Number(tpOn.bodyZ),
+};
+const backDist = Math.hypot(backVec.x, backVec.z);
+const yawRad = (Number(tpOn.yawDeg) * Math.PI) / 180;
+// Positive = the camera is behind the look direction (forward at yaw f is (-sin f, 0, -cos f)).
+const behind = -(backVec.x * -Math.sin(yawRad) + backVec.z * -Math.cos(yawRad));
+check(
+  'camera sits a boom length behind the character',
+  Math.abs(backDist - 3.22) < 0.5 && behind > 2.8,
+  `${backDist.toFixed(2)} m away, ${behind.toFixed(2)} m behind, boom=${Number(tpOn.boom).toFixed(2)}`,
+);
+check(
+  'camera rides above the neck pivot',
+  Math.abs(Number(tpOn.camY) - Number(tpOn.bodyY) - 1.85) < 0.2,
+  `camY-bodyY=${(Number(tpOn.camY) - Number(tpOn.bodyY)).toFixed(2)} m (pivot 1.5 + height 0.35)`,
+);
+check('character is drawn in third person', tpOn.avatarVisible === true, `visible=${tpOn.avatarVisible}`);
+await shot('16-tp-toggle.png');
+
+// --- 18 third person: the run cycle ------------------------------------------
+// Down the -Z lane, the same clear 15 m the walk/sprint scenarios use.
+await respawn();
+await dragLook(LANE_TURN, sens);
+await wait(150);
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+// Polled, not slept: the sampling window has to sit entirely inside the clear part of the
+// lane, and at 4-15 headless fps a fixed sleep can run the whole 14 m into the far wall —
+// where the body stops, drops out of the run cycle, and the assertion below has every right
+// to fail.
+const upToSpeed = await poll((s) => Number(s.z) < -4, 6000);
+check(
+  'the run cycle is playing at sprint speed',
+  upToSpeed.anim === 'run' && Number(upToSpeed.speed) > 5.5,
+  `anim=${upToSpeed.anim} at ${Number(upToSpeed.speed).toFixed(2)} m/s, weights ${JSON.stringify(upToSpeed.animWeights)}`,
+);
+await shot('17-tp-run.png');
+const tpRun = await sampleFrames(700);
+await page.keyboard.up('w');
+await page.keyboard.up('Shift');
+await wait(400);
+
+// The gate is "whenever the body is sprinting it is in the run cycle", not "every sampled
+// frame is". Headless frame rates are erratic enough that a sampling window can straddle the
+// end of the lane, and a body that has stopped moving has every right to leave the run cycle.
+const sprintFrames = tpRun.filter((s) => Number(s.speed) > 4);
+const strays = sprintFrames.filter((s) => s.anim !== 'run');
+const clipTimes = tpRun.map((s) => s.animTime);
+const clipSpread = spread(clipTimes);
+check(
+  'sprinting frames stay in the run clip',
+  tpRun.length > 2 && sprintFrames.length > 0 && strays.length === 0,
+  `${sprintFrames.length}/${tpRun.length} frames above 4 m/s, ${strays.length} of them off "run" [${tpRun
+    .map((s) => `${s.anim}@${Number(s.speed).toFixed(1)}`)
+    .join(' ')}]`,
+);
+check(
+  'the animation clock advances',
+  new Set(clipTimes).size >= 3 && clipSpread > 0.05,
+  `${new Set(clipTimes).size} distinct clip times spanning ${clipSpread.toFixed(3)} s over ${tpRun.length} frames (clip is 0.70 s)`,
+);
+check(
+  'no stride bob on the boom',
+  spread(tpRun.map((s) => s.camY)) < 0.02,
+  `${(spread(tpRun.map((s) => s.camY)) * 1000).toFixed(1)} mm of camera rise (first person bobs 55 mm)`,
+);
+
+// --- 19 third person: the boom against a wall ---------------------------------
+await respawn();
+// Straight back into the -X wall: the room's inner face is at x = -22.5 and the body radius
+// is 0.35, so the boom has nowhere to go and has to pull in to the character.
+await page.keyboard.down('s');
+const atWall = await poll((s) => Number(s.x) < -21.9 && Number(s.speed) < 0.5, 10000);
+await page.keyboard.up('s');
+await wait(400);
+const squeezed = await state();
+check(
+  'backed into the wall',
+  Number(atWall.x) < -21.9,
+  `x=${Number(squeezed.x).toFixed(2)} (wall face at -22.5)`,
+);
+check(
+  'the boom pulls in hard against the wall',
+  Number(squeezed.boom) < 0.6,
+  `boom=${Number(squeezed.boom).toFixed(2)} m of a ${Number(squeezed.boomRest).toFixed(2)} m rest length`,
+);
+check(
+  'the squeezed camera stays inside the room',
+  Number(squeezed.camX) > -22.5,
+  `camX=${Number(squeezed.camX).toFixed(2)}`,
+);
+
+// Orbit through ~140 deg with the wall behind: the boom has to track it the whole way.
+await startProbe();
+await dragLook(-70, sens);
+await dragLook(140, sens);
+await dragLook(-70, sens);
+const orbit = await readProbe();
+check(
+  'the boom shrinks below its default while orbiting a wall',
+  orbit.minBoom < 3.0 && orbit.samples > 4,
+  `min ${orbit.minBoom.toFixed(2)} m / max ${orbit.maxBoom.toFixed(2)} m over ${orbit.samples} frames (default 3.2)`,
+);
+check(
+  'the camera never leaves the room while orbiting',
+  orbit.camMinX > -22.5 && orbit.camMaxX < 22.5 && orbit.camMinZ > -15 && orbit.camMaxZ < 15,
+  `x ${orbit.camMinX.toFixed(2)}..${orbit.camMaxX.toFixed(2)}, z ${orbit.camMinZ.toFixed(2)}..${orbit.camMaxZ.toFixed(2)} (room is 45 x 30)`,
+);
+
+// Step off the wall until the boom is mid-squeeze — the readable version of the same shot.
+await page.keyboard.down('w');
+await poll((s) => Number(s.boom) > 0.9, 5000);
+await page.keyboard.up('w');
+await wait(250);
+const midSqueeze = await state();
+await shot('18-tp-wall.png');
+check(
+  'the boom recovers smoothly as the wall is left behind',
+  Number(midSqueeze.boom) > 0.6 && Number(midSqueeze.boom) < 2.6,
+  `boom=${Number(midSqueeze.boom).toFixed(2)} m at x=${Number(midSqueeze.x).toFixed(2)}`,
+);
+
+// --- 20 third person: vaulting -----------------------------------------------
+await setVariant('4', 'Mantle Lane');
+await respawn();
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+await poll((s) => Number(s.x) > -14.15, 6000);
+await page.keyboard.down('Space');
+const tpVaulting = await poll((s) => s.mantling === true, 2500);
+check(
+  'third-person vault started',
+  tpVaulting.mantling === true && tpVaulting.view === 'third',
+  `x=${Number(tpVaulting.x).toFixed(2)} anim=${tpVaulting.anim}`,
+);
+// A vault is 0.25 s, which at headless frame rates is one or two frames: wait for the body to
+// actually be off the floor before shooting, otherwise the "climb" shot is of a standing man.
+await poll((s) => Number(s.y) > 0.5, 900);
+await shot('19-tp-mantle.png');
+const tpVaulted = await poll(
+  (s) => s.mantling === false && s.grounded === true && Number(s.y) > 0.9,
+  3000,
+);
+await page.keyboard.up('Space');
+await page.keyboard.up('w');
+await page.keyboard.up('Shift');
+check(
+  'third-person vault finished on the ledge',
+  Math.abs(Number(tpVaulted.y) - 1) < 0.05 && tpVaulted.grounded === true,
+  `y=${Number(tpVaulted.y).toFixed(2)} grounded=${tpVaulted.grounded}`,
+);
+check(
+  'the body stayed drawn through the climb',
+  tpVaulted.avatarVisible === true,
+  `visible=${tpVaulted.avatarVisible} boom=${Number(tpVaulted.boom).toFixed(2)}`,
+);
+await wait(400);
+
+// --- 21 back to first person: no body in shot ---------------------------------
+await page.keyboard.press('v');
+await poll((s) => Number(s.viewBlend) <= 0.001, 4000);
+await wait(300);
+const fpBack = await state();
+check(
+  'V returns to first person',
+  fpBack.view === 'first' && Number(fpBack.viewBlend) === 0,
+  `view=${fpBack.view} blend=${fpBack.viewBlend}`,
+);
+check(
+  'the body is not drawn in first person',
+  fpBack.avatarVisible === false,
+  `avatarVisible=${fpBack.avatarVisible}`,
+);
+check(
+  'the camera is back at eye height',
+  Math.abs(Number(fpBack.camY) - Number(fpBack.bodyY) - 1.62) < 0.03 &&
+    Math.hypot(Number(fpBack.camX) - Number(fpBack.bodyX), Number(fpBack.camZ) - Number(fpBack.bodyZ)) < 0.05,
+  `camY-bodyY=${(Number(fpBack.camY) - Number(fpBack.bodyY)).toFixed(3)} m`,
+);
+await shot('20-fp-hidden.png');
+
+// --- 22 strafe and turn roll ---------------------------------------------------
+await setVariant('2', 'Bare Room');
+await respawn();
+await wait(300);
+
+// A pure strafe: no look input at all, so this isolates the lateral-velocity term.
+await page.keyboard.down('a');
+await wait(900);
+const strafing = await sampleFrames(800);
+await page.keyboard.up('a');
+const strafeRoll = mean(strafing.map((s) => s.camRoll));
+check(
+  'strafing leans the camera',
+  Math.abs(strafeRoll) > 0.9 && Math.abs(strafeRoll) < 2.6,
+  `${strafeRoll.toFixed(2)} deg mean over ${strafing.length} frames (strafeRollDeg = 1.5)`,
+);
+await wait(500);
+const afterStrafe = await state();
+check(
+  'the strafe lean releases',
+  Math.abs(Number(afterStrafe.camRoll)) < 0.2,
+  `${Number(afterStrafe.camRoll).toFixed(3)} deg 0.5 s after the key came up`,
+);
+
+// The full thing: a sprinting A-strafe circle, roll from both sources at once.
+await respawn();
+await wait(200);
+await startProbe();
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+await page.keyboard.down('a');
+await wait(450);
+await dragLook(120, sens);
+await shot('21-roll.png');
+await page.keyboard.up('a');
+await page.keyboard.up('w');
+await page.keyboard.up('Shift');
+const rollProbe = await readProbe();
+check(
+  'a hard strafing turn rolls the camera',
+  Math.abs(rollProbe.maxAbsRoll) > 0.9 && Math.abs(rollProbe.maxAbsRoll) < 4.5,
+  `${rollProbe.maxAbsRoll.toFixed(2)} deg peak over ${rollProbe.samples} frames (1.5 strafe + 1.0 turn + 0.25 stride)`,
+);
+await wait(600);
+const settled = await state();
+check(
+  'roll returns to zero within 0.5 s of the input stopping',
+  Math.abs(Number(settled.camRoll)) < 0.2,
+  `${Number(settled.camRoll).toFixed(4)} deg`,
+);
 
 // --- report ----------------------------------------------------------------
 check(
