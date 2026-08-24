@@ -152,6 +152,24 @@ function rawColor(hex: number): THREE.Color {
 }
 
 /**
+ * A (floor, feather) pair per item, set to "unbounded": reach any age, at full strength.
+ *
+ * What an item that has never been refreshed carries, and what a refresh landing dead centre
+ * would write anyway — so the neutral value and the identity value are the same value.
+ */
+function unbounded(items: number): Float32Array<ArrayBuffer> {
+  const out = new Float32Array(items * 2);
+  for (let i = 0; i < items; i++) out[i * 2 + 1] = 1;
+  return out;
+}
+
+/** The shader's smoothstep, so the CPU mirror of the ease cannot drift from the GPU's. */
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
  * The displaced ring profile, in units of ring widths behind the front.
  *
  * A pressure pulse, not a bump: the surface is shoved outward as the front arrives, crosses back
@@ -251,6 +269,8 @@ const DOT_VERTEX = /* glsl */ `
   attribute float aWave;
   attribute float aSeed;
   attribute float aAccent;
+  // x = the youngest age the newest refresh may reach here, y = how much of it this dot gets.
+  attribute vec2  aRefresh;
 
   varying vec3  vColor;
   varying float vAlpha;
@@ -325,7 +345,12 @@ const DOT_VERTEX = /* glsl */ `
         gl_PointSize = 0.0;
         return;
       }
-      age = mix(ageOld, ageNew, smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew));
+      // Bounded exactly as the blip cloud bounds it, because it is one policy: a footfall may
+      // only walk the age back to the end of the white band, and only fully in the middle of its
+      // own radius. The min against the old age keeps the floor a floor.
+      float target = min(ageOld, max(ageNew, aRefresh.x));
+      float s = smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew) * aRefresh.y;
+      age = mix(ageOld, target, s);
     }
 
     vec3 col;
@@ -384,6 +409,8 @@ const EDGE_VERTEX = /* glsl */ `
   attribute float aPrior;
   attribute float aT;
   attribute float aAccent;
+  // The same two bounds a lattice dot carries, on the line the dot's face is bordered by.
+  attribute vec2  aRefresh;
 
   varying vec3  vColor;
   varying float vAlpha;
@@ -434,7 +461,11 @@ const EDGE_VERTEX = /* glsl */ `
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
       }
-      age = mix(ageOld, ageNew, smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew));
+      float target = min(ageOld, max(ageNew, aRefresh.x));
+      float s = smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew) * aRefresh.y;
+      age = mix(ageOld, target, s);
+      // A line that has been drawn once is whole for ever: the bounds shape how young a refresh
+      // may make it, never whether it is there.
       vInk = 10.0;
     }
 
@@ -511,6 +542,22 @@ export interface StructuredStats {
   lastChunks: number;
   /** Items the outstanding unlock job has still to look at. */
   pending: number;
+  /** Of `lastDots`, the ones that were already known — the refreshes rather than the reveals. */
+  lastRefreshed: number;
+  /** The age floor the last event carried, seconds — zero for anything but a footstep. */
+  lastFloor: number;
+  /** Mean spatial feather over the dots it refreshed (1 = all of them dead centre). */
+  lastFeatherMean: number;
+  /** Refreshed dots the floor genuinely held back — older than the floor when it landed. */
+  lastFloored: number;
+  /**
+   * Worst age discontinuity the last event's refreshes put on screen, seconds.
+   *
+   * The blip cloud's invariant, measured the same way here: the displayed age is evaluated under
+   * the old stamps and again under the new ones at the same instant, and the effective-stamp
+   * construction makes the difference zero. One policy, one number, two backends.
+   */
+  lastJump: number;
 }
 
 export interface StructuredDiagnostics {
@@ -549,6 +596,9 @@ interface UnlockJob {
   t0: number;
   invSpeed: number;
   slot: number;
+  /** Youngest age this event's refreshes may reach, and where they start fading out (metres). */
+  floor: number;
+  featherFrom: number;
   /** 0 = skip, 1 = shell (per dot, occluded), 2 = object (heard as a whole). */
   faceCursor: number;
   dotCursor: number;
@@ -577,11 +627,15 @@ export class StructuredPaint {
   private dotWave = new Float32Array(0);
   private dotSeed = new Float32Array(0);
   private dotAccent = new Float32Array(0);
+  /** (floor age, feather) per dot, interleaved — the bounds on its newest refresh. */
+  private dotRefresh = new Float32Array(0);
   private edgePos = new Float32Array(0);
   private edgeBirth = new Float32Array(0);
   private edgePrior = new Float32Array(0);
   private edgeT = new Float32Array(0);
   private edgeAccent = new Float32Array(0);
+  /** The same pair per contour vertex, written to both ends of a piece at once. */
+  private edgeRefresh = new Float32Array(0);
   private edgeBox = new Int32Array(0);
   /** The two face normals an edge piece belongs to, as indices into `NORMALS`. */
   private edgeNa = new Uint8Array(0);
@@ -600,6 +654,15 @@ export class StructuredPaint {
   private readonly waveMeta = new Float32Array(WAVE_SLOTS * 2);
   private lastBlocker = -1;
   private lastChunkAt = 0;
+  /**
+   * The two numbers the wave tunables own: how long a refresh eases for, and where it starts
+   * fading out across the event's radius. Pushed in by `applyLook` rather than duplicated as
+   * tunables of this module, for the same reason the ease itself is — one policy, one source.
+   */
+  private refreshSeconds = 0.3;
+  private featherStart = 0.55;
+  /** Running feather sum behind `lastFeatherMean`, reset with the other per-event stats. */
+  private featherSum = 0;
 
   private dotDirtyMin = Infinity;
   private dotDirtyMax = -Infinity;
@@ -621,6 +684,11 @@ export class StructuredPaint {
     lastChunkMs: 0,
     lastChunks: 0,
     pending: 0,
+    lastRefreshed: 0,
+    lastFloor: 0,
+    lastFeatherMean: 0,
+    lastFloored: 0,
+    lastJump: 0,
   };
 
   private diag: StructuredDiagnostics = {
@@ -1039,6 +1107,7 @@ export class StructuredPaint {
     this.dotPrior = new Float32Array(dots).fill(NEVER);
     this.dotWave = new Float32Array(dots);
     this.dotAccent = new Float32Array(dots);
+    this.dotRefresh = unbounded(dots);
 
     const verts = this.pieces * 2;
     this.edgePos = new Float32Array(epos);
@@ -1049,6 +1118,7 @@ export class StructuredPaint {
     this.edgeBirth = new Float32Array(verts).fill(NEVER);
     this.edgePrior = new Float32Array(verts).fill(NEVER);
     this.edgeAccent = new Float32Array(verts);
+    this.edgeRefresh = unbounded(verts);
     this.edgeT = new Float32Array(verts);
     for (let i = 0; i < this.pieces; i++) {
       this.edgeT[i * 2] = 0;
@@ -1061,6 +1131,7 @@ export class StructuredPaint {
     this.dotGeometry.setAttribute('aWave', new THREE.BufferAttribute(this.dotWave, 1));
     this.dotGeometry.setAttribute('aSeed', new THREE.BufferAttribute(this.dotSeed, 1));
     this.dotGeometry.setAttribute('aAccent', new THREE.BufferAttribute(this.dotAccent, 1));
+    this.dotGeometry.setAttribute('aRefresh', new THREE.BufferAttribute(this.dotRefresh, 2));
     this.dotGeometry.setDrawRange(0, dots);
     this.dotGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
 
@@ -1069,6 +1140,7 @@ export class StructuredPaint {
     this.edgeGeometry.setAttribute('aPrior', new THREE.BufferAttribute(this.edgePrior, 1));
     this.edgeGeometry.setAttribute('aT', new THREE.BufferAttribute(this.edgeT, 1));
     this.edgeGeometry.setAttribute('aAccent', new THREE.BufferAttribute(this.edgeAccent, 1));
+    this.edgeGeometry.setAttribute('aRefresh', new THREE.BufferAttribute(this.edgeRefresh, 2));
     this.edgeGeometry.setDrawRange(0, verts);
     this.edgeGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
 
@@ -1077,10 +1149,10 @@ export class StructuredPaint {
     this.stats.buildMs = performance.now() - t0;
     this.stats.dots = dots;
     this.stats.edges = this.pieces;
-    // Per dot: position(3) + birth + prior + wave + seed + accent, all f32.
-    // Per contour vertex: position(3) + birth + prior + t + accent, all f32.
+    // Per dot: position(3) + birth + prior + wave + seed + accent + refresh(2), all f32.
+    // Per contour vertex: position(3) + birth + prior + t + accent + refresh(2), all f32.
     // Per contour piece, CPU-side only: midpoint(3) f32 + box index i32 + two normal indices u8.
-    this.stats.bytes = dots * 8 * 4 + verts * 7 * 4 + this.pieces * (3 * 4 + 4 + 2);
+    this.stats.bytes = dots * 10 * 4 + verts * 9 * 4 + this.pieces * (3 * 4 + 4 + 2);
     this.stats.unlockedDots = 0;
     this.stats.unlockedEdges = 0;
   }
@@ -1088,11 +1160,15 @@ export class StructuredPaint {
   // ---- look ----------------------------------------------------------------
 
   /**
-   * Pushes the tunables and the shared age ramp into both shaders. `refreshSeconds` comes from
-   * the wave tunables rather than from this module's own: the silent refresh is one policy
-   * across both paint backends, so it has exactly one number behind it.
+   * Pushes the tunables and the shared age ramp into both shaders. `refreshSeconds` and
+   * `featherStart` come from the wave tunables rather than from this module's own: the silent
+   * refresh and the bounds on it are one policy across both paint backends, so each has exactly
+   * one number behind it. (The floor is per *event* rather than per look, so it arrives with the
+   * event, in `handle`.)
    */
-  applyLook(windowRadius: number, refreshSeconds: number): void {
+  applyLook(windowRadius: number, refreshSeconds: number, featherStart: number): void {
+    this.refreshSeconds = refreshSeconds;
+    this.featherStart = featherStart;
     const t = this.tunables;
     const d = this.dotMaterial.uniforms;
     const e = this.edgeMaterial.uniforms;
@@ -1142,8 +1218,10 @@ export class StructuredPaint {
     this.dotBirth.fill(NEVER);
     this.dotPrior.fill(NEVER);
     this.dotWave.fill(0);
+    this.dotRefresh.set(unbounded(this.dotRefresh.length / 2));
     this.edgeBirth.fill(NEVER);
     this.edgePrior.fill(NEVER);
+    this.edgeRefresh.set(unbounded(this.edgeRefresh.length / 2));
     this.waveMeta.fill(0);
     this.stats.unlockedDots = 0;
     this.stats.unlockedEdges = 0;
@@ -1153,6 +1231,12 @@ export class StructuredPaint {
     this.stats.lastMs = 0;
     this.stats.lastChunkMs = 0;
     this.stats.lastChunks = 0;
+    this.stats.lastRefreshed = 0;
+    this.stats.lastFloor = 0;
+    this.stats.lastFeatherMean = 0;
+    this.stats.lastFloored = 0;
+    this.stats.lastJump = 0;
+    this.featherSum = 0;
     this.markDots(0, this.dotBirth.length - 1);
     this.markEdges(0, this.edgeBirth.length - 1);
     this.upload();
@@ -1170,7 +1254,7 @@ export class StructuredPaint {
    * is a function of the event's own time and the distance to it (§the wave engine): a dot
    * unlocked three frames late still lights at exactly the instant the front reached it.
    */
-  handle(event: SoundEvent, now: number): void {
+  handle(event: SoundEvent, now: number, floorAge = 0): void {
     this.ensureBuilt();
     this.drain();
 
@@ -1180,6 +1264,12 @@ export class StructuredPaint {
     this.stats.lastMs = 0;
     this.stats.lastChunkMs = 0;
     this.stats.lastChunks = 0;
+    this.stats.lastRefreshed = 0;
+    this.stats.lastFloor = floorAge;
+    this.stats.lastFeatherMean = 0;
+    this.stats.lastFloored = 0;
+    this.stats.lastJump = 0;
+    this.featherSum = 0;
 
     const slot = this.slotCursor++ % WAVE_SLOTS;
     this.waveOrigin[slot * 4] = event.x;
@@ -1203,6 +1293,8 @@ export class StructuredPaint {
       t0: event.time,
       invSpeed: 1 / event.waveSpeed,
       slot,
+      floor: floorAge,
+      featherFrom: event.paintRadius * Math.min(0.999, Math.max(0, this.featherStart)),
       faceCursor: 0,
       dotCursor: 0,
       edgeCursor: 0,
@@ -1359,7 +1451,14 @@ export class StructuredPaint {
           this.stats.lastRays++;
           if (this.blocked(job.ox, job.oy, job.oz, px, py, pz, face.box)) continue;
         }
-        this.unlockDot(i, job.t0 + dist * job.invSpeed, now, job.slot);
+        this.unlockDot(
+          i,
+          job.t0 + dist * job.invSpeed,
+          now,
+          job.slot,
+          job.floor,
+          1 - smoothstep(job.featherFrom, job.radius, dist),
+        );
       }
       job.dotCursor = i - face.dot0;
       if (i < end) {
@@ -1401,7 +1500,14 @@ export class StructuredPaint {
         // run just off whichever of them is turned toward the sound.
         if (!this.creaseHeard(k, mx, my, mz, job)) continue;
       }
-      this.unlockEdge(k, job.t0 + dist * job.invSpeed, now, job.slot);
+      this.unlockEdge(
+        k,
+        job.t0 + dist * job.invSpeed,
+        now,
+        job.slot,
+        job.floor,
+        1 - smoothstep(job.featherFrom, job.radius, dist),
+      );
       if (items >= maxItems || performance.now() - start >= budgetMs) {
         this.endChunk(start);
         return;
@@ -1548,29 +1654,104 @@ export class StructuredPaint {
   }
 
   /**
+   * The age an item is displaying this instant, under the exact curve its shader runs.
+   *
+   * The blip cloud's `displayedAge`, over this module's arrays. It exists for the same reason:
+   * an item bounded by a floor and a feather sits *between* its two stamps, so the only stamp
+   * that can be written back without moving the picture is the one that reproduces what is on
+   * screen now.
+   */
+  private displayedAge(
+    birth: number,
+    prior: number,
+    floor: number,
+    feather: number,
+    now: number,
+  ): number {
+    const ageNew = now - birth;
+    if (prior <= -1e8) return ageNew;
+    const ageOld = now - prior;
+    const target = Math.min(ageOld, Math.max(ageNew, floor));
+    const s = smoothstep(0, Math.max(0.001, this.refreshSeconds), ageNew) * feather;
+    return ageOld + (target - ageOld) * s;
+  }
+
+  /**
    * Restamps one item. The dual stamp is the blip system's, verbatim: only an arrival that has
    * genuinely landed may become the fallback, so a point restamped twice in flight never falls
-   * back to a stamp that never happened.
+   * back to a stamp that never happened — and what lands there is the *effective* stamp, the one
+   * that reproduces the age on screen, so a bounded refresh has no baseline to snap.
    */
-  private unlockDot(i: number, arrival: number, now: number, slot: number): void {
+  private unlockDot(
+    i: number,
+    arrival: number,
+    now: number,
+    slot: number,
+    floor: number,
+    feather: number,
+  ): void {
     const old = this.dotBirth[i]!;
     if (old <= -1e8) this.stats.unlockedDots++;
-    if (old <= now) this.dotPrior[i] = old;
+    const prior = this.dotPrior[i]!;
+    const before = this.displayedAge(
+      old,
+      prior,
+      this.dotRefresh[i * 2]!,
+      this.dotRefresh[i * 2 + 1]!,
+      now,
+    );
+    if (old <= now) this.dotPrior[i] = now - before;
     this.dotBirth[i] = arrival;
     this.dotWave[i] = slot;
+    this.dotRefresh[i * 2] = floor;
+    this.dotRefresh[i * 2 + 1] = feather;
+    // "Refreshed" is the blip cloud's sense of it: this item was already known, whether it was
+    // known from one event or from ten, so the bounds are what decides how it answers this one.
+    if (old > -1e8) {
+      this.stats.lastRefreshed++;
+      this.featherSum += feather;
+      this.stats.lastFeatherMean = this.featherSum / this.stats.lastRefreshed;
+      if (floor > 0 && before > floor) this.stats.lastFloored++;
+    }
+    // Only where there is a picture to disturb: an item whose first front has not landed is not
+    // drawn at all, and its stamp being replaced outright is the virgin-in-flight rule.
+    if (old <= now) {
+      const jump = Math.abs(
+        this.displayedAge(arrival, this.dotPrior[i]!, floor, feather, now) - before,
+      );
+      if (jump > this.stats.lastJump) this.stats.lastJump = jump;
+    }
     this.stats.lastDots++;
     this.markDots(i, i);
   }
 
-  private unlockEdge(k: number, arrival: number, now: number, slot: number): void {
+  private unlockEdge(
+    k: number,
+    arrival: number,
+    now: number,
+    slot: number,
+    floor: number,
+    feather: number,
+  ): void {
     const v = k * 2;
     const old = this.edgeBirth[v]!;
     if (old <= -1e8) this.stats.unlockedEdges++;
-    const prior = old <= now ? old : this.edgePrior[v]!;
+    const shown = this.displayedAge(
+      old,
+      this.edgePrior[v]!,
+      this.edgeRefresh[v * 2]!,
+      this.edgeRefresh[v * 2 + 1]!,
+      now,
+    );
+    const prior = old <= now ? now - shown : this.edgePrior[v]!;
     this.edgeBirth[v] = arrival;
     this.edgeBirth[v + 1] = arrival;
     this.edgePrior[v] = prior;
     this.edgePrior[v + 1] = prior;
+    this.edgeRefresh[v * 2] = floor;
+    this.edgeRefresh[v * 2 + 1] = feather;
+    this.edgeRefresh[(v + 1) * 2] = floor;
+    this.edgeRefresh[(v + 1) * 2 + 1] = feather;
     this.stats.lastEdges++;
     this.markEdges(v, v + 1);
     void slot;
@@ -1595,6 +1776,10 @@ export class StructuredPaint {
         attr.addUpdateRange(start, count);
         attr.needsUpdate = true;
       }
+      // Two floats an item, so its range is the same window in twice the units.
+      const refresh = this.dotGeometry.getAttribute('aRefresh') as THREE.BufferAttribute;
+      refresh.addUpdateRange(start * 2, count * 2);
+      refresh.needsUpdate = true;
       this.dotDirtyMin = Infinity;
       this.dotDirtyMax = -Infinity;
     }
@@ -1606,6 +1791,9 @@ export class StructuredPaint {
         attr.addUpdateRange(start, count);
         attr.needsUpdate = true;
       }
+      const refresh = this.edgeGeometry.getAttribute('aRefresh') as THREE.BufferAttribute;
+      refresh.addUpdateRange(start * 2, count * 2);
+      refresh.needsUpdate = true;
       this.edgeDirtyMin = Infinity;
       this.edgeDirtyMax = -Infinity;
     }

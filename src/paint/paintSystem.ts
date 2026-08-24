@@ -69,6 +69,36 @@
  * The two cases share one branch on `aPrior`, so the policy cannot drift between them, and both
  * are free: the front is still a comparison against a uniform rather than a list the CPU walks.
  *
+ * ## What a refresh is allowed to reach, and how far out it is allowed to reach it
+ *
+ * Easing the age over a third of a second smooths *time*, and time was only half of the
+ * complaint. The other half is colour distance: a footfall over cooled navy floor eased its way
+ * to age zero, and age zero is the ice-white end of the ramp — so a sprinting player still laid
+ * down footprint-shaped patches of white on ground they had painted a minute ago, each with a
+ * hard border where the paint radius stopped. Smooth in time, and still a blotch.
+ *
+ * So a refresh carries two bounds, both per-restamp, both stored on the blip (`aRefresh`):
+ *
+ *  - **A floor on how young it may make the paint.** A footstep may walk the age back only to
+ *    the *end of the white band* (`wave.stepFloor` in units of that band), never to zero: a step
+ *    is a step, not a question. Pings, landings and every other deliberate or loud class keep a
+ *    floor of zero, because a ping re-asking a room *should* re-whiten it — that is what the
+ *    player paid the noise for. The floor is a floor and never a ceiling: paint that is already
+ *    fresher than it is left alone rather than aged back down to it.
+ *
+ *  - **A feather on how much of that it gets.** Every point inside an event's radius used to
+ *    take the whole refresh, and the point a centimetre outside took none, which is a border.
+ *    The refresh instead fades out over the last of the radius (`wave.featherStart`), so a
+ *    footfall's patch and a ping's disc both dissolve into the paint around them.
+ *
+ * Both bounds mean a blip converges only *part* of the way toward its new stamp, and that puts a
+ * requirement on the *next* restamp. `aPrior` is read by the shader as "the age this blip is
+ * showing"; writing the raw old birth stamp there would snap the picture back to an age the blip
+ * was never displaying. A restamp therefore stores the **effective** stamp: the CPU evaluates
+ * the same mix the shader is evaluating this instant (`displayedAge`) and writes back the stamp
+ * that reproduces it. The baseline is then exactly what is on screen, whatever the floor and the
+ * feather did to it, and no restamp — first, second or fiftieth — can ever be seen to happen.
+ *
  * The arrival flash is scaled per event class (`rimScaleFor`). A ping is a deliberate question
  * and answers at full brightness; footsteps, which fire three times a second, answer at a
  * fraction of it. Sprinting into unpainted ground should read as headlights, never as a strobe.
@@ -381,6 +411,42 @@ export interface WaveTunables {
    * of it stops shouting.
    */
   stepRim: number;
+  /**
+   * How young a *footstep* is allowed to make paint it has already painted, in units of the
+   * ramp's white band (0 = all the way to ice-white, 1 = the end of the band, 2 = a band past it).
+   *
+   * The sprint blotch, in one number. Steps fire three or four times a second and each one used
+   * to walk the age of everything inside its radius back to zero — and zero is the ice-white end
+   * of the ramp, which the ramp deliberately lingers on. Sprinting over floor you painted a
+   * minute ago therefore stamped footfall-shaped patches of white onto cooled cyan, four times a
+   * second, and the eye reads that as strobing however smoothly the age underneath it eased.
+   *
+   * A step is not a question. It is allowed to say "still here" — to hold the paint at the
+   * *bottom* of the white band, fresh cyan, clearly newer than the floor either side of the lane
+   * — and it is not allowed to say "look again", because the player did not ask. Pings and
+   * landings keep the full refresh (floor 0) and re-whiten what they reach, which is precisely
+   * the difference in price between a footfall and a deliberate act. Zero here restores the old
+   * behaviour exactly, for the comparison.
+   *
+   * Expressed in bands rather than in seconds because the band is what the eye reads, and looks
+   * walk the ramp at different rates: `coolRate` divides out (§`floorAgeFor`), so one setting is
+   * the same *colour* in every look.
+   */
+  stepFloor: number;
+  /**
+   * Where a refresh starts fading out, as a fraction of the event's own paint radius.
+   *
+   * Every point inside the radius used to take the whole refresh and every point outside it took
+   * none, which is a border — and a border on a footfall is a footprint stencilled onto the
+   * floor. Past this fraction the refresh tapers to nothing at the rim, so what a step leaves
+   * behind is a soft brightening in the middle of the paint it already owns rather than a patch
+   * with an edge. 1 is the old hard-edged behaviour.
+   *
+   * Distinct from `PaintTunables.featherStart`, which thins out the *hits* a sampled event
+   * deposits near its rim: that one shapes where new paint lands, this one shapes how much of a
+   * refresh already-painted ground receives.
+   */
+  featherStart: number;
   /** Lifetime of the E-ping's tracer streak, seconds (§brief: ≤0.3). */
   tracerSeconds: number;
   /** How far ahead of the rig the fan begins, metres. */
@@ -414,6 +480,8 @@ export function defaultWaveTunables(): WaveTunables {
     arriveSeconds: 0.12,
     refreshSeconds: 0.3,
     stepRim: 0.4,
+    stepFloor: 1,
+    featherStart: 0.55,
     tracerSeconds: 0.25,
     tracerStart: 1.4,
     tracerLength: 3.2,
@@ -443,6 +511,33 @@ export function defaultWaveTunables(): WaveTunables {
  */
 function rimScaleFor(cls: SoundClass, wave: WaveTunables): number {
   return cls === 'crouch-step' || cls === 'walk-step' || cls === 'sprint-step' ? wave.stepRim : 1;
+}
+
+/** True for the classes a body makes by moving, as opposed to the ones a player chooses to make. */
+function isStep(cls: SoundClass): boolean {
+  return cls === 'crouch-step' || cls === 'walk-step' || cls === 'sprint-step';
+}
+
+/**
+ * The youngest age a class's refresh may hand to paint that already exists, in seconds.
+ *
+ * The same split as `rimScaleFor`, one step further down the same argument: a footfall is not
+ * allowed to look like news at the *edge* of the paint, and it is not allowed to look like news
+ * in the *colour* of it either. `stepFloor` is authored in bands of the ramp's white stage, so
+ * the division by the look's cooling rate is what keeps one setting meaning one colour: the
+ * shader walks the ramp at `age × coolRate`, so an age of `freshSeconds / coolRate` lands on the
+ * end of the white band in every look, and Afterimage's 1.8× ramp does not quietly turn the
+ * floor into a different policy.
+ */
+function floorAgeFor(cls: SoundClass, wave: WaveTunables, ramp: AgeRamp, coolRate: number): number {
+  if (!isStep(cls)) return 0;
+  return (ramp.freshSeconds / Math.max(0.001, coolRate)) * wave.stepFloor;
+}
+
+/** The shader's own smoothstep, so the CPU mirror of the ease cannot drift from the GPU's. */
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+  return t * t * (3 - 2 * t);
 }
 
 /** Event-layer palette (§3.2): self is amber, and the pings are the same self, brighter. */
@@ -848,6 +943,8 @@ const MATTER_VERTEX = /* glsl */ `
   attribute float aSeed;
   attribute float aMat;
   attribute float aRim;
+  // x = the youngest age the newest refresh may hand this blip, y = how much of that it gets.
+  attribute vec2  aRefresh;
 
   varying vec3  vColor;
   varying float vAlpha;
@@ -895,10 +992,21 @@ const MATTER_VERTEX = /* glsl */ `
         gl_PointSize = 0.0;
         return;
       }
-      // Both ages advance at the same rate, so this is a smooth slide from one to the other:
-      // exactly the old age while the front is still coming, exactly the new one 0.3 s after it
-      // passed, and no discontinuity anywhere between.
-      age = mix(ageOld, ageNew, smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew));
+      /*
+       * The refresh, bounded twice (see the header). aRefresh.x is the youngest age this event is
+       * allowed to hand this blip — zero for a deliberate question, the end of the white band for
+       * a footfall — and taking the min against the old age is what keeps that a floor and not a
+       * ceiling: a step crossing ground a ping has just whitened must not drag it back down to
+       * cyan. aRefresh.y is how much of the way there this point gets at all, which is what
+       * dissolves the edge of the patch instead of stencilling it.
+       *
+       * Both ages advance at the same rate, so this is still a smooth slide from one to the
+       * other: exactly the old age while the front is still coming, settled 0.3 s after it
+       * passed, and no discontinuity anywhere between.
+       */
+      float target = min(ageOld, max(ageNew, aRefresh.x));
+      float s = smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew) * aRefresh.y;
+      age = mix(ageOld, target, s);
     }
 
     // Per-grain cooling spread: at uDissolve = 0 the surface cools as one sheet.
@@ -1044,6 +1152,31 @@ export interface PaintStats {
   lastDeposited: number;
   /** Existing blips restamped by the most recent event. */
   lastRefreshed: number;
+  /**
+   * The age floor the most recent event carried, seconds — zero for anything but a footstep.
+   *
+   * A property of the *event*, so it is reported whether or not the event found anything to
+   * refresh: it is the number the class table and `stepFloor` decided on, before the world had
+   * a say.
+   */
+  lastRefreshFloor: number;
+  /** Mean spatial feather over the restamps of the most recent event (1 = all dead centre). */
+  lastFeatherMean: number;
+  /**
+   * Restamps the floor genuinely held back: the paint was older than the floor, so the refresh
+   * stopped short of the white instead of walking all the way to it. The count that separates
+   * "the policy is configured" from "the policy did something".
+   */
+  lastFloored: number;
+  /**
+   * Worst discontinuity the most recent event's restamps put on screen, seconds of age.
+   *
+   * Measured, not argued: for every restamp the age the blip was displaying is evaluated under
+   * the old stamps and again under the new ones, at the same instant, with the same curve the
+   * shader runs. The effective-stamp construction (see the header) makes this zero by design, so
+   * a non-zero reading is the invariant breaking rather than a number to be tuned.
+   */
+  lastRestampJump: number;
   /** Wall-clock cost of the most recent event's sampling, ms, summed over its chunks. */
   lastPaintMs: number;
   /** Worst single chunk of that sampling, ms — the actual frame stall the player pays. */
@@ -1137,6 +1270,48 @@ export interface PaintDiagnostics {
   maxBlipWant: number;
 }
 
+/** One shell of the newest event's radius, and how its refresh landed there (`refreshProbe`). */
+export interface RefreshBand {
+  /** Inner and outer edge of the shell, as fractions of that event's paint radius. */
+  lo: number;
+  hi: number;
+  /** Blips the event stamped here, and how many of those it found already painted. */
+  points: number;
+  known: number;
+  /** Means over the known ones — the two bounds the restamp actually wrote. */
+  meanFeather: number;
+  meanFloor: number;
+  /** Known blips older than the floor, so the floor genuinely held the refresh back. */
+  floored: number;
+}
+
+/** One blip's restamp attributes, and the age they add up to right now. */
+export interface RefreshRow {
+  i: number;
+  x: number;
+  y: number;
+  z: number;
+  birth: number;
+  prior: number;
+  floor: number;
+  feather: number;
+  age: number;
+}
+
+export interface RefreshProbe {
+  /** The paint clock the rows were read at — an age is only meaningful against its own instant. */
+  now: number;
+  originX: number;
+  originY: number;
+  originZ: number;
+  radius: number;
+  /** Blips carrying the newest event's arrival stamp. */
+  stamped: number;
+  refreshSeconds: number;
+  bands: RefreshBand[];
+  rows: RefreshRow[];
+}
+
 export class PaintSystem {
   readonly tunables: PaintTunables;
   readonly ramp: AgeRamp;
@@ -1163,6 +1338,15 @@ export class PaintSystem {
    * along with position, seed and material in the append range, which is the cheap one.
    */
   private readonly rims: Float32Array;
+  /**
+   * How the newest refresh of this blip was bounded: (floor age, feather), interleaved.
+   *
+   * Written on every restamp and initialised to (0, 1) on deposit — a virgin blip's branch never
+   * reads them, and (0, 1) is "an unbounded refresh", which is what the *next* event would give
+   * it if it landed dead centre. Interleaved rather than two attributes because both are written
+   * by the same restamp and uploaded in the same touched range: one attribute, one upload.
+   */
+  private readonly refreshes: Float32Array;
   /** Dedup cell key currently held by each slot, or -1. Lets a ring wrap unmap cleanly. */
   private readonly slotKeys: Float64Array;
   private readonly cells = new Map<number, number>();
@@ -1211,6 +1395,10 @@ export class PaintSystem {
   private emitInvSpeed = 0;
   /** Arrival-flash scale of the event being sampled (§`rimScaleFor`). */
   private emitRim = 1;
+  /** Youngest age its refreshes may reach (§`floorAgeFor`), and where they start fading out. */
+  private emitFloor = 0;
+  private emitRadius = 1;
+  private emitFeatherFrom = 0;
   private readonly candidates: Aabb[] = [];
   private readonly listener = new THREE.Vector3();
   private readonly viewportSize = new THREE.Vector2();
@@ -1255,6 +1443,10 @@ export class PaintSystem {
     lastRays: 0,
     lastDeposited: 0,
     lastRefreshed: 0,
+    lastRefreshFloor: 0,
+    lastFeatherMean: 0,
+    lastFloored: 0,
+    lastRestampJump: 0,
     lastPaintMs: 0,
     lastChunkMs: 0,
     lastChunks: 0,
@@ -1264,6 +1456,8 @@ export class PaintSystem {
     lastSpanDeg: 0,
     lastLateral: 0,
   };
+  /** Running feather sum behind `lastFeatherMean`, reset with the rest of the per-event stats. */
+  private featherSum = 0;
 
   private diag: PaintDiagnostics = {
     waveLive: false,
@@ -1311,6 +1505,7 @@ export class PaintSystem {
     this.seeds = new Float32Array(this.capacity);
     this.mats = new Float32Array(this.capacity);
     this.rims = new Float32Array(this.capacity);
+    this.refreshes = new Float32Array(this.capacity * 2);
     this.slotKeys = new Float64Array(this.capacity).fill(-1);
 
     this.geometry.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
@@ -1320,6 +1515,7 @@ export class PaintSystem {
     this.geometry.setAttribute('aSeed', new THREE.BufferAttribute(this.seeds, 1));
     this.geometry.setAttribute('aMat', new THREE.BufferAttribute(this.mats, 1));
     this.geometry.setAttribute('aRim', new THREE.BufferAttribute(this.rims, 1));
+    this.geometry.setAttribute('aRefresh', new THREE.BufferAttribute(this.refreshes, 2));
     this.geometry.setDrawRange(0, 0);
 
     const p = this.profiles[0]!;
@@ -1421,7 +1617,11 @@ export class PaintSystem {
       this.dust.object,
       this.structured.object,
     );
-    this.structured.applyLook(this.tunables.windowRadius, this.wave.refreshSeconds);
+    this.structured.applyLook(
+      this.tunables.windowRadius,
+      this.wave.refreshSeconds,
+      this.wave.featherStart,
+    );
   }
 
   /** The object to add to the scene. */
@@ -1502,7 +1702,11 @@ export class PaintSystem {
     u.uRefreshSeconds!.value = this.wave.refreshSeconds;
     this.tracer.setLook(this.wave.tracerSeconds, this.wave.tracerBrightness);
     this.dust.setLook(this.wave.dustGain, this.wave.dustSize, this.wave.dustShell);
-    this.structured.applyLook(this.tunables.windowRadius, this.wave.refreshSeconds);
+    this.structured.applyLook(
+      this.tunables.windowRadius,
+      this.wave.refreshSeconds,
+      this.wave.featherStart,
+    );
   }
 
   /**
@@ -1586,6 +1790,11 @@ export class PaintSystem {
     this.stats.lastRays = 0;
     this.stats.lastDeposited = 0;
     this.stats.lastRefreshed = 0;
+    this.stats.lastRefreshFloor = 0;
+    this.stats.lastFeatherMean = 0;
+    this.stats.lastFloored = 0;
+    this.stats.lastRestampJump = 0;
+    this.featherSum = 0;
     this.stats.lastPaintMs = 0;
     this.stats.lastMaxRange = 0;
     this.stats.lastFar20 = 0;
@@ -1612,6 +1821,16 @@ export class PaintSystem {
     this.stats.lastRays = 0;
     this.stats.lastDeposited = 0;
     this.stats.lastRefreshed = 0;
+    this.stats.lastFeatherMean = 0;
+    this.stats.lastFloored = 0;
+    this.stats.lastRestampJump = 0;
+    this.featherSum = 0;
+    this.stats.lastRefreshFloor = floorAgeFor(
+      event.class,
+      this.wave,
+      this.ramp,
+      this.profile.coolRate,
+    );
     this.stats.lastPaintMs = 0;
     this.stats.lastChunkMs = 0;
     this.stats.lastChunks = 0;
@@ -1641,7 +1860,9 @@ export class PaintSystem {
        * shared; everything below is how a look chooses to answer it.
        */
       if (this.profile.structured) {
-        this.structured.handle(event, this.time);
+        // The refresh floor is a property of the sound, not of the representation that answers
+        // it, so the structured backend is handed the same number rather than deriving its own.
+        this.structured.handle(event, this.time, this.stats.lastRefreshFloor);
       } else {
         if (event.coneAngleDeg >= 359.9) this.planOmni(event);
         else this.planCone(event);
@@ -1886,6 +2107,9 @@ export class PaintSystem {
     this.emitTime = event.time;
     this.emitInvSpeed = 1 / event.waveSpeed;
     this.emitRim = rimScaleFor(event.class, this.wave);
+    this.emitFloor = floorAgeFor(event.class, this.wave, this.ramp, this.profile.coolRate);
+    this.emitRadius = Math.max(0.001, event.paintRadius);
+    this.emitFeatherFrom = this.emitRadius * Math.min(0.999, Math.max(0, this.wave.featherStart));
     const feather = this.tunables.coneFeather;
     const blipCap =
       this.stats.lastDeposited + this.stats.lastRefreshed + this.tunables.chunkBlips;
@@ -2154,6 +2378,31 @@ export class PaintSystem {
     return this.emitTime + Math.sqrt(dx * dx + dy * dy + dz * dz) * this.emitInvSpeed;
   }
 
+  /** How much of the current event's refresh reaches a point this far from its origin, 0-1. */
+  private featherAt(dist: number): number {
+    return 1 - smoothstep(this.emitFeatherFrom, this.emitRadius, dist);
+  }
+
+  /**
+   * The age a blip is displaying at this instant, under the exact curve `MATTER_VERTEX` runs.
+   *
+   * The CPU copy of the shader's known-ground branch, and the reason a restamp can be invisible:
+   * a blip bounded by a floor and a feather converges only part of the way to its stamp, so the
+   * only stamp that can be written back without moving the picture is the one that reproduces
+   * what is on screen *now*. Also what the diagnostics mean over, so the number a test reads and
+   * the number the player sees are the same number.
+   */
+  private displayedAge(slot: number, birth: number, prior: number, now: number): number {
+    const ageNew = now - birth;
+    // A virgin blip draws its own age straight, and is not drawn at all before its front lands.
+    if (prior <= -1e8) return ageNew;
+    const ageOld = now - prior;
+    const target = Math.min(ageOld, Math.max(ageNew, this.refreshes[slot * 2]!));
+    const ease = smoothstep(0, Math.max(0.001, this.wave.refreshSeconds), ageNew);
+    const s = ease * this.refreshes[slot * 2 + 1]!;
+    return ageOld + (target - ageOld) * s;
+  }
+
   private deposit(x: number, y: number, z: number, intensity: number, mat: number): void {
     if (this.tunables.dedupe) {
       const key = this.cellKey(x, y, z);
@@ -2168,19 +2417,59 @@ export class PaintSystem {
          * Only an arrival that has genuinely landed may become that prior: a blip restamped
          * twice in flight was never actually seen, so it stays virgin and still gets its
          * arrival when a front finally reaches it.
+         *
+         * What is written there is the *effective* stamp, not the old one. Since a refresh may be
+         * floored and feathered (see the header), a blip is generally somewhere between its two
+         * stamps rather than settled on either, and handing the next event the raw old birth
+         * would hand it a baseline the blip was never showing — the picture would step at the
+         * restamp, which is the one thing this whole policy exists to forbid. So the ease is
+         * evaluated on the CPU exactly as the shader is evaluating it this instant, and the stamp
+         * written back is the one that reproduces the age on screen. Continuity by construction:
+         * the invariant holds at the first restamp and at the fiftieth, at any feather.
          */
         const i3 = existing * 3;
-        const arrival = this.arrivalAt(
-          this.positions[i3]!,
-          this.positions[i3 + 1]!,
-          this.positions[i3 + 2]!,
-        );
+        const px = this.positions[i3]!;
+        const py = this.positions[i3 + 1]!;
+        const pz = this.positions[i3 + 2]!;
+        const ex = px - this.emitX;
+        const ey = py - this.emitY;
+        const ez = pz - this.emitZ;
+        const dist = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        const arrival = this.emitTime + dist * this.emitInvSpeed;
+        const feather = this.featherAt(dist);
+
         const oldBirth = this.births[existing]!;
-        if (oldBirth <= this.time) this.priors[existing] = oldBirth;
+        const oldPrior = this.priors[existing]!;
+        const before = this.displayedAge(existing, oldBirth, oldPrior, this.time);
+        if (oldBirth <= this.time) this.priors[existing] = this.time - before;
         this.births[existing] = arrival;
-        if (intensity > this.intensities[existing]!) this.intensities[existing] = intensity;
+        this.refreshes[existing * 2] = this.emitFloor;
+        this.refreshes[existing * 2 + 1] = feather;
+        /*
+         * The brightness step gets the same feather as the age does. A restamp used to take the
+         * louder of the two intensities outright, which put a hard-edged brightness patch on the
+         * floor even once the *colour* had stopped stepping — the two halves of one artefact.
+         * Still a max, because a refresh may never make known ground dimmer than the player has
+         * already seen it.
+         */
+        const oldIntensity = this.intensities[existing]!;
+        const bumped = oldIntensity + (intensity - oldIntensity) * feather;
+        if (bumped > oldIntensity) this.intensities[existing] = bumped;
+
         this.markTouched(existing, existing);
         this.stats.lastRefreshed++;
+        this.featherSum += feather;
+        this.stats.lastFeatherMean = this.featherSum / this.stats.lastRefreshed;
+        if (this.emitFloor > 0 && before > this.emitFloor) this.stats.lastFloored++;
+        // Measured only where there is a picture to disturb: a blip whose first front has not
+        // landed yet is not on screen at all, and its stamp being replaced wholesale is the
+        // virgin-in-flight rule doing its job rather than a discontinuity anybody can see.
+        if (oldBirth <= this.time) {
+          const jump = Math.abs(
+            this.displayedAge(existing, arrival, this.priors[existing]!, this.time) - before,
+          );
+          if (jump > this.stats.lastRestampJump) this.stats.lastRestampJump = jump;
+        }
         return;
       }
       const slot = this.writeIndex % this.capacity;
@@ -2223,6 +2512,10 @@ export class PaintSystem {
     this.seeds[slot] = this.rng();
     this.mats[slot] = mat;
     this.rims[slot] = this.emitRim;
+    // An unbounded refresh: the virgin branch never reads these, and this is what a restamp
+    // landing dead centre would have written anyway.
+    this.refreshes[slot * 2] = 0;
+    this.refreshes[slot * 2 + 1] = 1;
     this.markAppended(slot, slot);
     this.markTouched(slot, slot);
     this.writeIndex++;
@@ -2260,6 +2553,9 @@ export class PaintSystem {
       this.uploadRange('aBirth', start, count);
       this.uploadRange('aPrior', start, count);
       this.uploadRange('aIntensity', start, count);
+      // Two floats a blip, and they change on every restamp — so this one rides the touched
+      // range with the stamps it bounds, never the append range `aRim` gets away with.
+      this.uploadRange('aRefresh', start * 2, count * 2);
       this.touchMin = Infinity;
       this.touchMax = -Infinity;
     }
@@ -2377,12 +2673,9 @@ export class PaintSystem {
       if (listenerD2 <= nearR2) {
         nearBlips++;
         nearStep += since >= 0 ? since : now - prior;
-        if (prior <= -1e8) nearEased += since;
-        else {
-          const ageOld = now - prior;
-          const t = Math.min(1, Math.max(0, since / Math.max(0.001, refreshWindow)));
-          nearEased += ageOld + (since - ageOld) * t * t * (3 - 2 * t);
-        }
+        // The shipped curve, floor and feather included, taken from the one function the restamp
+        // path itself uses — so this cannot drift from what the shader draws.
+        nearEased += this.displayedAge(i, birth, prior, now);
       }
       const depth = (px - cx) * dxv + (py - cy) * dyv + (pz - cz) * dzv;
       if (depth > 0.05 && depth < minDepth) minDepth = depth;
@@ -2419,6 +2712,127 @@ export class PaintSystem {
       d.maxBlipPixels = size;
     }
     return d;
+  }
+
+  /**
+   * How the newest event's refresh actually landed, band by band of its own radius, plus the raw
+   * attributes of a handful of blips near a chosen point.
+   *
+   * The floor and the feather are per-blip decisions taken in the deposit loop and then only ever
+   * read by the GPU, so from outside the renderer they are invisible — which would make the whole
+   * policy a matter of taking the shader's word for it. This is the window onto them: the bands
+   * prove the shape (all of the refresh in the middle, less of it at the rim), and the rows let
+   * tooling run the ease itself and check that a restamp mid-ease did not move the picture.
+   *
+   * Blips are attributed to the newest event by *arithmetic*, not by bookkeeping: a blip belongs
+   * to it when its birth stamp is what that event's front arriving here would have written. The
+   * arithmetic reads the emit seat rather than the live wave list, because a wave is dropped the
+   * instant its front clears its radius — a step's is gone in a fifth of a second — while the seat
+   * still holds the geometry that wrote those stamps long after the front has passed.
+   */
+  refreshProbe(
+    x: number,
+    y: number,
+    z: number,
+    sampleRadius: number,
+    maxRows: number,
+    bandCount = 5,
+  ): RefreshProbe {
+    const radius = this.emitInvSpeed > 0 ? this.emitRadius : 0;
+    const bands: RefreshBand[] = [];
+    const featherSums: number[] = [];
+    const floorSums: number[] = [];
+    for (let k = 0; k < bandCount; k++) {
+      bands.push({
+        lo: k / bandCount,
+        hi: (k + 1) / bandCount,
+        points: 0,
+        known: 0,
+        meanFeather: 0,
+        meanFloor: 0,
+        floored: 0,
+      });
+      featherSums.push(0);
+      floorSums.push(0);
+    }
+
+    const rows: RefreshRow[] = [];
+    const drawn = Math.min(this.writeIndex, this.capacity);
+    const now = this.time;
+    const sample2 = sampleRadius * sampleRadius;
+    let stamped = 0;
+
+    for (let i = 0; i < drawn; i++) {
+      const i3 = i * 3;
+      const px = this.positions[i3]!;
+      const py = this.positions[i3 + 1]!;
+      const pz = this.positions[i3 + 2]!;
+      const birth = this.births[i]!;
+      const prior = this.priors[i]!;
+      const floor = this.refreshes[i * 2]!;
+      const feather = this.refreshes[i * 2 + 1]!;
+
+      if (radius > 0) {
+        const ex = px - this.emitX;
+        const ey = py - this.emitY;
+        const ez = pz - this.emitZ;
+        const dist = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        if (
+          Math.abs(this.emitTime + dist * this.emitInvSpeed - birth) <= 0.02 &&
+          dist <= radius * 1.001
+        ) {
+          stamped++;
+          const k = Math.min(bandCount - 1, Math.floor((dist / radius) * bandCount));
+          const band = bands[k]!;
+          band.points++;
+          if (prior > -1e8) {
+            band.known++;
+            featherSums[k] += feather;
+            floorSums[k] += floor;
+            if (floor > 0 && now - prior > floor) band.floored++;
+          }
+        }
+      }
+
+      if (rows.length < maxRows) {
+        const dx = px - x;
+        const dy = py - y;
+        const dz = pz - z;
+        if (dx * dx + dy * dy + dz * dz <= sample2) {
+          rows.push({
+            i,
+            x: px,
+            y: py,
+            z: pz,
+            birth,
+            prior,
+            floor,
+            feather,
+            age: this.displayedAge(i, birth, prior, now),
+          });
+        }
+      }
+    }
+
+    for (let k = 0; k < bandCount; k++) {
+      const band = bands[k]!;
+      if (band.known > 0) {
+        band.meanFeather = featherSums[k]! / band.known;
+        band.meanFloor = floorSums[k]! / band.known;
+      }
+    }
+
+    return {
+      now,
+      originX: this.emitX,
+      originY: this.emitY,
+      originZ: this.emitZ,
+      radius,
+      stamped,
+      refreshSeconds: this.wave.refreshSeconds,
+      bands,
+      rows,
+    };
   }
 
   // ---- event layer ---------------------------------------------------------

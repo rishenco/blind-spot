@@ -17,7 +17,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { decodePng, meanLuminance, litFraction, hueFamilies } from './png.mjs';
+import { decodePng, meanLuminance, litFraction, hueFamilies, whiteFraction } from './png.mjs';
 
 const DEFAULT_HTML = 'dist/index.html';
 const DEFAULT_OUT =
@@ -118,6 +118,25 @@ function photo(buf, rect = FRAME, holes = FRAME_HOLES) {
 function hues(buf, rect = CANVAS) {
   return hueFamilies(decodePng(buf), rect);
 }
+/**
+ * How much of a window has gone ice-white, at four thresholds on the dimmest channel.
+ *
+ * Cooled paint is cyan however much of it piles up — red stays down — so the dimmest channel is
+ * what tells a fresh return from a bright old one. `w100` is the number the batch-2.3.1
+ * assertions rest on; the others are printed alongside it so a shifting threshold is visible in
+ * the log rather than silently doing the arguing.
+ */
+function white(buf, rect = FLOOR_BAND, holes = []) {
+  const img = decodePng(buf);
+  return {
+    w60: whiteFraction(img, rect, 60, holes).fraction,
+    w100: whiteFraction(img, rect, 100, holes).fraction,
+    w140: whiteFraction(img, rect, 140, holes).fraction,
+    w190: whiteFraction(img, rect, 190, holes).fraction,
+  };
+}
+const whiteLine = (w) =>
+  `≥60 ${pct(w.w60)} · ≥100 ${pct(w.w100)} · ≥140 ${pct(w.w140)} · ≥190 ${pct(w.w190)}`;
 const pct = (v) => `${(v * 100).toFixed(2)}%`;
 const wait = (ms) => page.waitForTimeout(ms);
 const state = () => page.evaluate(() => window.__blindspot.getState());
@@ -1720,6 +1739,470 @@ check(
 await pitchBy(25, sens);
 
 /*
+ * ===========================================================================
+ *  30e-30i THE REFRESH BOUNDS (batch 2.3.1)
+ * ===========================================================================
+ *
+ * Batch 2.3 stopped a restamp from *flashing*. It did not stop one from turning cooled floor
+ * white: the age still eased all the way to zero, and zero is the ice-white end of the ramp, so
+ * a player sprinting over ground they painted a minute ago laid footfall-shaped patches of white
+ * onto navy — smoothly, three times a second, with a hard border where the paint radius stopped.
+ * The ease smoothed time and left colour distance alone.
+ *
+ * Two bounds close it, both stored per blip at the restamp. A footstep may only walk the age back
+ * to the end of the white band (`stepFloor`), never to zero — a step says "still here", a ping
+ * says "look again", and only one of those was paid for. And every refresh fades out over the last
+ * of its own radius (`featherStart`), so a patch has no edge to see.
+ *
+ * The pixel case is below in four parts: virgin ground must still ignite, the lane must stay cyan
+ * under a sprint of the same length, a ping must still re-whiten, and dialling both bounds back
+ * out must put the blotch back — the control runs first so the aged lane has something to be
+ * quiet against, and the last part is what stops the other three from being a test of a dark room.
+ */
+
+/** Eyes down the way you sprint in the dark: the floor band then holds the ground ahead. */
+const LANE_PITCH = -25;
+
+/**
+ * Types a value into one of the lil-gui number rows, found by its label.
+ *
+ * Real input into a real widget, like the front-dust checkbox click: the driver never writes game
+ * state. lil-gui commits a number on `input`, so filling the field is what a player typing into
+ * it does, and Enter blurs it exactly as they would.
+ */
+async function setKnob(label, value) {
+  const index = await page.evaluate((name) => {
+    const inputs = [...document.querySelectorAll('.lil-controller input[type="text"]')];
+    const row = [...document.querySelectorAll('.lil-controller')].find(
+      (c) => c.querySelector('.lil-name')?.textContent === name,
+    );
+    const input = row?.querySelector('input[type="text"]');
+    return input === undefined || input === null ? -1 : inputs.indexOf(input);
+  }, label);
+  if (index < 0) return false;
+  const input = page.locator('.lil-controller input[type="text"]').nth(index);
+  await input.fill(String(value));
+  await input.press('Enter');
+  await wait(80);
+  return true;
+}
+
+/**
+ * Buys a lane of floor, saturates its voxels, and lets it cool well out of the white band.
+ *
+ * Saturation is the whole setup: sampling is stochastic, so a return trip over a lightly painted
+ * lane finds thousands of cells nobody has hit yet and lights them — legitimately, as virgin
+ * ground, in the same colour this section is hunting. Out and back at a sprint plus three
+ * deliberate questions from the same spot leaves almost nothing new to find.
+ */
+async function ageTheLane(seconds = 4.5) {
+  await respawn();
+  await clearPaint();
+  await dragLook(LANE_TURN, sens);
+  await pitchBy(LANE_PITCH, sens);
+  await wait(150);
+  await page.keyboard.down('Shift');
+  await page.keyboard.down('w');
+  await wait(1100);
+  await page.keyboard.up('w');
+  await page.keyboard.down('s');
+  await wait(1100);
+  await page.keyboard.up('s');
+  await page.keyboard.up('Shift');
+  await ping('q-ping');
+  await ping('e-ping');
+  await ping('q-ping');
+  // The white band is freshSeconds / coolRate = 2 s on this look, so this is well past it and
+  // the lane is unambiguously in the cyan.
+  const t0 = Number((await state()).paintTime);
+  return poll((s) => Number(s.paintTime) - t0 >= seconds, 40000);
+}
+
+/** Sprints down the aged lane, catching frames while the feet are actually on it. */
+async function sprintTheLane(shots = 3) {
+  await page.keyboard.down('Shift');
+  await page.keyboard.down('w');
+  const frames = [];
+  for (let i = 0; i < shots; i++) frames.push(await page.screenshot());
+  const during = await state();
+  await page.keyboard.up('w');
+  await page.keyboard.up('Shift');
+  return { frames, during };
+}
+
+/*
+ * --- 30e the control: virgin ground still ignites ----------------------------
+ *
+ * §3.3, and the half of this that must not be broken by any of it: your own footsteps are your
+ * headlights. Run first, so that the quiet lane below is quiet against a number measured the same
+ * way — same pose, same sprint, same band — rather than against a threshold picked by hand.
+ */
+await setVariant('1', 'Dust');
+await respawn();
+await clearPaint();
+await dragLook(LANE_TURN, sens);
+await pitchBy(LANE_PITCH, sens);
+await wait(150);
+const virgin = await sprintTheLane();
+await writeFile(join(outDir, '38e-sprint-over-virgin.png'), virgin.frames[1] ?? virgin.frames[0]);
+console.log('[shoot] wrote 38e-sprint-over-virgin.png');
+const virginWhite = virgin.frames.map((b) => white(b));
+const bestVirginWhite = Math.max(...virginWhite.map((w) => w.w100));
+console.log(
+  `  mid-sprint over virgin floor: ` + virginWhite.map((w) => pct(w.w100)).join(' ') +
+    ` · ${whiteLine(virginWhite[0])}`,
+);
+check(
+  'a sprint over unpainted floor ignites it white (§3.3)',
+  bestVirginWhite > 0.004 && Number(virgin.during.lastDeposited) > 500,
+  `${pct(bestVirginWhite)} of the floor band goes near-white under the footfalls · the last one ` +
+    `discovered +${virgin.during.lastDeposited} blips and refreshed ~${virgin.during.lastRefreshed}`,
+);
+
+// --- 30f sprinting over floor you already own leaves it cyan -----------------
+const agedState = await ageTheLane();
+const laneBuf = await shotBuf('38f-aged-lane.png');
+const agedBand = photo(laneBuf, FLOOR_BAND, []);
+const agedWhite = white(laneBuf);
+console.log(`  aged lane: ${whiteLine(agedWhite)} · band mean ${agedBand.mean.toFixed(2)}/255`);
+check(
+  'the lane is painted, and has cooled out of the white band before the run',
+  agedBand.lit > 0.02 && agedWhite.w100 < 0.0005 && Number(agedState.points) > 20000,
+  `${Number(agedState.points).toLocaleString('en-US')} blips · band lit ${pct(agedBand.lit)} ` +
+    `mean ${agedBand.mean.toFixed(2)}/255 · near-white ${pct(agedWhite.w100)}`,
+);
+
+const run = await sprintTheLane();
+await writeFile(join(outDir, '38g-sprint-over-aged-lane.png'), run.frames[1] ?? run.frames[0]);
+console.log('[shoot] wrote 38g-sprint-over-aged-lane.png');
+const runWhite = run.frames.map((b) => white(b));
+const runBand = run.frames.map((b) => photo(b, FLOOR_BAND, []));
+const worstRunWhite = Math.max(...runWhite.map((w) => w.w100));
+const afterRunBuf = await shotBuf('38h-after-sprint.png');
+const afterRunWhite = white(afterRunBuf);
+const afterRunBand = photo(afterRunBuf, FLOOR_BAND, []);
+console.log(
+  `  mid-sprint over the aged lane: ` +
+    runWhite.map((w, i) => `${pct(w.w100)}@${runBand[i].mean.toFixed(1)}`).join(' ') +
+    ` · after ${pct(afterRunWhite.w100)} · ${whiteLine(runWhite[0])}`,
+);
+/*
+ * Bounded against the control rather than against zero. A sprint down a lane that has been
+ * saturated three ways still finds a few hundred cells nobody has hit yet, and those are
+ * *legitimately* white — virgin ground, §3.3, the thing 30e just measured. What the bounds have to
+ * kill is the restamp blotch, which is an order of magnitude larger and covers the lane rather
+ * than speckling it: a quarter of the control is well below the speckle floor and far below
+ * anything a player would read as a patch.
+ */
+check(
+  'sprinting over floor you already own leaves it cyan, not white',
+  worstRunWhite < 0.008 &&
+    worstRunWhite < bestVirginWhite * 0.25 &&
+    afterRunWhite.w100 < 0.008,
+  `worst near-white in the floor band ${pct(worstRunWhite)} across ${run.frames.length} ` +
+    `mid-sprint frames vs ${pct(bestVirginWhite)} for the same sprint over virgin ground ` +
+    `(${(bestVirginWhite / Math.max(1e-6, worstRunWhite)).toFixed(0)}x) · aged lane ` +
+    `${pct(agedWhite.w100)}, after the run ${pct(afterRunWhite.w100)}`,
+);
+/*
+ * The other way to pass the check above is to stop painting, so: the lane is still lit at the end
+ * of the run, and the engine says the footfalls spent themselves refreshing what was already there
+ * instead of discovering it. Read off the standing frame after the run — a mid-sprint band mean
+ * moves with the camera, not with the paint.
+ */
+check(
+  'and the floor under the run is still there — refreshed, not merely absent',
+  afterRunBand.lit > agedBand.lit * 0.5 &&
+    Number(run.during.lastRefreshed) > Number(run.during.lastDeposited) * 3,
+  `band lit ${pct(agedBand.lit)} before the run → ${pct(afterRunBand.lit)} standing at the end of ` +
+    `it · the last footfall refreshed ~${run.during.lastRefreshed} blips and found ` +
+    `+${run.during.lastDeposited} new`,
+);
+
+/*
+ * --- 30g the bounds are what did it -----------------------------------------
+ *
+ * Dial both back out — floor 0, feather 1 — and the policy is exactly the pre-2.3.1 one. If the
+ * blotch does not come back, then the lane above was cyan for some other reason and none of this
+ * proves anything.
+ */
+const knobsOff =
+  (await setKnob('step age floor (bands)', 0)) && (await setKnob('refresh feather', 1));
+const offState = await poll(
+  (s) => Number(s.stepFloor) === 0 && Number(s.refreshFeatherStart) === 1,
+  4000,
+);
+check(
+  'the two bounds are live knobs, and the old policy is 0 / 1',
+  knobsOff && Number(offState.stepFloor) === 0 && Number(offState.refreshFeatherStart) === 1,
+  `stepFloor=${offState.stepFloor} featherStart=${offState.refreshFeatherStart}`,
+);
+await ageTheLane();
+const oldPolicy = await sprintTheLane();
+await writeFile(join(outDir, '38i-sprint-old-policy.png'), oldPolicy.frames[1] ?? oldPolicy.frames[0]);
+console.log('[shoot] wrote 38i-sprint-old-policy.png');
+const oldWhite = oldPolicy.frames.map((b) => white(b));
+const worstOldWhite = Math.max(...oldWhite.map((w) => w.w100));
+console.log(
+  `  mid-sprint, bounds off: ` + oldWhite.map((w) => pct(w.w100)).join(' ') +
+    ` · ${whiteLine(oldWhite[0])}`,
+);
+check(
+  'with the floor and the feather dialled out, the white patches come back',
+  worstOldWhite > 0.004 && worstOldWhite > worstRunWhite * 4,
+  `near-white in the floor band ${pct(worstOldWhite)} with the bounds off vs ` +
+    `${pct(worstRunWhite)} with them on — the same lane, aged the same way`,
+);
+const knobsBack =
+  (await setKnob('step age floor (bands)', 1)) && (await setKnob('refresh feather', 0.55));
+const restored = await poll(
+  (s) => Number(s.stepFloor) === 1 && Math.abs(Number(s.refreshFeatherStart) - 0.55) < 1e-6,
+  4000,
+);
+check(
+  'and the defaults go back',
+  knobsBack &&
+    Math.abs(Number(restored.stepFloor) - 1) < 1e-6 &&
+    Math.abs(Number(restored.refreshFeatherStart) - 0.55) < 1e-6,
+  `stepFloor=${restored.stepFloor} featherStart=${restored.refreshFeatherStart}`,
+);
+
+/*
+ * --- 30h a ping still re-whitens the room -----------------------------------
+ *
+ * The floor is per class, and that is the whole design: a footfall is a byproduct of moving and
+ * gets a floor, a ping is a question the player paid noise for and gets none. Asked over ground
+ * it already owns, the beam has to make it new again.
+ */
+const agedForPing = await ageTheLane();
+const beforePingBuf = await shotBuf('38j-aged-before-ping.png');
+const beforePing = white(beforePingBuf);
+const pinged = await ping('e-ping');
+const rewhitenBuf = await shotBuf('38k-ping-rewhitens.png');
+const rewhiten = white(rewhitenBuf);
+console.log(
+  `  E-ping over known floor: ${whiteLine(beforePing)} → ${whiteLine(rewhiten)} · ` +
+    `+${pinged.lastDeposited} new / ~${pinged.lastRefreshed} refreshed`,
+);
+check(
+  'an E-ping over ground you already own makes it white again',
+  rewhiten.w100 > 0.004 &&
+    rewhiten.w100 > beforePing.w100 * 8 &&
+    Number(pinged.lastRefreshFloor) === 0 &&
+    Number(pinged.lastRefreshed) > Number(pinged.lastDeposited) * 2,
+  `near-white ${pct(beforePing.w100)} → ${pct(rewhiten.w100)} · floor ${pinged.lastRefreshFloor} s · ` +
+    `~${pinged.lastRefreshed} refreshed against +${pinged.lastDeposited} discovered · ` +
+    `aged lane was ${Number(agedForPing.points).toLocaleString('en-US')} blips`,
+);
+
+/*
+ * --- 30i the same claims, in the data ---------------------------------------
+ *
+ * Pixels prove the frame; the probe proves the mechanism. `refreshProbe` hands back the two
+ * numbers each restamp actually wrote, banded across the event's own radius, plus the raw
+ * attributes of the blips under the player — which is the only way to check from outside the
+ * renderer that the floor is a floor, that the feather tapers, and that the stamp written back
+ * across a restamp is the age that was on screen.
+ */
+const refreshProbe = (args = {}) =>
+  page.evaluate((a) => window.__blindspot.probe('refresh', a), args);
+
+/** A band's feather for the report line — and a word rather than a crash when no band has one. */
+const bandFeather = (b) => (b === undefined ? 'no populated band' : b.meanFeather.toFixed(3));
+
+/*
+ * Sampled at a *fixed* world point rather than around the player, so that a probe taken before a
+ * footfall and one taken after it describe the same blips: the sphere follows the player by
+ * default, and a player who has walked two metres between two probes is looking at two different
+ * sets of ground.
+ */
+const cooledFrom = Number((await state()).paintTime);
+await poll((s) => Number(s.paintTime) - cooledFrom >= 4.5, 40000);
+const probeSpot = await state();
+const here = {
+  x: Number(probeSpot.x),
+  y: Number(probeSpot.y) + 0.1,
+  z: Number(probeSpot.z),
+  radius: 3,
+  rows: 80,
+};
+const beforeStep = await refreshProbe(here);
+await page.keyboard.down('w');
+await wait(500);
+await page.keyboard.up('w');
+const stepState = await poll((s) => String(s.lastEvent).endsWith('step'), 6000);
+const stepProbe = await refreshProbe(here);
+const populated = stepProbe.bands.filter((b) => b.known > 20);
+const innerBand = populated[0];
+const outerBand = populated[populated.length - 1];
+console.log(
+  `  step probe (${stepState.lastEvent}, r=${stepProbe.radius} m, ${stepProbe.stamped} blips stamped): ` +
+    stepProbe.bands
+      .map((b) => `${Math.round(b.lo * 100)}-${Math.round(b.hi * 100)}%:${b.known}×f${b.meanFeather.toFixed(2)}`)
+      .join(' '),
+);
+check(
+  "a footstep's restamps carry a floor at the end of the white band",
+  Math.abs(Number(stepState.lastRefreshFloor) - 2) < 0.01 &&
+    innerBand !== undefined &&
+    Math.abs(innerBand.meanFloor - 2) < 0.01 &&
+    Number(stepState.lastFloored) > 100,
+  `floor ${Number(stepState.lastRefreshFloor).toFixed(2)} s = freshSeconds ${2} / coolRate ` +
+    `${stepState.coolRate} × stepFloor ${stepState.stepFloor} · ` +
+    `${stepState.lastFloored} restamps were older than it and were held there`,
+);
+check(
+  'the refresh is total in the middle of the patch and tapers away at its rim',
+  innerBand !== undefined &&
+    outerBand !== undefined &&
+    innerBand.meanFeather > 0.99 &&
+    outerBand.meanFeather < 0.6 &&
+    outerBand.meanFeather < innerBand.meanFeather * 0.7 &&
+    Number(stepState.lastFeatherMean) < 1,
+  `feather ${bandFeather(innerBand)} at ${Math.round((innerBand?.lo ?? 0) * 100)}-` +
+    `${Math.round((innerBand?.hi ?? 0) * 100)}% of the radius → ${bandFeather(outerBand)} at ` +
+    `${Math.round((outerBand?.lo ?? 0) * 100)}-${Math.round((outerBand?.hi ?? 0) * 100)}% · ` +
+    `event mean ${Number(stepState.lastFeatherMean).toFixed(3)}`,
+);
+/*
+ * The claim the whole batch is about, on the blips themselves: ground that was cold when the
+ * footfall landed on it is not in the white afterwards. Restricted to blips the *earlier* probe
+ * also saw as cold, because a blip a step deposits for the first time and its neighbour restamps
+ * a third of a second later is legitimately young — the floor is a floor and never a ceiling, and
+ * it is not supposed to age fresh paint back down to it.
+ */
+const wasCold = new Map(beforeStep.rows.filter((r) => r.age > 3).map((r) => [r.i, r]));
+const flooredRows = stepProbe.rows.filter((r) => r.floor > 0 && wasCold.has(r.i));
+const youngestFloored = Math.min(...flooredRows.map((r) => r.age));
+check(
+  'and no blip that was cold when a footfall reached it is left sitting in the white band',
+  flooredRows.length > 5 && youngestFloored > 1.9,
+  `${flooredRows.length} of ${stepProbe.rows.length} sampled blips were cold and then refreshed ` +
+    `by a step; the youngest of them now displays ${youngestFloored.toFixed(2)} s of age, and the ` +
+    `white band ends at 2.00 s`,
+);
+
+/*
+ * The continuity construction, from the attributes themselves.
+ *
+ * A bounded refresh leaves a blip *between* its two stamps, so the stamp handed to the next event
+ * has to be the one that reproduces what is on screen rather than the raw old arrival. Run at the
+ * x0.1 clock: the 0.3 s ease then takes three seconds of wall time, so a probe taken right after
+ * an event catches the restamp before the ease has moved anything, and what is left in the
+ * measurement is the restamp itself. The old construction's error is computed alongside, on the
+ * same rows, so the number has something to be compared with.
+ */
+await setTimeScale(0.1);
+const quietFrom = Number((await state()).paintTime);
+await poll((s) => Number(s.paintTime) - quietFrom > 0.5, 60000);
+const standingAgain = await state();
+const there = {
+  x: Number(standingAgain.x),
+  y: Number(standingAgain.y) + 0.1,
+  z: Number(standingAgain.z),
+  radius: 3,
+  rows: 80,
+};
+const priorProbe = await refreshProbe(there);
+const eventsBefore = Number((await state()).soundEvents);
+await page.keyboard.down('w');
+await wait(220);
+await page.keyboard.up('w');
+await poll((s) => Number(s.soundEvents) > eventsBefore, 8000);
+const laterProbe = await refreshProbe(there);
+const beforeById = new Map(priorProbe.rows.map((r) => [r.i, r]));
+const dt = laterProbe.now - priorProbe.now;
+const moved = [];
+for (const row of laterProbe.rows) {
+  const was = beforeById.get(row.i);
+  if (was === undefined || Math.abs(was.birth - row.birth) < 1e-4) continue;
+  moved.push({
+    // What the age did across the restamp, against what the clock alone accounts for.
+    shipped: Math.abs(row.age - (was.age + dt)),
+    // What it would have done had the raw old arrival been written back as the baseline.
+    naive: Math.abs(laterProbe.now - was.birth - (was.age + dt)),
+  });
+}
+const worstShipped = moved.length === 0 ? Infinity : Math.max(...moved.map((m) => m.shipped));
+const worstNaive = moved.length === 0 ? 0 : Math.max(...moved.map((m) => m.naive));
+console.log(
+  `  ${moved.length} blips restamped between the two probes over ${dt.toFixed(3)} s of paint clock: ` +
+    `displayed age moved ${worstShipped.toFixed(3)} s worst case, ` +
+    `${mean(moved.map((m) => m.shipped)).toFixed(3)} s mean`,
+);
+check(
+  'a restamp writes back the age that was on screen, not the stamp underneath it',
+  moved.length >= 5 && worstShipped < 0.15 && worstNaive > 0.4,
+  `worst displayed-age step across the restamp: ${worstShipped.toFixed(3)} s shipped vs ` +
+    `${worstNaive.toFixed(3)} s if the raw previous arrival were written back instead ` +
+    `(${moved.length} blips, ${dt.toFixed(3)} s of clock between the probes)`,
+);
+await setTimeScale(1);
+
+/*
+ * The other half of the class split, in the data: a ping's restamps carry no floor at all, so the
+ * room it re-asks answers new. Taken after the continuity pair on purpose — a ping would reset
+ * every blip under the player to an unbounded refresh, which is exactly the state that makes the
+ * construction above impossible to see.
+ */
+const pingedAgain = await ping('q-ping');
+const pingProbe = await refreshProbe({ radius: 3, rows: 60 });
+const pingBands = pingProbe.bands.filter((b) => b.known > 20);
+const pingInner = pingBands[0];
+const pingOuter = pingBands[pingBands.length - 1];
+check(
+  "a ping's restamps carry no floor at all — it re-asks the room, so the room answers new",
+  Number(pingedAgain.lastRefreshFloor) === 0 &&
+    pingBands.length >= 2 &&
+    pingBands.every((b) => b.meanFloor === 0) &&
+    pingInner !== undefined &&
+    pingInner.meanFeather > 0.99,
+  `floor ${pingedAgain.lastRefreshFloor} s across ${pingBands.length} populated bands of a ` +
+    `${pingProbe.radius} m ping · feather ${bandFeather(pingInner)} → ${bandFeather(pingOuter)}`,
+);
+
+/*
+ * The same invariant at speed, measured by the engine at the instant of every restamp: the age
+ * the blip was displaying under its old stamps against the age it displays under its new ones, at
+ * one clock value. At a sprint the footfalls land every ~0.29 s and the ease is 0.3 s, so every
+ * restamp in this trace is a re-restamp mid-ease — the case the construction exists for.
+ */
+const jumpTrace = page.evaluate(
+  (ms) =>
+    new Promise((done) => {
+      const out = [];
+      const t0 = performance.now();
+      const tick = () => {
+        const s = window.__blindspot.getState();
+        out.push([performance.now() - t0, s.lastRestampJump, s.lastRefreshed, s.speed]);
+        if (performance.now() - t0 < ms) requestAnimationFrame(tick);
+        else done(out);
+      };
+      requestAnimationFrame(tick);
+    }),
+  2400,
+);
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+await wait(1000);
+await page.keyboard.up('w');
+await page.keyboard.down('s');
+await wait(1000);
+await page.keyboard.up('s');
+await page.keyboard.up('Shift');
+const jumpRows = await jumpTrace;
+const refreshingFrames = jumpRows.filter((r) => Number(r[2]) > 0);
+const worstJump = Math.max(0, ...refreshingFrames.map((r) => Number(r[1])));
+const mostRefreshed = Math.max(0, ...refreshingFrames.map((r) => Number(r[2])));
+check(
+  'and at a sprint, where every restamp lands mid-ease, none of them steps the picture',
+  refreshingFrames.length >= 8 && mostRefreshed > 500 && worstJump < 0.02,
+  `worst age discontinuity ${worstJump.toFixed(4)} s over ${refreshingFrames.length} rendered ` +
+    `frames of refreshing (up to ${mostRefreshed} blips restamped by a single footfall)`,
+);
+await pitchBy(-LANE_PITCH, sens);
+
+/*
  * --- 30d the front dust ships switched off ----------------------------------
  *
  * The airborne shell the same playtest called part of the "second wave". It stays in the build
@@ -2445,6 +2928,46 @@ check(
     Number(bpAfterAge.structUnlockedEdges) === Number(bpBeforeAge.structUnlockedEdges),
   `dots ${bpBeforeAge.structUnlockedDots} → ${bpAfterAge.structUnlockedDots}, ` +
     `segments ${bpBeforeAge.structUnlockedEdges} → ${bpAfterAge.structUnlockedEdges}`,
+);
+
+/*
+ * --- 34d (cont.) the refresh bounds are one policy, not two -------------------
+ *
+ * The lattice is aged to the skeleton and every dot around the player is known, which is exactly
+ * the state §30f is about — so walking on it here answers the same question on the other backend.
+ * A footstep has to arrive with the same floor and the same feather it carries into the blip
+ * cloud, and its restamps have to be as invisible: one policy, owned by the wave, spent by
+ * whichever representation happens to be drawing.
+ */
+await page.keyboard.down('w');
+await wait(700);
+await page.keyboard.up('w');
+const bpStep = await poll((s) => String(s.lastEvent).endsWith('step'), 8000);
+await settleInk(30000);
+const bpStepped = await state();
+console.log(
+  `  blueprint footfall: floor ${Number(bpStepped.structLastFloor).toFixed(2)} s · ` +
+    `feather ${Number(bpStepped.structLastFeatherMean).toFixed(3)} · ` +
+    `${bpStepped.structLastRefreshed} dots refreshed, ${bpStepped.structLastFloored} of them floored`,
+);
+check(
+  'a footstep bounds the structured refresh exactly as it bounds the cloud',
+  String(bpStep.lastEvent).endsWith('step') &&
+    Math.abs(Number(bpStepped.structLastFloor) - 2) < 0.01 &&
+    Number(bpStepped.structLastFeatherMean) > 0 &&
+    Number(bpStepped.structLastFeatherMean) < 1 &&
+    Number(bpStepped.structLastRefreshed) > 500 &&
+    Number(bpStepped.structLastFloored) > 100,
+  `floor ${Number(bpStepped.structLastFloor).toFixed(2)} s (cloud: ` +
+    `${Number(bpStepped.lastRefreshFloor).toFixed(2)} s) · mean feather ` +
+    `${Number(bpStepped.structLastFeatherMean).toFixed(3)} over ` +
+    `${bpStepped.structLastRefreshed} refreshed dots, ${bpStepped.structLastFloored} held at the floor`,
+);
+check(
+  'and its restamps are as invisible there as they are here',
+  Number(bpStepped.structLastJump) < 0.02,
+  `worst displayed-age discontinuity ${Number(bpStepped.structLastJump).toFixed(4)} s across the ` +
+    `whole unlock pass`,
 );
 
 /*

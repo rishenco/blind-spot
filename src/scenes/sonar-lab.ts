@@ -720,6 +720,10 @@ export class SonarLab implements LabScene {
     folder.add(w, 'arriveSeconds', 0, 0.4, 0.01).name('arrival ramp (s)').onChange(push);
     folder.add(w, 'refreshSeconds', 0.02, 1, 0.01).name('refresh ease (s)').onChange(push);
     folder.add(w, 'stepRim', 0, 1, 0.05).name('step flash ×').onChange(push);
+    // The two bounds on a refresh (batch 2.3.1, playtest: sprinting over aged floor stamped
+    // white footprints onto it). 0 on either restores exactly what the complaint was about.
+    folder.add(w, 'stepFloor', 0, 2, 0.05).name('step age floor (bands)').onChange(push);
+    folder.add(w, 'featherStart', 0, 1, 0.05).name('refresh feather').onChange(push);
     folder.add(w, 'tracerSeconds', 0.05, 1, 0.01).name('tracer life (s)').onChange(push);
     folder.add(w, 'tracerStart', 0, 4, 0.05).name('tracer start (m)');
     folder.add(w, 'tracerLength', 1, 22, 0.5).name('tracer length (m)');
@@ -899,6 +903,13 @@ export class SonarLab implements LabScene {
       lastRays: stats.lastRays,
       lastDeposited: stats.lastDeposited,
       lastRefreshed: stats.lastRefreshed,
+      // Batch 2.3.1: what the last event's refreshes were allowed to do, and what they did.
+      // `lastRestampJump` is the continuity invariant itself — the worst age step any of those
+      // restamps put on screen, which the effective-stamp construction holds at zero.
+      lastRefreshFloor: stats.lastRefreshFloor,
+      lastFeatherMean: stats.lastFeatherMean,
+      lastFloored: stats.lastFloored,
+      lastRestampJump: stats.lastRestampJump,
       // Total CPU spent sampling the last event, and the worst single frame's share of it —
       // the second is the one that can be felt, so it is the one the driver asserts on.
       lastPaintMs: stats.lastPaintMs,
@@ -941,6 +952,8 @@ export class SonarLab implements LabScene {
       arriveSeconds: this.paint.wave.arriveSeconds,
       refreshSeconds: this.paint.wave.refreshSeconds,
       stepRim: this.paint.wave.stepRim,
+      stepFloor: this.paint.wave.stepFloor,
+      refreshFeatherStart: this.paint.wave.featherStart,
       coolRate: this.paint.profile.coolRate,
       tracerAlive: this.paint.tracerAlive,
       tracerAge: this.paint.tracerAge,
@@ -974,6 +987,13 @@ export class SonarLab implements LabScene {
       structLastDots: s.lastDots,
       structLastEdges: s.lastEdges,
       structLastRays: s.lastRays,
+      structLastRefreshed: s.lastRefreshed,
+      // The same four readouts the blip cloud publishes, off the other backend's arrays: one
+      // policy is only one policy if both halves of it can be measured the same way.
+      structLastFloor: s.lastFloor,
+      structLastFeatherMean: s.lastFeatherMean,
+      structLastFloored: s.lastFloored,
+      structLastJump: s.lastJump,
       structLastMs: s.lastMs,
       structLastChunkMs: s.lastChunkMs,
       structLastChunks: s.lastChunks,
@@ -998,6 +1018,27 @@ export class SonarLab implements LabScene {
    * behind a wall did not answer at all.
    */
   debugProbe(name: string, args?: Record<string, unknown>): unknown {
+    /*
+     * How the newest event's refresh landed, per blip and per shell of its radius.
+     *
+     * The floor and the feather are decided in the deposit loop and thereafter only ever read by
+     * the GPU, so without this the whole policy would be a matter of taking the shader's word for
+     * it. The sample defaults to a small sphere around the player, which is where a footfall's
+     * refresh actually happens.
+     */
+    if (name === 'refresh') {
+      const p = this.player.position;
+      const num = (key: string, fallback: number): number =>
+        typeof args?.[key] === 'number' ? (args[key] as number) : fallback;
+      return this.paint.refreshProbe(
+        num('x', p.x),
+        num('y', p.y + 0.1),
+        num('z', p.z),
+        num('radius', 3),
+        num('rows', 24),
+        num('bands', 5),
+      );
+    }
     if (name !== 'region') return null;
     const key = typeof args?.region === 'string' ? args.region : null;
     const box = key !== null ? PROBE_REGIONS[key] : null;
