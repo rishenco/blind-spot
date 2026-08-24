@@ -26,12 +26,17 @@
  *     second ping over ground you already have is a quiet brightening of it, and the CPU work
  *     can be amortised over as many frames as it likes without anyone being able to tell.
  *
- *  3. **Objects surface whole; the shell surfaces where it is hit.** If any part of a prop is
- *     directly audible — one unoccluded probe inside the event's radius and cone — every face of
- *     that prop within the radius unlocks, back faces included: you have heard *a thing*, and a
- *     thing has a far side. Walls, floors, ceilings and partitions are not things, they are the
- *     room, so they unlock per dot behind a real occlusion test. That is what stops a ping in one
- *     room from painting the next one through a wall.
+ *  3. **One mask, one rule: a point is unlocked when the front actually reached *that point*.**
+ *     There is no such thing as an object surfacing whole. Every dot and every contour piece —
+ *     crate, shelf, column, wall, floor, ceiling, alike — is tested on its own against the
+ *     event's radius, its cone, its own facing, and a real occlusion ray. Clipping the edge of a
+ *     twenty-metre rack run therefore lights the edge and nothing else, and the back of a crate
+ *     you can see the front of stays unknown until you walk round it.
+ *
+ *     This replaces the M1 rule ("hearing one face of a prop surfaces all of it"), which was
+ *     found in playtest to be tactile telekinesis: one clipped corner handed you the shape of
+ *     something you had never looked at. The check any frame must pass is *how does the player
+ *     know that?* — and only a point the beam or the hand actually reached can answer it.
  *
  *  4. **One front, and the drawing happens at it.** As the front passes virgin lattice, a dot is
  *     pushed *off* its true position — radially outward, on a damped ring profile a metre or so
@@ -45,6 +50,12 @@
  *
  *  5. **Nothing is ever lost.** Both layers cool along the same age ramp as the blip cloud and
  *     settle at the skeleton alpha of §3.6. The map dims; it never dies.
+ *
+ *  6. **The hand writes to the same mask.** The tactile layer is not a second geometry system: it
+ *     is a second *source* of unlocking over this one mask (`revealTouch`), marking the dots and
+ *     contour pieces inside arm's reach. They draw grey — bright under the hand, a faint trail
+ *     once you have moved on — and the instant a lidar front reaches one of them it is drawn in
+ *     the lidar's colours instead. The lidar outranks the hand, because it knows more.
  *
  * A per-item accent channel (gold) is reserved and wired through both shaders for the traversal
  * holds of §5 ("dots are matter, lines are holds"). Nothing writes it yet.
@@ -116,6 +127,12 @@ export function defaultStructuredTunables(): StructuredTunables {
 }
 
 // ---------------------------------------------------------------------------
+
+/** The tactile grey. Deliberately colourless: the hand is not a sensor, it is a hand. */
+const TOUCH_GREY = 0x9fa6ab;
+
+/** Cell size of the reach grids, metres. Comfortably above the largest arm's-reach radius. */
+const REACH_CELL = 0.8;
 
 /** Birth stamp meaning "nothing was ever known here". */
 const NEVER = -1e9;
@@ -262,12 +279,22 @@ const DOT_VERTEX = /* glsl */ `
   uniform float uSkeletonSize;
   uniform vec3  uListener;
   uniform vec3  uAccent;
+  // The hand: where the tactile reach is centred, how far it goes, and how bright a point is
+  // under it versus once it has become a memory. uTouchOn is the debug toggle, nothing more.
+  uniform vec3  uHand;
+  uniform vec3  uTouchColor;
+  uniform float uTouchRange;
+  uniform float uTouchNear;
+  uniform float uTouchMemory;
+  uniform float uTouchOn;
 
   attribute float aBirth;
   attribute float aPrior;
   attribute float aWave;
   attribute float aSeed;
   attribute float aAccent;
+  /** 1 when the hand has ever reached this point. The lidar overrides it wherever both hold. */
+  attribute float aTouch;
   // x = the youngest age the newest refresh may reach here, y = how much of it this dot gets.
   attribute vec2  aRefresh;
 
@@ -292,8 +319,38 @@ const DOT_VERTEX = /* glsl */ `
      * draw. Reject it explicitly, first, before anything else costs anything.
      */
     if (aBirth <= -1.0e8) {
-      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-      gl_PointSize = 0.0;
+      /*
+       * No front has ever arrived here. The hand may still have found it — same mask, other
+       * source — and that is the *only* other way a point may be on screen. Grey, bright under
+       * the hand and a faint trail behind it, and never anything more than the point itself.
+       */
+      if (aTouch < 0.5 || uTouchOn < 0.5 || distance(position, uListener) > uWindowRadius) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+      }
+      float td = distance(position, uHand);
+      float prox = 1.0 - smoothstep(uTouchRange * 0.45, uTouchRange, td);
+      float ta = max(prox * uTouchNear, uTouchMemory);
+      if (ta < 0.004) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+      }
+      /*
+       * A felt point is drawn as a small hard stipple, not as the lidar's energy-conserving
+       * blob: at arm's length the world-size rule would swell one dot to twenty pixels and then
+       * dim it to nothing to keep the energy, which is exactly the wrong answer for the one
+       * channel that only ever draws things 60 cm away. Fixed small size, honest brightness.
+       */
+      vec4 tmv = modelViewMatrix * vec4(position, 1.0);
+      float tpx = clamp(uSizeWorld * uSkeletonSize * uProjScale / max(0.001, -tmv.z), 4.0, 8.0);
+      vColor = uTouchColor * ta;
+      vAlpha = 1.0;
+      // Harder-edged than a lidar dot: a felt point is a fingertip, not a return.
+      vSoft = uDotSoft * 0.6;
+      gl_PointSize = tpx;
+      gl_Position = projectionMatrix * tmv;
       return;
     }
 
@@ -403,11 +460,18 @@ const EDGE_VERTEX = /* glsl */ `
   uniform float uContourBright;
   uniform vec3  uListener;
   uniform vec3  uAccent;
+  uniform vec3  uHand;
+  uniform vec3  uTouchColor;
+  uniform float uTouchRange;
+  uniform float uTouchNear;
+  uniform float uTouchMemory;
+  uniform float uTouchOn;
 
   attribute float aBirth;
   attribute float aPrior;
   attribute float aT;
   attribute float aAccent;
+  attribute float aTouch;
   // The same two bounds a lattice dot carries, on the line the dot's face is bordered by.
   attribute vec2  aRefresh;
 
@@ -424,9 +488,24 @@ const EDGE_VERTEX = /* glsl */ `
     vInk = -1.0;
     vT = aT;
 
-    // A contour nobody has heard is not a dim contour — see the note in the dot shader.
+    // A contour nobody has heard is not a dim contour — see the note in the dot shader. The
+    // hand is the one exception, and it draws its own 20 cm piece, grey, and nothing adjoining.
     if (aBirth <= -1.0e8) {
-      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      if (aTouch < 0.5 || uTouchOn < 0.5 || distance(position, uListener) > uWindowRadius) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+      float td = distance(position, uHand);
+      float prox = 1.0 - smoothstep(uTouchRange * 0.45, uTouchRange, td);
+      float ta = max(prox * uTouchNear, uTouchMemory);
+      if (ta < 0.004) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+      vColor = uTouchColor;
+      vAlpha = ta;
+      vInk = 10.0;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       return;
     }
 
@@ -496,6 +575,111 @@ const EDGE_FRAGMENT = /* glsl */ `
 
 // ---------------------------------------------------------------------------
 
+
+/**
+ * A uniform grid over a set of points, so "what is within arm's reach" is a handful of cells
+ * instead of a third of a million distance tests.
+ *
+ * Built once with the lattice and never touched again — the world is static and so are the
+ * points. Counting sort into two typed arrays: `start` indexes cells, `items` holds point
+ * indices grouped by cell. No allocation at query time.
+ */
+class PointGrid {
+  private readonly cell: number;
+  private readonly minX: number;
+  private readonly minY: number;
+  private readonly minZ: number;
+  private readonly nx: number;
+  private readonly ny: number;
+  private readonly nz: number;
+  private readonly start: Int32Array;
+  private readonly items: Int32Array;
+
+  constructor(pos: Float32Array, count: number, cell: number) {
+    this.cell = cell;
+    let minX = Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxZ = -Infinity;
+    for (let i = 0; i < count; i++) {
+      const x = pos[i * 3]!;
+      const y = pos[i * 3 + 1]!;
+      const z = pos[i * 3 + 2]!;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    }
+    if (count === 0) {
+      minX = minY = minZ = 0;
+      maxX = maxY = maxZ = 0;
+    }
+    this.minX = minX;
+    this.minY = minY;
+    this.minZ = minZ;
+    this.nx = Math.max(1, Math.ceil((maxX - minX) / cell) + 1);
+    this.ny = Math.max(1, Math.ceil((maxY - minY) / cell) + 1);
+    this.nz = Math.max(1, Math.ceil((maxZ - minZ) / cell) + 1);
+
+    const cells = this.nx * this.ny * this.nz;
+    const counts = new Int32Array(cells + 1);
+    const cellOf = new Int32Array(count);
+    for (let i = 0; i < count; i++) {
+      const c = this.index(pos[i * 3]!, pos[i * 3 + 1]!, pos[i * 3 + 2]!);
+      cellOf[i] = c;
+      counts[c + 1] = counts[c + 1]! + 1;
+    }
+    for (let c = 0; c < cells; c++) counts[c + 1] = counts[c + 1]! + counts[c]!;
+    this.start = counts;
+    this.items = new Int32Array(count);
+    const cursor = new Int32Array(cells);
+    for (let i = 0; i < count; i++) {
+      const c = cellOf[i]!;
+      this.items[this.start[c]! + cursor[c]!] = i;
+      cursor[c] = cursor[c]! + 1;
+    }
+  }
+
+  /** Bytes held, for the memory line in the stats. */
+  get bytes(): number {
+    return this.start.byteLength + this.items.byteLength;
+  }
+
+  private index(x: number, y: number, z: number): number {
+    const ix = Math.min(this.nx - 1, Math.max(0, Math.floor((x - this.minX) / this.cell)));
+    const iy = Math.min(this.ny - 1, Math.max(0, Math.floor((y - this.minY) / this.cell)));
+    const iz = Math.min(this.nz - 1, Math.max(0, Math.floor((z - this.minZ) / this.cell)));
+    return (iz * this.ny + iy) * this.nx + ix;
+  }
+
+  /** Appends every point index whose cell could hold something within `r` of (x, y, z). */
+  candidates(x: number, y: number, z: number, r: number, out: number[]): void {
+    out.length = 0;
+    const lo = (v: number, min: number, n: number): number =>
+      Math.min(n - 1, Math.max(0, Math.floor((v - r - min) / this.cell)));
+    const hi = (v: number, min: number, n: number): number =>
+      Math.min(n - 1, Math.max(0, Math.floor((v + r - min) / this.cell)));
+    const x0 = lo(x, this.minX, this.nx);
+    const x1 = hi(x, this.minX, this.nx);
+    const y0 = lo(y, this.minY, this.ny);
+    const y1 = hi(y, this.minY, this.ny);
+    const z0 = lo(z, this.minZ, this.nz);
+    const z1 = hi(z, this.minZ, this.nz);
+    for (let iz = z0; iz <= z1; iz++) {
+      for (let iy = y0; iy <= y1; iy++) {
+        const row = (iz * this.ny + iy) * this.nx;
+        const from = this.start[row + x0]!;
+        const to = this.start[row + x1 + 1]!;
+        for (let k = from; k < to; k++) out.push(this.items[k]!);
+      }
+    }
+  }
+}
+
 interface StructFace {
   box: number;
   axis: number;
@@ -511,7 +695,6 @@ interface StructFace {
 }
 
 interface StructBox {
-  shell: boolean;
   face0: number;
   faceN: number;
   dot0: number;
@@ -571,6 +754,14 @@ export interface StructuredStats {
   lastLate: number;
   /** Worst age step those late refreshes took, seconds — reported, not asserted on. */
   lastLateStep: number;
+  /** Mask dots the hand has ever been within reach of. */
+  touchedDots: number;
+  /** Contour pieces the hand has ever been within reach of. */
+  touchedEdges: number;
+  /** Dots the last `revealTouch` call newly reached. */
+  lastTouchedDots: number;
+  /** Mask items the last `revealTouch` call had to look at. */
+  lastTouchTests: number;
 }
 
 export interface StructuredDiagnostics {
@@ -595,6 +786,8 @@ export interface RegionStats {
   edges: number;
   edgesUnlocked: number;
   edgesInked: number;
+  /** Of `dots`, the ones the hand has reached. */
+  touched: number;
 }
 
 interface UnlockJob {
@@ -612,7 +805,7 @@ interface UnlockJob {
   /** Youngest age this event's refreshes may reach, and where they start fading out (metres). */
   floor: number;
   featherFrom: number;
-  /** 0 = skip, 1 = shell (per dot, occluded), 2 = object (heard as a whole). */
+  /** Cursors into the mask: faces, then the dots of the face being walked, then contour pieces. */
   faceCursor: number;
   dotCursor: number;
   edgeCursor: number;
@@ -642,6 +835,8 @@ export class StructuredPaint {
   private dotAccent = new Float32Array(0);
   /** (floor age, feather) per dot, interleaved — the bounds on its newest refresh. */
   private dotRefresh = new Float32Array(0);
+  /** The hand's channel into the same mask: 1 once a dot has been within arm's reach. */
+  private dotTouch = new Float32Array(0);
   private edgePos = new Float32Array(0);
   private edgeBirth = new Float32Array(0);
   private edgePrior = new Float32Array(0);
@@ -654,6 +849,12 @@ export class StructuredPaint {
   private edgeNa = new Uint8Array(0);
   private edgeNb = new Uint8Array(0);
   private edgeMid = new Float32Array(0);
+  /** The same channel per contour vertex, written to both ends of a piece at once. */
+  private edgeTouch = new Float32Array(0);
+  /** Uniform grids over the mask, so a reach query costs a handful of cells, not the world. */
+  private dotGrid: PointGrid | null = null;
+  private edgeGrid: PointGrid | null = null;
+  private readonly reachScratch: number[] = [];
   private pieces = 0;
   private accept = new Uint8Array(0);
 
@@ -666,6 +867,19 @@ export class StructuredPaint {
   private readonly waveOrigin = new Float32Array(WAVE_SLOTS * 4);
   private readonly waveMeta = new Float32Array(WAVE_SLOTS * 2);
   private lastBlocker = -1;
+  /**
+   * Boxes that could possibly block anything on the surface being walked right now.
+   *
+   * Per-point occlusion is the whole point of this pass, and it is also its whole cost: every
+   * dot of every face wants a shadow ray. Testing all 240 boxes per ray is what made the worst
+   * ping frame spike. So before a face is walked, the cone from the sound to that face's
+   * bounding sphere is intersected against every box sphere once, and the rays of that face then
+   * see only the survivors — typically a handful. Conservative by construction: a ray from the
+   * origin to any point of the face's sphere never leaves the capsule this tests against.
+   */
+  private candList = new Int32Array(0);
+  private candCount = 0;
+  private candBox = -1;
   private lastChunkAt = 0;
   /**
    * The two numbers the wave tunables own: how long a refresh eases for, and where it starts
@@ -681,6 +895,11 @@ export class StructuredPaint {
   private dotDirtyMax = -Infinity;
   private edgeDirtyMin = Infinity;
   private edgeDirtyMax = -Infinity;
+  /** The hand writes to its own attribute, so it carries its own upload window. */
+  private touchDotDirtyMin = Infinity;
+  private touchDotDirtyMax = -Infinity;
+  private touchEdgeDirtyMin = Infinity;
+  private touchEdgeDirtyMax = -Infinity;
 
   private stats: StructuredStats = {
     built: false,
@@ -704,6 +923,10 @@ export class StructuredPaint {
     lastJump: 0,
     lastLate: 0,
     lastLateStep: 0,
+    touchedDots: 0,
+    touchedEdges: 0,
+    lastTouchedDots: 0,
+    lastTouchTests: 0,
   };
 
   private diag: StructuredDiagnostics = {
@@ -740,6 +963,12 @@ export class StructuredPaint {
       uMid: { value: rawColor(MATTER_MID) },
       uCold: { value: rawColor(MATTER_COLD) },
       uAccent: { value: rawColor(ACCENT_GOLD) },
+      uHand: { value: new THREE.Vector3(0, -1e5, 0) },
+      uTouchColor: { value: rawColor(TOUCH_GREY) },
+      uTouchRange: { value: 0.55 },
+      uTouchNear: { value: 0.8 },
+      uTouchMemory: { value: 0.07 },
+      uTouchOn: { value: 1 },
     });
 
     this.dotMaterial = new THREE.ShaderMaterial({
@@ -1096,7 +1325,6 @@ export class StructuredPaint {
       }
 
       recs.push({
-        shell: b.shell === true,
         face0,
         faceN: faces.length - face0,
         dot0,
@@ -1115,6 +1343,7 @@ export class StructuredPaint {
     this.boxes = recs;
     this.faces = faces;
     this.accept = new Uint8Array(n);
+    this.candList = new Int32Array(n);
 
     this.dotPos = new Float32Array(pos);
     this.dotSeed = new Float32Array(seeds);
@@ -1123,6 +1352,7 @@ export class StructuredPaint {
     this.dotWave = new Float32Array(dots);
     this.dotAccent = new Float32Array(dots);
     this.dotRefresh = unbounded(dots);
+    this.dotTouch = new Float32Array(dots);
 
     const verts = this.pieces * 2;
     this.edgePos = new Float32Array(epos);
@@ -1135,6 +1365,7 @@ export class StructuredPaint {
     this.edgeAccent = new Float32Array(verts);
     this.edgeRefresh = unbounded(verts);
     this.edgeT = new Float32Array(verts);
+    this.edgeTouch = new Float32Array(verts);
     for (let i = 0; i < this.pieces; i++) {
       this.edgeT[i * 2] = 0;
       this.edgeT[i * 2 + 1] = 1;
@@ -1147,6 +1378,7 @@ export class StructuredPaint {
     this.dotGeometry.setAttribute('aSeed', new THREE.BufferAttribute(this.dotSeed, 1));
     this.dotGeometry.setAttribute('aAccent', new THREE.BufferAttribute(this.dotAccent, 1));
     this.dotGeometry.setAttribute('aRefresh', new THREE.BufferAttribute(this.dotRefresh, 2));
+    this.dotGeometry.setAttribute('aTouch', new THREE.BufferAttribute(this.dotTouch, 1));
     this.dotGeometry.setDrawRange(0, dots);
     this.dotGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
 
@@ -1156,20 +1388,31 @@ export class StructuredPaint {
     this.edgeGeometry.setAttribute('aT', new THREE.BufferAttribute(this.edgeT, 1));
     this.edgeGeometry.setAttribute('aAccent', new THREE.BufferAttribute(this.edgeAccent, 1));
     this.edgeGeometry.setAttribute('aRefresh', new THREE.BufferAttribute(this.edgeRefresh, 2));
+    this.edgeGeometry.setAttribute('aTouch', new THREE.BufferAttribute(this.edgeTouch, 1));
     this.edgeGeometry.setDrawRange(0, verts);
     this.edgeGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
+
+    // One grid over the dots and one over the contour midpoints: the hand asks "what is within
+    // half a metre of me" sixty times a second, and the floor alone is a single box with tens of
+    // thousands of dots, so a per-box range is not a usable answer. Counting sort, built once.
+    this.dotGrid = new PointGrid(this.dotPos, dots, REACH_CELL);
+    this.edgeGrid = new PointGrid(this.edgeMid, this.pieces, REACH_CELL);
 
     this.built = true;
     this.stats.built = true;
     this.stats.buildMs = performance.now() - t0;
     this.stats.dots = dots;
     this.stats.edges = this.pieces;
-    // Per dot: position(3) + birth + prior + wave + seed + accent + refresh(2), all f32.
-    // Per contour vertex: position(3) + birth + prior + t + accent + refresh(2), all f32.
+    // Per dot: position(3) + birth + prior + wave + seed + accent + refresh(2) + touch, all f32.
+    // Per contour vertex: position(3) + birth + prior + t + accent + refresh(2) + touch, all f32.
     // Per contour piece, CPU-side only: midpoint(3) f32 + box index i32 + two normal indices u8.
-    this.stats.bytes = dots * 10 * 4 + verts * 9 * 4 + this.pieces * (3 * 4 + 4 + 2);
+    this.stats.bytes =
+      dots * 11 * 4 + verts * 10 * 4 + this.pieces * (3 * 4 + 4 + 2) +
+      this.dotGrid.bytes + this.edgeGrid.bytes;
     this.stats.unlockedDots = 0;
     this.stats.unlockedEdges = 0;
+    this.stats.touchedDots = 0;
+    this.stats.touchedEdges = 0;
   }
 
   // ---- look ----------------------------------------------------------------
@@ -1227,6 +1470,83 @@ export class StructuredPaint {
     this.dotMaterial.uniforms.uProjScale!.value = scale;
   }
 
+  setHand(x: number, y: number, z: number): void {
+    (this.dotMaterial.uniforms.uHand!.value as THREE.Vector3).set(x, y, z);
+    (this.edgeMaterial.uniforms.uHand!.value as THREE.Vector3).set(x, y, z);
+  }
+
+  /** The hand's three numbers: how far it reaches, how bright it is there, what it leaves behind. */
+  setTouchLook(range: number, near: number, memory: number): void {
+    for (const u of [this.dotMaterial.uniforms, this.edgeMaterial.uniforms]) {
+      u.uTouchRange!.value = range;
+      u.uTouchNear!.value = near;
+      u.uTouchMemory!.value = memory;
+    }
+  }
+
+  setTouchVisible(on: boolean): void {
+    const v = on ? 1 : 0;
+    this.dotMaterial.uniforms.uTouchOn!.value = v;
+    this.edgeMaterial.uniforms.uTouchOn!.value = v;
+  }
+
+  /**
+   * The hand's write into the shared mask: every dot and contour piece within `radius` of
+   * (x, y, z) is marked touched, and nothing else is. No object-level shortcut and no
+   * occlusion ray — the player's own body radius plus the thinnest partition in the hall is
+   * wider than the reach, so there is nothing to reach through.
+   *
+   * Returns the number of dots this call newly reached.
+   */
+  revealTouch(x: number, y: number, z: number, radius: number): number {
+    this.ensureBuilt();
+    if (this.dotGrid === null || this.edgeGrid === null) return 0;
+    const r2 = radius * radius;
+    const out = this.reachScratch;
+    let fresh = 0;
+    let tests = 0;
+
+    this.dotGrid.candidates(x, y, z, radius, out);
+    tests += out.length;
+    for (let n = 0; n < out.length; n++) {
+      const i = out[n]!;
+      if (this.dotTouch[i] === 1) continue;
+      const i3 = i * 3;
+      const dx = this.dotPos[i3]! - x;
+      const dy = this.dotPos[i3 + 1]! - y;
+      const dz = this.dotPos[i3 + 2]! - z;
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      this.dotTouch[i] = 1;
+      this.markTouchDots(i, i);
+      fresh++;
+    }
+
+    this.edgeGrid.candidates(x, y, z, radius, out);
+    tests += out.length;
+    let freshEdges = 0;
+    for (let n = 0; n < out.length; n++) {
+      const k = out[n]!;
+      const v = k * 2;
+      if (this.edgeTouch[v] === 1) continue;
+      const k3 = k * 3;
+      const dx = this.edgeMid[k3]! - x;
+      const dy = this.edgeMid[k3 + 1]! - y;
+      const dz = this.edgeMid[k3 + 2]! - z;
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      this.edgeTouch[v] = 1;
+      this.edgeTouch[v + 1] = 1;
+      this.markTouchEdges(v, v + 1);
+      freshEdges++;
+    }
+
+    this.stats.touchedDots += fresh;
+    this.stats.touchedEdges += freshEdges;
+    this.stats.lastTouchedDots = fresh;
+    this.stats.lastTouchTests = tests;
+    if (fresh > 0 || freshEdges > 0) this.upload();
+    return fresh;
+  }
+
   clear(): void {
     this.job = null;
     if (!this.built) return;
@@ -1238,8 +1558,16 @@ export class StructuredPaint {
     this.edgePrior.fill(NEVER);
     this.edgeRefresh.set(unbounded(this.edgeRefresh.length / 2));
     this.waveMeta.fill(0);
+    this.dotTouch.fill(0);
+    this.edgeTouch.fill(0);
+    this.markTouchDots(0, this.dotTouch.length - 1);
+    this.markTouchEdges(0, this.edgeTouch.length - 1);
     this.stats.unlockedDots = 0;
     this.stats.unlockedEdges = 0;
+    this.stats.touchedDots = 0;
+    this.stats.touchedEdges = 0;
+    this.stats.lastTouchedDots = 0;
+    this.stats.lastTouchTests = 0;
     this.stats.lastDots = 0;
     this.stats.lastEdges = 0;
     this.stats.lastRays = 0;
@@ -1325,8 +1653,9 @@ export class StructuredPaint {
   }
 
   /**
-   * Decides, per box, what the event may unlock: nothing, the shell treatment (per dot, behind a
-   * real occlusion test) or the whole-object treatment (§the header, rule 3).
+   * The only per-box decision left: could this box hold *any* point the event can reach? A
+   * range and cone reject on its bounding sphere, and nothing else — what actually unlocks is
+   * decided one point at a time in `runChunk` (§the header, rule 3).
    */
   private plan(job: UnlockJob): void {
     const t0 = performance.now();
@@ -1345,64 +1674,11 @@ export class StructuredPaint {
         const angle = Math.acos(cosA < -1 ? -1 : cosA > 1 ? 1 : cosA);
         if (angle - Math.asin(Math.min(1, rec.r / d)) > Math.acos(job.cosHalf)) continue;
       }
-      if (rec.shell) {
-        this.accept[i] = 1;
-        continue;
-      }
-      if (this.probeObject(i, job)) this.accept[i] = 2;
+      this.accept[i] = 1;
     }
     job.planned = true;
     this.stats.lastMs += performance.now() - t0;
     this.diagTime = Number.NaN;
-  }
-
-  /**
-   * Is any part of this prop directly audible? Probes the centre and corners of its front-facing
-   * faces and stops at the first sample the event can actually reach. One hit is enough: the
-   * object surfaces as a whole.
-   */
-  private probeObject(index: number, job: UnlockJob): boolean {
-    const b = this.world.boxes[index]!;
-    const lo = [b.minX, b.minY, b.minZ];
-    const hi = [b.maxX, b.maxY, b.maxZ];
-    const origin = [job.ox, job.oy, job.oz];
-    const p = [0, 0, 0];
-    for (let axis = 0; axis < 3; axis++) {
-      const u = (axis + 1) % 3;
-      const v = (axis + 2) % 3;
-      for (const sign of [-1, 1] as const) {
-        const plane = sign > 0 ? hi[axis]! : lo[axis]!;
-        // A back face is never directly heard, so it is never worth a ray.
-        if ((origin[axis]! - plane) * sign <= 0) continue;
-        const midU = (lo[u]! + hi[u]!) / 2;
-        const midV = (lo[v]! + hi[v]!) / 2;
-        // Centre first, then the corners pulled 12 % in from the border.
-        const su = (hi[u]! - lo[u]!) * 0.38;
-        const sv = (hi[v]! - lo[v]!) * 0.38;
-        for (const [du, dv] of [
-          [0, 0],
-          [-su, -sv],
-          [su, -sv],
-          [-su, sv],
-          [su, sv],
-        ] as const) {
-          p[axis] = plane;
-          p[u] = midU + du;
-          p[v] = midV + dv;
-          const ex = p[0]! - job.ox;
-          const ey = p[1]! - job.oy;
-          const ez = p[2]! - job.oz;
-          const dist = Math.sqrt(ex * ex + ey * ey + ez * ez);
-          if (dist > job.radius) continue;
-          if (job.cosHalf > -1 && dist > 1e-4) {
-            if ((ex * job.dirX + ey * job.dirY + ez * job.dirZ) / dist < job.cosHalf) continue;
-          }
-          this.stats.lastRays++;
-          if (!this.blocked(job.ox, job.oy, job.oz, p[0]!, p[1]!, p[2]!, index)) return true;
-        }
-      }
-    }
-    return false;
   }
 
   /** Finishes the outstanding unlock pass immediately, whatever it costs. */
@@ -1433,15 +1709,18 @@ export class StructuredPaint {
 
     while (job.faceCursor < faces.length) {
       const face = faces[job.faceCursor]!;
-      const mode = this.accept[face.box]!;
-      if (mode === 0) {
+      if (this.accept[face.box]! === 0) {
         job.faceCursor++;
         job.dotCursor = 0;
         continue;
       }
-      if (job.dotCursor === 0 && !this.faceInReach(face, job, mode)) {
-        job.faceCursor++;
-        continue;
+      if (job.dotCursor === 0) {
+        if (!this.faceInReach(face, job)) {
+          job.faceCursor++;
+          continue;
+        }
+        this.buildCands(job, face.cx, face.cy, face.cz, face.r);
+        this.candBox = -1;
       }
       const end = face.dot0 + face.dotN;
       let i = face.dot0 + job.dotCursor;
@@ -1462,14 +1741,13 @@ export class StructuredPaint {
         const d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > r2) continue;
         const dist = Math.sqrt(d2);
-        if (mode === 1) {
-          // The room shell answers only where it was actually struck.
-          if (job.cosHalf > -1 && dist > 1e-4) {
-            if ((dx * job.dirX + dy * job.dirY + dz * job.dirZ) / dist < job.cosHalf) continue;
-          }
-          this.stats.lastRays++;
-          if (this.blocked(job.ox, job.oy, job.oz, px, py, pz, face.box)) continue;
+        // Every surface in the world answers only where it was actually struck — the wall, the
+        // floor and the crate on the same terms.
+        if (job.cosHalf > -1 && dist > 1e-4) {
+          if ((dx * job.dirX + dy * job.dirY + dz * job.dirZ) / dist < job.cosHalf) continue;
         }
+        this.stats.lastRays++;
+        if (this.blocked(job.ox, job.oy, job.oz, px, py, pz, face.box)) continue;
         this.unlockDot(
           i,
           job.t0 + dist * job.invSpeed,
@@ -1494,10 +1772,16 @@ export class StructuredPaint {
 
     while (job.edgeCursor < this.pieces) {
       const k = job.edgeCursor;
-      const mode = this.accept[this.edgeBox[k]!]!;
-      if (mode === 0) {
+      const kbox = this.edgeBox[k]!;
+      if (this.accept[kbox]! === 0) {
         job.edgeCursor++;
         continue;
+      }
+      // Contour pieces come in box order, so the candidate set is rebuilt once per box.
+      if (kbox !== this.candBox) {
+        const rec = this.boxes[kbox]!;
+        this.buildCands(job, rec.cx, rec.cy, rec.cz, rec.r);
+        this.candBox = kbox;
       }
       items++;
       const k3 = k * 3;
@@ -1511,14 +1795,12 @@ export class StructuredPaint {
       job.edgeCursor++;
       if (d2 > r2) continue;
       const dist = Math.sqrt(d2);
-      if (mode === 1) {
-        if (job.cosHalf > -1 && dist > 1e-4) {
-          if ((dx * job.dirX + dy * job.dirY + dz * job.dirZ) / dist < job.cosHalf) continue;
-        }
-        // A crease is directly heard when one of the two faces it belongs to is, so the test is
-        // run just off whichever of them is turned toward the sound.
-        if (!this.creaseHeard(k, mx, my, mz, job)) continue;
+      if (job.cosHalf > -1 && dist > 1e-4) {
+        if ((dx * job.dirX + dy * job.dirY + dz * job.dirZ) / dist < job.cosHalf) continue;
       }
+      // A crease is directly heard when one of the two faces it belongs to is, so the test is
+      // run just off whichever of them is turned toward the sound.
+      if (!this.creaseHeard(k, mx, my, mz, job)) continue;
       this.unlockEdge(
         k,
         job.t0 + dist * job.invSpeed,
@@ -1548,13 +1830,12 @@ export class StructuredPaint {
   }
 
   /** Face-level rejects: out of range, out of the cone, or turned away from the sound. */
-  private faceInReach(face: StructFace, job: UnlockJob, mode: number): boolean {
+  private faceInReach(face: StructFace, job: UnlockJob): boolean {
     const dx = face.cx - job.ox;
     const dy = face.cy - job.oy;
     const dz = face.cz - job.oz;
     const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (d - face.r > job.radius) return false;
-    if (mode === 2) return true; // the object has already been heard; its far side comes too
     const origin = face.axis === 0 ? job.ox : face.axis === 1 ? job.oy : job.oz;
     if ((origin - face.plane) * face.sign <= 0) return false;
     if (job.cosHalf > -1 && d > face.r) {
@@ -1614,7 +1895,8 @@ export class StructuredPaint {
     if (last >= 0 && last !== skip && last < boxes.length) {
       if (this.hits(last, ox, oy, oz, ux, uy, uz, maxT)) return true;
     }
-    for (let i = 0; i < boxes.length; i++) {
+    for (let c = 0; c < this.candCount; c++) {
+      const i = this.candList[c]!;
       if (i === skip || i === last) continue;
       if (this.hits(i, ox, oy, oz, ux, uy, uz, maxT)) {
         this.lastBlocker = i;
@@ -1622,6 +1904,33 @@ export class StructuredPaint {
       }
     }
     return false;
+  }
+
+  /**
+   * Narrows the world to the boxes that could shadow a sphere of radius `r` about (cx, cy, cz)
+   * as seen from the sound. One pass over the box spheres; the rays that follow are then cheap.
+   */
+  private buildCands(job: UnlockJob, cx: number, cy: number, cz: number, r: number): void {
+    const boxes = this.world.boxes;
+    const vx = cx - job.ox;
+    const vy = cy - job.oy;
+    const vz = cz - job.oz;
+    const vv = vx * vx + vy * vy + vz * vz;
+    let count = 0;
+    for (let i = 0; i < boxes.length; i++) {
+      const o4 = i * 4;
+      const sx = this.spheres[o4]! - job.ox;
+      const sy = this.spheres[o4 + 1]! - job.oy;
+      const sz = this.spheres[o4 + 2]! - job.oz;
+      let t = vv > 1e-9 ? (sx * vx + sy * vy + sz * vz) / vv : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const dx = sx - vx * t;
+      const dy = sy - vy * t;
+      const dz = sz - vz * t;
+      const reach = this.spheres[o4 + 3]! + r + 0.1;
+      if (dx * dx + dy * dy + dz * dz <= reach * reach) this.candList[count++] = i;
+    }
+    this.candCount = count;
   }
 
   /** Bounding-sphere reject, then the slab test. */
@@ -1796,6 +2105,16 @@ export class StructuredPaint {
     if (hi > this.edgeDirtyMax) this.edgeDirtyMax = hi;
   }
 
+  private markTouchDots(lo: number, hi: number): void {
+    if (lo < this.touchDotDirtyMin) this.touchDotDirtyMin = lo;
+    if (hi > this.touchDotDirtyMax) this.touchDotDirtyMax = hi;
+  }
+
+  private markTouchEdges(lo: number, hi: number): void {
+    if (lo < this.touchEdgeDirtyMin) this.touchEdgeDirtyMin = lo;
+    if (hi > this.touchEdgeDirtyMax) this.touchEdgeDirtyMax = hi;
+  }
+
   private upload(): void {
     if (this.dotDirtyMax >= this.dotDirtyMin) {
       const start = this.dotDirtyMin;
@@ -1825,6 +2144,23 @@ export class StructuredPaint {
       refresh.needsUpdate = true;
       this.edgeDirtyMin = Infinity;
       this.edgeDirtyMax = -Infinity;
+    }
+    if (this.touchDotDirtyMax >= this.touchDotDirtyMin) {
+      const attr = this.dotGeometry.getAttribute('aTouch') as THREE.BufferAttribute;
+      attr.addUpdateRange(this.touchDotDirtyMin, this.touchDotDirtyMax - this.touchDotDirtyMin + 1);
+      attr.needsUpdate = true;
+      this.touchDotDirtyMin = Infinity;
+      this.touchDotDirtyMax = -Infinity;
+    }
+    if (this.touchEdgeDirtyMax >= this.touchEdgeDirtyMin) {
+      const attr = this.edgeGeometry.getAttribute('aTouch') as THREE.BufferAttribute;
+      attr.addUpdateRange(
+        this.touchEdgeDirtyMin,
+        this.touchEdgeDirtyMax - this.touchEdgeDirtyMin + 1,
+      );
+      attr.needsUpdate = true;
+      this.touchEdgeDirtyMin = Infinity;
+      this.touchEdgeDirtyMax = -Infinity;
     }
   }
 
@@ -1928,6 +2264,7 @@ export class StructuredPaint {
       edges: 0,
       edgesUnlocked: 0,
       edgesInked: 0,
+      touched: 0,
     };
     if (!this.built) return out;
     const now = this.time;
@@ -1942,6 +2279,7 @@ export class StructuredPaint {
       const z = this.dotPos[i3 + 2]!;
       if (x < minX || x > maxX || y < minY || y > maxY || z < minZ || z > maxZ) continue;
       out.dots++;
+      if (this.dotTouch[i] === 1) out.touched++;
       const birth = this.dotBirth[i]!;
       if (birth <= -1e8) continue;
       out.unlocked++;

@@ -134,8 +134,9 @@ class App {
     this.paint.applyLook(this.look.windowRadius, this.look.refreshSeconds, this.look.featherStart);
     this.scene.add(this.paint.object);
 
-    this.touch = new TouchLayer(this.hall.world, defaultTouchTunables());
-    this.scene.add(this.touch.object);
+    // The hand writes into the paint's mask rather than owning geometry of its own, so it needs
+    // the paint and nothing else — and it adds no draw call.
+    this.touch = new TouchLayer(this.paint, defaultTouchTunables());
 
     // Lights-on debug view. Off by default and, being a Group, costs nothing while it is.
     this.lights.add(new THREE.HemisphereLight(0xbfd4e6, 0x202428, 2.1));
@@ -315,7 +316,7 @@ class App {
       ['paint', `${this.perf.paintMs.toFixed(2)} ms · pend ${paint.pending}`],
       ['dots', `${paint.unlockedDots} / ${paint.dots}`],
       ['edges', `${paint.unlockedEdges} / ${paint.edges}`],
-      ['touch', `${this.touch.getStats().segments} seg`],
+      ['touch', `${this.touch.getStats().remembered} pt`],
       ['calls', `${this.renderer.info.render.calls}`],
     ]);
 
