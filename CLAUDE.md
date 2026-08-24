@@ -1,6 +1,11 @@
-Read @doc/vision.md
+Текущий проект — прототип из `doc/proto/`.
+
+Read @doc/proto/concept.md
+Read @doc/proto/process.md
+
+`doc/vision.md` описывает другую, отложенную игру. Не читай его и не ориентируйся на него.
 
 Notes:
-- Use Fable for planning, Opus for implementation
-- Run code review after each milestone (and fix bugs iteratively)
-- If something can be implemented easier and better using a well-maintained popular library - use the library
+- Если что-то проще и лучше делается популярной поддерживаемой библиотекой — используй библиотеку.
+- Производительность — часть дизайна, а не оптимизация «на потом».
+- Каждая фича приносит с собой свой дебаг-инструмент и свой сценарий ключевых кадров.
