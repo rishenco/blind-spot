@@ -25,6 +25,7 @@
 
 import * as THREE from 'three';
 import type { StaticWorld } from '../core/collision';
+import { DEFAULT_DUST_SEED, makeRng } from '../core/rng';
 import type { SoundClass, SoundEvent } from './soundEvents';
 import { type AgeRamp, defaultAgeRamp } from './ageRamp';
 import { MAX_LIVE_WAVES, TracerStreaks, WaveDust, type LiveWave } from './waveFx';
@@ -205,17 +206,6 @@ const DUST_EXTENT = 14;
 /** Birth stamp meaning "nothing was ever known here". */
 const NEVER = -1e9;
 
-/** mulberry32 — small, fast, and seedable so the dust field is the same field every run. */
-function makeRng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 /** Colours are authored in sRGB and written straight to the framebuffer by the raw shaders. */
 function rawColor(hex: number): THREE.Color {
   return new THREE.Color().setHex(hex, THREE.LinearSRGBColorSpace);
@@ -325,6 +315,9 @@ export class PaintSystem {
       ramp?: AgeRamp;
       wave?: WaveTunables;
       structured?: StructuredTunables;
+      /** Seeds for the two random streams; omitted means "the constant this has always used". */
+      latticeSeed?: number;
+      dustSeed?: number;
     } = {},
   ) {
     this.perception = options.perception ?? defaultPerceptionTunables();
@@ -334,6 +327,7 @@ export class PaintSystem {
       world,
       this.ramp,
       options.structured ?? defaultStructuredTunables(),
+      options.latticeSeed,
     );
 
     this.eventGeometry.setAttribute('position', new THREE.BufferAttribute(this.eventPositions, 3));
@@ -365,7 +359,8 @@ export class PaintSystem {
 
     this.tracer = new TracerStreaks(rawColor(EVENT_COLORS['e-ping']));
     this.tracer.setLook(this.wave.tracerSeconds, this.wave.tracerBrightness);
-    this.dust = new WaveDust(DUST_COUNT, DUST_EXTENT, makeRng(0xd0757));
+    const dustSeed = options.dustSeed ?? DEFAULT_DUST_SEED;
+    this.dust = new WaveDust(DUST_COUNT, DUST_EXTENT, makeRng(dustSeed));
     this.dust.setLook(this.wave.dustGain, this.wave.dustSize, this.wave.dustShell);
 
     this.root.add(this.eventPoints, this.tracer.object, this.dust.object, this.structured.object);

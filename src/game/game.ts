@@ -22,6 +22,13 @@ import * as THREE from 'three';
 import type GUI from 'lil-gui';
 import { StaticWorld } from '../core/collision';
 import type { Input } from '../core/input';
+import {
+  DEFAULT_SEED,
+  STREAM_DUST,
+  STREAM_LATTICE,
+  streamSeed,
+  type SeedConfig,
+} from '../core/rng';
 import type { HelpRow, Hud } from '../ui/hud';
 import {
   PlayerController,
@@ -100,6 +107,11 @@ export interface GameCtx {
   input: Input;
   gui: GUI;
   hud: Hud;
+  /**
+   * The run's seed. Omitted — or present but not explicit — means every random stream keeps the
+   * constant it was born with, so the default run is the run it has always been (`core/rng.ts`).
+   */
+  seed?: SeedConfig;
 }
 
 export class Game {
@@ -110,6 +122,7 @@ export class Game {
 
   private readonly world = new StaticWorld();
   private readonly room: Room;
+  private readonly seed: SeedConfig;
 
   private readonly movement = defaultMovementTunables();
   private readonly cameraTunables = defaultCameraTunables();
@@ -147,6 +160,7 @@ export class Game {
   constructor(ctx: GameCtx) {
     this.ctx = ctx;
     this.input = ctx.input;
+    this.seed = ctx.seed ?? DEFAULT_SEED;
 
     // Law 3: absence is black. No ambient light, no fog, no helpful outlines — ever.
     ctx.scene.background = new THREE.Color(0x000000);
@@ -173,6 +187,8 @@ export class Game {
       ramp: defaultAgeRamp(),
       wave: defaultWaveTunables(),
       structured: defaultStructuredTunables(),
+      latticeSeed: streamSeed(this.seed, STREAM_LATTICE),
+      dustSeed: streamSeed(this.seed, STREAM_DUST),
     });
     ctx.scene.add(this.paint.object);
     this.unsubscribeBus = this.bus.subscribe(this.paint.handle);
@@ -462,6 +478,10 @@ export class Game {
     const d = this.paint.structured.diagnostics();
     const t = this.paint.structured.tunables;
     return {
+      // --- the run. `seedExplicit` false means the streams are on their historical constants,
+      // which is why `seed` alone is not enough to tell you which world you are in.
+      seed: this.seed.seed,
+      seedExplicit: this.seed.explicit,
       // --- body
       x: this.player.position.x,
       y: this.player.position.y,

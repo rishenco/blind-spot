@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import GUI from 'lil-gui';
 import { Input } from './core/input';
 import { Loop } from './core/loop';
+import { parseSeed } from './core/rng';
 import { Hud } from './ui/hud';
 import { Game } from './game/game';
 
@@ -37,7 +38,13 @@ const hud = new Hud();
 const gui = new GUI({ title: 'Blind Spot' });
 gui.domElement.style.zIndex = '15';
 
-const game = new Game({ scene, camera, renderer, input, hud, gui });
+// `?seed=N` reseeds every random stream in the simulation from N, so a run can be handed to
+// someone else as a link. Without it the streams keep their historical constants and the game is
+// bit-for-bit the game it has always been (see core/rng.ts). The URL is the only way in: it is
+// real input, which is why this does not need a setter on the debug handle below.
+const seed = parseSeed(window.location.search);
+
+const game = new Game({ scene, camera, renderer, input, hud, gui, seed });
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;

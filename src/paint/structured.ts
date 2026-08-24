@@ -50,6 +50,7 @@
 
 import * as THREE from 'three';
 import type { StaticWorld } from '../core/collision';
+import { DEFAULT_LATTICE_SEED, makeRng } from '../core/rng';
 import type { SoundEvent } from './soundEvents';
 import type { AgeRamp } from './ageRamp';
 import { ACCENT_GOLD, MATTER_COLD, MATTER_FRESH, MATTER_MID } from './materials';
@@ -133,17 +134,6 @@ const NORMALS: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0, 1],
   [0, 0, -1],
 ];
-
-/** mulberry32 — seeded, so the lattice is the same lattice every run. */
-function makeRng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 function rawColor(hex: number): THREE.Color {
   return new THREE.Color().setHex(hex, THREE.LinearSRGBColorSpace);
@@ -713,12 +703,22 @@ export class StructuredPaint {
   };
   private diagTime = Number.NaN;
 
+  /**
+   * The lattice jitter's seed — the only random draw this class makes, taken once per build.
+   *
+   * Defaulted to the constant it has always used, so an unseeded run keeps the exact lattice it
+   * has always had; `core/rng.ts` owns the policy that decides when it is anything else.
+   */
+  private readonly latticeSeed: number;
+
   constructor(
     private readonly world: StaticWorld,
     private readonly ramp: AgeRamp,
     tunables?: StructuredTunables,
+    latticeSeed: number = DEFAULT_LATTICE_SEED,
   ) {
     this.tunables = tunables ?? defaultStructuredTunables();
+    this.latticeSeed = latticeSeed;
 
     const waveA = Array.from({ length: WAVE_SLOTS }, () => new THREE.Vector4());
     const waveB = Array.from({ length: WAVE_SLOTS }, () => new THREE.Vector4());
@@ -836,7 +836,7 @@ export class StructuredPaint {
     const spacing = Math.max(0.05, this.tunables.spacing);
     const jitter = Math.min(0.3, Math.max(0, this.tunables.jitter));
     const segment = Math.max(0.05, this.tunables.segment);
-    const rng = makeRng(0x51ded);
+    const rng = makeRng(this.latticeSeed);
 
     // Bounding spheres (static: the world never changes after scene build) and the union AABB.
     // The union is exactly the outside of the room shell, which is what makes "a sample point
