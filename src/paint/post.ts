@@ -1,23 +1,22 @@
 /**
- * Selective bloom for the point cloud.
+ * Selective bloom for the reveal.
  *
- * Look 4 is built around it: at a nearly uniform splat size, brightness is the *only* thing
- * carrying salience, and a bare additive dot has no way to look brighter than full white. Bloom
- * gives the fresh returns somewhere to go above 1.0 — a hot grain blooms, a cold one does not,
- * and the whole difference between "this just came back" and "I remember this" stops depending
- * on hue alone. Looks 1-3 can borrow it from the GUI to see whether they want it too.
+ * Contours are thin bright lines on black, which is exactly what a mild bloom flatters: the ink
+ * gains a halo and the lattice stays quiet. It is also what gives a fresh return somewhere to go
+ * above 1.0 — a bare additive line has no way to look brighter than full white — so the
+ * difference between "this just came back" and "I remember this" stops depending on hue alone.
  *
  * Two rules govern the implementation:
  *
- *  - **Off must cost exactly zero.** The composer is built lazily on first use and the scene
+ *  - **Off must cost exactly zero.** The composer is built lazily on first use and the game
  *    simply does not call this at all while bloom is off, so the frame goes straight through
  *    `renderer.render` on the path it always took.
  *
- *  - **On must not re-grade the picture.** The point shaders write their colours straight to
+ *  - **On must not re-grade the picture.** The reveal shaders write their colours straight to
  *    the framebuffer (they carry no tone-mapping or colour-space chunk), so the chain here is
  *    render → bloom → screen with no `OutputPass`: adding one would apply the renderer's tone
- *    map and an sRGB encode to values that are already display-referred, and every look would
- *    quietly change the moment bloom was switched on.
+ *    map and an sRGB encode to values that are already display-referred, and the whole look
+ *    would quietly change the moment bloom was switched on.
  *
  * Software GL (headless SwiftShader) is detected and reported. Five mip levels of separable
  * gaussian at full resolution is a lot of fill for a CPU rasteriser, so the pass runs at a

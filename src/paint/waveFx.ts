@@ -1,10 +1,10 @@
 /**
  * The two things that make a wavefront visible in the *air* rather than only on surfaces.
  *
- * The matter cloud already shows a wave arriving — every blip flashes ice-white at the instant
- * the front reaches it, so a ping sweeps outward across the geometry. What it cannot show is
- * the front crossing a space that has nothing in it, and it cannot show the moment of firing at
- * all. Those two gaps are what this file fills:
+ * The reveal already shows a wave arriving — the ring displaces and burns the lattice at the
+ * instant the front reaches it, so a ping sweeps outward across the geometry. What it cannot
+ * show is the front crossing a space that has nothing in it, and it cannot show the moment of
+ * firing at all. Those two gaps are what this file fills:
  *
  *  - `TracerStreaks` — the cause. A dim streak leaves the rig along the aim when the E-ping
  *    fires and burns down tip-first inside a quarter of a second. It is not a laser and must
@@ -17,7 +17,7 @@
  *    passing through it. Idle, the whole field is `visible = false` and costs nothing.
  *
  * Both are driven by the same `LiveWave` list the paint system keeps, so nothing here can draw
- * a front that the sampler did not also paint from.
+ * a front that no real sound produced (law 2).
  */
 
 import * as THREE from 'three';

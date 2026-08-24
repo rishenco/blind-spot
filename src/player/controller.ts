@@ -1197,11 +1197,11 @@ export class PlayerController {
    *
    * Both camera modes are evaluated and then blended by position, which is what makes the
    * V toggle a 0.25 s move rather than a cut. Stride bob belongs to the first-person eye only
-   * — in third person the animated body carries the physicality and a bobbing boom just reads
-   * as a wobbly camera — while the landing dip survives at `landDipScale`.
+   * — on a boom it just reads as a wobbly camera — while the landing dip survives at
+   * `landDipScale`.
    *
    * This is also where the body's render pose is published (`renderPosition`, `bodyFacing`,
-   * `bodyVisible`); the avatar reads it and never touches the simulation.
+   * `bodyVisible`): whatever draws the body reads those and never touches the simulation.
    */
   applyToCamera(camera: THREE.PerspectiveCamera, alpha: number): void {
     const a = clamp01(alpha);

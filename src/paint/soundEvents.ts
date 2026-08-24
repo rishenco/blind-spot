@@ -5,8 +5,8 @@
  * path: if a thing can be heard, it exists here, with a real origin and a real loudness, and
  * anything that listens (the paint system today; dog hearing, heat and the audio mixer later)
  * subscribes to the same stream. That is what makes law 2 — "the system never lies" —
- * enforceable rather than aspirational: a blip with no event behind it is impossible to
- * produce.
+ * enforceable rather than aspirational: geometry drawn with no event behind it is impossible
+ * to produce.
  *
  * An event carries two radii, and they are not the same number:
  *  - `paintRadius`  — how much static geometry the sound reveals around its origin (§3.3,
@@ -19,9 +19,9 @@
  */
 
 /**
- * Sound classes implemented so far. The table below is the whole of §3.3 that batch 2 needs;
- * `slide`, `prop-knock`, dog gaits, `detonation` and the carried-cell hum are additional rows
- * in the same table and need no new machinery — a class name, a profile entry, an emitter.
+ * Sound classes implemented so far. `slide`, `prop-knock`, dog gaits, `detonation` and the
+ * carried-cell hum are additional rows in the same table of §3.3 and need no new machinery —
+ * a class name, a profile entry, an emitter.
  */
 export type SoundClass =
   | 'crouch-step'
@@ -39,7 +39,7 @@ export type SoundClass =
 export type WaveGroup = 'step' | 'ping' | 'beam';
 
 /**
- * How fast each group's wavefront expands, m/s. Runtime-tunable from the lab GUI.
+ * How fast each group's wavefront expands, m/s. Runtime-tunable from the dev panel.
  *
  * Not the speed of sound: 343 m/s crosses a 30 m room in 90 ms, which at any frame rate is
  * an instant pop — the thing the wave engine exists to abolish. These are *readable* speeds,
@@ -106,7 +106,7 @@ export interface SoundEvent {
   readonly z: number;
   readonly paintRadius: number;
   readonly hearingRadius: number;
-  /** Loudness, ~1 = the class's nominal value. Scales blip density and brightness. */
+  /** Loudness, ~1 = the class's nominal value. Scales how much the event reveals. */
   readonly intensity: number;
   /** Unit aim vector; (0, 0, 0) for an omnidirectional event. */
   readonly dirX: number;
@@ -116,7 +116,7 @@ export interface SoundEvent {
   readonly coneAngleDeg: number;
   /**
    * How fast this event's wavefront expands, m/s. Nothing the event reveals exists before the
-   * front has physically reached it: a blip's birth stamp is `time + distance / waveSpeed`.
+   * front has physically reached it: a surface's birth stamp is `time + distance / waveSpeed`.
    */
   readonly waveSpeed: number;
   /** Scene clock at emission, seconds. */

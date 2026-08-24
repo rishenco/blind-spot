@@ -1,30 +1,28 @@
 /**
- * The structured reveal backend — "Blueprint" (look 5).
+ * The structured reveal — the Blueprint. This is what the game looks like.
  *
- * Looks 1-4 answer the world with a *stochastic* cloud: rays are fired, and wherever one lands
- * a patch of random blips is splatted. That is sonar as texture. Blueprint answers the same
- * events with the opposite representation: the geometry is known ahead of time, so a sound does
- * not *sample* a surface, it **unlocks** the part of the surface it reached. What the player sees
- * is therefore exact — a uniform lattice of dim dots across every revealed face, and a bright
- * contour along every revealed edge — and the only thing sound decides is *which* of it is
- * known and *when* it became known.
+ * A sound does not *sample* a surface, it **unlocks** the part of the surface it reached. The
+ * level's geometry is known ahead of time, so what the player sees is exact — a uniform lattice
+ * of dim dots across every revealed face, and a bright contour along every revealed edge — and
+ * the only thing sound decides is *which* of it is known and *when* it became known. A CAD
+ * drawing being surveyed by ear.
  *
  * Five properties carry the look:
  *
- *  1. **Precomputed, never resampled.** At scene build every collider box is turned into
+ *  1. **Precomputed, never resampled.** At world build every collider box is turned into
  *     per-face dot lattices (snapped to one world-space grid, so coplanar faces line up) and
  *     ~0.2 m contour segments along its twelve edges. Faces and edges that are buried inside
  *     another box, or that face out of the level entirely, are dropped at build time — the
  *     outside of the room shell is not a place sound can ever reach.
  *
- *  2. **The same wave, the same two stamps, the same restamp policy.** An unlock writes
- *     `birth = event.time + distance / waveSpeed` and keeps the previous arrival in `prior`,
- *     exactly as the blip system does, and both shaders here branch on `prior` exactly as that
- *     one does: virgin geometry gets the whole front, known geometry refreshes *silently* — it
- *     does not ripple, does not re-ink, does not wait for the new front, it simply eases to its
- *     new age over `refreshSeconds`. So a first reveal is a front sweeping across the room, a
- *     second ping over ground you already have is a quiet brightening of it, and the CPU work
- *     can be amortised over as many frames as it likes without anyone being able to tell.
+ *  2. **The wave, two stamps, one restamp policy.** An unlock writes
+ *     `birth = event.time + distance / waveSpeed` and keeps the previous arrival in `prior`;
+ *     both shaders here branch on `prior`: virgin geometry gets the whole front, known geometry
+ *     refreshes *silently* — it does not ripple, does not re-ink, does not wait for the new
+ *     front, it simply eases to its new age over `refreshSeconds`. So a first reveal is a front
+ *     sweeping across the room, a second ping over ground you already have is a quiet
+ *     brightening of it, and the CPU work can be amortised over as many frames as it likes
+ *     without anyone being able to tell.
  *
  *  3. **Objects surface whole; the shell surfaces where it is hit.** If any part of a prop is
  *     directly audible — one unoccluded probe inside the event's radius and cone — every face of
@@ -37,14 +35,14 @@
  *     pushed *off* its true position — radially outward, on a damped ring profile a metre or so
  *     wide — and drawn hot, swollen and white; a fifth of a ring width later it is already back
  *     exactly where it belongs, cooling into the dim cyan lattice. The contours ink themselves in
- *     segment by segment *at that same ring*, not behind it. Batch 2.2 ran the ink on a fixed
- *     delay (`phaseDelay`) with a warm wake (`probeWake`) bridging the gap, which gave the room a
- *     second, slower front chasing the first — read as a bug in playtest, and removed. The
- *     displacement is a *render-time* effect computed from the stored exact position: the data
- *     never lies (law 2), and once the ring has passed the picture is exact.
+ *     segment by segment *at that same ring*, not behind it: an earlier build ran the ink on a
+ *     fixed delay with a warm wake bridging the gap, which gave the room a second, slower front
+ *     chasing the first — read as a bug in playtest, and removed. The displacement is a
+ *     *render-time* effect computed from the stored exact position: the data never lies (law 2),
+ *     and once the ring has passed the picture is exact.
  *
- *  5. **Nothing is ever lost.** Both layers cool along the same age ramp as the blip cloud and
- *     settle at the skeleton alpha of §3.6. The map dims; it never dies.
+ *  5. **Nothing is ever lost.** Both layers cool along the age ramp and settle at the skeleton
+ *     alpha of §3.6. The map dims; it never dies.
  *
  * A per-item accent channel (gold) is reserved and wired through both shaders for the traversal
  * holds of §5 ("dots are matter, lines are holds"). Nothing writes it yet.
@@ -53,7 +51,7 @@
 import * as THREE from 'three';
 import type { StaticWorld } from '../core/collision';
 import type { SoundEvent } from './soundEvents';
-import type { AgeRamp } from './paintSystem';
+import type { AgeRamp } from './ageRamp';
 import { ACCENT_GOLD, MATTER_COLD, MATTER_FRESH, MATTER_MID } from './materials';
 
 // ---------------------------------------------------------------------------
@@ -136,7 +134,7 @@ const NORMALS: ReadonlyArray<readonly [number, number, number]> = [
   [0, 0, -1],
 ];
 
-/** mulberry32, local so this module has no runtime dependency on the blip system. */
+/** mulberry32 — seeded, so the lattice is the same lattice every run. */
 function makeRng(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -189,7 +187,7 @@ const RING_GLSL = /* glsl */ `
   }
 `;
 
-/** The age ramp, shared by both layers and identical in shape to the blip cloud's (§3.2). */
+/** The age ramp (§3.2), shared by both layers — dots and contours cool as one picture. */
 const RAMP_GLSL = /* glsl */ `
   uniform vec3  uRampTimes;
   uniform float uSkeletonAlpha;
@@ -312,8 +310,8 @@ const DOT_VERTEX = /* glsl */ `
     float appear = 1.0;
 
     /*
-     * The restamp policy, identical to the blip cloud's (paintSystem.ts) because it is one
-     * policy and not two. No prior means nobody has ever heard this dot: it waits for the front,
+     * The restamp policy, in one branch. No prior means nobody has ever heard this dot: it
+     * waits for the front,
      * and the front visibly passes through it — displaced, hot, swollen. A prior means known
      * ground, and a refresh over known ground is *silent*: no ring, no displacement, no gate, the
      * age just eases to its new value. That is what stops a second ping from re-surveying a room
@@ -334,8 +332,7 @@ const DOT_VERTEX = /* glsl */ `
         float ringN = behind / max(0.05, uRingWidth);
         p += outward * uRipple * ringProfile(ringN);
         hot = 1.0 - smoothstep(0.0, 1.0, ringN);
-        // A soft leading edge on the ring, a third of a ring width deep — the distance analogue
-        // of the blip cloud's arrival ramp, and for the same reason: nothing pops on.
+        // A soft leading edge on the ring, a third of a ring width deep: nothing pops on.
         appear = smoothstep(0.0, 0.35, ringN);
       }
     } else {
@@ -345,9 +342,9 @@ const DOT_VERTEX = /* glsl */ `
         gl_PointSize = 0.0;
         return;
       }
-      // Bounded exactly as the blip cloud bounds it, because it is one policy: a footfall may
-      // only walk the age back to the end of the white band, and only fully in the middle of its
-      // own radius. The min against the old age keeps the floor a floor.
+      // Bounded by the policy the wave owns (stepFloor and featherStart in WaveTunables): a
+      // footfall may only walk the age back to the end of the white band, and only fully in the
+      // middle of its own radius. The min against the old age keeps the floor a floor.
       float target = min(ageOld, max(ageNew, aRefresh.x));
       float s = smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew) * aRefresh.y;
       age = mix(ageOld, target, s);
@@ -553,9 +550,9 @@ export interface StructuredStats {
   /**
    * Worst age discontinuity the last event's refreshes put on screen, seconds.
    *
-   * The blip cloud's invariant, measured the same way here: the displayed age is evaluated under
-   * the old stamps and again under the new ones at the same instant, and the effective-stamp
-   * construction makes the difference zero. One policy, one number, two backends.
+   * The continuity invariant: the displayed age is evaluated under the old stamps and again
+   * under the new ones at the same instant, and the effective-stamp construction makes the
+   * difference zero. A refresh you can see happening is a refresh that failed.
    *
    * Refreshes the front had already passed before the unlock job reached them are counted in
    * `lastLate` instead, for the reason given there.
@@ -1341,7 +1338,7 @@ export class StructuredPaint {
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (d - rec.r > job.radius) continue;
       if (job.cosHalf > -1 && d > rec.r) {
-        // Cone reject on the bounding sphere, exactly as the blip sampler culls candidates.
+        // Cone reject on the bounding sphere, before a single dot of the box is tested.
         const cosA = (dx * job.dirX + dy * job.dirY + dz * job.dirZ) / d;
         const angle = Math.acos(cosA < -1 ? -1 : cosA > 1 ? 1 : cosA);
         if (angle - Math.asin(Math.min(1, rec.r / d)) > Math.acos(job.cosHalf)) continue;
@@ -1415,7 +1412,7 @@ export class StructuredPaint {
     this.job = null;
   }
 
-  /** One chunk of unlocking per frame, gated on wall clock like the blip sampler. */
+  /** One chunk of unlocking per frame, gated on wall clock (law 5: movement never waits). */
   advance(now: number, gapMs: number): void {
     this.setTime(now);
     if (this.job === null) return;
@@ -1676,10 +1673,9 @@ export class StructuredPaint {
   /**
    * The age an item is displaying this instant, under the exact curve its shader runs.
    *
-   * The blip cloud's `displayedAge`, over this module's arrays. It exists for the same reason:
-   * an item bounded by a floor and a feather sits *between* its two stamps, so the only stamp
-   * that can be written back without moving the picture is the one that reproduces what is on
-   * screen now.
+   * It exists because an item bounded by a floor and a feather sits *between* its two stamps,
+   * so the only stamp that can be written back without moving the picture is the one that
+   * reproduces what is on screen now.
    */
   private displayedAge(
     birth: number,
@@ -1697,8 +1693,8 @@ export class StructuredPaint {
   }
 
   /**
-   * Restamps one item. The dual stamp is the blip system's, verbatim: only an arrival that has
-   * genuinely landed may become the fallback, so a point restamped twice in flight never falls
+   * Restamps one item. The stamp is dual on purpose: only an arrival that has genuinely landed
+   * may become the fallback, so an item restamped twice in flight never falls
    * back to a stamp that never happened — and what lands there is the *effective* stamp, the one
    * that reproduces the age on screen, so a bounded refresh has no baseline to snap.
    */
@@ -1725,8 +1721,8 @@ export class StructuredPaint {
     this.dotWave[i] = slot;
     this.dotRefresh[i * 2] = floor;
     this.dotRefresh[i * 2 + 1] = feather;
-    // "Refreshed" is the blip cloud's sense of it: this item was already known, whether it was
-    // known from one event or from ten, so the bounds are what decides how it answers this one.
+    // "Refreshed" means this item was already known, whether from one event or from ten, so the
+    // bounds are what decides how it answers this one.
     if (old > -1e8) {
       this.stats.lastRefreshed++;
       this.featherSum += feather;

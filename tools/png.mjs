@@ -1,7 +1,7 @@
 /**
  * Minimal PNG reader for the screenshot driver.
  *
- * The sonar lab's assertions are photometric — "this frame is black", "this region dimmed but
+ * Half the suite's assertions are photometric — "this frame is black", "this region dimmed but
  * did not vanish" — so the driver has to look at pixels, not just at state. Playwright hands
  * back a PNG buffer and node ships zlib, so the only missing piece is ~60 lines of unfiltering.
  * That is cheaper than taking on an image dependency for it.

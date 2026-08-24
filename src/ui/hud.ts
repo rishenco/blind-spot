@@ -1,8 +1,8 @@
 /**
- * Debug HUD, hint line, help card and mouse-capture prompt.
+ * Debug HUD, title, hint line, help card and mouse-capture prompt.
  *
  * Plain DOM on top of the canvas — no framework, no per-frame allocation beyond the
- * strings it writes, and every element is pointer-events:none except the help toggle.
+ * strings it writes, and every element is pointer-events:none.
  */
 
 const STYLE = `
@@ -22,12 +22,12 @@ const STYLE = `
   white-space: pre; min-width: 200px;
 }
 .bs-debug .bs-perf { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--bs-edge); color: #8fa2b0; }
-.bs-scene {
+.bs-title {
   position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
   padding: 6px 12px; background: var(--bs-panel); border: 1px solid var(--bs-edge);
   border-radius: 4px; text-transform: uppercase; letter-spacing: 0.14em; font-size: 11px;
+  color: var(--bs-accent);
 }
-.bs-scene .bs-variant { color: var(--bs-accent); }
 .bs-hint {
   position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
   padding: 6px 14px; background: var(--bs-panel); border: 1px solid var(--bs-edge);
@@ -67,29 +67,13 @@ export interface HelpRow {
   action: string;
 }
 
-export const DEFAULT_HELP: HelpRow[] = [
-  { keys: 'W A S D', action: 'move' },
-  { keys: 'Shift', action: 'sprint (forward)' },
-  { keys: 'C / Ctrl', action: 'crouch' },
-  { keys: 'Space', action: 'jump (tap = hop, hold = full)' },
-  { keys: 'Space at a ledge', action: 'climb — vault or pull-up' },
-  { keys: 'V', action: 'view — first / third person' },
-  { keys: 'R', action: 'respawn' },
-  { keys: 'Mouse', action: 'look (click to capture, or drag)' },
-  { keys: '1 - 9', action: 'scene variant' },
-  { keys: '`', action: 'scene picker' },
-  { keys: 'H', action: 'toggle this help' },
-];
-
-export const DEFAULT_HINT =
-  'WASD move · Shift sprint · C/Ctrl crouch · Space jump/climb · V view · R respawn · H help · ` scenes';
 
 export class Hud {
   private readonly root: HTMLDivElement;
   private readonly panelEl: HTMLDivElement;
   private readonly debugEl: HTMLDivElement;
   private readonly perfEl: HTMLDivElement;
-  private readonly sceneEl: HTMLDivElement;
+  private readonly titleEl: HTMLDivElement;
   private readonly hintEl: HTMLDivElement;
   private readonly captureEl: HTMLDivElement;
   private readonly helpEl: HTMLDivElement;
@@ -113,12 +97,11 @@ export class Hud {
     this.perfEl.className = 'bs-perf';
     this.panelEl.append(this.debugEl, this.perfEl);
 
-    this.sceneEl = document.createElement('div');
-    this.sceneEl.className = 'bs-scene';
+    this.titleEl = document.createElement('div');
+    this.titleEl.className = 'bs-title';
 
     this.hintEl = document.createElement('div');
     this.hintEl.className = 'bs-hint';
-    this.hintEl.textContent = DEFAULT_HINT;
 
     this.captureEl = document.createElement('div');
     this.captureEl.className = 'bs-capture';
@@ -128,9 +111,8 @@ export class Hud {
 
     this.helpEl = document.createElement('div');
     this.helpEl.className = 'bs-help bs-hidden';
-    this.setHelp(DEFAULT_HELP);
 
-    this.root.append(reticle, this.panelEl, this.sceneEl, this.hintEl, this.captureEl, this.helpEl);
+    this.root.append(reticle, this.panelEl, this.titleEl, this.hintEl, this.captureEl, this.helpEl);
     parent.append(this.root);
   }
 
@@ -143,7 +125,7 @@ export class Hud {
     this.debugEl.textContent = text.trimEnd();
   }
 
-  /** Performance block, written by the harness rather than the active scene. */
+  /** Performance block, written by the boot loop rather than by the game. */
   setPerf(rows: Array<[string, string]>): void {
     let text = '';
     for (const [key, value] of rows) text += `${key.padEnd(9)}${value}\n`;
@@ -152,14 +134,8 @@ export class Hud {
     this.perfEl.textContent = text.trimEnd();
   }
 
-  setSceneLabel(title: string, variant: string | null): void {
-    this.sceneEl.textContent = title;
-    if (variant !== null) {
-      const span = document.createElement('span');
-      span.className = 'bs-variant';
-      span.textContent = ` · ${variant}`;
-      this.sceneEl.append(span);
-    }
+  setTitle(text: string): void {
+    this.titleEl.textContent = text;
   }
 
   setHint(text: string): void {

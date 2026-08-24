@@ -19,15 +19,15 @@ export interface Aabb {
   readonly maxZ: number;
   /**
    * What this box is made of — an index into `paint/materials`. Collision does not care; the
-   * paint system does, because a return off metal and a return off concrete are not the same
-   * sound. Absent means concrete (0), which is what most of a facility is.
+   * rest of the game does, because a return off metal and a return off concrete are not the
+   * same sound. Absent means concrete (0), which is what most of a facility is.
    */
   readonly mat?: number;
   /**
    * True when this box *is the room* — a floor, a ceiling, an outer wall, a partition — rather
-   * than a thing standing in it. Collision does not care; the structured reveal of look 5 does,
-   * because hearing one face of a crate tells you a crate is there (so all of it surfaces) while
-   * hearing one patch of a wall tells you nothing whatsoever about the room on its far side.
+   * than a thing standing in it. Collision does not care; the reveal does, because hearing one
+   * face of a crate tells you a crate is there (so all of it surfaces) while hearing one patch
+   * of a wall tells you nothing whatsoever about the room on its far side.
    */
   readonly shell?: boolean;
 }
