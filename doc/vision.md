@@ -59,9 +59,17 @@ The Finals: responsive, momentum-preserving first-person parkour. First person i
 ### 3.1 The rule
 
 Every sound event is a paint source: it reveals static geometry around its **origin**. Blip
-density scales with intensity; falloff is quadratic. You receive an event's paint only if the
-event is within your own hearing range (base 18 m). Without sound you perceive only contact
+density scales with intensity; falloff is quadratic. Without sound you perceive only contact
 geometry (a faint shell within 2 m of your body, plus surfaces you touch).
+
+**One hearing law, for every ear.** You receive an event's paint only if you can hear it, and
+"can hear it" means the same thing for you as it does for the spider: the distance is within
+**both** your own hearing range (base 18 m, raised by the Sensitivity chip) **and** the event's
+own carry radius — the right-hand column of §3.3. A crouch-step carries 2 m; standing 10 m away
+you do not hear it, and neither does anything else. This is deliberately stricter than "18 m and
+you hear everything": a listener whose ears obeyed different physics than the enemy's would make
+§3.3's right column a fiction on one side of the hunt and a rule on the other. One predicate
+governs the player's paint, the spider's hearing, and every ear added later.
 
 ### 3.2 Two color layers
 
@@ -143,14 +151,33 @@ A ring around the reticle whose brightness equals your current audible radius, p
 hum pitch. You always know exactly how loud you are. Non-negotiable: the genre's most-repeated
 complaint is "I can't tell when I'm detectable."
 
+The hum's **pitch** is the readout, not its volume: `55·√(r/1.5)` Hz, mapping a 1.5 m crouch
+radius to 55 Hz — felt more than heard — and a 24 m sprint to 220 Hz, insistent. It glides
+continuously rather than stepping between stances, because the ring is continuous and the two
+must never disagree; quantizing the hum into gears would hide exactly the in-between states
+where you most want to know how loud you are. Level stays low and near-constant (≈ −21 dBFS)
+and ducks under events, so the information rides on pitch and the tone can sit under everything
+without fatiguing. A volume slider is an accessibility control, not a retreat — the ring remains
+the guaranteed readout. **Playtest gate:** if more than half of testers mute it, the stepped
+variant is the prepared fallback.
+
 ### 3.9 Material voices
 
-Every collider carries a material class — concrete (the default), metal, stone
-(`src/paint/materials.ts`); the palette will need at least one quiet class (dust / soft debris)
-when the tower is authored *(proposal)*. Material is what gives every contact sound its voice:
-different timbre, different loudness — and therefore different paint radius and different
-hearing range, applied as a multiplier on the class values of §3.3. First-pass multipliers
-*(proposal)*: metal ×1.5 · stone ×1.15 · concrete ×1.0 · dust ×0.6.
+Every collider carries a material class — concrete (the default), metal, stone, and **dust**
+(`src/paint/materials.ts`). Material is what gives every contact sound its voice: different
+timbre, different loudness — and therefore different paint radius and different hearing range.
+First-pass multipliers: metal ×1.5 · stone ×1.15 · concrete ×1.0 · dust ×0.6.
+
+**The multiplier scales every radius the event carries, not just the class default.** A landing
+that computed its own 8–14 m from impact speed is scaled by the surface it struck, as is a
+thrown object's impact. The surface speaks whatever loudness arrives at it, and keeping the law
+in one place is what stops each new emitter from having to remember it — M2's throwables and
+M4's spider would forget. The consequence is real and intended: a hard landing on steel is
+14 × 1.5 = 21 m of paint, louder than a Q-ping, which makes a steel floor a genuinely dangerous
+thing to drop onto.
+
+Dust is the quiet end, and it exists so the tower has a floor to reward: without a class below
+concrete, every surface is normal-or-louder and "go slow and stay quiet" has nothing to pay it.
 
 The player-facing consequence: crossing the steel walkway is loud and fast, crossing the dusty
 slab is quiet and slow — a real routing choice every few seconds, priced in the same currency
