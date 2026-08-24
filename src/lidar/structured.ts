@@ -908,6 +908,8 @@ export interface RegionStats {
   edgesInked: number;
   /** Of `dots`, the ones the hand has reached. */
   touched: number;
+  /** Of `edges`, the pieces the hand has reached *both ends* of — the ones it may draw. */
+  edgesTouched: number;
 }
 
 interface UnlockJob {
@@ -2467,6 +2469,7 @@ export class StructuredPaint {
       edgesUnlocked: 0,
       edgesInked: 0,
       touched: 0,
+      edgesTouched: 0,
     };
     if (!this.built) return out;
     const now = this.time;
@@ -2508,6 +2511,7 @@ export class StructuredPaint {
       const z = this.edgeMid[k3 + 2]!;
       if (x < minX || x > maxX || y < minY || y > maxY || z < minZ || z > maxZ) continue;
       out.edges++;
+      if (this.edgeTouch[k * 2]! > NEVER && this.edgeTouch[k * 2 + 1]! > NEVER) out.edgesTouched++;
       const birth = this.edgeBirth[k * 2]!;
       if (birth <= -1e8) continue;
       out.edgesUnlocked++;

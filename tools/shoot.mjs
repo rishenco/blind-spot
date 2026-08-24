@@ -204,7 +204,10 @@ check('unscanned world renders black', litFraction(dark) < 0.01, `lit=${litFract
 // The window the landmark rack stands in, in screen pixels. In flight it must be black and
 // after the front arrives it must be drawn — that is the whole claim of this pair, and it is
 // the same rectangle of the same shot, so the two frames genuinely compare.
-const RACK_WINDOW = { x: 430, y: 250, w: 430, h: 110 };
+// Only the part of it that stands *above* the horizon. M2 filled the hall with clutter, and the
+// bottom of the old window looked at floor the crest has already swept over — genuinely drawn,
+// and nothing to do with whether the landmark itself has been reached.
+const RACK_WINDOW = { x: 430, y: 250, w: 430, h: 50 };
 await call('touch', true);
 const fired = await ping();
 // One trigger pull queues two fronts: the cone and the small halo around the player.
@@ -312,6 +315,16 @@ check('a small crate can be felt', crateHit.touched > 12,
   `${crateHit.touched} of ${crateHit.dots} mask points on a 0.55x0.69x0.97 m crate`);
 check('the crate frame is touch only', crateStats.paint.unlockedDots === 0,
   `${crateStats.paint.unlockedDots} dots unlocked by lidar`);
+// The M1 audit's actual complaint: the whole wireframe of the crate was drawn, far top edge and
+// all. A contour piece is a fact about the world like a dot is, so it is revealed only where the
+// hand got to it. The crate is 0.97 m deep, the reach 0.55 m: the near half answers, the far
+// half must stay black even though it belongs to the very same box.
+const crateNear = await call('region', [CRATE[0] - 0.1, -0.1, 10.9, CRATE[3] + 0.1, CRATE[4] + 0.1, CRATE[5] + 0.1]);
+const crateFar = await call('region', [CRATE[0] - 0.1, -0.1, CRATE[2] - 0.1, CRATE[3] + 0.1, CRATE[4] + 0.1, 10.5]);
+check('the hand draws the near edges of the crate', crateNear.edgesTouched > 0,
+  `${crateNear.edgesTouched} of ${crateNear.edges} contour pieces on the near side`);
+check('the far side of the same crate is never drawn', crateFar.edgesTouched === 0,
+  `0 of ${crateFar.edges} contour pieces beyond the reach`);
 await call('keys', [], ['KeyC']);
 
 // --- 08 the cone clips one end of a 24 m run -------------------------------
