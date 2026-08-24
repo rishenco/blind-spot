@@ -129,15 +129,15 @@ export function defaultStructuredTunables(): StructuredTunables {
 // ---------------------------------------------------------------------------
 
 /** The tactile grey. Deliberately colourless: the hand is not a sensor, it is a hand. */
-const TOUCH_GREY = 0x9fa6ab;
+export const TOUCH_GREY = 0x9fa6ab;
 
 /** Cell size of the reach grids, metres. Comfortably above the largest arm's-reach radius. */
 const REACH_CELL = 0.8;
 
 /** Birth stamp meaning "nothing was ever known here". */
-const NEVER = -1e9;
+export const NEVER = -1e9;
 /** How many recent events can still be rippling at once. */
-const WAVE_SLOTS = 8;
+export const WAVE_SLOTS = 8;
 /** Slack for "strictly inside another box", metres. */
 const EPS = 0.01;
 /** Outward offset of a lattice dot from its face, metres — it should sit *on* the surface. */
@@ -163,7 +163,7 @@ function makeRng(seed: number): () => number {
   };
 }
 
-function rawColor(hex: number): THREE.Color {
+export function rawColor(hex: number): THREE.Color {
   return new THREE.Color().setHex(hex, THREE.LinearSRGBColorSpace);
 }
 
@@ -198,7 +198,7 @@ function ringProfile(t: number): number {
   return Math.exp(-2.6 * t) * Math.cos(Math.PI * t);
 }
 
-const RING_GLSL = /* glsl */ `
+export const RING_GLSL = /* glsl */ `
   float ringProfile(float t) {
     if (t < 0.0 || t > 2.0) return 0.0;
     return exp(-2.6 * t) * cos(3.14159265 * t);
@@ -206,7 +206,7 @@ const RING_GLSL = /* glsl */ `
 `;
 
 /** The age ramp, shared by both layers and identical in shape to the blip cloud's (§3.2). */
-const RAMP_GLSL = /* glsl */ `
+export const RAMP_GLSL = /* glsl */ `
   uniform vec3  uRampTimes;
   uniform float uSkeletonAlpha;
   uniform vec3  uFresh;
@@ -231,7 +231,7 @@ const RAMP_GLSL = /* glsl */ `
 `;
 
 /** Looks up the wave that unlocked this item, and proves it really was that one. */
-const WAVE_GLSL = /* glsl */ `
+export const WAVE_GLSL = /* glsl */ `
   uniform vec4 uWaveA[${WAVE_SLOTS}];   // origin.xyz, t0
   uniform vec4 uWaveB[${WAVE_SLOTS}];   // speed, live, -, -
 
@@ -1048,6 +1048,26 @@ export class StructuredPaint {
 
   get object(): THREE.Object3D {
     return this.root;
+  }
+
+  /**
+   * The wave-slot uniform arrays, shared by reference.
+   *
+   * A second reveal layer (the props' local masks) has to ripple on the *same* fronts as this
+   * one, or the crest would visibly stop at every crate. Handing out the arrays rather than
+   * copying them means there is one set of live fronts in the process and no way for the two
+   * layers to disagree about them.
+   */
+  waveUniforms(): { a: THREE.Vector4[]; b: THREE.Vector4[] } {
+    return {
+      a: this.dotMaterial.uniforms.uWaveA!.value as THREE.Vector4[],
+      b: this.dotMaterial.uniforms.uWaveB!.value as THREE.Vector4[],
+    };
+  }
+
+  /** The slot the most recent `handle` claimed — what a second layer must stamp its points with. */
+  get lastWaveSlot(): number {
+    return (this.slotCursor - 1 + WAVE_SLOTS) % WAVE_SLOTS;
   }
 
   get active(): boolean {

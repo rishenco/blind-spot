@@ -40,6 +40,15 @@ export interface SoundEvent {
   readonly time: number;
   /** Monotonic counter — stable identity for tooling and for seeding per-event sampling. */
   readonly seq: number;
+  /**
+   * What made the noise, materially: 'glass', 'tin', 'steel', 'wood', 'plastic', or absent when
+   * the emitter has nothing useful to say (a footstep, for now).
+   *
+   * Added in M2 for the audio synth, which has no sample library and must derive a bottle's ring
+   * from *something*. It is a hint, not a contract: every consumer has to work without it, which
+   * is why it is optional rather than a required field with a meaningless default.
+   */
+  readonly material?: string;
 }
 
 export interface SoundEmitSpec {
@@ -48,6 +57,7 @@ export interface SoundEmitSpec {
   y: number;
   z: number;
   loudness: number;
+  material?: string;
 }
 
 export type SoundListener = (event: SoundEvent) => void;
@@ -98,6 +108,7 @@ export class SoundBus {
       y: spec.y,
       z: spec.z,
       loudness: Math.max(0, spec.loudness),
+      material: spec.material,
       time: this.now,
       seq: this.seq++,
     };

@@ -10,6 +10,7 @@
     "shots": "npm run build && node tools/shoot.mjs"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.20.0",
     "lil-gui": "^0.21.0",
     "three": "^0.185.1"
   },
