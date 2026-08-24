@@ -23,6 +23,17 @@
  */
 import type { StructuredPaint } from '../lidar/structured';
 
+/**
+ * A second mask the hand also writes into. The props are a separate buffer from the hall (they
+ * move; the hall does not), but feeling around is one gesture and must not know the difference:
+ * put your hand on a barrel and you feel the barrel, not "the dynamic layer".
+ */
+export interface TouchSink {
+  setHand(x: number, y: number, z: number, span: number, range: number, near: number): void;
+  setTouchVisible(on: boolean): void;
+  revealTouch(x: number, y: number, z: number, span: number, radius: number): number;
+}
+
 export interface TouchTunables {
   /** How far the "hand" reaches, metres. */
   range: number;
@@ -69,12 +80,19 @@ export class TouchLayer {
   private on = true;
   private dirty = true;
   private stats: TouchStats = { near: 0, remembered: 0, rebuilds: 0 };
+  private extra: TouchSink | null = null;
 
   constructor(
     private readonly paint: StructuredPaint,
     tunables: TouchTunables = defaultTouchTunables(),
   ) {
     this.tunables = tunables;
+  }
+
+  /** Adds the prop mask to what the hand can feel. Called once, after the props exist. */
+  attach(sink: TouchSink): void {
+    this.extra = sink;
+    sink.setTouchVisible(this.on);
   }
 
   get visible(): boolean {
@@ -84,6 +102,7 @@ export class TouchLayer {
   setVisible(value: boolean): void {
     this.on = value;
     this.paint.setTouchVisible(value);
+    this.extra?.setTouchVisible(value);
   }
 
   getStats(): TouchStats {
@@ -114,6 +133,7 @@ export class TouchLayer {
     const span = Math.max(0, y - foot);
     this.paint.setHand(x, foot, z, span);
     this.paint.setTouchLook(t.range, t.nearAlpha, t.memoryAlpha);
+    this.extra?.setHand(x, foot, z, span, t.range, t.nearAlpha);
 
     const moved = Math.hypot(x - this.lastX, y - this.lastY, z - this.lastZ);
     if (!this.dirty && moved < t.rebuildStep) return;
@@ -124,7 +144,8 @@ export class TouchLayer {
 
     // The write has to cover the reach plus the drift allowance, or a point would be felt a
     // re-query late and pop in behind the hand.
-    const fresh = this.paint.revealTouch(x, foot, z, span, t.range + t.rebuildStep);
+    let fresh = this.paint.revealTouch(x, foot, z, span, t.range + t.rebuildStep);
+    fresh += this.extra?.revealTouch(x, foot, z, span, t.range + t.rebuildStep) ?? 0;
     const s = this.paint.getStats();
     this.stats = {
       near: fresh,

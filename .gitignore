@@ -1,3 +1,6 @@
 node_modules/
 dist/
 out/
+
+# Ad-hoc probe scripts (must live in the repo root so node resolves node_modules).
+.probe.*

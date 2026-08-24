@@ -26,6 +26,10 @@ import {
   type PlayerEvent,
 } from './player/controller';
 import { GATE_TARGET, HALL, LANDMARKS, buildHall } from './world/hall';
+import { PropWorld, defaultPropTunables, loadRapier } from './props/props';
+import { PropReveal } from './props/reveal';
+import { DynamicPaint } from './lidar/dynamic';
+import { ARCHETYPES } from './props/shapes';
 
 type ViewMode = 'player' | 'third' | 'top';
 
@@ -38,6 +42,7 @@ const HELP: HelpRow[] = [
   { keys: 'V', action: 'debug: view — player / third / top' },
   { keys: 'T', action: 'debug: touch layer on/off' },
   { keys: 'K', action: 'debug: clear the accumulated map' },
+  { keys: 'B', action: 'debug: shove the clutter in front of you (make a mess)' },
   { keys: 'J', action: 'debug: refill the lidar' },
   { keys: 'G', action: 'debug: tuning panel' },
   { keys: 'R', action: 'respawn' },
@@ -82,6 +87,10 @@ class App {
   private readonly paint: StructuredPaint;
   private readonly touch: TouchLayer;
   private readonly player: PlayerController;
+  /** Built after the wasm is up, so everything that touches them is null-guarded. */
+  private props: PropWorld | null = null;
+  private dyn: DynamicPaint | null = null;
+  private propReveal: PropReveal | null = null;
 
   private readonly lights = new THREE.Group();
   private gui: GUI | null = null;
@@ -92,7 +101,9 @@ class App {
   private lightsOn = false;
   private pendingFire = false;
   private buildMs = 0;
+  private propsMs = 0;
 
+  private readonly scratchDir = new THREE.Vector3();
   private readonly frameTimes: number[] = [];
   private perf: Perf = { simMs: 0, paintMs: 0, renderMs: 0, frameMs: 0 };
   private topHeight = 62;
@@ -170,6 +181,38 @@ class App {
       { fixedUpdate: (dt) => this.fixedUpdate(dt), render: (a) => this.render(a) },
       { hz: 120 },
     );
+  }
+
+  /**
+   * Second half of construction: Rapier's wasm has to be decoded before a single prop can exist,
+   * and that is a promise. Nothing publishes `window.bs` until this resolves, so the keyframe
+   * generator never catches a hall without its clutter.
+   */
+  async start(): Promise<void> {
+    const R = await loadRapier();
+    const t0 = performance.now();
+    this.props = new PropWorld(R, this.hall.world, this.bus, this.seed, defaultPropTunables());
+    this.dyn = new DynamicPaint(
+      this.props,
+      this.hall.world,
+      defaultAgeRamp(),
+      this.paint.tunables,
+      // Shared by reference: a ping's ripple crest must not stop at the edge of a barrel.
+      this.paint.waveUniforms(),
+    );
+    this.dyn.setActive(!this.lightsOn);
+    this.dyn.setWindow(this.look.windowRadius, this.look.refreshSeconds);
+    this.scene.add(this.dyn.object);
+    this.touch.attach(this.dyn);
+    this.propReveal = new PropReveal(this.props);
+    this.scene.add(this.propReveal.object);
+    this.propsMs = performance.now() - t0;
+
+    // Let the pile settle before anyone looks at it: laid-out props start a few millimetres
+    // above their support and would otherwise be caught mid-drop on frame one.
+    for (let i = 0; i < 90; i++) this.props.step(1 / 60, 0);
+    this.props.settle();
+    this.hud.setSceneLabel('BLIND SPOT', 'M2 — clutter');
     if (!this.harness) this.loop.start();
   }
 
@@ -190,6 +233,16 @@ class App {
     }
 
     const eye = this.player.eye;
+
+    if (this.props !== null) {
+      const p = this.player.position;
+      this.props.setPlayer(p.x, p.y, p.z, this.player.bodyRadius, this.player.bodyHeight);
+      this.placeRifle(eye);
+      this.props.step(dt, this.time);
+      this.dyn?.update(this.time);
+      if (this.propReveal !== null && this.lightsOn) this.propReveal.sync();
+    }
+
     this.touch.update(eye.x, eye.y, eye.z);
 
     this.input.endTick();
@@ -203,10 +256,40 @@ class App {
     if (i.wasKeyPressed('KeyV')) this.cycleView();
     if (i.wasKeyPressed('KeyT')) this.touch.setVisible(!this.touch.visible);
     if (i.wasKeyPressed('KeyK')) this.clearMap();
+    if (i.wasKeyPressed('KeyB')) this.shove();
     if (i.wasKeyPressed('KeyJ')) this.lidar.refill();
     if (i.wasKeyPressed('KeyG')) this.toggleGui();
     if (i.wasKeyPressed('KeyH')) this.hud.toggleHelp();
     if (i.wasKeyPressed('KeyR')) this.player.respawn();
+  }
+
+  /**
+   * The rifle's physical collider — concept: "если резко крутиться в тесноте, стволом сшибаешь
+   * вещи". It is kinematic and rides the camera, so the barrel really does sweep through a
+   * shelf when you spin, and the contact forces that come back out are ordinary sound events.
+   */
+  private placeRifle(eye: THREE.Vector3): void {
+    const f = this.scratchDir;
+    this.camera.getWorldDirection(f);
+    if (f.lengthSq() < 1e-6) f.set(0, 0, -1);
+    this.props?.setRifle(
+      eye.x + f.x * 0.42,
+      eye.y + f.y * 0.42 - 0.16,
+      eye.z + f.z * 0.42,
+      this.camera.quaternion.x,
+      this.camera.quaternion.y,
+      this.camera.quaternion.z,
+      this.camera.quaternion.w,
+    );
+  }
+
+  /** Debug: kick over whatever is a couple of metres ahead. The mess-maker for the keyframes. */
+  private shove(): number {
+    if (this.props === null) return 0;
+    const eye = this.player.eye;
+    const f = this.scratchDir;
+    this.camera.getWorldDirection(f);
+    return this.props.disturb(eye.x + f.x * 2, eye.y - 0.6, eye.z + f.z * 2, 2.2, 2.4);
   }
 
   /** Fires the lidar from the eye, along the look direction. */
@@ -246,18 +329,29 @@ class App {
     const renderTime = this.time + alpha * this.loop.stepSeconds;
     const eye = this.camera.position;
     this.paint.setListener(eye.x, eye.y, eye.z);
+    this.dyn?.setListener(eye.x, eye.y, eye.z);
 
     const paintStart = performance.now();
     // One front at a time: the renderer finishes unlocking before it is handed the next.
-    this.lidar.pump(this.paint.getStats().pending > 0, (ping) => {
+    const busy = this.paint.getStats().pending > 0 || (this.dyn?.getStats().pending ?? 0) > 0;
+    this.lidar.pump(busy, (ping) => {
       this.paint.handle(ping, renderTime, 0);
-      if (this.harness && this.syncPaint) this.paint.drain();
+      // The prop layer stamps its points with the slot the hall's paint just claimed, so both
+      // buffers read the same wave uniform and the crest crosses the boundary unbroken.
+      this.dyn?.handle(ping, this.paint.lastWaveSlot);
+      if (this.harness && this.syncPaint) {
+        this.paint.drain();
+        this.dyn?.drain();
+      }
     });
     this.paint.advance(renderTime, this.look.chunkGapMs);
+    this.dyn?.advance(this.paint.tunables.chunkMs);
     this.perf.paintMs = performance.now() - paintStart;
 
     const camera = this.activeCamera();
-    this.paint.setProjScale((camera.projectionMatrix.elements[5] ?? 1) * this.drawHeight() * 0.5);
+    const projScale = (camera.projectionMatrix.elements[5] ?? 1) * this.drawHeight() * 0.5;
+    this.paint.setProjScale(projScale);
+    this.dyn?.setProjScale(projScale);
 
     const renderStart = performance.now();
     this.renderer.render(this.scene, camera);
@@ -300,6 +394,8 @@ class App {
     const p = this.player.position;
     const st = this.lidar.state;
     const paint = this.paint.getStats();
+    const props = this.props?.getStats() ?? null;
+    const dyn = this.dyn?.getStats() ?? null;
     const counts = this.bus.countsBySource();
     const gate = Math.hypot(p.x - GATE_TARGET.x, p.z - GATE_TARGET.z);
 
@@ -309,7 +405,7 @@ class App {
       ['gate', `${gate.toFixed(1)} m`],
       ['lidar', st.ready ? `ready ${st.charge.toFixed(2)}` : `charging ${(st.progress * 100) | 0}%`],
       ['pings', `${st.fired}${st.queued > 0 ? ` (+${st.queued})` : ''}`],
-      ['sound', `${this.bus.emitted} ev · step ${counts.get('player-step') ?? 0}`],
+      ['sound', `${this.bus.emitted} ev · step ${counts.get('player-step') ?? 0} · prop ${counts.get('prop-impact') ?? 0}`],
       ['view', this.lightsOn ? `${this.view} + lights` : this.view],
     ]);
 
@@ -324,6 +420,8 @@ class App {
       ['dots', `${paint.unlockedDots} / ${paint.dots}`],
       ['edges', `${paint.unlockedEdges} / ${paint.edges}`],
       ['touch', `${this.touch.getStats().remembered} pt`],
+      ['props', props === null ? 'off' : `${props.awake}/${props.bodies} awake · ${props.stepMs.toFixed(2)} ms`],
+      ['prop pts', dyn === null ? '-' : `${dyn.revealed} / ${dyn.points}`],
       ['calls', `${this.renderer.info.render.calls}`],
     ]);
 
@@ -352,7 +450,10 @@ class App {
     this.hall.reveal.visible = on;
     this.lights.visible = on;
     this.paint.setActive(!on);
+    this.dyn?.setActive(!on);
     this.touch.setVisible(!on);
+    this.propReveal?.setVisible(on);
+    if (on) this.propReveal?.sync();
   }
 
   setView(mode: ViewMode): void {
@@ -485,6 +586,23 @@ class App {
       solids: () =>
         this.hall.world.boxes.map((b) => [b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ]),
       touch: (on: boolean) => this.touch.setVisible(on),
+      /** Debug: shove the clutter around a world point. Returns how many bodies woke up. */
+      disturb: (x: number, y: number, z: number, radius: number, impulse: number) =>
+        this.props?.disturb(x, y, z, radius, impulse) ?? 0,
+      shove: () => this.shove(),
+      /** Every prop as [archetype, x, y, z] — lets a scenario aim at a real object. */
+      propList: () => {
+        const p = this.props;
+        if (p === null) return [];
+        const out: Array<[string, number, number, number]> = [];
+        for (let i = 0; i < p.count; i++) {
+          out.push([
+            ARCHETYPES[p.arch[i]!]!.name,
+            p.pos[i * 3]!, p.pos[i * 3 + 1]!, p.pos[i * 3 + 2]!,
+          ]);
+        }
+        return out;
+      },
       clear: () => this.clearMap(),
       refill: () => this.lidar.refill(),
       hud: (on: boolean) => this.hudVisible(on),
@@ -499,6 +617,9 @@ class App {
         paint: { ...this.paint.getStats() },
         diag: this.paint.diagnostics(),
         touch: this.touch.getStats(),
+        props: this.props?.getStats() ?? null,
+        dyn: this.dyn?.getStats() ?? null,
+        propsMs: this.propsMs,
         sound: { emitted: this.bus.emitted, last: this.bus.lastEvent },
         gate: Math.hypot(this.player.position.x - GATE_TARGET.x, this.player.position.z - GATE_TARGET.z),
         frameMs: this.perf,
@@ -517,4 +638,6 @@ class App {
 }
 
 const app = new App();
-(window as unknown as Record<string, unknown>).bs = app.api();
+void app.start().then(() => {
+  (window as unknown as Record<string, unknown>).bs = app.api();
+});

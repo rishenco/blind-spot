@@ -85,6 +85,16 @@ const VERTEX = /* glsl */ `
   attribute float aPrior;
   attribute float aWave;
   attribute float aSeed;
+  /**
+   * This point's share of its own object's lattice, relative to the hall's.
+   *
+   * A prop is sampled at 0.02-0.06 m where the hall is sampled at 0.18, so a prop dot drawn at
+   * the hall's world size would be six times wider than its own spacing: every barrel would
+   * render as a saturated white blob and the silhouette the dense sampling bought would be
+   * thrown away again. Scaling the dot to its own pitch keeps a prop the same *brightness per
+   * square metre* as the floor it stands on, and lets the shape read.
+   */
+  attribute float aScale;
 
   varying vec3  vColor;
   varying float vAlpha;
@@ -144,7 +154,7 @@ const VERTEX = /* glsl */ `
       vColor = uTouchColor * ta;
       vAlpha = 1.0;
       vSoft = uDotSoft * 0.6;
-      gl_PointSize = clamp(uSizeWorld * uSkeletonSize * uProjScale / max(0.001, -tmv.z), 4.0, 8.0);
+      gl_PointSize = clamp(uSizeWorld * aScale * uSkeletonSize * uProjScale / max(0.001, -tmv.z), 2.0, 8.0);
       gl_Position = projectionMatrix * tmv;
       return;
     }
@@ -206,7 +216,7 @@ const VERTEX = /* glsl */ `
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     float depth = max(0.001, -mv.z);
     float cooled = clamp(age / max(0.001, uRampTimes.z), 0.0, 1.0);
-    float want = uSizeWorld * mix(1.0, uSkeletonSize, cooled) * (1.0 + hot * uProbeSize)
+    float want = uSizeWorld * aScale * mix(1.0, uSkeletonSize, cooled) * (1.0 + hot * uProbeSize)
       * uProjScale / depth;
     float q = want / max(0.5, uPixelCap);
     float px = want / pow(1.0 + q * q * q, 0.33333334);
@@ -426,6 +436,7 @@ export class DynamicPaint {
     this.liveCount = new Int32Array(n);
     this.gcAt = new Float32Array(n).fill(Infinity);
     const seed = new Float32Array(total);
+    const scale = new Float32Array(total);
 
     for (let i = 0; i < n; i++) {
       const cloud = props.cloudOf(i);
@@ -440,6 +451,7 @@ export class DynamicPaint {
         this.normal[o + 2] = cloud.nrm[k * 3 + 2]!;
         this.bodyOf[at + k] = i;
         seed[at + k] = ((at + k) * 0.6180339887) % 1;
+        scale[at + k] = cloud.pitch / tunables.spacing;
       }
     }
     this.stats.points = total;
@@ -458,6 +470,7 @@ export class DynamicPaint {
     g.setAttribute('aPrior', new THREE.BufferAttribute(this.prior, 1));
     g.setAttribute('aWave', new THREE.BufferAttribute(this.wave, 1));
     g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    g.setAttribute('aScale', new THREE.BufferAttribute(scale, 1));
     g.setDrawRange(0, total);
     g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
 

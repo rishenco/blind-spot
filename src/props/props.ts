@@ -58,10 +58,17 @@ export interface PropTunables {
   maxLoudness: number;
   /** Minimum seconds between two sound events from the same body. A tumbling can is one voice. */
   perBodyGap: number;
+  /**
+   * How many props the hall gets. The concept wants a *lot* of junk, and the ceiling on that is
+   * not physics — Rapier sleeps everything that is not moving — but the lidar mask: every prop
+   * carries a few hundred points, and those points are uploaded, aged and drawn. See the report
+   * for the frame-budget measurement this number came out of.
+   */
+  cap: number;
 }
 
 export function defaultPropTunables(): PropTunables {
-  return { hz: 60, quietForce: 90, forcePerMetre: 26, maxLoudness: 34, perBodyGap: 0.055 };
+  return { hz: 60, quietForce: 90, forcePerMetre: 26, maxLoudness: 34, perBodyGap: 0.055, cap: 1100 };
 }
 
 export interface PropStats {
@@ -129,7 +136,7 @@ export class PropWorld {
     }
 
     // --- the clutter itself ------------------------------------------------
-    const spots = layout(statics, seed);
+    const spots = layout(statics, seed, tunables.cap);
     this.count = spots.length;
     this.arch = new Int32Array(this.count);
     this.pos = new Float32Array(this.count * 3);
@@ -308,6 +315,30 @@ export class PropWorld {
     this.stats.asleep = this.count - awake;
   }
 
+  /**
+   * Force the whole pile to rest *now*, and pretend it always was.
+   *
+   * The layout drops things a few millimetres above their support, so the first tenth of a second
+   * of the world is a rain of small settling impacts. Nobody should hear that and no keyframe
+   * should catch it, so startup steps the world blind and then calls this: every body is put to
+   * sleep and its `settleAt` is rewound to zero, which is what makes a scan of untouched clutter
+   * permanent rather than a three-second ghost.
+   */
+  settle(): void {
+    for (let i = 0; i < this.count; i++) {
+      const b = this.bodies[i]!;
+      b.setLinvel({ x: 0, y: 0, z: 0 }, false);
+      b.setAngvel({ x: 0, y: 0, z: 0 }, false);
+      b.sleep();
+      this.moving[i] = 0;
+      this.settleAt[i] = 0;
+      this.lastSound[i] = 0;
+    }
+    this.readBack();
+    this.stats.impacts = 0;
+    this.queue.clear();
+  }
+
   /** Debug: shove everything inside a radius, which is how the "spilled stack" frames happen. */
   disturb(x: number, y: number, z: number, radius: number, impulse: number): number {
     let hit = 0;
@@ -359,7 +390,7 @@ function quat(ax: number, ay: number, az: number, angle: number): { x: number; y
  * `highestTopUnder` finds those surfaces from the existing static world, so nothing has to be
  * hand-placed onto a shelf that might move next milestone.
  */
-function layout(statics: StaticWorld, seed: number): Spot[] {
+function layout(statics: StaticWorld, seed: number, cap: number): Spot[] {
   const rng = makeRng(seed ^ 0x2c10);
   const out: Spot[] = [];
   const scratch: Aabb[] = [];
@@ -388,15 +419,30 @@ function layout(statics: StaticWorld, seed: number): Spot[] {
     return canOccupy(scratch, x, y + 0.02, z, r, h);
   };
 
-  const place = (archIdx: number, x: number, y: number, z: number, r: Rng): boolean => {
+  /**
+   * Seats one prop and reports the height of its top, or null if it did not fit.
+   *
+   * `stacked` skips the clearance test: a thing put *on* another thing is deliberately sharing
+   * that column, and the physics settles the last centimetre anyway. Without it a pile is a
+   * lawn — every member elbowed out to arm's length from every other, which is what "300 props"
+   * looked like before and is not what a warehouse floor looks like.
+   */
+  const place = (
+    archIdx: number,
+    x: number,
+    y: number,
+    z: number,
+    r: Rng,
+    stacked = false,
+  ): number | null => {
     const a = ARCHETYPES[archIdx]!;
     const cloud = sampleShape(a.parts, Math.max(a.pitch, 0.08), 1);
     const half = Math.max(cloud.bounds[3]! - cloud.bounds[0]!, cloud.bounds[5]! - cloud.bounds[2]!) / 2;
     const height = cloud.bounds[4]! - cloud.bounds[1]!;
     const lying = a.rest === 'lie' || (a.rest === 'any' && r() < 0.28);
     const radius = lying ? Math.max(half, height / 2) : half;
-    if (!free(x, y, z, radius + 0.06, lying ? half * 2 : height)) return false;
-    taken.push([x, z, radius + 0.05]);
+    if (!stacked && !free(x, y, z, radius + 0.06, lying ? half * 2 : height)) return null;
+    if (!stacked) taken.push([x, z, radius + 0.05]);
     const yaw = r() * Math.PI * 2;
     const rot = lying
       ? mul(quat(0, 1, 0, yaw), quat(1, 0, 0, Math.PI / 2))
@@ -404,11 +450,13 @@ function layout(statics: StaticWorld, seed: number): Spot[] {
     // Seated so the lowest point of the shape is a hair above the support.
     const lift = lying ? half + 0.01 : -cloud.bounds[1]! + 0.01;
     out.push({ arch: archIdx, x, y: y + lift, z, rot });
-    return true;
+    return y + 0.02 + (lying ? half * 2 : height);
   };
 
   // --- piles -------------------------------------------------------------
-  for (let n = 0; n < 300 && out.length < 520; n++) {
+  // A pile is a cluster of footprints *and* a stack on each of them. Both matter: the cluster is
+  // what you blunder into, the stack is what comes down when you do.
+  for (let n = 0; n < 420 && out.length < cap; n++) {
     const cx = range(rng, -32, 32);
     const cz = range(rng, -22, 22);
     const top = highestTopUnder(statics.boxes, cx, cz, 0.5, -0.5, 2.7);
@@ -416,24 +464,35 @@ function layout(statics: StaticWorld, seed: number): Spot[] {
     if (y > 0.05 && rng() < 0.45) continue; // shelves get fewer piles than the floor
     const members = rangeInt(rng, 3, 9);
     let placed = 0;
-    for (let k = 0; k < members * 2 && placed < members; k++) {
+    for (let k = 0; k < members * 2 && placed < members && out.length < cap; k++) {
       const ang = rng() * Math.PI * 2;
-      const rad = Math.sqrt(rng()) * range(rng, 0.5, 1.5);
+      const rad = Math.sqrt(rng()) * range(rng, 0.35, 1.4);
       const x = cx + Math.cos(ang) * rad;
       const z = cz + Math.sin(ang) * rad;
       if (Math.abs(x) > 32.5 || Math.abs(z) > 22.5) continue;
-      const list = rng() < 0.66 ? small : large;
-      if (place(weighted(list, rng), x, y, z, rng)) placed++;
+      const list = rng() < 0.42 ? small : large;
+      let level = place(weighted(list, rng), x, y, z, rng);
+      if (level === null) continue;
+      placed++;
+      // Stack on top of what just landed, small things only — a barrel on a bottle is a joke,
+      // a can on a barrel is a warehouse.
+      let storeys = rangeInt(rng, 0, 3);
+      while (storeys-- > 0 && level !== null && level < 2.4 && out.length < cap) {
+        const next = place(weighted(small, rng), x + range(rng, -0.06, 0.06), level, z + range(rng, -0.06, 0.06), rng, true);
+        if (next === null) break;
+        level = next;
+        placed++;
+      }
     }
   }
 
   // --- loners: the thing you kick in an aisle you thought was empty -------
-  for (let n = 0; n < 420 && out.length < 620; n++) {
+  for (let n = 0; n < 900 && out.length < cap; n++) {
     const x = range(rng, -32, 32);
     const z = range(rng, -22, 22);
     const top = highestTopUnder(statics.boxes, x, z, 0.4, -0.5, 2.7);
     const y = top === -Infinity ? 0 : top;
-    place(weighted(rng() < 0.6 ? small : large, rng), x, y, z, rng);
+    place(weighted(rng() < 0.45 ? small : large, rng), x, y, z, rng);
   }
 
   return out;

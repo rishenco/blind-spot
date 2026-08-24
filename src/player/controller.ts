@@ -632,6 +632,16 @@ export class PlayerController {
     return this.eyeScratch.set(this.position.x, this.position.y + this.eyeHeight, this.position.z);
   }
 
+  /** Current collider height — stance-dependent, so the physics capsule can follow the crouch. */
+  get bodyHeight(): number {
+    return this.colliderHeight;
+  }
+
+  /** Body radius, metres. */
+  get bodyRadius(): number {
+    return this.movement.radius;
+  }
+
   /** Smoothed body heading, radians, same convention as `yaw`. */
   get bodyFacing(): number {
     return this.renderFacing;

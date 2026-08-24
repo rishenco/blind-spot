@@ -188,6 +188,8 @@ export interface PointCloud {
   readonly radius: number;
   /** Local AABB, [minX,minY,minZ,maxX,maxY,maxZ]. */
   readonly bounds: number[];
+  /** The pitch this cloud was sampled at, metres — the renderer sizes its dots from it. */
+  readonly pitch: number;
 }
 
 /**
@@ -315,5 +317,5 @@ export function sampleShape(parts: readonly Part[], pitch: number, seed = 1): Po
     bounds[4] = Math.max(bounds[4]!, y);
     bounds[5] = Math.max(bounds[5]!, z);
   }
-  return { pos: new Float32Array(pos), nrm: new Float32Array(nrm), count, radius, bounds };
+  return { pos: new Float32Array(pos), nrm: new Float32Array(nrm), count, radius, bounds, pitch };
 }
