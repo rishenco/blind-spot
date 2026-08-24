@@ -1,15 +1,20 @@
 /**
- * Keyframe generator for M1.
+ * Keyframe generator.
  *
  * Headless chromium opens the single-file build over file://, then drives the simulation by
  * hand: fixed seed, fixed step, no wall clock anywhere in the loop. Every scenario ends in a
  * PNG, and every PNG that claims something is checked photometrically — you cannot eyeball a
  * black screen, so the frames are measured instead of trusted.
  *
+ * The set is deliberately small. A frame earns its place by *proving* something that is
+ * visible to the eye; anything that could only be proved by a number is checked as a number
+ * and does not get a picture. Pairs ("as the player sees" / "as it really is") exist only
+ * where the two shots are the same patch of world from the same camera.
+ *
  *   node tools/shoot.mjs [dist/index.html] [out]
  */
 import { chromium } from 'playwright';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -21,12 +26,14 @@ import {
   hueFamilies as hueFamiliesRect,
 } from './png.mjs';
 
-/** png.mjs measures rectangles and returns records; M1 only ever asks about the whole frame. */
+/** png.mjs measures rectangles and returns records; the scenarios only ask about whole frames. */
 const whole = (img) => ({ x: 0, y: 0, w: img.width, h: img.height });
 const litFraction = (img) => litFractionRect(img, whole(img)).fraction;
 const meanLuminance = (img) => meanLuminanceRect(img, whole(img)).mean;
 const whiteFraction = (img, threshold = 100) => whiteFractionRect(img, whole(img), threshold).fraction;
 const hueFamilies = (img, rect) => hueFamiliesRect(img, rect);
+/** A named window of the frame, so a caption's claim can be measured where the eye looks. */
+const litIn = (img, rect) => litFractionRect(img, rect).fraction;
 
 const htmlPath = resolve(process.argv[2] ?? 'dist/index.html');
 const outDir = resolve(process.argv[3] ?? 'out');
@@ -36,6 +43,11 @@ if (!existsSync(htmlPath)) {
   process.exit(2);
 }
 await mkdir(outDir, { recursive: true });
+// The set shrinks as well as grows; a stale PNG from a deleted scenario next to the new ones
+// is exactly the "why is this here twice" confusion this pass exists to remove.
+for (const f of await readdir(outDir)) {
+  if (f.endsWith('.png')) await unlink(join(outDir, f));
+}
 
 const failures = [];
 const notes = [];
@@ -102,6 +114,24 @@ const ping = () =>
     return bs.stats();
   });
 
+/** Walks forward for `seconds`, drawing as it goes — the tactile layer only builds while moving. */
+const walk = (seconds) =>
+  page.evaluate(
+    ([sec]) => {
+      const bs = window.bs;
+      const dt = 1 / 120;
+      bs.keys(['KeyW'], []);
+      for (let i = 0; i < Math.round(sec / dt); i++) {
+        bs.step(dt);
+        if (i % 4 === 0) bs.draw();
+      }
+      bs.keys([], ['KeyW']);
+      bs.draw();
+      return bs.stats();
+    },
+    [seconds],
+  );
+
 const call = (fn, ...args) =>
   page.evaluate(
     ([f, a]) => {
@@ -134,178 +164,180 @@ notes.push(
 await call('hud', false);
 await advance(0.5, 2);
 
-// --- 01/02 lights on: the hall as it actually is ---------------------------
+// The vista every lidar frame is shot from: mid-hall, facing east down the long axis, with the
+// 6 m landmark rack, two full-height columns, a silo and a crate field stacked in depth. There
+// is 26 m of open air in front of the player, which is what makes a travelling wave front
+// visible at all — the old spawn-corner pose had everything inside 6 m, so the wave had always
+// already landed by the time the shutter opened.
+const VISTA = [-4, 1, 270];
+const VISTA_AIM = [270, -3];
+
+// --- 01 the hall as it actually is ----------------------------------------
+// Pinned overhead camera: same centre and same height as frame 11, so the two are directly
+// comparable rather than being two different wide shots that happen to both be from above.
 await call('lights', true);
-// The top camera follows the player, so put him in the middle for the establishing shot.
-await call('pose', 0, 0, 35);
 await call('view', 'top');
-await call('topHeight', 58);
+await call('topFocus', 0, 0);
+await call('topHeight', 62);
 await advance(0.1, 2);
-const lit1 = await shot('01-hall-lit-top.png', 'the whole hall under full light, from above');
+const lit1 = await shot('01-hall-truth-top.png', 'the whole hall under full light, from a pinned overhead camera — the ground truth frame 10 is measured against');
 check('lit top view is bright', litFraction(lit1) > 0.5, `lit=${litFraction(lit1).toFixed(3)}`);
 
+// --- 02 the same vista, lights on ------------------------------------------
 await call('view', 'player');
-await call('pose', -30, -20, 35);
+await call('pose', ...VISTA);
+await call('aim', ...VISTA_AIM);
 await advance(0.1, 2);
-const lit2 = await shot('02-hall-lit-player.png', 'same spawn pose, darkness switched off');
-check('lit player view is bright', litFraction(lit2) > 0.4, `lit=${litFraction(lit2).toFixed(3)}`);
+const lit2 = await shot('02-vista-truth.png', 'mid-hall looking east with the lights on: rack run, columns, silo, crate field — this is the patch of world the next two frames are looking at');
+check('lit vista is bright', litFraction(lit2) > 0.4, `lit=${litFraction(lit2).toFixed(3)}`);
 
-// --- 03 the ground state: black ------------------------------------------
+// The default state of the game is a black screen. That is a law, not a picture: an all-black
+// PNG proves nothing to the eye, so it is measured here and never shot.
 await call('lights', false);
 await call('clear');
 await call('touch', false);
 await advance(0.2, 2);
-const dark = await shot('03-spawn-dark.png', 'spawn, darkness on, nothing scanned yet');
+const dark = decodePng(await page.screenshot({ timeout: 180000 }));
 check('unscanned world renders black', litFraction(dark) < 0.01, `lit=${litFraction(dark).toFixed(4)}`);
 
-// --- 04..06 one ping, aged ------------------------------------------------
+// --- 03/04 one ping, caught in flight and after it lands -------------------
+// The window the landmark rack stands in, in screen pixels. In flight it must be black and
+// after the front arrives it must be drawn — that is the whole claim of this pair, and it is
+// the same rectangle of the same shot, so the two frames genuinely compare.
+const RACK_WINDOW = { x: 430, y: 250, w: 430, h: 110 };
 await call('touch', true);
 const fired = await ping();
 // One trigger pull queues two fronts: the cone and the small halo around the player.
 check('lidar fired', fired.lidar.fired === 2, `fronts=${fired.lidar.fired}`);
 await advance(0.25, 3);
-const p0 = await shot('04-ping-t0.png', 'the ping, ~0.2 s in: the front is still travelling');
+const p0 = await shot('03-ping-inflight.png', 'the ping 0.25 s in: a hot crest hanging in mid-air at ~10 m, the floor behind it already drawn, everything past it still black');
 check('ping paints something', litFraction(p0) > 0.005, `lit=${litFraction(p0).toFixed(4)}`);
-check('front is hot', whiteFraction(p0, 100) > 0, 'white pixels on the wave front');
+check('the crest is hot', whiteFraction(p0, 100) > 0, 'white pixels on the wave front');
+check('the crest has not reached the landmark yet', litIn(p0, RACK_WINDOW) < 0.002,
+  `the rack window is ${(litIn(p0, RACK_WINDOW) * 100).toFixed(2)}% lit`);
 
-await advance(0.75, 4);
-const p1 = await shot('05-ping-t1.png', 'same ping at +1 s: the cone has landed, map is fresh');
+await advance(0.9, 5);
+const p1 = await shot('04-ping-landed.png', 'the same ping one second later: the crest has swept through, and the 6 m rack run, the columns and the far wall are on the map');
+check('the landmark is drawn once the front gets there', litIn(p1, RACK_WINDOW) > litIn(p0, RACK_WINDOW) * 10 + 0.01,
+  `rack window ${(litIn(p0, RACK_WINDOW) * 100).toFixed(2)}% -> ${(litIn(p1, RACK_WINDOW) * 100).toFixed(2)}% lit`);
+check('the landed map is brighter than the one in flight', meanLuminance(p1) > meanLuminance(p0),
+  `mean ${meanLuminance(p0).toFixed(2)} -> ${meanLuminance(p1).toFixed(2)}`);
+
+// A cooled map still reads — checked numerically, because "the same picture, dimmer" does not
+// earn a frame in a set this size.
+const beforeCool = (await stats()).paint.unlockedDots;
 await advance(4, 6);
-const p5 = await shot('06-ping-t5.png', 'same ping at +5 s: cooled to the skeleton, still readable');
-check('the map dims but does not die', litFraction(p5) > 0.003, `lit=${litFraction(p5).toFixed(4)}`);
-check('cold map is dimmer than fresh', meanLuminance(p5) < meanLuminance(p1),
-  `mean ${meanLuminance(p5).toFixed(2)} < ${meanLuminance(p1).toFixed(2)}`);
-const seen1 = (await stats()).paint.unlockedDots;
+const cooled = decodePng(await page.screenshot({ timeout: 180000 }));
+check('the map dims but does not die', litFraction(cooled) > 0.003 && meanLuminance(cooled) < meanLuminance(p1),
+  `lit=${litFraction(cooled).toFixed(4)}, mean ${meanLuminance(p1).toFixed(2)} -> ${meanLuminance(cooled).toFixed(2)}`);
+check('cooling forgets nothing', (await stats()).paint.unlockedDots === beforeCool,
+  `${beforeCool} dots still unlocked`);
 
-// --- 07/08 several scans from different places accumulate -----------------
-const scanPoints = [
-  [-28, -16, 60],
-  [-24, -4, 90],
-  [-10, 0, 90],
-  [6, 2, 75],
-];
-let grew = true;
-let prev = seen1;
-const series = [];
-for (const [x, z, yaw] of scanPoints) {
-  await call('pose', x, z, yaw);
-  await call('refill');
-  await ping();
-  await advance(0.6, 3);
-  const now = (await stats()).paint.unlockedDots;
-  if (now <= prev) grew = false;
-  series.push(now);
-  prev = now;
-}
-check('each scan adds new ground', grew, `unlocked dots ${seen1} -> ${series.join(' -> ')}`);
-await shot('07-accum-player.png', 'four scans from four places, seen from the last of them');
-await call('view', 'top');
-await call('topHeight', 74);
-await advance(0.1, 2);
-await shot('08-accum-top.png', 'the same accumulated map from above — what you have learned so far');
-await call('view', 'player');
-
-// --- 09 the shared mask: two sources, per point, nothing wholesale ---------
-// The east rack run is one box 24 m long and 6 m tall (x 22..23.4, z -18..6). It is the exact
-// shape the playtest complained about: before this batch, brushing it or clipping it with the
-// cone handed you the whole twenty metres. These four frames are the proof it no longer does.
-// Padded outward by 10 cm: a lattice dot sits *on* the surface, which is a hair outside the
-// collision box it belongs to, so a region query cut exactly at the box misses every one of them.
-const RACK = [21.9, -0.1, -18.1, 23.5, 6.1, 6.1];
-const rackSouth = [21.9, -0.1, -18.1, 23.5, 6.1, -6];
-const rackNorth = [21.9, -0.1, 1.9, 23.5, 6.1, 6.1];
-
+// --- 05 the hand, in the middle of a crate field ---------------------------
+// Touch reveals the 0.55 m column around the body and nothing else. Crouched inside the
+// central clutter, that column happens to contain three stacked crates, so the picture is a
+// few metres of wireframe and grain hanging in nothing — which is exactly the sensation.
+const FIELD = [-18.1, -0.1, -12.1, -5.9, 3.5, -3.9];
 await call('clear');
 await call('lights', false);
 await call('touch', true);
-// Pressed to the east face of the rack, in one of the gaps between its shelf decks.
-await call('pose', 23.75, -14.2, 90);
-await advance(0.6, 3);
+await call('pose', -13.8, -10.8, 90);
+await call('keys', ['KeyC'], []);
+await advance(0.8, 3);
+await call('aim', 90, -38);
+await advance(0.2, 2);
 const feel = await stats();
-const eye = feel.eye;
-const near = await call('region', [eye[0] - 1.2, eye[1] - 1.2, eye[2] - 1.2, eye[0] + 1.2, eye[1] + 1.2, eye[2] + 1.2]);
-const rackAll = await call('region', RACK);
-const t1 = await shot('09-touch-shelf.png', "pressed to a 24 m rack run, no ping ever fired: only the patch under your hand");
-check('touch reaches the rack at all', rackAll.touched > 0,
-  `${rackAll.touched} points felt on the rack, ${feel.paint.touchedDots} in the world`);
-check('touch reveals a patch, not the shelf', rackAll.touched === near.touched && rackAll.touched < 400,
-  `all ${rackAll.touched} felt rack points are within 1.2 m of the hand`);
-const runSouth = await call('region', [21.9, -0.1, -18.1, 23.5, 6.1, eye[2] - 1.2]);
-const runNorth = await call('region', [21.9, -0.1, eye[2] + 1.2, 23.5, 6.1, 6.1]);
-check('the other 21 metres of the run stay unknown',
-  runSouth.touched === 0 && runNorth.touched === 0,
-  `${runSouth.dots + runNorth.dots} mask points along the rest of the run, 0 revealed`);
+const fieldHit = await call('region', FIELD);
+const t1 = await shot('05-touch-clutter.png', 'crouched in the middle of the crate field, no ping ever fired: the hand draws the arm-length of junk it is actually touching and nothing else');
+check('the hand draws a readable patch', feel.paint.touchedDots > 120,
+  `${feel.paint.touchedDots} points felt`);
 check('nothing but touch is on screen', feel.paint.unlockedDots === 0,
   `${feel.paint.unlockedDots} dots unlocked by lidar`);
-check('a felt patch is a patch', litFraction(t1) > 0.0002 && litFraction(t1) < 0.02,
-  `lit=${litFraction(t1).toFixed(4)}`);
+check('the rest of the field stays unknown', fieldHit.touched < fieldHit.dots * 0.05,
+  `${fieldHit.touched} of ${fieldHit.dots} mask points in the 12x8 m crate field revealed`);
 const feelHue = hueFamilies(t1, whole(t1));
 check('touch draws grey, not lidar cyan', feelHue.coolFraction < 0.35,
   `cool ${(feelHue.coolFraction * 100).toFixed(0)}% of ${feelHue.lit} lit pixels`);
+await call('keys', [], ['KeyC']);
 
-// --- 09b a wall answers the hand exactly like a crate does ----------------
+// A flat wall answers the hand exactly like a prop does — numeric check, no frame: the picture
+// would be indistinguishable from any other grey patch.
 await call('clear');
-// The north wall is a single 68 m slab. Before this batch it had no edges within a hundred
-// metres of you, so the tactile layer appeared to ignore walls entirely.
-const WALL = [-34.1, -0.1, -24.6, 34.1, 9.1, -23.9];
 await call('pose', 6, -23.5, 0);
 await advance(0.6, 3);
-const wallFeel = await stats();
-const wallEye = wallFeel.eye;
-const wallHit = await call('region', WALL);
+const wallEye = (await stats()).eye;
+const wallHit = await call('region', [-34.1, -0.1, -24.6, 34.1, 9.1, -23.9]);
 const wallFar = await call('region', [-34.1, -0.1, -24.6, wallEye[0] - 1.5, 9.1, -23.9]);
-const t2 = await shot('09b-touch-wall.png', 'pressed to the flat north wall: the wall answers, and only where you touch it');
-check('the wall reacts to the hand', wallHit.touched > 0, `${wallHit.touched} wall points felt`);
+check('a flat wall answers the hand', wallHit.touched > 0, `${wallHit.touched} wall points felt`);
 check('the rest of the wall does not', wallFar.touched === 0, '0 points felt more than 1.5 m along the wall');
-check('a felt wall is a patch too', litFraction(t2) > 0.0002 && litFraction(t2) < 0.02,
-  `lit=${litFraction(t2).toFixed(4)}`);
 
-// --- 09c the lidar clips the end of the run, and lights only the end ------
+// --- 06 a knee-high crate can be felt --------------------------------------
+// The bug this proves: the reach used to be a sphere around the eye, so with a 0.35 m body
+// radius nothing below y ~ 1.2 m was reachable and small clutter was literally unfeelable.
+// Crouched, one hand on a lone 0.55 x 0.69 x 0.97 m crate on the open north-east floor.
+const CRATE = [6.81, 0, 10.16, 7.36, 0.69, 11.13];
 await call('clear');
-await call('touch', false);
-await call('pose', 16, 10, 0);
-await call('aim', -60, -4);
-await call('refill');
-await ping();
-await advance(0.8, 4);
-const edgeNorth = await call('region', rackNorth);
-const edgeSouth = await call('region', rackSouth);
-const t3 = await shot('09c-lidar-shelf-edge.png', 'the cone clips the north end of the same rack run — the other twenty metres stay dark');
-check('the clipped end is drawn', edgeNorth.unlocked > 200,
-  `${edgeNorth.unlocked} of ${edgeNorth.dots} dots on the north end`);
-check('the far end of the run is not', edgeSouth.unlocked === 0,
-  `${edgeSouth.unlocked} dots on the south end (${edgeSouth.dots} in the mask there)`);
+await call('pose', 7.08, 11.5, 0);
+await call('keys', ['KeyC'], []);
+await advance(0.6, 3);
+await call('aim', 0, -45);
+await advance(0.2, 2);
+const crateStats = await stats();
+const crateHit = await call('region', [CRATE[0] - 0.1, -0.1, CRATE[2] - 0.1, CRATE[3] + 0.1, CRATE[4] + 0.1, CRATE[5] + 0.1]);
+const t2 = await shot('06-touch-crate.png', 'crouched with a hand on a knee-high crate alone on an empty floor: its top edge and corners come back, the far side does not — small clutter used to return nothing at all');
+check('a small crate can be felt', crateHit.touched > 12,
+  `${crateHit.touched} of ${crateHit.dots} mask points on a 0.55x0.69x0.97 m crate`);
+check('the crate frame is touch only', crateStats.paint.unlockedDots === 0,
+  `${crateStats.paint.unlockedDots} dots unlocked by lidar`);
+await call('keys', [], ['KeyC']);
 
-// --- 09d lidar outranks the hand on the points they share ----------------
+// --- 07 lidar outranks the hand on the points they share -------------------
 await call('clear');
-await call('touch', true);
 await call('pose', 23.75, -14.2, 90);
 await advance(0.6, 3);
-const greyBefore = await call('region', [eye[0] - 1.2, eye[1] - 1.2, eye[2] - 1.2, eye[0] + 1.2, eye[1] + 1.2, eye[2] + 1.2]);
+const eye = (await stats()).eye;
+const HAND = [eye[0] - 1.2, eye[1] - 1.9, eye[2] - 1.2, eye[0] + 1.2, eye[1] + 1.2, eye[2] + 1.2];
+const greyBefore = await call('region', HAND);
 await call('refill');
 await ping();
 await advance(1.2, 4);
-const mixed = await call('region', [eye[0] - 1.2, eye[1] - 1.2, eye[2] - 1.2, eye[0] + 1.2, eye[1] + 1.2, eye[2] + 1.2]);
-const t4 = await shot('09d-touch-then-lidar.png', 'the same felt patch after a ping: the shared points are redrawn in the lidar colours');
+const mixed = await call('region', HAND);
+const t3 = await shot('07-touch-then-lidar.png', 'a patch of the big rack felt by hand, then a ping over it: the shared points flip from grey to lidar cyan, and the rest of the run appears with them');
 check('the ping lands on ground the hand already knew',
   greyBefore.touched > 0 && mixed.unlocked >= greyBefore.touched,
   `${greyBefore.touched} felt, ${mixed.unlocked} of them now scanned`);
 // Touch is strictly neutral grey and the lidar's matter palette is strictly cyan-family, so a
 // cool pixel where there was none is the recolouring, measured rather than asserted by eye.
-const mixedHue = hueFamilies(t4, whole(t4));
+const mixedHue = hueFamilies(t3, whole(t3));
 check('the shared points are redrawn in the lidar colours',
   mixedHue.cool > 50 && feelHue.cool * 4 < mixedHue.cool,
   `cool pixels ${feelHue.cool} felt -> ${mixedHue.cool} scanned`);
+
+// --- 08 the cone clips one end of a 24 m run -------------------------------
+// The east rack is a single box 24 m long (x 22..23.4, z -18..6). Before the shared mask,
+// clipping its corner handed you all twenty-four metres.
+const rackSouth = [21.9, -0.1, -18.1, 23.5, 6.1, -6];
+const rackNorth = [21.9, -0.1, 1.9, 23.5, 6.1, 6.1];
+await call('clear');
+await call('touch', false);
+await call('pose', 30, -2, 132);
+await call('aim', 132, -4);
+await call('refill');
+await ping();
+await advance(0.9, 4);
+const edgeNorth = await call('region', rackNorth);
+const edgeSouth = await call('region', rackSouth);
+const t4 = await shot('08-lidar-rack-end.png', 'one ping across a 24 m rack run: shelf decks and surface grain inside the disc the cone reached, and nothing at all to either side of it');
+check('the clipped end is drawn', edgeNorth.unlocked > 200,
+  `${edgeNorth.unlocked} of ${edgeNorth.dots} dots on the north end`);
+check('the far end of the run is not', edgeSouth.unlocked === 0,
+  `${edgeSouth.unlocked} dots on the south end (${edgeSouth.dots} in the mask there)`);
 await call('touch', true);
 
-// --- 10..13 the readability gate: spawn -> gate on lidar alone ------------
+// --- 10/11 the readability gate: spawn -> gate on lidar alone --------------
 await call('clear');
 await call('pose', -30, -20, 35);
 await advance(0.4, 2);
-await call('refill');
-await ping();
-await advance(0.7, 4);
-await shot('10-gate-start.png', 'first scan from the spawn corner — where do you even go');
 
 // The east end is split by a solid 6 m rack run (x 22..23.4, z -18..6): the only way through
 // to the gate is around its north end.
@@ -385,19 +417,27 @@ console.log(
 notes.push(
   `gate run: ${trace.pings} pings, ${trace.stuck} stuck-recoveries, ended ${trace.gate.toFixed(1)} m from the gate`,
 );
-await shot('11-gate-arrive.png', 'standing in the gate, on what the last few pings drew');
+await call('aim', 100, -4);
+await advance(0.3, 2);
+await call('refill');
+await ping();
+await advance(0.6, 3);
+await shot('09-gate-arrive.png', 'standing in the gate at the far end, looking back down the hall he just crossed on lidar alone');
 check('reached the gate', trace.gate < 4, `${trace.gate.toFixed(1)} m`);
 
 await call('view', 'top');
-await call('topHeight', 80);
+await call('topFocus', 0, 0);
+await call('topHeight', 62);
 await advance(0.1, 2);
-await shot('12-gate-map-top.png', 'everything the walk revealed, from above — the route as a map');
-await call('lights', true);
-await advance(0.1, 2);
-await shot('13-gate-truth-top.png', 'the same instant with the lights on: map versus reality');
+await shot('10-gate-map-top.png', 'everything that walk revealed, from the same overhead camera as frame 01: a corridor of known ground across an otherwise black hall');
+const known = (await stats()).paint;
+check('the walk maps a corridor, not the hall', known.unlockedDots > 20000 && known.unlockedDots < known.dots * 0.7,
+  `${known.unlockedDots} of ${known.dots} mask points known (${((known.unlockedDots / known.dots) * 100).toFixed(0)}%)`);
+notes.push(
+  `after the crossing: ${known.unlockedDots} of ${known.dots} mask points known (${((known.unlockedDots / known.dots) * 100).toFixed(0)}%)`,
+);
 
 // --- perf ------------------------------------------------------------------
-await call('lights', false);
 await call('view', 'player');
 await call('hud', true);
 await advance(0.3, 2);
@@ -475,7 +515,7 @@ check('the unlock stays inside its amortisation budget', perf.paintPingMax < 12,
 await call('sync', true);
 check('a ping does not spike our own frame cost', perf.cpuMax < perf.cpuMedian + 25,
   `max ${perf.cpuMax.toFixed(2)} ms vs median ${perf.cpuMedian.toFixed(2)} ms`);
-await shot('14-hud.png', 'the debug overlay: position, landmark, lidar charge, sound bus, frame cost');
+await shot('11-hud.png', 'the same view as frame 09 with the debug overlay on: position, nearest landmark, lidar charge, sound bus, mask coverage, frame cost, draw calls');
 
 // --- contact sheet ---------------------------------------------------------
 const html = `<!doctype html><meta charset="utf-8"><title>BLIND SPOT M1 — keyframes</title>

@@ -13,7 +13,7 @@
  *
  * So this file now owns no vertices. It is a *driver* over the one shared mask in
  * `StructuredPaint`: every frame it asks the paint to mark the lattice dots and contour pieces
- * inside the reach sphere as touched (`revealTouch`), and the paint draws exactly those, grey,
+ * inside the reach column as touched (`revealTouch`), and the paint draws exactly those, grey,
  * bright under the hand and faint once you have moved on. A wall reacts because a wall has
  * lattice dots like everything else; a crate does not give itself away, because a dot two metres
  * up its far side was never within reach.
@@ -26,6 +26,13 @@ import type { StructuredPaint } from '../lidar/structured';
 export interface TouchTunables {
   /** How far the "hand" reaches, metres. */
   range: number;
+  /**
+   * How far *below* the eye the reach column starts, metres. The player feels with a body, not
+   * with an eyeball: a sphere at eye height cannot reach a knee-high crate you are standing
+   * against, which is exactly the thing you most want to identify by feel. The column runs from
+   * `eye - drop` up to the eye, and the reach sphere is swept along it.
+   */
+  drop: number;
   /** Brightness of a point right against you. */
   nearAlpha: number;
   /** Brightness a felt point keeps once you have walked away. */
@@ -37,8 +44,9 @@ export interface TouchTunables {
 export function defaultTouchTunables(): TouchTunables {
   return {
     range: 0.55,
-    nearAlpha: 0.8,
-    memoryAlpha: 0.07,
+    drop: 1.5,
+    nearAlpha: 1,
+    memoryAlpha: 0.22,
     rebuildStep: 0.08,
   };
 }
@@ -92,8 +100,9 @@ export class TouchLayer {
   }
 
   /**
-   * One tick of feeling around. `x/y/z` is the hand — the eye, in practice. The reach is a
-   * sphere about it; everything inside it is revealed in the shared mask, and nothing outside.
+   * One tick of feeling around. `x/y/z` is the head — the eye, in practice. The reach is a
+   * capsule: a vertical column from the shins to the eye, grown by `range`. Everything inside
+   * it is revealed in the shared mask, and nothing outside.
    *
    * No occlusion test is run, and that is deliberate rather than sloppy: the player's own body
    * radius plus the thinnest partition in the hall is wider than the reach, so there is no pose
@@ -101,7 +110,11 @@ export class TouchLayer {
    */
   update(x: number, y: number, z: number): void {
     const t = this.tunables;
-    this.paint.setHand(x, y, z);
+    // The column bottom never goes below the floor plane: feeling the ground you stand on is
+    // honest, feeling through it is not.
+    const foot = Math.max(0.02, y - t.drop);
+    const span = Math.max(0, y - foot);
+    this.paint.setHand(x, foot, z, span);
     this.paint.setTouchLook(t.range, t.nearAlpha, t.memoryAlpha);
 
     const moved = Math.hypot(x - this.lastX, y - this.lastY, z - this.lastZ);
@@ -113,7 +126,7 @@ export class TouchLayer {
 
     // The write has to cover the reach plus the drift allowance, or a point would be felt a
     // re-query late and pop in behind the hand.
-    const fresh = this.paint.revealTouch(x, y, z, t.range + t.rebuildStep);
+    const fresh = this.paint.revealTouch(x, foot, z, span, t.range + t.rebuildStep);
     const s = this.paint.getStats();
     this.stats = {
       near: fresh,

@@ -96,6 +96,8 @@ class App {
   private readonly frameTimes: number[] = [];
   private perf: Perf = { simMs: 0, paintMs: 0, renderMs: 0, frameMs: 0 };
   private topHeight = 62;
+  /** Pins the top-down camera to a fixed spot instead of the player. Debug/keyframes only. */
+  private topFocus: { x: number; z: number } | null = null;
 
   /** Live look/quality knobs the tuning panel owns. */
   private readonly look = {
@@ -270,8 +272,13 @@ class App {
   private activeCamera(): THREE.PerspectiveCamera {
     if (this.view !== 'top') return this.camera;
     const p = this.player.position;
-    this.topCamera.position.set(p.x, this.topHeight, p.z + 0.001);
-    this.topCamera.lookAt(p.x, 0, p.z);
+    // The top view normally follows the player, but a map screenshot has to be able to stand
+    // still: a map and the lit truth of the same hall are only comparable if the camera did
+    // not move between them.
+    const fx = this.topFocus?.x ?? p.x;
+    const fz = this.topFocus?.z ?? p.z;
+    this.topCamera.position.set(fx, this.topHeight, fz + 0.001);
+    this.topCamera.lookAt(fx, 0, fz);
     this.topCamera.updateMatrixWorld();
     this.topCamera.updateProjectionMatrix();
     return this.topCamera;
@@ -404,6 +411,7 @@ class App {
 
     const tactile = gui.addFolder('touch');
     tactile.add(this.touch.tunables, 'range', 0.2, 2, 0.05);
+    tactile.add(this.touch.tunables, 'drop', 0, 1.6, 0.05);
     tactile.add(this.touch.tunables, 'nearAlpha', 0, 1, 0.02);
     tactile.add(this.touch.tunables, 'memoryAlpha', 0, 0.6, 0.01);
     tactile.close();
@@ -470,6 +478,12 @@ class App {
       topHeight: (h: number) => {
         this.topHeight = h;
       },
+      topFocus: (x: number | null, z = 0) => {
+        this.topFocus = x === null ? null : { x, z };
+      },
+      /** Every solid in the hall, as flat bounds — lets a scenario *find* its subject. */
+      solids: () =>
+        this.hall.world.boxes.map((b) => [b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ]),
       touch: (on: boolean) => this.touch.setVisible(on),
       clear: () => this.clearMap(),
       refill: () => this.lidar.refill(),

@@ -282,6 +282,8 @@ const DOT_VERTEX = /* glsl */ `
   // The hand: where the tactile reach is centred, how far it goes, and how bright a point is
   // under it versus once it has become a memory. uTouchOn is the debug toggle, nothing more.
   uniform vec3  uHand;
+  /** Upward length of the reach column, metres — the hand is a body-height segment, not a point. */
+  uniform float uHandSpan;
   uniform vec3  uTouchColor;
   uniform float uTouchRange;
   uniform float uTouchNear;
@@ -329,8 +331,16 @@ const DOT_VERTEX = /* glsl */ `
         gl_PointSize = 0.0;
         return;
       }
-      float td = distance(position, uHand);
-      float prox = 1.0 - smoothstep(uTouchRange * 0.45, uTouchRange, td);
+      // Distance to the reach *column*, not to a point at eye level. A crate at your shins is
+      // as reachable as a shelf at your shoulder, which is the whole difference between
+      // "I felt something" and "I felt nothing at all".
+      vec3 hd = position - uHand;
+      hd.y -= clamp(hd.y, 0.0, uHandSpan);
+      float td = length(hd);
+      // Flat over most of the reach, fading only at its rim. The earlier curve started dimming
+      // at 45% of the range, which made a felt patch read as three bright dots and a smudge —
+      // technically honest, visually unreadable.
+      float prox = 1.0 - smoothstep(uTouchRange * 0.8, uTouchRange * 1.25, td);
       float ta = max(prox * uTouchNear, uTouchMemory);
       if (ta < 0.004) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -344,7 +354,7 @@ const DOT_VERTEX = /* glsl */ `
        * channel that only ever draws things 60 cm away. Fixed small size, honest brightness.
        */
       vec4 tmv = modelViewMatrix * vec4(position, 1.0);
-      float tpx = clamp(uSizeWorld * uSkeletonSize * uProjScale / max(0.001, -tmv.z), 4.0, 8.0);
+      float tpx = clamp(uSizeWorld * uSkeletonSize * uProjScale / max(0.001, -tmv.z), 5.0, 9.0);
       vColor = uTouchColor * ta;
       vAlpha = 1.0;
       // Harder-edged than a lidar dot: a felt point is a fingertip, not a return.
@@ -461,6 +471,8 @@ const EDGE_VERTEX = /* glsl */ `
   uniform vec3  uListener;
   uniform vec3  uAccent;
   uniform vec3  uHand;
+  /** Upward length of the reach column, metres — the hand is a body-height segment, not a point. */
+  uniform float uHandSpan;
   uniform vec3  uTouchColor;
   uniform float uTouchRange;
   uniform float uTouchNear;
@@ -495,8 +507,16 @@ const EDGE_VERTEX = /* glsl */ `
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
       }
-      float td = distance(position, uHand);
-      float prox = 1.0 - smoothstep(uTouchRange * 0.45, uTouchRange, td);
+      // Distance to the reach *column*, not to a point at eye level. A crate at your shins is
+      // as reachable as a shelf at your shoulder, which is the whole difference between
+      // "I felt something" and "I felt nothing at all".
+      vec3 hd = position - uHand;
+      hd.y -= clamp(hd.y, 0.0, uHandSpan);
+      float td = length(hd);
+      // Flat over most of the reach, fading only at its rim. The earlier curve started dimming
+      // at 45% of the range, which made a felt patch read as three bright dots and a smudge —
+      // technically honest, visually unreadable.
+      float prox = 1.0 - smoothstep(uTouchRange * 0.8, uTouchRange * 1.25, td);
       float ta = max(prox * uTouchNear, uTouchMemory);
       if (ta < 0.004) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -964,6 +984,7 @@ export class StructuredPaint {
       uCold: { value: rawColor(MATTER_COLD) },
       uAccent: { value: rawColor(ACCENT_GOLD) },
       uHand: { value: new THREE.Vector3(0, -1e5, 0) },
+      uHandSpan: { value: 1.2 },
       uTouchColor: { value: rawColor(TOUCH_GREY) },
       uTouchRange: { value: 0.55 },
       uTouchNear: { value: 0.8 },
@@ -1257,6 +1278,39 @@ export class StructuredPaint {
             }
           }
 
+          /*
+           * Minimum density, one point per face, whatever its size.
+           *
+           * The lattice is snapped to a single world grid so that coplanar faces line up. The
+           * price is that a face thinner than the pitch can fall entirely between two grid
+           * lines and come out with no points at all — and a surface with no points is a
+           * surface that cannot be felt or scanned. That is how a knee-high crate stayed
+           * silent under the hand while the wall behind it answered normally. So a face that
+           * the world grid missed gets its own centred grid instead, sized to at least one
+           * cell. Alignment is lost on exactly those faces that were too small to align with
+           * anything anyway.
+           */
+          if (pos.length / 3 === faceDot0) {
+            const nu = Math.max(1, Math.round((maxU - minU) / spacing));
+            const nv = Math.max(1, Math.round((maxV - minV) / spacing));
+            for (let iu = 0; iu < nu; iu++) {
+              for (let iv = 0; iv < nv; iv++) {
+                p[axis] = plane;
+                p[u] = minU + ((iu + 0.5) * (maxU - minU)) / nu;
+                p[v] = minV + ((iv + 0.5) * (maxV - minV)) / nv;
+                if (!open(p[0]! + nrm[0] * 0.03, p[1]! + nrm[1] * 0.03, p[2]! + nrm[2] * 0.03)) {
+                  continue;
+                }
+                pos.push(
+                  p[0]! + nrm[0] * SURFACE_OFFSET,
+                  p[1]! + nrm[1] * SURFACE_OFFSET,
+                  p[2]! + nrm[2] * SURFACE_OFFSET,
+                );
+                seeds.push(rng());
+              }
+            }
+          }
+
           const dotN = pos.length / 3 - faceDot0;
           if (dotN === 0) continue;
           const c = [0, 0, 0];
@@ -1470,9 +1524,16 @@ export class StructuredPaint {
     this.dotMaterial.uniforms.uProjScale!.value = scale;
   }
 
-  setHand(x: number, y: number, z: number): void {
+  /**
+   * Where the hand is. `y` is the *bottom* of the reach column and `span` its height, because
+   * the player feels with a body, not with an eyeball: the reach is a vertical segment from
+   * about the shins to the head, and the sphere of `range` is swept along it.
+   */
+  setHand(x: number, y: number, z: number, span: number): void {
     (this.dotMaterial.uniforms.uHand!.value as THREE.Vector3).set(x, y, z);
     (this.edgeMaterial.uniforms.uHand!.value as THREE.Vector3).set(x, y, z);
+    this.dotMaterial.uniforms.uHandSpan!.value = span;
+    this.edgeMaterial.uniforms.uHandSpan!.value = span;
   }
 
   /** The hand's three numbers: how far it reaches, how bright it is there, what it leaves behind. */
@@ -1491,37 +1552,45 @@ export class StructuredPaint {
   }
 
   /**
-   * The hand's write into the shared mask: every dot and contour piece within `radius` of
-   * (x, y, z) is marked touched, and nothing else is. No object-level shortcut and no
-   * occlusion ray — the player's own body radius plus the thinnest partition in the hall is
-   * wider than the reach, so there is nothing to reach through.
+   * The hand's write into the shared mask: every dot and contour piece within `radius` of the
+   * reach column (the vertical segment from (x, y, z) up by `span`) is marked touched, and
+   * nothing else is. No object-level shortcut and no occlusion ray — the player's own body
+   * radius plus the thinnest partition in the hall is wider than the reach, so there is
+   * nothing to reach through.
    *
    * Returns the number of dots this call newly reached.
    */
-  revealTouch(x: number, y: number, z: number, radius: number): number {
+  revealTouch(x: number, y: number, z: number, span: number, radius: number): number {
     this.ensureBuilt();
     if (this.dotGrid === null || this.edgeGrid === null) return 0;
     const r2 = radius * radius;
     const out = this.reachScratch;
     let fresh = 0;
     let tests = 0;
+    // The broadphase is still one sphere: the column's midpoint, grown by half its height.
+    const midY = y + span / 2;
+    const query = radius + span / 2;
+    /** Distance to the vertical segment [y, y + span] at (x, z), squared. */
+    const near2 = (px: number, py: number, pz: number): number => {
+      const dx = px - x;
+      const dz = pz - z;
+      const dy = py < y ? py - y : py > y + span ? py - (y + span) : 0;
+      return dx * dx + dy * dy + dz * dz;
+    };
 
-    this.dotGrid.candidates(x, y, z, radius, out);
+    this.dotGrid.candidates(x, midY, z, query, out);
     tests += out.length;
     for (let n = 0; n < out.length; n++) {
       const i = out[n]!;
       if (this.dotTouch[i] === 1) continue;
       const i3 = i * 3;
-      const dx = this.dotPos[i3]! - x;
-      const dy = this.dotPos[i3 + 1]! - y;
-      const dz = this.dotPos[i3 + 2]! - z;
-      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      if (near2(this.dotPos[i3]!, this.dotPos[i3 + 1]!, this.dotPos[i3 + 2]!) > r2) continue;
       this.dotTouch[i] = 1;
       this.markTouchDots(i, i);
       fresh++;
     }
 
-    this.edgeGrid.candidates(x, y, z, radius, out);
+    this.edgeGrid.candidates(x, midY, z, query, out);
     tests += out.length;
     let freshEdges = 0;
     for (let n = 0; n < out.length; n++) {
@@ -1529,10 +1598,7 @@ export class StructuredPaint {
       const v = k * 2;
       if (this.edgeTouch[v] === 1) continue;
       const k3 = k * 3;
-      const dx = this.edgeMid[k3]! - x;
-      const dy = this.edgeMid[k3 + 1]! - y;
-      const dz = this.edgeMid[k3 + 2]! - z;
-      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      if (near2(this.edgeMid[k3]!, this.edgeMid[k3 + 1]!, this.edgeMid[k3 + 2]!) > r2) continue;
       this.edgeTouch[v] = 1;
       this.edgeTouch[v + 1] = 1;
       this.markTouchEdges(v, v + 1);
