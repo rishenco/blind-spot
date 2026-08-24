@@ -545,11 +545,15 @@ const EDGE_VERTEX = /* glsl */ `
   uniform float uTouchNear;
   uniform float uTouchMemory;
   uniform float uTouchOn;
+  /** How much of a felt point's brightness a felt *line* gets. A line covers far more pixels. */
+  uniform float uTouchEdge;
 
   attribute float aBirth;
   attribute float aPrior;
   attribute float aT;
   attribute float aAccent;
+  /** When *this end* of the piece was felt. Per vertex, not per piece — see the hand branch. */
+  attribute float aTouch;
   // The same two bounds a lattice dot carries, on the line the dot's face is bordered by.
   attribute vec2  aRefresh;
 
@@ -577,23 +581,45 @@ const EDGE_VERTEX = /* glsl */ `
     vLive = 0.0;
 
     /*
-     * The hand does not draw contours at all — only the lidar does.
+     * The hand draws contours — concept.md says touch gives a grey tactile *contour*, and in the
+     * dark an edge is worth ten points for working out which way a crate is turned.
      *
-     * The audit of the M1 frames called this "tactile telekinesis in the form of edges": on the
-     * touch frames a crate came back as a bright white wireframe while barely a third of it had
-     * been reached. The mask itself was never wrong (measured: 16 of the crate's 44 contour
-     * pieces, all of them on the face the hand was against). The lie was in the *drawing*: at
-     * arm's length one 20 cm piece covers several hundred pixels, so a dozen honest pieces read
-     * as a complete, confident outline of the whole object — and a piece whose far end failed a
-     * test used to be clipped rather than dropped, which streaked it off the edge of the screen.
+     * What the M1 audit actually caught was narrower: a crate came back as a full white
+     * wireframe, far top edge included, when the hand had been against one face. Two separate
+     * causes, both fixed here. The first was drawing: a piece whose far end failed a test was
+     * culled by shoving that vertex outside the clip volume, which does not remove the line —
+     * it clips it at the frustum and leaves a streak running off toward the dead end. Liveness
+     * is a varying now (vLive) and both ends have to agree. The second is the rule itself:
+     * a touch stamp is per *vertex*, so a piece is only ever drawn when both of its ends were
+     * inside the reach column. You reveal the piece of the edge you ran your hand along, and
+     * the edge stops where your hand stopped.
      *
-     * A line says "this crease runs *this way*, that far"; a point says "something is here".
-     * The hand only ever knows the second thing. So touch is points, and nothing else, which is
-     * the option the spec offers outright. The lidar keeps its contours: a beam that reached a
-     * crease really did measure its direction and extent.
+     * Dimmer than a felt point, deliberately. One 20 cm piece at arm's length is several
+     * hundred pixels against a stipple's nine, so equal brightness is not equal presence.
      */
     if (aBirth <= -1.0e8) {
-      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      if (aTouch <= -1.0e8 || uTouchOn < 0.5 || distance(position, uListener) > uWindowRadius) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+      // Distance to the reach column, exactly as the dot shader measures it.
+      vec3 hd = position - uHand;
+      hd.y -= clamp(hd.y, 0.0, uHandSpan);
+      float td = length(hd);
+      float prox = 1.0 - smoothstep(uTouchRange * 0.8, uTouchRange * 1.25, td);
+      vec3 memCol;
+      float memAlpha;
+      ageRamp(uTime - aTouch, memCol, memAlpha);
+      float ta = max(prox * uTouchNear, uTouchMemory * memAlpha) * uTouchEdge;
+      if (ta < 0.004) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+      vColor = uTouchColor * ta;
+      vAlpha = 1.0;
+      vInk = 10.0;
+      vLive = 1.0;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       return;
     }
 
@@ -850,6 +876,8 @@ export interface StructuredStats {
   lastLateStep: number;
   /** Mask dots the hand has ever been within reach of. */
   touchedDots: number;
+  /** Contour piece *ends* the hand has ever been within reach of. */
+  touchedEdges: number;
   /** Dots the last `revealTouch` call newly reached. */
   lastTouchedDots: number;
   /** Mask items the last `revealTouch` call had to look at. */
@@ -942,6 +970,8 @@ export class StructuredPaint {
   private edgeNa = new Uint8Array(0);
   private edgeNb = new Uint8Array(0);
   private edgeMid = new Float32Array(0);
+  /** The same birth-time channel as `dotTouch`, but per contour *vertex*: both ends must agree. */
+  private edgeTouch = new Float32Array(0);
   /** The same channel per contour vertex, written to both ends of a piece at once. */
   /** Uniform grids over the mask, so a reach query costs a handful of cells, not the world. */
   private dotGrid: PointGrid | null = null;
@@ -990,6 +1020,8 @@ export class StructuredPaint {
   /** The hand writes to its own attribute, so it carries its own upload window. */
   private touchDotDirtyMin = Infinity;
   private touchDotDirtyMax = -Infinity;
+  private touchEdgeDirtyMin = Infinity;
+  private touchEdgeDirtyMax = -Infinity;
 
   private stats: StructuredStats = {
     built: false,
@@ -1014,6 +1046,7 @@ export class StructuredPaint {
     lastLate: 0,
     lastLateStep: 0,
     touchedDots: 0,
+    touchedEdges: 0,
     lastTouchedDots: 0,
     lastTouchTests: 0,
   };
@@ -1059,6 +1092,7 @@ export class StructuredPaint {
       uTouchNear: { value: 0.8 },
       uTouchMemory: { value: 0.07 },
       uTouchOn: { value: 1 },
+      uTouchEdge: { value: 0.42 },
     });
 
     this.dotMaterial = new THREE.ShaderMaterial({
@@ -1513,6 +1547,7 @@ export class StructuredPaint {
     this.edgeAccent = new Float32Array(verts);
     this.edgeRefresh = unbounded(verts);
     this.edgeT = new Float32Array(verts);
+    this.edgeTouch = new Float32Array(verts).fill(NEVER);
     for (let i = 0; i < this.pieces; i++) {
       this.edgeT[i * 2] = 0;
       this.edgeT[i * 2 + 1] = 1;
@@ -1536,6 +1571,7 @@ export class StructuredPaint {
     this.edgeGeometry.setAttribute('aT', new THREE.BufferAttribute(this.edgeT, 1));
     this.edgeGeometry.setAttribute('aAccent', new THREE.BufferAttribute(this.edgeAccent, 1));
     this.edgeGeometry.setAttribute('aRefresh', new THREE.BufferAttribute(this.edgeRefresh, 2));
+    this.edgeGeometry.setAttribute('aTouch', new THREE.BufferAttribute(this.edgeTouch, 1));
     this.edgeGeometry.setDrawRange(0, verts);
     this.edgeGeometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e5);
 
@@ -1683,10 +1719,33 @@ export class StructuredPaint {
       fresh++;
     }
 
+    /*
+     * And the same over the contour pieces, but stamped per *end*. A piece is drawn only when
+     * both of its vertices were reached (the shader ANDs them), so the hand reveals the length
+     * of edge it actually ran along and no more: the far top edge of a crate stays dark while
+     * you are holding its near face.
+     */
+    this.edgeGrid.candidates(x, midY, z, query, out);
+    tests += out.length;
+    let freshEnds = 0;
+    for (let n = 0; n < out.length; n++) {
+      const k = out[n]!;
+      for (let e = 0; e < 2; e++) {
+        const v = k * 2 + e;
+        if (this.edgeTouch[v]! > NEVER) continue;
+        const v3 = v * 3;
+        if (near2(this.edgePos[v3]!, this.edgePos[v3 + 1]!, this.edgePos[v3 + 2]!) > r2) continue;
+        this.edgeTouch[v] = this.time;
+        this.markTouchEdges(v, v);
+        freshEnds++;
+      }
+    }
+
     this.stats.touchedDots += fresh;
+    this.stats.touchedEdges += freshEnds;
     this.stats.lastTouchedDots = fresh;
     this.stats.lastTouchTests = tests;
-    if (fresh > 0) this.upload();
+    if (fresh > 0 || freshEnds > 0) this.upload();
     return fresh;
   }
 
@@ -1703,9 +1762,12 @@ export class StructuredPaint {
     this.waveMeta.fill(0);
     this.dotTouch.fill(NEVER);
     this.markTouchDots(0, this.dotTouch.length - 1);
+    this.edgeTouch.fill(NEVER);
+    this.markTouchEdges(0, this.edgeTouch.length - 1);
     this.stats.unlockedDots = 0;
     this.stats.unlockedEdges = 0;
     this.stats.touchedDots = 0;
+    this.stats.touchedEdges = 0;
     this.stats.lastTouchedDots = 0;
     this.stats.lastTouchTests = 0;
     this.stats.lastDots = 0;
@@ -2250,6 +2312,11 @@ export class StructuredPaint {
     if (hi > this.touchDotDirtyMax) this.touchDotDirtyMax = hi;
   }
 
+  private markTouchEdges(lo: number, hi: number): void {
+    if (lo < this.touchEdgeDirtyMin) this.touchEdgeDirtyMin = lo;
+    if (hi > this.touchEdgeDirtyMax) this.touchEdgeDirtyMax = hi;
+  }
+
   private upload(): void {
     if (this.dotDirtyMax >= this.dotDirtyMin) {
       const start = this.dotDirtyMin;
@@ -2286,6 +2353,16 @@ export class StructuredPaint {
       attr.needsUpdate = true;
       this.touchDotDirtyMin = Infinity;
       this.touchDotDirtyMax = -Infinity;
+    }
+    if (this.touchEdgeDirtyMax >= this.touchEdgeDirtyMin) {
+      const attr = this.edgeGeometry.getAttribute('aTouch') as THREE.BufferAttribute;
+      attr.addUpdateRange(
+        this.touchEdgeDirtyMin,
+        this.touchEdgeDirtyMax - this.touchEdgeDirtyMin + 1,
+      );
+      attr.needsUpdate = true;
+      this.touchEdgeDirtyMin = Infinity;
+      this.touchEdgeDirtyMax = -Infinity;
     }
   }
 

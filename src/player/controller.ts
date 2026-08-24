@@ -302,6 +302,9 @@ const TWO_PI = Math.PI * 2;
 const HALF_PI = Math.PI / 2;
 
 /** Landings below this impact speed do not dip the camera at all, m/s. */
+/** Below this impact speed a landing is a step down, not an event worth hearing. */
+const LAND_EVENT_MIN_SPEED = 1.2;
+
 const LAND_DIP_MIN_SPEED = 3;
 /** Impact speed that produces the full `landDipMax` dip, m/s. */
 const LAND_DIP_FULL_SPEED = 13;
@@ -756,7 +759,14 @@ export class PlayerController {
     const res = moveBody(this.world, this.position, this.velocity, dt, this.shape, wasGrounded);
 
     this.grounded = res.grounded;
-    if (res.landingSpeed > 0) {
+    /*
+     * A landing is the end of a *fall*, not the per-tick fact that the floor is still there.
+     * Standing still, gravity gives the body a few centimetres a second every tick and the
+     * sweep absorbs it, so `landingSpeed > 0` was true on every single tick — which the sound
+     * layer turned into a permanent stream of "land" events under a motionless player. The
+     * marker layer is what made it visible; the bug was always there.
+     */
+    if (!wasGrounded && res.landingSpeed > LAND_EVENT_MIN_SPEED) {
       this.lastLandingSpeed = res.landingSpeed;
       this.onLanded(res.landingSpeed);
     }

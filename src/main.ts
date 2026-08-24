@@ -452,7 +452,7 @@ class App {
       ['paint', `${this.perf.paintMs.toFixed(2)} ms · pend ${paint.pending}`],
       ['dots', `${paint.unlockedDots} / ${paint.dots}`],
       ['edges', `${paint.unlockedEdges} / ${paint.edges}`],
-      ['touch', `${this.touch.getStats().remembered} pt`],
+      ['touch', `${this.touch.getStats().remembered} pt · ${this.touch.getStats().segments} ends`],
       ['props', props === null ? 'off' : `${props.awake} awake / ${props.bodies - props.awake} asleep · ${props.stepMs.toFixed(2)} ms`],
       ['prop pts', dyn === null ? '-' : `${dyn.revealed} / ${dyn.points}`],
       ['marks', `${marks.alive} live · ${this.eventRate.toFixed(1)} ev/s`],
@@ -505,6 +505,9 @@ class App {
 
   clearMap(): void {
     this.paint.clear();
+    // The props hold their own mask, so forgetting the map has to forget them too — otherwise
+    // "clear" leaves a hall full of remembered barrels, which is law 1 with extra steps.
+    this.dyn?.clear();
     this.touch.clear();
     this.markers.clear();
   }

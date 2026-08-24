@@ -67,6 +67,19 @@ export interface PropTunables {
   /** Minimum seconds between two sound events from the same body. A tumbling can is one voice. */
   perBodyGap: number;
   /**
+   * How much of a body's own weight a contact has to exceed before it counts as an impact.
+   * A prop standing on the floor pushes back with mg for ever, and mg for a barrel is several
+   * hundred newtons — far above any absolute threshold — so the hall used to hum with a
+   * permanent fog of "impacts" from things that were doing nothing at all.
+   */
+  weightSlack: number;
+  /**
+   * Metres per second the body must have been moving on the previous tick for a contact to be a
+   * collision. The solver has already killed the velocity by the time the force event is read,
+   * so the speed is remembered one tick back.
+   */
+  impactSpeed: number;
+  /**
    * How many props the hall gets. The concept wants a *lot* of junk, and the ceiling on that is
    * not physics — Rapier sleeps everything that is not moving — but the lidar mask: every prop
    * carries a few hundred points, and those points are uploaded, aged and drawn. See the report
@@ -76,7 +89,16 @@ export interface PropTunables {
 }
 
 export function defaultPropTunables(): PropTunables {
-  return { hz: 60, quietForce: 90, forcePerMetre: 26, maxLoudness: 34, perBodyGap: 0.055, cap: 1100 };
+  return {
+    hz: 60,
+    quietForce: 90,
+    forcePerMetre: 26,
+    maxLoudness: 34,
+    perBodyGap: 0.055,
+    weightSlack: 1.5,
+    impactSpeed: 0.22,
+    cap: 1100,
+  };
 }
 
 export interface PropStats {
@@ -85,6 +107,8 @@ export interface PropStats {
   asleep: number;
   /** Sound events emitted by props since the start. */
   impacts: number;
+  /** Props caught falling out of the world and put back where the layout meant them to be. */
+  rescued: number;
   stepMs: number;
   points: number;
 }
@@ -112,11 +136,17 @@ export class PropWorld {
   private readonly bodies: RAPIER.RigidBody[] = [];
   private readonly byCollider = new Map<number, number>();
   private readonly lastSound: Float32Array;
+  /** Speed on the previous tick, and the body's own weight in newtons — the two impact gates. */
+  private readonly prevSpeed: Float32Array;
+  private readonly weight: Float32Array;
+  /** Where each prop was laid out, so one that falls out of the world can be put back. */
+  private readonly spawn: Float32Array;
+  private readonly spawnRot: Float32Array;
   private player: RAPIER.RigidBody | null = null;
   private rifle: RAPIER.RigidBody | null = null;
   private accumulator = 0;
   private time = 0;
-  private stats: PropStats = { bodies: 0, awake: 0, asleep: 0, impacts: 0, stepMs: 0, points: 0 };
+  private stats: PropStats = { bodies: 0, awake: 0, asleep: 0, impacts: 0, rescued: 0, stepMs: 0, points: 0 };
   private readonly vec: RAPIER.Vector3;
 
   constructor(
@@ -135,6 +165,23 @@ export class PropWorld {
     for (const a of ARCHETYPES) {
       this.clouds.push(sampleShape(a.parts, a.pitch, 0x9e37 + a.name.length));
       this.edges.push(shapeEdges(a.parts));
+    }
+
+    /*
+     * The ground. The hall has no floor *box* — the player's collider treats y = 0 as ground
+     * implicitly — so Rapier had nothing under the open floor at all, and every prop that was
+     * not standing on a shelf fell for ever. One fifth of the clutter was several hundred metres
+     * below the hall and still accelerating, which is also where the permanent fog of sound
+     * markers came from: a body in free fall never sleeps.
+     */
+    {
+      let half = 40;
+      for (const b of statics.boxes) {
+        half = Math.max(half, Math.abs(b.minX), Math.abs(b.maxX), Math.abs(b.minZ), Math.abs(b.maxZ));
+      }
+      half += 20;
+      const ground = this.world.createRigidBody(R.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0));
+      this.world.createCollider(R.ColliderDesc.cuboid(half, 0.5, half).setFriction(0.8), ground);
     }
 
     // --- static: the same boxes the player already collides with ----------
@@ -157,11 +204,22 @@ export class PropWorld {
     this.moving = new Uint8Array(this.count);
     this.settleAt = new Float32Array(this.count);
     this.lastSound = new Float32Array(this.count);
+    this.prevSpeed = new Float32Array(this.count);
+    this.weight = new Float32Array(this.count);
+    this.spawn = new Float32Array(this.count * 3);
+    this.spawnRot = new Float32Array(this.count * 4);
     let points = 0;
 
     for (let i = 0; i < spots.length; i++) {
       const s = spots[i]!;
       this.arch[i] = s.arch;
+      this.spawn[i * 3] = s.x;
+      this.spawn[i * 3 + 1] = s.y;
+      this.spawn[i * 3 + 2] = s.z;
+      this.spawnRot[i * 4] = s.rot.x;
+      this.spawnRot[i * 4 + 1] = s.rot.y;
+      this.spawnRot[i * 4 + 2] = s.rot.z;
+      this.spawnRot[i * 4 + 3] = s.rot.w;
       points += this.clouds[s.arch]!.count;
       const a = ARCHETYPES[s.arch]!;
       const mat = MATERIALS[a.material];
@@ -169,8 +227,11 @@ export class PropWorld {
         R.RigidBodyDesc.dynamic()
           .setTranslation(s.x, s.y, s.z)
           .setRotation(s.rot)
-          .setLinearDamping(0.08)
-          .setAngularDamping(0.22),
+          // Enough damping that a bottle knocked over rolls a metre and stops, instead of
+          // rolling for the rest of the session: an awake body is solver time, mask expiry and
+          // an ear-catching event, all for a bottle nobody is looking at.
+          .setLinearDamping(0.22)
+          .setAngularDamping(0.85),
       );
       for (const part of a.parts) {
         let desc: RAPIER.ColliderDesc;
@@ -194,6 +255,8 @@ export class PropWorld {
         );
       }
       this.bodies.push(body);
+      // Weight in newtons, cached once: the contact that merely holds this thing up is not sound.
+      this.weight[i] = body.mass() * 9.81;
       for (let c = 0; c < body.numColliders(); c++) {
         this.byCollider.set(body.collider(c).handle, i);
       }
@@ -271,6 +334,9 @@ export class PropWorld {
     this.accumulator += dt;
     let steps = 0;
     while (this.accumulator >= h && steps < 4) {
+      // Speed *before* the solve. Afterwards an impact and a resting body look identical: the
+      // solver has taken the velocity away in both cases, which is what an impact is.
+      this.rememberSpeeds();
       this.world.step(this.queue);
       this.accumulator -= h;
       steps++;
@@ -278,6 +344,57 @@ export class PropWorld {
     }
     if (steps > 0) this.readBack();
     this.stats.stepMs = performance.now() - t0;
+  }
+
+  /**
+   * One pass over the awake bodies: remembers the pre-solve speed, and puts to sleep anything
+   * that has stopped moving in any way that matters.
+   *
+   * Sleep is architecture here, not an optimisation — a sleeping prop costs no solver time, no
+   * mask expiry and no sound. But a quarter of a thousand-prop pile never reached Rapier's own
+   * sleep threshold: junk leaning on junk keeps trading millimetres for ever, which showed up
+   * as a permanent fog of sound markers over a hall where nothing was happening. Half a second
+   * under six centimetres a second is not motion, whatever the solver still has to say about it.
+   */
+  private rememberSpeeds(): void {
+    for (let i = 0; i < this.count; i++) {
+      const b = this.bodies[i]!;
+      /*
+       * Rescue. A prop that spawns interpenetrating a rack can be ejected downwards hard enough
+       * to end up *inside* the ground slab, and a body fully buried in a big convex shape stops
+       * generating contacts with it — so it falls for ever, awake for ever, chirping for ever.
+       * A tenth of the clutter did exactly that. Put it back where the layout meant it to be,
+       * still, and asleep: if it lands badly a second time it lands badly asleep, which is
+       * invisible and free, and anything that touches it later wakes it normally.
+       */
+      if (b.translation().y < -0.4) {
+        this.vec.x = this.spawn[i * 3]!;
+        this.vec.y = this.spawn[i * 3 + 1]!;
+        this.vec.z = this.spawn[i * 3 + 2]!;
+        b.setTranslation(this.vec, false);
+        b.setRotation(
+          {
+            x: this.spawnRot[i * 4]!,
+            y: this.spawnRot[i * 4 + 1]!,
+            z: this.spawnRot[i * 4 + 2]!,
+            w: this.spawnRot[i * 4 + 3]!,
+          },
+          false,
+        );
+        b.setLinvel({ x: 0, y: 0, z: 0 }, false);
+        b.setAngvel({ x: 0, y: 0, z: 0 }, false);
+        b.sleep();
+        this.prevSpeed[i] = 0;
+        this.stats.rescued++;
+        continue;
+      }
+      if (b.isSleeping()) {
+        this.prevSpeed[i] = 0;
+        continue;
+      }
+      const v = b.linvel();
+      this.prevSpeed[i] = Math.hypot(v.x, v.y, v.z);
+    }
   }
 
   /** Contact forces -> loudness in metres -> the one bus. This is the whole "sound from physics". */
@@ -288,6 +405,21 @@ export class PropWorld {
       if (force < t.quietForce) return;
       const i = this.byCollider.get(e.collider1()) ?? this.byCollider.get(e.collider2());
       if (i === undefined) return;
+      /*
+       * Two gates, and both of them exist because of one frame: with an absolute force threshold
+       * alone the whole hall drew a permanent fog of sound markers over a thousand props that
+       * were standing perfectly still. A resting body's contact carries its own weight for ever,
+       * and a barrel weighs far more newtons than any threshold worth setting for a dropped can.
+       *
+       *   - the contact has to exceed the body's own weight by a margin, so support is not sound;
+       *   - the body has to have been moving a tick ago, so only a *collision* speaks.
+       *
+       * The floor of the loudness scale then subtracts the weight too: what is heard is the part
+       * of the force that the fall put there, not the part gravity was always paying.
+       */
+      const floor = t.quietForce + this.weight[i]! * t.weightSlack;
+      if (force < floor) return;
+      if (this.prevSpeed[i]! < t.impactSpeed) return;
       if (this.time - this.lastSound[i]! < t.perBodyGap) return;
       this.lastSound[i] = this.time;
       const mat = MATERIALS[ARCHETYPES[this.arch[i]!]!.material];
@@ -295,7 +427,7 @@ export class PropWorld {
       // the ear is not linear in energy and neither is a spider's attention.
       const loud = Math.min(
         t.maxLoudness,
-        Math.sqrt((force - t.quietForce) / t.forcePerMetre) * 4.2 * mat.gain,
+        Math.sqrt((force - floor) / t.forcePerMetre) * 4.2 * mat.gain,
       );
       if (loud < 0.6) return;
       const body = this.bodies[i]!;
