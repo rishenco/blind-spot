@@ -258,6 +258,29 @@ check('the rest of the field stays unknown', fieldHit.touched < fieldHit.dots * 
 const feelHue = hueFamilies(t1, whole(t1));
 check('touch draws grey, not lidar cyan', feelHue.coolFraction < 0.35,
   `cool ${(feelHue.coolFraction * 100).toFixed(0)}% of ${feelHue.lit} lit pixels`);
+
+// --- 06 lidar outranks the hand on the points they share -------------------
+// Identical pose, identical aim, one ping later: the only honest way to show a recolouring is
+// to shoot the same patch twice. The stack the hand drew in grey comes back in lidar cyan,
+// and the floor and neighbours the hand could never reach arrive with it.
+const HAND = [-15.0, -0.1, -12.0, -12.6, 2.0, -9.6];
+const greyBefore = await call('region', HAND);
+await call('refill');
+await ping();
+await advance(1.0, 4);
+const mixed = await call('region', HAND);
+const t2 = await shot('06-clutter-then-lidar.png', 'the same crouch, same aim, one ping later: the crates the hand had drawn in grey are redrawn in lidar cyan, and the floor around them arrives with them');
+check('the ping lands on ground the hand already knew',
+  greyBefore.touched > 0 && mixed.unlocked > greyBefore.touched * 0.3,
+  `${greyBefore.touched} felt, ${mixed.unlocked} of them now scanned`);
+// Touch is strictly neutral grey and the lidar's matter palette is strictly cyan-family, so a
+// cool pixel where there was none is the recolouring, measured rather than asserted by eye.
+const mixedHue = hueFamilies(t2, whole(t2));
+check('the shared points are redrawn in the lidar colours',
+  mixedHue.cool > 50 && feelHue.cool * 4 < mixedHue.cool,
+  `cool pixels ${feelHue.cool} felt -> ${mixedHue.cool} scanned`);
+check('the ping shows what the hand never could', mixed.unlocked * 4 < (await stats()).paint.unlockedDots,
+  `${greyBefore.touched} points by hand vs ${(await stats()).paint.unlockedDots} by one ping`);
 await call('keys', [], ['KeyC']);
 
 // A flat wall answers the hand exactly like a prop does — numeric check, no frame: the picture
@@ -271,7 +294,7 @@ const wallFar = await call('region', [-34.1, -0.1, -24.6, wallEye[0] - 1.5, 9.1,
 check('a flat wall answers the hand', wallHit.touched > 0, `${wallHit.touched} wall points felt`);
 check('the rest of the wall does not', wallFar.touched === 0, '0 points felt more than 1.5 m along the wall');
 
-// --- 06 a knee-high crate can be felt --------------------------------------
+// --- 07 a knee-high crate can be felt --------------------------------------
 // The bug this proves: the reach used to be a sphere around the eye, so with a 0.35 m body
 // radius nothing below y ~ 1.2 m was reachable and small clutter was literally unfeelable.
 // Crouched, one hand on a lone 0.55 x 0.69 x 0.97 m crate on the open north-east floor.
@@ -284,34 +307,12 @@ await call('aim', 0, -45);
 await advance(0.2, 2);
 const crateStats = await stats();
 const crateHit = await call('region', [CRATE[0] - 0.1, -0.1, CRATE[2] - 0.1, CRATE[3] + 0.1, CRATE[4] + 0.1, CRATE[5] + 0.1]);
-const t2 = await shot('06-touch-crate.png', 'crouched with a hand on a knee-high crate alone on an empty floor: its top edge and corners come back, the far side does not — small clutter used to return nothing at all');
+const t3 = await shot('07-touch-crate.png', 'crouched with a hand on a knee-high crate alone on an empty floor: its top edge and corners come back, the far side does not — small clutter used to return nothing at all');
 check('a small crate can be felt', crateHit.touched > 12,
   `${crateHit.touched} of ${crateHit.dots} mask points on a 0.55x0.69x0.97 m crate`);
 check('the crate frame is touch only', crateStats.paint.unlockedDots === 0,
   `${crateStats.paint.unlockedDots} dots unlocked by lidar`);
 await call('keys', [], ['KeyC']);
-
-// --- 07 lidar outranks the hand on the points they share -------------------
-await call('clear');
-await call('pose', 23.75, -14.2, 90);
-await advance(0.6, 3);
-const eye = (await stats()).eye;
-const HAND = [eye[0] - 1.2, eye[1] - 1.9, eye[2] - 1.2, eye[0] + 1.2, eye[1] + 1.2, eye[2] + 1.2];
-const greyBefore = await call('region', HAND);
-await call('refill');
-await ping();
-await advance(1.2, 4);
-const mixed = await call('region', HAND);
-const t3 = await shot('07-touch-then-lidar.png', 'a patch of the big rack felt by hand, then a ping over it: the shared points flip from grey to lidar cyan, and the rest of the run appears with them');
-check('the ping lands on ground the hand already knew',
-  greyBefore.touched > 0 && mixed.unlocked >= greyBefore.touched,
-  `${greyBefore.touched} felt, ${mixed.unlocked} of them now scanned`);
-// Touch is strictly neutral grey and the lidar's matter palette is strictly cyan-family, so a
-// cool pixel where there was none is the recolouring, measured rather than asserted by eye.
-const mixedHue = hueFamilies(t3, whole(t3));
-check('the shared points are redrawn in the lidar colours',
-  mixedHue.cool > 50 && feelHue.cool * 4 < mixedHue.cool,
-  `cool pixels ${feelHue.cool} felt -> ${mixedHue.cool} scanned`);
 
 // --- 08 the cone clips one end of a 24 m run -------------------------------
 // The east rack is a single box 24 m long (x 22..23.4, z -18..6). Before the shared mask,
