@@ -30,7 +30,15 @@ import type RAPIER from '@dimforge/rapier3d-compat';
 import { StaticWorld, canOccupy, highestTopUnder, type Aabb } from '../core/collision';
 import { makeRng, range, rangeInt, type Rng } from '../core/rng';
 import type { SoundBus } from '../events/bus';
-import { ARCHETYPES, MATERIALS, sampleShape, type PointCloud } from './shapes';
+import {
+  ARCHETYPES,
+  MATERIALS,
+  sampleShape,
+  shapeEdges,
+  shapeSpan,
+  type EdgeSet,
+  type PointCloud,
+} from './shapes';
 
 export type Rapier = typeof RAPIER;
 
@@ -94,6 +102,8 @@ export class PropWorld {
   /** Scene time the body last fell asleep. Reveal fade is written against this (see dynamic.ts). */
   readonly settleAt: Float32Array;
   readonly clouds: PointCloud[] = [];
+  /** Per archetype, the contour of the shape — what actually makes it recognisable. */
+  readonly edges: EdgeSet[] = [];
 
   readonly count: number;
 
@@ -122,7 +132,10 @@ export class PropWorld {
     this.queue = new R.EventQueue(true);
     this.vec = { x: 0, y: 0, z: 0 };
 
-    for (const a of ARCHETYPES) this.clouds.push(sampleShape(a.parts, a.pitch, 0x9e37 + a.name.length));
+    for (const a of ARCHETYPES) {
+      this.clouds.push(sampleShape(a.parts, a.pitch, 0x9e37 + a.name.length));
+      this.edges.push(shapeEdges(a.parts));
+    }
 
     // --- static: the same boxes the player already collides with ----------
     for (const b of statics.boxes) {
@@ -198,6 +211,11 @@ export class PropWorld {
   /** Local point cloud of prop `i`. */
   cloudOf(i: number): PointCloud {
     return this.clouds[this.arch[i]!]!;
+  }
+
+  /** Local contour of prop `i`. */
+  edgesOf(i: number): EdgeSet {
+    return this.edges[this.arch[i]!]!;
   }
 
   /**
@@ -396,8 +414,11 @@ function layout(statics: StaticWorld, seed: number, cap: number): Spot[] {
   const scratch: Aabb[] = [];
   const taken: Array<[number, number, number]> = [];
 
-  const small = ARCHETYPES.map((a, i) => ({ a, i })).filter(({ a }) => a.pitch <= 0.034);
-  const large = ARCHETYPES.map((a, i) => ({ a, i })).filter(({ a }) => a.pitch > 0.034);
+  // Size class, by the thing's actual size — not by its point pitch, which is a rendering
+  // decision and drifted the moment the clouds were re-tuned for readability.
+  const tall = ARCHETYPES.map((a, i) => ({ a, i, span: shapeSpan(a.parts) }));
+  const small = tall.filter((e) => e.span <= 0.42).map(({ a, i }) => ({ a, i }));
+  const large = tall.filter((e) => e.span > 0.42).map(({ a, i }) => ({ a, i }));
 
   const weighted = (list: typeof small, r: Rng): number => {
     let total = 0;

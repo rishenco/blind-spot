@@ -41,6 +41,7 @@ import {
   NEVER,
   RAMP_GLSL,
   RING_GLSL,
+  SHADE_GLSL,
   TOUCH_GREY,
   WAVE_GLSL,
   rawColor,
@@ -95,6 +96,8 @@ const VERTEX = /* glsl */ `
    * square metre* as the floor it stands on, and lets the shape read.
    */
   attribute float aScale;
+  /** The point's normal in the body's own frame — rotated to world with the body. */
+  attribute vec3  aNormal;
 
   varying vec3  vColor;
   varying float vAlpha;
@@ -103,6 +106,7 @@ const VERTEX = /* glsl */ `
   ${RAMP_GLSL}
   ${RING_GLSL}
   ${WAVE_GLSL}
+  ${SHADE_GLSL}
 
   vec4 bodyTexel(float body, float slot) {
     float idx = body * ${TEXELS}.0 + slot;
@@ -223,8 +227,20 @@ const VERTEX = /* glsl */ `
     px = clamp(px, 1.0, 14.0);
     float coverage = min(1.0, (want * want) / (px * px));
 
+    // The same readability pass as the hall's mask (SHADE_GLSL), and it matters far more here:
+    // this is what stops a barrel from being a grey smudge on a grey floor.
+    vec3 nWorld = qrot(t1, aNormal);
+    float f = faceToEye(p, nWorld);
+    if (f < -0.22 && hot < 0.01) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      gl_PointSize = 0.0;
+      return;
+    }
+    float shade = mix(facingGain(f) * depthCue(depth, uWindowRadius), 1.0, hot);
+    col *= mix(faceTint(nWorld), vec3(1.0), hot);
+
     vColor = col * uDotBright * coverage * (1.0 + hot * uProbeBright) * (0.88 + 0.24 * aSeed)
-      * appear * fade;
+      * appear * fade * shade;
     vAlpha = alpha;
     vSoft = mix(uDotSoft, uProbeSoft, hot);
     gl_PointSize = px;
@@ -246,6 +262,94 @@ const FRAGMENT = /* glsl */ `
   }
 `;
 
+/**
+ * The prop contour — the line pass that turns a hundred correct dots into a barrel.
+ *
+ * One birth stamp per *body*, not per vertex: a contour is the shape's outline, and an outline of
+ * half a barrel is not a fact anyone can use. The stamp rides in the body texture that is uploaded
+ * every frame anyway, so the whole pass costs one draw call and no extra bandwidth. Fading the
+ * half of a ring that faces away is what keeps a cylinder from reading as a wire cage — and it is
+ * per-vertex arithmetic, no raycast.
+ */
+const EDGE_VERTEX = /* glsl */ `
+  uniform float uTime;
+  uniform float uWindowRadius;
+  uniform float uBright;
+  uniform float uDecaySeconds;
+  uniform vec3  uListener;
+  uniform sampler2D uBodies;
+  uniform vec2  uBodyTex;
+
+  attribute float aBody;
+  attribute vec3  aNormal;
+  /** Scales a small object's contour down, so a jar does not shout as loudly as a barrel. */
+  attribute float aWeight;
+
+  varying vec3  vColor;
+  varying float vAlpha;
+
+  ${RAMP_GLSL}
+  ${SHADE_GLSL}
+
+  vec4 bodyTexel(float body, float slot) {
+    float idx = body * ${TEXELS}.0 + slot;
+    float col = mod(idx, uBodyTex.x);
+    float row = floor(idx / uBodyTex.x);
+    return texture2D(uBodies, vec2((col + 0.5) / uBodyTex.x, (row + 0.5) / uBodyTex.y));
+  }
+
+  vec3 qrot(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+  }
+
+  void main() {
+    vColor = vec3(0.0);
+    vAlpha = 0.0;
+
+    vec4 t0 = bodyTexel(aBody, 0.0);
+    vec4 t1 = bodyTexel(aBody, 1.0);
+    vec4 t2 = bodyTexel(aBody, 2.0);
+    float birth = t2.z;
+    vec3 world = qrot(t1, position) + t0.xyz;
+
+    if (birth <= -1.0e8 || distance(world, uListener) > uWindowRadius) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      return;
+    }
+    float permanent = (t2.y < 0.5 && birth >= t2.x) ? 1.0 : 0.0;
+    float age = uTime - birth;
+    if (age < 0.0) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      return;
+    }
+    float fade = mix(1.0 - clamp(age / max(0.2, uDecaySeconds), 0.0, 1.0), 1.0, permanent);
+
+    vec3 col;
+    float alpha;
+    ageRamp(age, col, alpha);
+
+    vec3 n = qrot(t1, aNormal);
+    vec4 mv = modelViewMatrix * vec4(world, 1.0);
+    float depth = max(0.001, -mv.z);
+    float f = faceToEye(world, n);
+    vColor = col * uBright * aWeight * facingGain(f) * depthCue(depth, uWindowRadius) * fade;
+    // Past the silhouette the line is gone rather than dim: a ring that wrapped all the way round
+    // reads as a cage, and a cage is the one thing a pile of clutter must not look like.
+    vAlpha = alpha * smoothstep(-0.18, 0.06, f);
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+
+const EDGE_FRAGMENT = /* glsl */ `
+  precision highp float;
+  varying vec3  vColor;
+  varying float vAlpha;
+  void main() {
+    if (vAlpha <= 0.01) discard;
+    gl_FragColor = vec4(vColor, vAlpha);
+  }
+`;
+
 export interface DynamicStats {
   /** Mask points across all props. */
   points: number;
@@ -257,6 +361,8 @@ export interface DynamicStats {
   pending: number;
   /** Points garbage-collected because the thing they were on moved. */
   forgotten: number;
+  /** Contour segments across all props — one draw call, drawn only where a body is revealed. */
+  segments: number;
   unlockMs: number;
 }
 
@@ -381,6 +487,12 @@ export class DynamicPaint {
   private readonly geometry = new THREE.BufferGeometry();
   private readonly material: THREE.ShaderMaterial;
   private readonly points: THREE.Points;
+  private readonly edgeGeometry = new THREE.BufferGeometry();
+  private readonly edgeMaterial: THREE.ShaderMaterial;
+  private readonly lines: THREE.LineSegments;
+  private readonly group = new THREE.Group();
+  /** Per body: when its contour was first drawn. Lives in the body texture, texel 2 z. */
+  private readonly contourBirth: Float32Array;
 
   /** Per-point: which body, local position, outward normal (CPU only), stamps (GPU). */
   private readonly bodyOf: Int32Array;
@@ -404,7 +516,7 @@ export class DynamicPaint {
   private readonly gcAt: Float32Array;
   private readonly grid: RayGrid;
   private stats: DynamicStats = {
-    points: 0, revealed: 0, tested: 0, pending: 0, forgotten: 0, unlockMs: 0,
+    points: 0, revealed: 0, tested: 0, pending: 0, forgotten: 0, segments: 0, unlockMs: 0,
   };
 
   /** How long a sighting of something in motion survives, seconds. */
@@ -456,6 +568,44 @@ export class DynamicPaint {
     }
     this.stats.points = total;
 
+    /*
+     * The contour buffer. Built flat, once, exactly like the points: a body's outline never
+     * changes in its own frame either. Small things get a dimmer line — a floor of jars each
+     * shouting as loudly as a barrel is the "каша из линий" this pass exists to avoid.
+     */
+    this.contourBirth = new Float32Array(n).fill(NEVER);
+    let segs = 0;
+    for (let i = 0; i < n; i++) segs += props.edgesOf(i).segments;
+    const epos = new Float32Array(segs * 6);
+    const enrm = new Float32Array(segs * 6);
+    const ebody = new Float32Array(segs * 2);
+    const eweight = new Float32Array(segs * 2);
+    let eAt = 0;
+    for (let i = 0; i < n; i++) {
+      const e = props.edgesOf(i);
+      const span = props.cloudOf(i).radius;
+      const weight = 0.4 + 0.6 * Math.min(1, span / 0.45);
+      for (let k = 0; k < e.segments * 2; k++) {
+        epos[(eAt + k) * 3] = e.pos[k * 3]!;
+        epos[(eAt + k) * 3 + 1] = e.pos[k * 3 + 1]!;
+        epos[(eAt + k) * 3 + 2] = e.pos[k * 3 + 2]!;
+        enrm[(eAt + k) * 3] = e.nrm[k * 3]!;
+        enrm[(eAt + k) * 3 + 1] = e.nrm[k * 3 + 1]!;
+        enrm[(eAt + k) * 3 + 2] = e.nrm[k * 3 + 2]!;
+        ebody[eAt + k] = i;
+        eweight[eAt + k] = weight;
+      }
+      eAt += e.segments * 2;
+    }
+    this.stats.segments = segs;
+    const eg = this.edgeGeometry;
+    eg.setAttribute('position', new THREE.BufferAttribute(epos, 3));
+    eg.setAttribute('aNormal', new THREE.BufferAttribute(enrm, 3));
+    eg.setAttribute('aBody', new THREE.BufferAttribute(ebody, 1));
+    eg.setAttribute('aWeight', new THREE.BufferAttribute(eweight, 1));
+    eg.setDrawRange(0, segs * 2);
+    eg.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
+
     const rows = Math.max(1, Math.ceil((n * TEXELS) / TEX_W));
     this.texData = new Float32Array(TEX_W * rows * 4);
     this.tex = new THREE.DataTexture(this.texData, TEX_W, rows, THREE.RGBAFormat, THREE.FloatType);
@@ -471,6 +621,7 @@ export class DynamicPaint {
     g.setAttribute('aWave', new THREE.BufferAttribute(this.wave, 1));
     g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
     g.setAttribute('aScale', new THREE.BufferAttribute(scale, 1));
+    g.setAttribute('aNormal', new THREE.BufferAttribute(this.normal, 3));
     g.setDrawRange(0, total);
     g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
 
@@ -517,18 +668,45 @@ export class DynamicPaint {
       blending: THREE.AdditiveBlending,
     });
 
+    this.edgeMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uWindowRadius: { value: 45 },
+        uBright: { value: tunables.contourBright * 0.62 },
+        uDecaySeconds: { value: this.decaySeconds },
+        uListener: { value: new THREE.Vector3() },
+        uRampTimes: { value: new THREE.Vector3(ramp.freshSeconds, ramp.coolSeconds, ramp.coldSeconds) },
+        uSkeletonAlpha: { value: ramp.skeletonAlpha },
+        uFresh: { value: rawColor(0xeaffff) },
+        uMid: { value: rawColor(0x28c8e6) },
+        uCold: { value: rawColor(0x16536e) },
+        uBodies: { value: this.tex },
+        uBodyTex: { value: new THREE.Vector2(TEX_W, rows) },
+      },
+      vertexShader: EDGE_VERTEX,
+      fragmentShader: EDGE_FRAGMENT,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+
     this.points = new THREE.Points(this.geometry, this.material);
     this.points.frustumCulled = false;
     this.points.renderOrder = 1;
-    this.points.visible = false;
+    this.lines = new THREE.LineSegments(this.edgeGeometry, this.edgeMaterial);
+    this.lines.frustumCulled = false;
+    this.lines.renderOrder = 2;
+    this.group.add(this.points, this.lines);
+    this.group.visible = false;
   }
 
   get object(): THREE.Object3D {
-    return this.points;
+    return this.group;
   }
 
   setActive(on: boolean): void {
-    this.points.visible = on;
+    this.group.visible = on;
   }
 
   getStats(): DynamicStats {
@@ -538,6 +716,7 @@ export class DynamicPaint {
 
   setListener(x: number, y: number, z: number): void {
     (this.material.uniforms.uListener!.value as THREE.Vector3).set(x, y, z);
+    (this.edgeMaterial.uniforms.uListener!.value as THREE.Vector3).set(x, y, z);
   }
 
   setProjScale(v: number): void {
@@ -545,6 +724,7 @@ export class DynamicPaint {
   }
 
   setWindow(radius: number, refreshSeconds: number): void {
+    this.edgeMaterial.uniforms.uWindowRadius!.value = radius;
     this.material.uniforms.uWindowRadius!.value = radius;
     this.material.uniforms.uRefreshSeconds!.value = refreshSeconds;
   }
@@ -562,6 +742,7 @@ export class DynamicPaint {
 
   /** Wipes every stamp. The debug "forget the map" key, and nothing else. */
   clear(): void {
+    this.contourBirth.fill(NEVER);
     this.birth.fill(NEVER);
     this.prior.fill(NEVER);
     this.liveCount.fill(0);
@@ -580,6 +761,8 @@ export class DynamicPaint {
     this.time = now;
     this.material.uniforms.uTime!.value = now;
     this.material.uniforms.uDecaySeconds!.value = this.decaySeconds;
+    this.edgeMaterial.uniforms.uTime!.value = now;
+    this.edgeMaterial.uniforms.uDecaySeconds!.value = this.decaySeconds;
     const p = this.props;
     const d = this.texData;
     for (let i = 0; i < p.count; i++) {
@@ -594,6 +777,7 @@ export class DynamicPaint {
       d[o + 7] = p.quat[i * 4 + 3]!;
       d[o + 8] = p.settleAt[i]!;
       d[o + 9] = p.moving[i]!;
+      d[o + 10] = this.contourBirth[i]!;
       // Anything not permanent has an expiry; run the sweep once, a moment after it is invisible.
       if (this.liveCount[i]! > 0 && (p.moving[i] === 1 || this.gcAt[i]! < Infinity)) {
         if (p.moving[i] === 1) this.gcAt[i] = now + this.decaySeconds + 0.2;
@@ -628,6 +812,9 @@ export class DynamicPaint {
     }
     this.liveCount[i] = live;
     this.gcAt[i] = Infinity;
+    // The outline goes with the points: a body that moved is no longer where its contour says.
+    if (live === 0) this.contourBirth[i] = NEVER;
+    else if (this.contourBirth[i]! < settle) this.contourBirth[i] = settle;
   }
 
   // -- reveal ---------------------------------------------------------------
@@ -740,6 +927,11 @@ export class DynamicPaint {
       touched = true;
     }
     if (!touched) return;
+    // The contour is stamped once per body, at the arrival time at its centre: an outline is a
+    // statement about the whole shape, so half of one would be a lie either way.
+    const cd = Math.hypot(job.ox - px, job.oy - py, job.oz - pz);
+    const at = job.t0 + cd / job.speed;
+    if (this.contourBirth[i]! <= NEVER * 0.5 || at < this.contourBirth[i]!) this.contourBirth[i] = at;
     this.stats.revealed += live - this.liveCount[i]!;
     this.liveCount[i] = live;
     this.mark(from, to - 1);

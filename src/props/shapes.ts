@@ -83,35 +83,35 @@ const box = (cy: number, hx: number, hy: number, hz: number, cx = 0, cz = 0): Pa
  */
 export const ARCHETYPES: readonly Archetype[] = [
   {
-    name: 'bottle', pitch: 0.026, material: 'glass', rest: 'any', weight: 1.0,
+    name: 'bottle', pitch: 0.047, material: 'glass', rest: 'any', weight: 1.0,
     parts: [cyl(0, 0.19, 0.038), cyl(0.19, 0.255, 0.038, 0.017), cyl(0.255, 0.305, 0.017), cyl(0.305, 0.322, 0.02)],
   },
   {
-    name: 'flask', pitch: 0.026, material: 'glass', rest: 'up', weight: 0.55,
+    name: 'flask', pitch: 0.047, material: 'glass', rest: 'up', weight: 0.55,
     parts: [cyl(0, 0.022, 0.055), { kind: 'ball', cy: 0.095, r: 0.088 }, cyl(0.17, 0.235, 0.022), cyl(0.235, 0.25, 0.029)],
   },
   {
-    name: 'jar', pitch: 0.026, material: 'glass', rest: 'up', weight: 0.7,
+    name: 'jar', pitch: 0.047, material: 'glass', rest: 'up', weight: 0.7,
     parts: [cyl(0, 0.128, 0.056), cyl(0.128, 0.152, 0.056, 0.04), cyl(0.152, 0.17, 0.043)],
   },
   {
-    name: 'can', pitch: 0.022, material: 'tin', rest: 'any', weight: 1.3,
+    name: 'can', pitch: 0.040, material: 'tin', rest: 'any', weight: 1.3,
     parts: [cyl(0, 0.012, 0.035), cyl(0.012, 0.102, 0.033), cyl(0.102, 0.114, 0.035)],
   },
   {
-    name: 'paint-tin', pitch: 0.03, material: 'tin', rest: 'up', weight: 0.7,
+    name: 'paint-tin', pitch: 0.054, material: 'tin', rest: 'up', weight: 0.7,
     parts: [cyl(0, 0.18, 0.125), cyl(0.18, 0.196, 0.132)],
   },
   {
-    name: 'canister', pitch: 0.034, material: 'plastic', rest: 'up', weight: 0.8,
+    name: 'canister', pitch: 0.061, material: 'plastic', rest: 'up', weight: 0.8,
     parts: [box(0.17, 0.115, 0.17, 0.075), box(0.375, 0.05, 0.035, 0.05), cyl(0.41, 0.455, 0.023)],
   },
   {
-    name: 'bucket', pitch: 0.036, material: 'plastic', rest: 'any', weight: 0.9,
+    name: 'bucket', pitch: 0.065, material: 'plastic', rest: 'any', weight: 0.9,
     parts: [cyl(0, 0.3, 0.13, 0.19), cyl(0.3, 0.325, 0.2)],
   },
   {
-    name: 'barrel', pitch: 0.06, material: 'steel', rest: 'up', weight: 0.75,
+    name: 'barrel', pitch: 0.108, material: 'steel', rest: 'up', weight: 0.75,
     parts: [
       cyl(0, 0.1, 0.265, 0.295), cyl(0.1, 0.24, 0.295), cyl(0.24, 0.3, 0.315),
       cyl(0.3, 0.56, 0.295), cyl(0.56, 0.62, 0.315), cyl(0.62, 0.78, 0.295),
@@ -119,23 +119,23 @@ export const ARCHETYPES: readonly Archetype[] = [
     ],
   },
   {
-    name: 'keg', pitch: 0.05, material: 'steel', rest: 'up', weight: 0.5,
+    name: 'keg', pitch: 0.090, material: 'steel', rest: 'up', weight: 0.5,
     parts: [cyl(0, 0.055, 0.185), cyl(0.055, 0.46, 0.21), cyl(0.46, 0.52, 0.185), cyl(0.52, 0.55, 0.16)],
   },
   {
-    name: 'gas-cylinder', pitch: 0.045, material: 'steel', rest: 'any', weight: 0.5,
+    name: 'gas-cylinder', pitch: 0.081, material: 'steel', rest: 'any', weight: 0.5,
     parts: [cyl(0, 0.98, 0.11), cyl(0.98, 1.1, 0.11, 0.05), cyl(1.1, 1.19, 0.032), cyl(1.19, 1.22, 0.048)],
   },
   {
-    name: 'pipe', pitch: 0.05, material: 'steel', rest: 'lie', weight: 0.8,
+    name: 'pipe', pitch: 0.090, material: 'steel', rest: 'lie', weight: 0.8,
     parts: [cyl(0, 1.75, 0.058)],
   },
   {
-    name: 'spool', pitch: 0.055, material: 'wood', rest: 'lie', weight: 0.45,
+    name: 'spool', pitch: 0.099, material: 'wood', rest: 'lie', weight: 0.45,
     parts: [cyl(0, 0.055, 0.31), cyl(0.055, 0.36, 0.125), cyl(0.36, 0.415, 0.31)],
   },
   {
-    name: 'pallet', pitch: 0.065, material: 'wood', rest: 'up', weight: 0.6,
+    name: 'pallet', pitch: 0.117, material: 'wood', rest: 'up', weight: 0.6,
     parts: [
       box(0.036, 0.055, 0.036, 0.6, -0.53, 0), box(0.036, 0.055, 0.036, 0.6, 0, 0), box(0.036, 0.055, 0.036, 0.6, 0.53, 0),
       box(0.085, 0.6, 0.013, 0.06, 0, -0.54), box(0.085, 0.6, 0.013, 0.06, 0, -0.27),
@@ -143,14 +143,140 @@ export const ARCHETYPES: readonly Archetype[] = [
     ],
   },
   {
-    name: 'crate', pitch: 0.05, material: 'wood', rest: 'up', weight: 1.1,
+    name: 'crate', pitch: 0.090, material: 'wood', rest: 'up', weight: 1.1,
     parts: [box(0.21, 0.26, 0.21, 0.19)],
   },
   {
-    name: 'toolbox', pitch: 0.038, material: 'steel', rest: 'up', weight: 0.55,
+    name: 'toolbox', pitch: 0.068, material: 'steel', rest: 'up', weight: 0.55,
     parts: [box(0.09, 0.21, 0.09, 0.1), box(0.2, 0.04, 0.02, 0.02), box(0.16, 0.02, 0.045, 0.02, -0.11), box(0.16, 0.02, 0.045, 0.02, 0.11)],
   },
 ];
+
+/**
+ * The contour of a shape: the few lines that make it recognisable at a glance.
+ *
+ * The dots alone lost the argument. A barrel sampled at 10 cm is a hundred correct points and no
+ * barrel — the eye reads a speckle, not a body, exactly as the hall's dots read as gravel until
+ * the rack edges were drawn over them. The hall solved this years ago with contour pieces, and
+ * props get the same treatment: rim rings on every cylinder, the twelve edges of every box, three
+ * great circles on a ball.
+ *
+ * Each vertex carries the outward normal of the surface the line rides, so the renderer can fade
+ * the half of a ring that has turned away — which is what turns two full ellipses into the near
+ * arcs that read as a cylinder. Lines whose midpoint is buried inside a sibling primitive are
+ * dropped, so the seam between a barrel's stacked sections does not become a wire cage.
+ */
+export interface EdgeSet {
+  /** Two vertices per segment, xyz. */
+  readonly pos: Float32Array;
+  readonly nrm: Float32Array;
+  readonly segments: number;
+}
+
+export function shapeEdges(parts: readonly Part[]): EdgeSet {
+  const pos: number[] = [];
+  const nrm: number[] = [];
+  const buried = (x: number, y: number, z: number, nx: number, ny: number, nz: number, self: Part): boolean => {
+    for (const other of parts) {
+      if (other === self) continue;
+      if (insidePart(other, x, y, z, 0.004)) return true;
+      if (insidePart(other, x + nx * 0.02, y + ny * 0.02, z + nz * 0.02, 0)) return true;
+    }
+    return false;
+  };
+  const seg = (
+    ax: number, ay: number, az: number, bx: number, by: number, bz: number,
+    nx: number, ny: number, nz: number, self: Part,
+  ): void => {
+    if (buried((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2, nx, ny, nz, self)) return;
+    pos.push(ax, ay, az, bx, by, bz);
+    nrm.push(nx, ny, nz, nx, ny, nz);
+  };
+
+  const ring = (y: number, r: number, self: Part): void => {
+    if (r < 0.012) return;
+    const n = Math.min(20, Math.max(8, Math.round((2 * Math.PI * r) / 0.11)));
+    for (let k = 0; k < n; k++) {
+      const a0 = (k / n) * Math.PI * 2;
+      const a1 = ((k + 1) / n) * Math.PI * 2;
+      const mx = Math.cos((a0 + a1) / 2);
+      const mz = Math.sin((a0 + a1) / 2);
+      seg(Math.cos(a0) * r, y, Math.sin(a0) * r, Math.cos(a1) * r, y, Math.sin(a1) * r, mx, 0, mz, self);
+    }
+  };
+
+  for (const part of parts) {
+    if (part.kind === 'cyl') {
+      ring(part.y0, part.r0, part);
+      ring(part.y1, part.r1 ?? part.r0, part);
+    } else if (part.kind === 'ball') {
+      const n = 16;
+      for (let axis = 0; axis < 3; axis++) {
+        for (let k = 0; k < n; k++) {
+          const a0 = (k / n) * Math.PI * 2;
+          const a1 = ((k + 1) / n) * Math.PI * 2;
+          const pt = (a: number): [number, number, number] => {
+            const c = Math.cos(a) * part.r;
+            const s = Math.sin(a) * part.r;
+            if (axis === 0) return [c, part.cy + s, 0];
+            if (axis === 1) return [c, part.cy, s];
+            return [0, part.cy + c, s];
+          };
+          const A = pt(a0);
+          const B = pt(a1);
+          const mx = (A[0] + B[0]) / 2;
+          const my = (A[1] + B[1]) / 2 - part.cy;
+          const mz = (A[2] + B[2]) / 2;
+          const len = Math.hypot(mx, my, mz) || 1;
+          seg(A[0], A[1], A[2], B[0], B[1], B[2], mx / len, my / len, mz / len, part);
+        }
+      }
+    } else {
+      const c = [part.cx, part.cy, part.cz];
+      const h = [part.hx, part.hy, part.hz];
+      for (let axis = 0; axis < 3; axis++) {
+        const u = (axis + 1) % 3;
+        const v = (axis + 2) % 3;
+        for (const su of [-1, 1]) {
+          for (const sv of [-1, 1]) {
+            const a = [0, 0, 0];
+            const b = [0, 0, 0];
+            const n = [0, 0, 0];
+            a[axis] = c[axis]! - h[axis]!;
+            b[axis] = c[axis]! + h[axis]!;
+            a[u] = b[u] = c[u]! + h[u]! * su;
+            a[v] = b[v] = c[v]! + h[v]! * sv;
+            n[u] = su * Math.SQRT1_2;
+            n[v] = sv * Math.SQRT1_2;
+            seg(a[0]!, a[1]!, a[2]!, b[0]!, b[1]!, b[2]!, n[0]!, n[1]!, n[2]!, part);
+          }
+        }
+      }
+    }
+  }
+  return { pos: new Float32Array(pos), nrm: new Float32Array(nrm), segments: pos.length / 6 };
+}
+
+/** Largest dimension of a shape's bounding box, metres — its size class in one number. */
+export function shapeSpan(parts: readonly Part[]): number {
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  const grow = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void => {
+    minX = Math.min(minX, x0); minY = Math.min(minY, y0); minZ = Math.min(minZ, z0);
+    maxX = Math.max(maxX, x1); maxY = Math.max(maxY, y1); maxZ = Math.max(maxZ, z1);
+  };
+  for (const p of parts) {
+    if (p.kind === 'cyl') {
+      const r = Math.max(p.r0, p.r1 ?? p.r0);
+      grow(-r, p.y0, -r, r, p.y1, r);
+    } else if (p.kind === 'ball') {
+      grow(-p.r, p.cy - p.r, -p.r, p.r, p.cy + p.r, p.r);
+    } else {
+      grow(p.cx - p.hx, p.cy - p.hy, p.cz - p.hz, p.cx + p.hx, p.cy + p.hy, p.cz + p.hz);
+    }
+  }
+  return Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+}
 
 export function archetypeByName(name: string): number {
   return ARCHETYPES.findIndex((a) => a.name === name);

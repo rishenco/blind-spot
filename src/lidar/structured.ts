@@ -260,6 +260,50 @@ export const WAVE_GLSL = /* glsl */ `
   }
 `;
 
+/**
+ * Readability of a fact — the shading every mask point goes through before it is drawn.
+ *
+ * None of this is light. There is no source, no shadow, no falloff off a lamp; the inputs are
+ * (a) which way the surface faces, which the mask has known since it was built, and (b) how far
+ * away it is, which the camera knows for free. Both are properties of a fact the player has
+ * already paid for, so law 1 is untouched: nothing here draws anything that was not scanned.
+ *
+ * It exists because the honest version was unreadable. A floor dot and a dot on a bottle standing
+ * on that floor came out the same grey at the same size, so a pile of clutter rendered as a
+ * uniform speckled fog: plenty of points, no objects. Three cheap terms fix it —
+ *
+ *   facing   the far side of a body is dimmed and, past grazing, dropped. One dot product, no
+ *            raycast. Small props still show through a little, and that is accepted: cheap and
+ *            readable beats exact and grey.
+ *   tint     a vertical wall, an upward face and a downward face read as three different greys.
+ *            This is what separates a crate from the floor it stands on.
+ *   distance near is bright, far recedes. Without it two metres and twenty look identical and the
+ *            frame has no depth at all.
+ */
+export const SHADE_GLSL = /* glsl */ `
+  vec3 faceTint(vec3 n) {
+    float up = clamp(n.y, 0.0, 1.0);
+    float down = clamp(-n.y, 0.0, 1.0);
+    vec3 t = mix(vec3(1.22, 1.16, 1.02), vec3(0.60, 0.72, 0.86), up * up);
+    return mix(t, vec3(0.40, 0.46, 0.56), down);
+  }
+
+  /** > 0 faces the eye. Used to dim and, past the silhouette, to drop the point. */
+  float faceToEye(vec3 world, vec3 n) {
+    vec3 toEye = cameraPosition - world;
+    float len = length(toEye);
+    return len < 1e-4 ? 1.0 : dot(n, toEye / len);
+  }
+
+  float facingGain(float f) {
+    return 0.30 + 0.70 * smoothstep(-0.05, 0.55, f);
+  }
+
+  float depthCue(float depth, float window) {
+    return mix(1.0, 0.20, pow(clamp(depth / max(2.0, window * 0.8), 0.0, 1.0), 0.75));
+  }
+`;
+
 const DOT_VERTEX = /* glsl */ `
   uniform float uTime;
   uniform float uProjScale;
@@ -295,6 +339,8 @@ const DOT_VERTEX = /* glsl */ `
   attribute float aWave;
   attribute float aSeed;
   attribute float aAccent;
+  /** Face normal, world space. The mask has always known it; until M2 nothing looked at it. */
+  attribute vec3  aNormal;
   /** 1 when the hand has ever reached this point. The lidar overrides it wherever both hold. */
   attribute float aTouch;
   // x = the youngest age the newest refresh may reach here, y = how much of it this dot gets.
@@ -307,6 +353,7 @@ const DOT_VERTEX = /* glsl */ `
   ${RAMP_GLSL}
   ${RING_GLSL}
   ${WAVE_GLSL}
+  ${SHADE_GLSL}
 
   void main() {
     vColor = vec3(0.0);
@@ -446,8 +493,19 @@ const DOT_VERTEX = /* glsl */ `
     px = clamp(px, uMinPixels, uMaxPixels);
     float coverage = min(1.0, (want * want) / (px * px));
 
+    // Readability pass — see SHADE_GLSL. The hot band skips it: a crest is the one thing that
+    // is allowed to be pure white wherever it is.
+    float f = faceToEye(p, aNormal);
+    if (f < -0.22 && hot < 0.01) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      gl_PointSize = 0.0;
+      return;
+    }
+    float shade = mix(facingGain(f) * depthCue(depth, uWindowRadius), 1.0, hot);
+    col *= mix(faceTint(aNormal), vec3(1.0), hot);
+
     vColor = col * uDotBright * coverage * (1.0 + hot * uProbeBright)
-      * (0.88 + 0.24 * aSeed) * appear;
+      * (0.88 + 0.24 * aSeed) * appear * shade;
     vAlpha = alpha;
     vSoft = mix(uDotSoft, uProbeSoft, hot);
     gl_PointSize = px;
@@ -867,6 +925,7 @@ export class StructuredPaint {
   private dotWave = new Float32Array(0);
   private dotSeed = new Float32Array(0);
   private dotAccent = new Float32Array(0);
+  private dotNormal = new Float32Array(0);
   /** (floor age, feather) per dot, interleaved — the bounds on its newest refresh. */
   private dotRefresh = new Float32Array(0);
   /** The hand's channel into the same mask: 1 once a dot has been within arm's reach. */
@@ -1152,6 +1211,8 @@ export class StructuredPaint {
 
     const pos: number[] = [];
     const seeds: number[] = [];
+    // Parallel to `seeds`: the face normal each dot sits on, for the readability shading.
+    const nrms: number[] = [];
     const epos: number[] = [];
     const emid: number[] = [];
     const ebox: number[] = [];
@@ -1305,6 +1366,7 @@ export class StructuredPaint {
                 p[2]! + nrm[2] * SURFACE_OFFSET,
               );
               seeds.push(rng());
+              nrms.push(nrm[0], nrm[1], nrm[2]);
             }
           }
 
@@ -1337,6 +1399,7 @@ export class StructuredPaint {
                   p[2]! + nrm[2] * SURFACE_OFFSET,
                 );
                 seeds.push(rng());
+                nrms.push(nrm[0], nrm[1], nrm[2]);
               }
             }
           }
@@ -1431,6 +1494,7 @@ export class StructuredPaint {
 
     this.dotPos = new Float32Array(pos);
     this.dotSeed = new Float32Array(seeds);
+    this.dotNormal = new Float32Array(nrms);
     this.dotBirth = new Float32Array(dots).fill(NEVER);
     this.dotPrior = new Float32Array(dots).fill(NEVER);
     this.dotWave = new Float32Array(dots);
@@ -1459,6 +1523,7 @@ export class StructuredPaint {
     this.dotGeometry.setAttribute('aPrior', new THREE.BufferAttribute(this.dotPrior, 1));
     this.dotGeometry.setAttribute('aWave', new THREE.BufferAttribute(this.dotWave, 1));
     this.dotGeometry.setAttribute('aSeed', new THREE.BufferAttribute(this.dotSeed, 1));
+    this.dotGeometry.setAttribute('aNormal', new THREE.BufferAttribute(this.dotNormal, 3));
     this.dotGeometry.setAttribute('aAccent', new THREE.BufferAttribute(this.dotAccent, 1));
     this.dotGeometry.setAttribute('aRefresh', new THREE.BufferAttribute(this.dotRefresh, 2));
     this.dotGeometry.setAttribute('aTouch', new THREE.BufferAttribute(this.dotTouch, 1));
