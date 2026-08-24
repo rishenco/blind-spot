@@ -117,6 +117,14 @@ export class Input {
     return this.codesPressedThisTick.has(code);
   }
 
+  /**
+   * True if *any* key went down this tick. Used for one thing only: browsers will not start an
+   * AudioContext outside a user gesture, so something has to notice the first press.
+   */
+  anyKeyPressed(): boolean {
+    return this.codesPressedThisTick.size > 0;
+  }
+
   /** Called by the loop at the end of each sim tick; edge state is tick-scoped. */
   endTick(): void {
     this.pressedThisTick.clear();

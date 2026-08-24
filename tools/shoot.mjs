@@ -162,6 +162,9 @@ notes.push(
   `hall ${boot.boxes} boxes · ${boot.stats.paint.dots} dots · ${boot.stats.paint.edges} edge segments · lattice build ${boot.buildMs.toFixed(0)} ms`,
 );
 await call('hud', false);
+// No device, no ears, nothing to prove: the audio stage would otherwise open an AudioContext the
+// moment the first synthetic key press lands, and spend frame budget we are here to measure.
+await call('audio', false);
 await advance(0.5, 2);
 
 // The vista every lidar frame is shot from: mid-hall, facing east down the long axis, with the

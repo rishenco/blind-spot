@@ -13,6 +13,7 @@ import GUI from 'lil-gui';
 
 import { Input } from './core/input';
 import { Loop } from './core/loop';
+import { AudioStage, defaultAudioTunables } from './audio/audio';
 import { SoundBus } from './events/bus';
 import { Hud, type HelpRow } from './debug/hud';
 import { Lidar, defaultLidarTunables } from './lidar/lidar';
@@ -94,6 +95,13 @@ class App {
    * it has no idea what physics or the player did, only that a noise happened at a point.
    */
   private readonly markers = new SoundMarkers(3072, defaultMarkerTunables());
+  /**
+   * The ear. A second, wholly independent bus subscriber: it knows nothing about the markers and
+   * the markers know nothing about it, which is the point of routing every noise through the bus
+   * in the first place. Silent until a key press starts the device, so the headless harness never
+   * opens an AudioContext.
+   */
+  private readonly audio = new AudioStage(defaultAudioTunables());
   private readonly player: PlayerController;
   /** Built after the wasm is up, so everything that touches them is null-guarded. */
   private props: PropWorld | null = null;
@@ -169,6 +177,7 @@ class App {
     // anything the ear would not have known.
     this.markers.applyLook();
     this.bus.subscribe((event) => this.markers.handle(event));
+    this.bus.subscribe((event) => this.audio.handle(event));
     this.scene.add(this.markers.object);
 
     // Lights-on debug view. Off by default and, being a Group, costs nothing while it is.
@@ -265,12 +274,17 @@ class App {
 
     this.touch.update(eye.x, eye.y, eye.z);
 
+    this.audio.setSceneTime(this.time);
+
     this.input.endTick();
     this.perf.simMs = performance.now() - t0;
   }
 
   private hotkeys(): void {
     const i = this.input;
+    // Browsers refuse to start an AudioContext outside a gesture, so the first key the player
+    // presses — any key — is what turns the world audible.
+    if (i.anyKeyPressed()) this.audio.resume();
     if (i.wasKeyPressed('KeyF')) this.pendingFire = true;
     if (i.wasKeyPressed('KeyL')) this.setLights(!this.lightsOn);
     if (i.wasKeyPressed('KeyV')) this.cycleView();
@@ -347,6 +361,14 @@ class App {
   private render(alpha: number): void {
     const frameStart = performance.now();
     this.player.applyToCamera(this.camera, alpha);
+    // The ear rides the *render* camera, not the sim eye: it is the only place the smoothed head
+    // orientation exists, and half a tick of lag in a pan is audible as a swim.
+    {
+      const c = this.camera;
+      const f = c.getWorldDirection(this.scratchDir);
+      this.audio.setEar(c.position.x, c.position.y, c.position.z);
+      this.audio.setListener(c.position.x, c.position.y, c.position.z, f.x, f.y, f.z);
+    }
 
     const renderTime = this.time + alpha * this.loop.stepSeconds;
     const eye = this.camera.position;
@@ -425,6 +447,7 @@ class App {
     const dyn = this.dyn?.getStats() ?? null;
     const counts = this.bus.countsBySource();
     const marks = this.markers.getStats();
+    const audio = this.audio.getStats();
     if (this.time - this.rateAt >= 1) {
       this.eventRate = (this.bus.emitted - this.rateSeq) / Math.max(0.001, this.time - this.rateAt);
       this.rateAt = this.time;
@@ -456,6 +479,7 @@ class App {
       ['props', props === null ? 'off' : `${props.awake} awake / ${props.bodies - props.awake} asleep · ${props.stepMs.toFixed(2)} ms`],
       ['prop pts', dyn === null ? '-' : `${dyn.revealed} / ${dyn.points}`],
       ['marks', `${marks.alive} live · ${this.eventRate.toFixed(1)} ev/s`],
+      ['audio', audio.state === 'off' ? 'off (press a key)' : `${audio.state} · ${audio.active}/${this.audio.tunables.voices} voices · ${audio.dropped} dropped`],
       ['calls', `${this.renderer.info.render.calls}`],
     ]);
 
@@ -565,6 +589,11 @@ class App {
     sound.add(m, 'brightness', 0, 2, 0.05).onChange(() => this.markers.applyLook());
     sound.add(m, 'glitchSeconds', 0, 1.5, 0.05).onChange(() => this.markers.applyLook());
     sound.close();
+
+    const ear = gui.addFolder('audio');
+    ear.add(this.audio.tunables, 'volume', 0, 1, 0.02).onChange((v: number) => this.audio.setVolume(v));
+    ear.add(this.audio.tunables, 'maxLatency', 0.05, 1, 0.05);
+    ear.close();
   }
 
   private applyLook(): void {
@@ -635,6 +664,7 @@ class App {
       solids: () =>
         this.hall.world.boxes.map((b) => [b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ]),
       touch: (on: boolean) => this.touch.setVisible(on),
+      audio: (on: boolean) => this.audio.setEnabled(on),
       markers: (on: boolean) => this.markers.setVisible(on),
       radii: (on: boolean) => this.markers.setRadiusVisible(on),
       /** Debug: shove the clutter around a world point. Returns how many bodies woke up. */
@@ -669,6 +699,7 @@ class App {
         diag: this.paint.diagnostics(),
         touch: this.touch.getStats(),
         marks: this.markers.getStats(),
+        audio: this.audio.getStats(),
         props: this.props?.getStats() ?? null,
         dyn: this.dyn?.getStats() ?? null,
         propsMs: this.propsMs,
