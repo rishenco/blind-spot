@@ -1,26 +1,37 @@
 services:
+  # Dev server. Everything is already installed in the image; the container only runs vite.
   dev:
-    build: .
+    build:
+      context: .
+      target: dev
     init: true
     ports:
       - "${PORT:-5173}:5173"
     volumes:
-      - .:/app                     # source, live-mounted for hot reload
-      # Deps live in a volume, not in the bind mount: the container never touches the host's
-      # node_modules, and they survive between runs. nocopy is essential — without it docker
-      # seeds a fresh volume from whatever the host has at that path, which is the collision
-      # we are trying to avoid (and npm chokes on the half-foreign tree).
-      - type: volume
-        source: node_modules
-        target: /app/node_modules
-        volume:
-          nocopy: true
-      - playwright:/ms-playwright  # chromium for `make shots`, cached between runs
+      - .:/app          # sources, live-mounted for hot reload
+      - /app/node_modules
+      # ^ Anonymous volume, and it is NOT where dependencies are installed — they are baked
+      #   into the image. Docker seeds an empty volume from the IMAGE's content at that path,
+      #   so this simply keeps the bind mount above from shadowing them with the host's
+      #   node_modules (which may be for another platform, or absent). `make up` passes
+      #   --renew-anon-volumes, so the volume is re-seeded from the image on every start and
+      #   can never go stale.
     environment:
       # Bind-mount file events are unreliable on Docker Desktop (macOS/Windows).
       # `VITE_POLL=1 make up` switches the watcher to polling if hot reload goes quiet.
       VITE_POLL: "${VITE_POLL:-}"
 
-volumes:
-  node_modules:
-  playwright:
+  # Keyframe generator. Separate image: playwright + chromium are ~500 MB and have no business
+  # in the image that runs the dev server.
+  shots:
+    build:
+      context: .
+      target: shots
+    init: true
+    profiles: ["tools"]           # never started by `docker compose up`
+    user: "${HOST_UID:-0}:${HOST_GID:-0}"   # so out/ and dist/ belong to the host user
+    environment:
+      HOME: /tmp                  # a writable HOME for whatever uid we were given
+    volumes:
+      - .:/app
+      - /app/node_modules

@@ -1,6 +1,7 @@
 #!/bin/sh
-# The container writes into the bind mount as root; hand the results back to the host user.
-# Only meaningful on Linux, and never a reason to fail the build.
+# Safety net only. The containers that write into the repo run as the host uid:gid (see the
+# `user:` key in docker-compose.yml), so normally there is nothing to fix here. This catches
+# the leftovers of an older run that was made as root. Never a reason to fail the build.
 set -u
 [ "$(uname -s 2>/dev/null)" = "Linux" ] || exit 0
 command -v id >/dev/null 2>&1 || exit 0

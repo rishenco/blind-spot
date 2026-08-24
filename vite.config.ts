@@ -13,6 +13,9 @@ export default defineConfig({
   // watcher poll instead. Native runs and the build path are untouched. (globalThis, not a bare
   // `process`: the project has no @types/node and `npm run build` typechecks this file.)
   server: pollEnv ? { watch: { usePolling: true, interval: 300 } } : undefined,
+  // The keyframe generator writes out/index.html (the gallery). Without this the dev server's
+  // dependency scan treats it as a second entry point and reports errors about generated files.
+  optimizeDeps: { entries: ['index.html'] },
   build: {
     target: 'es2022',
     cssCodeSplit: false,
