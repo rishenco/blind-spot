@@ -1,0 +1,26 @@
+services:
+  dev:
+    build: .
+    init: true
+    ports:
+      - "${PORT:-5173}:5173"
+    volumes:
+      - .:/app                     # source, live-mounted for hot reload
+      # Deps live in a volume, not in the bind mount: the container never touches the host's
+      # node_modules, and they survive between runs. nocopy is essential — without it docker
+      # seeds a fresh volume from whatever the host has at that path, which is the collision
+      # we are trying to avoid (and npm chokes on the half-foreign tree).
+      - type: volume
+        source: node_modules
+        target: /app/node_modules
+        volume:
+          nocopy: true
+      - playwright:/ms-playwright  # chromium for `make shots`, cached between runs
+    environment:
+      # Bind-mount file events are unreliable on Docker Desktop (macOS/Windows).
+      # `VITE_POLL=1 make up` switches the watcher to polling if hot reload goes quiet.
+      VITE_POLL: "${VITE_POLL:-}"
+
+volumes:
+  node_modules:
+  playwright:
