@@ -14,9 +14,12 @@
  * Every box carries a material class as well as a reveal colour, because a return off metal
  * and a return off concrete are not the same sound (see `paint/materials.ts`).
  *
- * Four looks are on 1/2/3/4. Switching one clears the cloud and reseeds the sampler, because
+ * Five looks are on 1-5. Switching one clears what is painted and reseeds the sampler, because
  * density and cell size are *sampling* parameters — the honest comparison is the same events
- * resampled, not the same blips restyled.
+ * resampled, not the same blips restyled. Look 5 (Blueprint) is not a cloud at all: it answers
+ * the same events by *unlocking* the room's known geometry as contours and a lattice
+ * (`paint/structured.ts`), which is why the room now declares which of its boxes are the shell
+ * and which are things standing in it.
  */
 
 import * as THREE from 'three';
@@ -46,7 +49,9 @@ import {
   defaultAgeRamp,
   defaultPaintTunables,
   defaultWaveTunables,
+  paintProfiles,
 } from '../paint/paintSystem';
+import { defaultStructuredTunables } from '../paint/structured';
 import { MAT_CONCRETE, MAT_METAL, MAT_STONE } from '../paint/materials';
 import { BloomChain, defaultBloomTunables, isSoftwareRenderer } from '../paint/post';
 
@@ -62,6 +67,31 @@ const WALL_T = 0.5;
 const SPAWN = new THREE.Vector3(-12.5, 0, 0);
 /** -90 faces +X: down the long axis, through the doorway, at the tank. */
 const SPAWN_YAW_DEG = -90;
+
+/** The lone 1 m cube in the near room — the whole-object reveal, in its simplest form. */
+const TEST_CRATE = { x: -9.0, z: -3.2 };
+/** West end of the side-chamber partition. Everything from here to the chokepoint is doorway. */
+const CHAMBER_DOOR_X = -1.0;
+
+/**
+ * World boxes the screenshot driver counts known geometry inside (see `debugProbe`).
+ *
+ * They live here rather than in the driver because they are statements about *this room*: the
+ * far side of the test crate, a slice of the side chamber that no straight line from the main
+ * lane can reach, and the chamber crate that therefore has to stay black until someone walks in.
+ */
+const PROBE_REGIONS: Record<string, readonly [number, number, number, number, number, number]> = {
+  // The +X face of the 1 m crate: the side the player cannot see when facing it from the spawn.
+  crateBack: [TEST_CRATE.x + 0.45, 0, TEST_CRATE.z - 0.55, TEST_CRATE.x + 0.6, 1.0, TEST_CRATE.z + 0.55],
+  // The -X face of the same crate: the side that is struck.
+  crateFront: [TEST_CRATE.x - 0.6, 0, TEST_CRATE.z - 0.55, TEST_CRATE.x - 0.45, 1.0, TEST_CRATE.z + 0.55],
+  // Deep inside the side chamber, past the doorway's line of sight from anywhere in the room.
+  chamber: [4, 0, 5.6, 14, 7, 9.8],
+  // The crate standing in it.
+  chamberCrate: [5.1, 0, 6.6, 6.9, 1.7, 8.4],
+  // The chokepoint's south doorjamb, 8.7 m from the spawn — where the ring is caught in flight.
+  jamb: [-4.5, 0, -2.6, -3.5, 3.0, -1.4],
+};
 
 /** Shared ping cooldown, seconds (§3.5). */
 const PING_COOLDOWN = 0.75;
@@ -89,7 +119,8 @@ const STEP_HEIGHT = 0.65;
  */
 const TIME_SCALES = [1, 0.1, 10, 60];
 
-const VARIANTS = ['Dust', 'Blips', 'Grain', 'Afterimage'];
+/** The looks, taken from the paint system itself so the two lists cannot drift apart. */
+const VARIANTS = paintProfiles().map((p) => p.name);
 
 /** The per-look numbers the Paint folder edits. */
 type PaintKnob =
@@ -121,7 +152,7 @@ const PAINT_KNOBS: readonly PaintKnob[] = [
 ];
 
 const HINT =
-  'WASD move · Q ping · E beam · L reveal · 1-4 looks · B bloom · T clock · K clear · V view · R respawn · H help';
+  'WASD move · Q ping · E beam · L reveal · 1-5 looks · B bloom · T clock · K clear · V view · R respawn · H help';
 
 /** Reveal-mode albedos. Never seen in the dark — this palette only exists for the L key. */
 const REVEAL_COLORS = {
@@ -166,6 +197,7 @@ class Builder {
     sz: number,
     material: THREE.Material,
     mat: number,
+    shell = false,
   ): void {
     this.bounds(
       cx - sx / 2,
@@ -176,10 +208,16 @@ class Builder {
       cz + sz / 2,
       material,
       mat,
+      shell,
     );
   }
 
-  /** Box by its bounds. */
+  /**
+   * Box by its bounds. `shell` marks the boxes that *are* the room — floor, ceiling, outer walls,
+   * partitions — as opposed to the things standing in it. Look 5 treats the two differently
+   * (see `paint/structured.ts`): a prop you hear at all surfaces whole, a wall answers only where
+   * it was actually struck.
+   */
   bounds(
     minX: number,
     minY: number,
@@ -189,6 +227,7 @@ class Builder {
     maxZ: number,
     material: THREE.Material,
     mat: number,
+    shell = false,
   ): void {
     const sx = maxX - minX;
     const sy = maxY - minY;
@@ -198,7 +237,7 @@ class Builder {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.set(minX + sx / 2, minY + sy / 2, minZ + sz / 2);
     this.group.add(mesh);
-    this.world.add(aabbFromBounds(minX, minY, minZ, maxX, maxY, maxZ, mat));
+    this.world.add(aabbFromBounds(minX, minY, minZ, maxX, maxY, maxZ, mat, shell));
   }
 
   /**
@@ -239,7 +278,7 @@ export class SonarLab implements LabScene {
     { keys: 'Q', action: 'spatial ping — 360°, 12 m, the room read' },
     { keys: 'E', action: 'directed ping — 110°, 22 m, the look-around' },
     { keys: 'L', action: 'reveal — lights on, for comparison only' },
-    { keys: '1 2 3 4', action: 'look: Dust / Blips / Grain / Afterimage' },
+    { keys: '1 2 3 4 5', action: 'look: Dust / Blips / Grain / Afterimage / Blueprint' },
     { keys: 'B', action: 'bloom on / off' },
     { keys: 'T', action: 'paint clock speed — x1, x0.1 (watch a wave), x10, x60' },
     { keys: 'K', action: 'clear the painted map' },
@@ -340,6 +379,7 @@ export class SonarLab implements LabScene {
       tunables: defaultPaintTunables(),
       ramp: defaultAgeRamp(),
       wave: defaultWaveTunables(),
+      structured: defaultStructuredTunables(),
     });
     ctx.scene.add(this.paint.object);
     this.unsubscribeBus = this.bus.subscribe(this.paint.handle);
@@ -389,12 +429,12 @@ export class SonarLab implements LabScene {
 
     // --- shell: floor, ceiling and four walls. A closed box, so every ping has something
     // to come back from in every direction. All of it poured concrete.
-    b.bounds(-HALF_X, -1, -HALF_Z, HALF_X, 0, HALF_Z, mats.floor, MAT_CONCRETE);
-    b.bounds(-HALF_X, ROOM_H, -HALF_Z, HALF_X, ROOM_H + 0.5, HALF_Z, mats.wall, MAT_CONCRETE);
-    b.bounds(-HALF_X - WALL_T, 0, -HALF_Z - WALL_T, -HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE);
-    b.bounds(HALF_X, 0, -HALF_Z - WALL_T, HALF_X + WALL_T, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE);
-    b.bounds(-HALF_X, 0, -HALF_Z - WALL_T, HALF_X, ROOM_H, -HALF_Z, mats.wall, MAT_CONCRETE);
-    b.bounds(-HALF_X, 0, HALF_Z, HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE);
+    b.bounds(-HALF_X, -1, -HALF_Z, HALF_X, 0, HALF_Z, mats.floor, MAT_CONCRETE, true);
+    b.bounds(-HALF_X, ROOM_H, -HALF_Z, HALF_X, ROOM_H + 0.5, HALF_Z, mats.wall, MAT_CONCRETE, true);
+    b.bounds(-HALF_X - WALL_T, 0, -HALF_Z - WALL_T, -HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE, true);
+    b.bounds(HALF_X, 0, -HALF_Z - WALL_T, HALF_X + WALL_T, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE, true);
+    b.bounds(-HALF_X, 0, -HALF_Z - WALL_T, HALF_X, ROOM_H, -HALF_Z, mats.wall, MAT_CONCRETE, true);
+    b.bounds(-HALF_X, 0, HALF_Z, HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE, true);
 
     // --- near room: the stair flight and its deck, hard against the -Z wall. Cut stone: the
     // third voice, so a staircase is identifiable by sound alone before you have touched it.
@@ -432,12 +472,34 @@ export class SonarLab implements LabScene {
     b.box(-10.6, 0, 5.6, 1.4, 2.2, 1.4, mats.prop, MAT_METAL);
     b.box(-7.6, 0, -2.0, 1.0, 0.6, 1.0, mats.prop, MAT_METAL);
     b.box(-11.5, 0, -3.5, 2.0, 1.2, 1.2, mats.prop, MAT_METAL);
+    /*
+     * A plain 1 m cube, alone in open floor 4.7 m off the spawn and well clear of the walking
+     * lane. It is here to be *one object*: look 5's rule is that a prop you hear at all surfaces
+     * whole, and the cleanest way to see — and to assert — that its far side comes back with its
+     * near side is to have a thing with an unambiguous far side and nothing behind it.
+     */
+    b.box(TEST_CRATE.x, 0, TEST_CRATE.z, 1.0, 1.0, 1.0, mats.prop, MAT_METAL);
 
     // --- the chokepoint: a full-height partition with a 3.8 m doorway on the spawn axis.
     // At 110° the beam no longer squeezes through the door — it lights the whole wall and both
     // jambs, and the doorway reads as the hole in the answer. That is the shot now.
-    b.bounds(-4.2, 0, -HALF_Z, -3.8, ROOM_H, -1.9, mats.wall, MAT_CONCRETE);
-    b.bounds(-4.2, 0, 1.9, -3.8, ROOM_H, HALF_Z, mats.wall, MAT_CONCRETE);
+    b.bounds(-4.2, 0, -HALF_Z, -3.8, ROOM_H, -1.9, mats.wall, MAT_CONCRETE, true);
+    b.bounds(-4.2, 0, 1.9, -3.8, ROOM_H, HALF_Z, mats.wall, MAT_CONCRETE, true);
+
+    /*
+     * --- the side chamber: a second partition, along the room's long axis this time, closing
+     * off the +Z third of the far room. Its only way in is the gap between its west end and the
+     * chokepoint wall — a real doorway, on a corner, so that no straight line from the main lane
+     * reaches the inside of the chamber.
+     *
+     * It exists for the propagation law of §3.4 and of look 5: sound with no path into a space
+     * reveals nothing of it. Stand in the main room and ping and the chamber stays black however
+     * loud you are; walk through the doorway and one ping hands you the whole of it. Vision §7
+     * calls this a side-vault, and this is the shape of one.
+     */
+    b.bounds(CHAMBER_DOOR_X, 0, 4.8, HALF_X, ROOM_H, 5.2, mats.wall, MAT_CONCRETE, true);
+    b.box(6.0, 0, 7.5, 1.6, 1.6, 1.6, mats.prop, MAT_METAL);
+    b.box(9.6, 0, 8.3, 1.2, 1.0, 1.2, mats.prop, MAT_METAL);
 
     // --- far room: the landmark. A 6.4 m wide, 6 m tall tank with a collar and a neck —
     // vision §11 wants one large silhouette per floor, because a point cloud transmits mass
@@ -535,6 +597,7 @@ export class SonarLab implements LabScene {
     s.add({ view: () => this.player.toggleView() }, 'view').name('Toggle view (V)');
 
     this.buildPaintGui();
+    this.buildBlueprintGui();
     this.buildWaveGui();
 
     const r = gui.addFolder('Age ramp');
@@ -592,7 +655,7 @@ export class SonarLab implements LabScene {
     this.paintFolder = folder;
     const p = this.paintKnobs;
     const apply = (): void => this.paint.applyProfile();
-    folder.add(p, 'look').name('look (1-4)').disable();
+    folder.add(p, 'look').name('look (1-5)').disable();
     // Sampling parameters: they change what the *next* event deposits, not what is on screen.
     folder.add(p, 'density', 0.05, 3, 0.05).name('density ×(next paint)');
     folder.add(p, 'cellSize', 0.02, 0.6, 0.005).name('cell size m (next paint)');
@@ -607,6 +670,39 @@ export class SonarLab implements LabScene {
     folder.add(p, 'materialMix', 0, 1, 0.05).name('material voice').onChange(apply);
     folder.add(p, 'dissolve', 0, 1, 0.02).name('grain dissolve').onChange(apply);
     folder.add({ repaint: () => this.paint.clear() }, 'repaint').name('Clear (resample)');
+  }
+
+  /**
+   * Look 5's own numbers.
+   *
+   * Two of them — spacing and jitter — are *build* parameters: they change the lattice itself,
+   * so they rebuild it and drop whatever was known, which is why they are on `onFinishChange`
+   * (a rebuild per mouse-move would be a slideshow). Everything else is a uniform and is live.
+   */
+  private buildBlueprintGui(): void {
+    const folder = this.ctx.gui.addFolder('Blueprint (5)');
+    const s = this.paint.structured.tunables;
+    const push = (): void => this.paint.applyTunables();
+    const rebuild = (): void => {
+      this.paint.structured.rebuild();
+      this.paint.clear();
+    };
+    folder.add(s, 'spacing', 0.08, 0.5, 0.01).name('lattice spacing (m)').onFinishChange(rebuild);
+    folder.add(s, 'jitter', 0, 0.3, 0.01).name('lattice jitter ×spacing').onFinishChange(rebuild);
+    folder.add(s, 'segment', 0.1, 1, 0.05).name('contour piece (m)').onFinishChange(rebuild);
+    folder.add(s, 'ripple', 0, 0.15, 0.005).name('ripple amplitude (m)').onChange(push);
+    folder.add(s, 'ringWidth', 0.2, 4, 0.1).name('ring width (m)').onChange(push);
+    folder.add(s, 'phaseDelay', 0.05, 1.2, 0.01).name('confirm delay (s)').onChange(push);
+    folder.add(s, 'inkSeconds', 0.01, 0.5, 0.01).name('ink-in (s)').onChange(push);
+    folder.add(s, 'contourBright', 0, 3, 0.05).name('contour brightness').onChange(push);
+    folder.add(s, 'dotBright', 0, 2, 0.02).name('lattice brightness').onChange(push);
+    folder.add(s, 'dotSize', 0.01, 0.2, 0.005).name('lattice dot (m)').onChange(push);
+    folder.add(s, 'probeBright', 0, 6, 0.1).name('probe boost ×').onChange(push);
+    folder.add(s, 'probeSize', 0, 5, 0.1).name('probe swell ×').onChange(push);
+    folder.add(s, 'probeSoftness', 0, 1, 0.02).name('probe blur').onChange(push);
+    folder.add(s, 'probeWake', 0, 1, 0.02).name('probe wake').onChange(push);
+    folder.add(s, 'dotSoftness', 0, 1, 0.02).name('lattice blur').onChange(push);
+    folder.add(s, 'pixelCap', 2, 20, 0.5).name('dot px cap').onChange(push);
   }
 
   /** How the wave announces itself: speed, arrival flash, the firing streak, the lit air. */
@@ -690,18 +786,35 @@ export class SonarLab implements LabScene {
         'look',
         `${this.paint.profileName}${this.bloomOn ? ' +bloom' : ''}${this.revealOn ? ' · REVEAL' : ''}`,
       ],
-      [
-        'points',
-        `${stats.points.toLocaleString('en-US')} / ${(stats.capacity / 1000).toFixed(0)}k · ${(
-          (stats.points / stats.capacity) *
-          100
-        ).toFixed(1)}%${stats.wrapped ? ' WRAP' : ''}`,
-      ],
+      this.paint.profile.structured
+        ? [
+            'known',
+            (() => {
+              const s = this.paint.structured.getStats();
+              return `${s.unlockedDots.toLocaleString('en-US')} / ${s.dots.toLocaleString(
+                'en-US',
+              )} dots · ${s.unlockedEdges.toLocaleString('en-US')} / ${s.edges.toLocaleString(
+                'en-US',
+              )} lines`;
+            })(),
+          ]
+        : [
+            'points',
+            `${stats.points.toLocaleString('en-US')} / ${(stats.capacity / 1000).toFixed(0)}k · ${(
+              (stats.points / stats.capacity) *
+              100
+            ).toFixed(1)}%${stats.wrapped ? ' WRAP' : ''}`,
+          ],
       [
         'event',
         last === null
           ? '—'
-          : `${last.class} · ${stats.lastRays} rays · +${stats.lastDeposited}/~${stats.lastRefreshed}`,
+          : this.paint.profile.structured
+            ? (() => {
+                const s = this.paint.structured.getStats();
+                return `${last.class} · ${s.lastRays} rays · ${s.lastDots} dots / ${s.lastEdges} lines`;
+              })()
+            : `${last.class} · ${stats.lastRays} rays · +${stats.lastDeposited}/~${stats.lastRefreshed}`,
       ],
       [
         'wave',
@@ -813,10 +926,68 @@ export class SonarLab implements LabScene {
       tracerAge: this.paint.tracerAge,
       // --- look readouts
       bloom: this.bloomOn,
+      /** What the *look* asks for, before software GL gets its veto. */
+      bloomWanted: this.paint.profile.bloom,
       softwareGl: this.softwareGl,
       materialMix: this.paint.profile.materialMix,
       eConeDeg: SOUND_CLASSES['e-ping'].coneAngleDeg,
       eRange: SOUND_CLASSES['e-ping'].paintRadius,
+      // --- look 5: the structured reveal
+      ...this.structuredState(),
+    };
+  }
+
+  /** Look 5's readouts. Cheap and constant-shaped whether or not the backend has ever run. */
+  private structuredState(): Record<string, unknown> {
+    const s = this.paint.structured.getStats();
+    const d = this.paint.structured.diagnostics();
+    const t = this.paint.structured.tunables;
+    return {
+      structured: this.paint.profile.structured,
+      structBuilt: s.built,
+      structBuildMs: s.buildMs,
+      structDots: s.dots,
+      structEdges: s.edges,
+      structBytes: s.bytes,
+      structUnlockedDots: s.unlockedDots,
+      structUnlockedEdges: s.unlockedEdges,
+      structLastDots: s.lastDots,
+      structLastEdges: s.lastEdges,
+      structLastRays: s.lastRays,
+      structLastMs: s.lastMs,
+      structLastChunkMs: s.lastChunkMs,
+      structLastChunks: s.lastChunks,
+      structPending: s.pending,
+      structDrawnDots: d.drawnDots,
+      structInkedEdges: d.inkedEdges,
+      structPendingEdges: d.pendingEdges,
+      structRippling: d.rippling,
+      structRippleMax: d.rippleMax,
+      structPhaseDelay: t.phaseDelay,
+      structRipple: t.ripple,
+      structRingWidth: t.ringWidth,
+      structSpacing: t.spacing,
+      probeRegions: PROBE_REGIONS,
+    };
+  }
+
+  /**
+   * Named world-box queries for tooling: how much of the geometry inside a region is known, and
+   * how much of it is drawn right now. This is the only way to prove the propagation rules from
+   * outside the renderer — that a crate's far side answered with its near side, and that the room
+   * behind a wall did not answer at all.
+   */
+  debugProbe(name: string, args?: Record<string, unknown>): unknown {
+    if (name !== 'region') return null;
+    const key = typeof args?.region === 'string' ? args.region : null;
+    const box = key !== null ? PROBE_REGIONS[key] : null;
+    const raw = Array.isArray(args?.box) ? (args.box as number[]) : null;
+    const b = box ?? raw;
+    if (b === null || b === undefined || b.length < 6) return null;
+    return {
+      region: key ?? 'custom',
+      box: b,
+      ...this.paint.structured.regionStats(b[0]!, b[1]!, b[2]!, b[3]!, b[4]!, b[5]!),
     };
   }
 

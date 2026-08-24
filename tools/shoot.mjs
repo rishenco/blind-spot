@@ -629,7 +629,21 @@ const dipPeak = Math.max(...falling.map((s) => s.dip));
 const dipTail = falling[falling.length - 1].dip;
 const landed = falling.some((s) => s.grounded === true);
 check('the 3 m drop landed', landed, `${falling.length} frames sampled`);
-check('landing dipped the camera', dipPeak > 0.03, `${(dipPeak * 1000).toFixed(1)} mm dip (max is 120 mm)`);
+/*
+ * Measured at simulation rate, not at frame rate. The dip attacks and decays inside a few fixed
+ * ticks; a rAF sampler on a 14 fps software rasteriser lands on whatever the last tick of a
+ * rendered frame left behind, which is usually well past the peak — this assertion failed at
+ * 29.3 mm against a 30 mm bar for exactly that reason, with nothing wrong underneath it. The
+ * controller now holds the deepest dip since the respawn, so what is asserted is the dip that
+ * happened rather than the one that happened to be visible.
+ */
+const dipHeld = Number((await state()).landDipPeak);
+check(
+  'landing dipped the camera',
+  dipHeld > 0.03,
+  `${(dipHeld * 1000).toFixed(1)} mm peak dip held by the sim (max is 120 mm), ` +
+    `${(dipPeak * 1000).toFixed(1)} mm caught by the ${falling.length}-frame sampler`,
+);
 check('the dip recovers', dipTail < 0.02, `${(dipTail * 1000).toFixed(2)} mm left after ${(falling[falling.length - 1].t / 1000).toFixed(2)} s`);
 
 // --- 17 third person: the V toggle -------------------------------------------
@@ -968,14 +982,36 @@ async function ping(cls) {
  * the wave-in-flight section) and a terrible thing to assert on by accident.
  */
 async function settle(budgetMs = 12000) {
-  return poll((s) => s.waveLive === false && Number(s.pendingRays) === 0, budgetMs);
+  return poll(
+    (s) => s.waveLive === false && Number(s.pendingRays) === 0 && Number(s.structPending) === 0,
+    budgetMs,
+  );
 }
 
-/** Empties the painted map and waits for it to actually be empty. */
+/**
+ * Waits for look 5's second phase as well: the contours ink a fixed delay *behind* the front, so
+ * a blueprint frame is not finished when the wave stops. Harmless on looks 1-4, where there are
+ * no contours and the counter is always zero.
+ */
+async function settleInk(budgetMs = 40000) {
+  await settle(budgetMs);
+  return poll((s) => Number(s.structPendingEdges) === 0, budgetMs);
+}
+
+/**
+ * Empties the painted map and waits for it to actually be empty.
+ *
+ * Look 5 keeps no blips, so `points` is already zero there and polling it alone would return
+ * before the keystroke had even been read — hence the second, structured half of the condition.
+ */
 async function clearPaint() {
   await page.keyboard.press('k');
-  await poll((s) => Number(s.points) === 0, 4000);
+  await poll((s) => Number(s.points) === 0 && Number(s.structUnlockedDots) === 0, 4000);
 }
+
+/** Counts what look 5 knows inside one of the scene's named world boxes. */
+const probeRegion = (region) =>
+  page.evaluate((r) => window.__blindspot.probe('region', { region: r }), region);
 
 /**
  * Cycles the paint clock's debug multiplier (T: ×1 → ×10 → ×60) until it reads `target`.
@@ -1007,7 +1043,8 @@ check('sonar renderer running', Number(sonar.fps) > 0, `fps=${Number(sonar.fps).
 check('the map starts empty', Number(sonar.points) === 0, `points=${sonar.points}`);
 check(
   'the scene owns the hint line',
-  (await page.textContent('.bs-hint')).includes('Q ping · E beam · L reveal · 1-4 looks'),
+  // Changed in batch 2.2: the scene gained a fifth look, so the hint line it owns now says 1-5.
+  (await page.textContent('.bs-hint')).includes('Q ping · E beam · L reveal · 1-5 looks'),
   await page.textContent('.bs-hint'),
 );
 
@@ -1582,6 +1619,470 @@ check(
   Number(cleared.points) === 0 && clearedShot.mean < 2,
   `points=${cleared.points} mean=${clearedShot.mean.toFixed(3)}/255`,
 );
+
+/*
+ * ===========================================================================
+ *  34 BLUEPRINT — the structured reveal (look 5)
+ * ===========================================================================
+ *
+ * Looks 1-4 answer a ping by sampling: cast rays, drop a blip wherever one lands, and let the
+ * density of the spray stand in for the shape. Look 5 answers a different question. The room's
+ * surfaces are laid out once, up front, as a dot lattice and a set of edge segments, and a sound
+ * does not *deposit* anything — it *unlocks* what was already there. So the frame it produces is
+ * a drawing rather than a spray, and every claim below is about the drawing being honest.
+ *
+ * It runs last on purpose. It is the only look with a build step and the only one with per-item
+ * state, so putting it after the perf section keeps its costs out of everybody else's numbers.
+ *
+ * The scene it runs in gained one wall for this batch (§4 of the vision's propagation rule: two
+ * walls between you and a sound means nothing at all comes back). The side chamber's only entrance
+ * is a corner doorway, which is what makes "ping from here, see nothing; walk through, see all of
+ * it" a thing a machine can check.
+ */
+await setVariant('5', 'Blueprint');
+await poll((s) => s.structBuilt === true, 30000);
+await respawn();
+await clearPaint();
+// Level the gaze: everything before this left the view pitched down at the floor.
+await pitchBy(12, sens);
+await wait(200);
+
+const bp0 = await state();
+const regions = bp0.probeRegions;
+console.log('[shoot] blueprint state', JSON.stringify(bp0));
+check(
+  'look 5 is the structured reveal, and its lattice is precomputed',
+  bp0.structured === true && bp0.structBuilt === true && Number(bp0.structDots) > 10000,
+  `${Number(bp0.structDots).toLocaleString('en-US')} dots · ` +
+    `${Number(bp0.structEdges).toLocaleString('en-US')} segments · ` +
+    `${(Number(bp0.structBytes) / 1e6).toFixed(2)} MB · built in ${Number(bp0.structBuildMs).toFixed(0)} ms`,
+);
+check(
+  'the HUD names the look',
+  (await page.textContent('.bs-debug')).includes('Blueprint'),
+  (await page.textContent('.bs-debug')).split('\n')[0],
+);
+/*
+ * The lattice is *not* a point cloud with extra steps: nothing is deposited into the ring buffer
+ * at all on this look, so the two representations can never both be on screen.
+ */
+check(
+  'the blueprint deposits no blips — one representation per look',
+  Number(bp0.points) === 0,
+  `points=${bp0.points} of ${bp0.capacity} · structured=${bp0.structured}`,
+);
+const bpDark = photo(await shotBuf('47-blueprint-dark.png'));
+check(
+  'an unheard lattice is not drawn (law 3: absence is black)',
+  bpDark.mean < 2 && bpDark.lit < 0.005,
+  `mean=${bpDark.mean.toFixed(3)}/255 lit=${pct(bpDark.lit)} with ${bp0.structDots} dots in memory`,
+);
+// The look asks for bloom; software GL vetoes it exactly as it does for look 4.
+check(
+  'Blueprint asks for bloom, and software GL still gets its veto',
+  bp0.bloomWanted === true && (bp0.softwareGl === true ? bp0.bloom === false : bp0.bloom === true),
+  `wanted=${bp0.bloomWanted} softwareGl=${bp0.softwareGl} effective=${bp0.bloom}`,
+);
+
+/*
+ * --- 34a the two phases ----------------------------------------------------
+ *
+ * The reveal is deliberately not instantaneous even once the front has arrived. A dot is first
+ * *probed* — pushed a few centimetres off its true position by the passing pressure and burned
+ * white — and only `phaseDelay` later does it snap back, cool, and let its object's contours ink
+ * in. The point is that the two phases are legible as two: a ring of hot uncommitted dots leading
+ * a body of quiet cyan drawing.
+ *
+ * Both halves are asserted where the front is, not globally, because near the origin the second
+ * phase has already landed by the time the ring is out at the doorjamb — which is the whole idea.
+ * The clock runs at x0.1 so the 0.3 s delay is three seconds of wall time and can be photographed.
+ */
+await setTimeScale(0.1);
+await clearPaint();
+await poll((s) => Number(s.pingCooldown) === 0, 8000);
+const beforeBp = Number((await state()).soundEvents);
+await page.keyboard.press('q');
+await poll((s) => Number(s.soundEvents) > beforeBp && s.lastEvent === 'q-ping', 8000);
+
+// The chokepoint's doorjamb is 8.7 m out; wait for the ring to be past it but still travelling.
+const inFlight = await poll((s) => Number(s.waveFront) >= 9.8, 60000);
+const jambRing = await probeRegion('jamb');
+const ringBuf = await shotBuf('48-blueprint-phase1.png');
+console.log(
+  `  phase 1 @front=${Number(inFlight.waveFront).toFixed(2)} m: jamb ${jambRing.drawn}/${jambRing.dots} dots drawn, ` +
+    `${jambRing.edgesUnlocked} segments unlocked, ${jambRing.edgesInked} inked · ` +
+    `ripple max ${(Number(inFlight.structRippleMax) * 100).toFixed(1)} cm on ${inFlight.structRippling} dots`,
+);
+check(
+  'phase 1: the ring has reached the doorjamb and lit its lattice',
+  jambRing.drawn > 20 && jambRing.unlocked > 20,
+  `${jambRing.drawn} of ${jambRing.dots} dots drawn 8.7 m out, front at ${Number(inFlight.waveFront).toFixed(2)} m`,
+);
+check(
+  'phase 1: not one contour has inked where the ring is',
+  jambRing.edgesInked === 0 && jambRing.edgesUnlocked > 0,
+  `${jambRing.edgesUnlocked} segments unlocked in the ring zone, ${jambRing.edgesInked} inked ` +
+    `(phase delay ${bp0.structPhaseDelay} s)`,
+);
+/*
+ * The contour phase is behind the lattice phase everywhere at once, not only in the box above.
+ * (Not asserted as "some contour has already inked": the nearest box edge to the spawn is metres
+ * away, so at this instant the delay has not elapsed for a single one of them — which is the
+ * lag being measured, seen from the other end.)
+ */
+check(
+  'phase 1: every contour the front has passed is still waiting out its delay',
+  Number(inFlight.structInkedEdges) < Number(inFlight.structUnlockedEdges) &&
+    Number(inFlight.structPendingEdges) > 0,
+  `${inFlight.structInkedEdges} inked of ${inFlight.structUnlockedEdges} unlocked, ` +
+    `${inFlight.structPendingEdges} still waiting out the delay`,
+);
+check(
+  'phase 1: dots at the front are displaced by it, and the displacement is real',
+  Number(inFlight.structRippling) > 0 && Number(inFlight.structRippleMax) > 0.03,
+  `${inFlight.structRippling} dots riding the ring, peak offset ` +
+    `${(Number(inFlight.structRippleMax) * 100).toFixed(1)} cm of an amplitude of ` +
+    `${(Number(inFlight.structRipple) * 100).toFixed(0)} cm`,
+);
+/*
+ * Law 2, in the one place this look could break it. The ripple is a *render-time* offset off the
+ * stored position — the data never moves — so nothing is unlocked ahead of the front, and dots
+ * whose front has not arrived are not drawn at all.
+ */
+check(
+  'phase 1: the far side of the room is unlocked but not yet drawn',
+  Number(inFlight.structDrawnDots) < Number(inFlight.structUnlockedDots),
+  `${inFlight.structDrawnDots} drawn of ${inFlight.structUnlockedDots} unlocked`,
+);
+
+// Between the phases: the wave has stopped, and the ink is still catching up to it.
+const between = await poll(
+  (s) => s.waveLive === false && Number(s.structPendingEdges) > 0,
+  60000,
+);
+const betweenBuf = await shotBuf('49-blueprint-between.png');
+check(
+  'phase 2 trails the front rather than riding it',
+  Number(between.structPendingEdges) > 0 && Number(between.structInkedEdges) > 0,
+  `front finished, ${between.structPendingEdges} segments still inking behind it, ` +
+    `${between.structInkedEdges} already drawn`,
+);
+
+// Settled: everything the ping unlocked is drawn, and the ring has passed out of existence.
+const settledBp = await settleInk(60000);
+await wait(250);
+const settledBuf = await shotBuf('50-blueprint-settled.png');
+const jambSettled = await probeRegion('jamb');
+check(
+  'settled: the contours inked in where the ring had been',
+  jambSettled.edgesInked > 0 && jambSettled.edgesInked === jambSettled.edgesUnlocked,
+  `${jambSettled.edgesInked} of ${jambSettled.edgesUnlocked} unlocked segments inked in the ring zone`,
+);
+check(
+  'settled: the ripple is gone — every dot is back on its exact surface',
+  Number(settledBp.structRippling) === 0 && Number(settledBp.structRippleMax) === 0,
+  `rippling=${settledBp.structRippling} max=${settledBp.structRippleMax}`,
+);
+const settledShot = photo(settledBuf);
+check(
+  'settled: the blueprint is legible',
+  settledShot.lit > 0.02 && settledShot.mean > 1,
+  `mean=${settledShot.mean.toFixed(2)}/255 lit=${pct(settledShot.lit)} · ` +
+    `${settledBp.structUnlockedDots} dots, ${settledBp.structInkedEdges} contours`,
+);
+/*
+ * §3.2: the accent channel exists on both lattice and contour, but it is reserved for traversal
+ * holds and is not spent yet, so a blueprint frame has to be as free of gold as looks 1-3 are.
+ *
+ * Only the warm half is asserted *here*. This particular frame is a quarter of a second past the
+ * moment its contours inked, and inking is the brightest a line ever gets — the whole drawing is
+ * clipping to the ice-white top of the band, which is §3.2's hot end doing its job rather than a
+ * hue leaving the family. The cool half of the claim is asserted on a settled frame below.
+ */
+const settledHue = hues(settledBuf);
+check(
+  'the blueprint spends no second hue — the accent channel is reserved (§3.2)',
+  settledHue.warmFraction < 0.02,
+  `cool=${pct(settledHue.coolFraction)} neutral=${pct(settledHue.neutral / settledHue.lit)} ` +
+    `warm=${pct(settledHue.warmFraction)} of ${settledHue.lit} lit px, one frame past the ink flash`,
+);
+/*
+ * Pixel evidence for the ripple, over and above the shader's own numbers: a box on the doorjamb,
+ * photographed while the ring was inside it and again once it had settled. A hot displaced ring
+ * and a cold committed drawing cannot look the same, and here they measurably do not.
+ */
+const RING_BOX = { x: 470, y: 250, w: 200, h: 210 };
+const ringHot = photo(ringBuf, RING_BOX, []);
+const ringCold = photo(settledBuf, RING_BOX, []);
+const ringMid = photo(betweenBuf, RING_BOX, []);
+check(
+  'the ring zone is a different picture while the front is in it',
+  Math.abs(ringHot.mean - ringCold.mean) > 0.5 || Math.abs(ringHot.lit - ringCold.lit) > 0.01,
+  `doorjamb box: ring ${ringHot.mean.toFixed(2)}/255 lit ${pct(ringHot.lit)} → ` +
+    `between ${ringMid.mean.toFixed(2)} lit ${pct(ringMid.lit)} → ` +
+    `settled ${ringCold.mean.toFixed(2)} lit ${pct(ringCold.lit)}`,
+);
+await setTimeScale(1);
+
+/*
+ * --- 34b an object surfaces whole ------------------------------------------
+ *
+ * The propagation rule this look is built on. A sampling look paints the faces its rays happen
+ * to strike, which means a crate you have walked all the way around is still a set of unrelated
+ * patches. Here, hearing *any* face of an object hands you the object: every face of it inside
+ * the sound's radius unlocks together, back faces included. A thing you have heard is a thing you
+ * know the shape of, which is the only reading that lets you route around it in the dark.
+ *
+ * The proof needs both halves. The crate's far side must come back from a ping that can only have
+ * touched its near side — and something farther away, with no sound path to it at all, must stay
+ * black in the same breath, or "whole object" would just be "everything".
+ */
+await respawn();
+await clearPaint();
+const atSpawn = await state();
+const crateX = (regions.crateFront[0] + regions.crateBack[3]) / 2;
+const crateZ = (regions.crateFront[2] + regions.crateFront[5]) / 2;
+await turnTo(yawTo(Number(atSpawn.x), Number(atSpawn.z), crateX, crateZ), sens);
+const crateState = await ping('e-ping');
+await settleInk(60000);
+const crateFront = await probeRegion('crateFront');
+const crateBack = await probeRegion('crateBack');
+const crateShot = await shotBuf('51-blueprint-whole-object.png');
+console.log(
+  `  crate at (${crateX.toFixed(1)}, ${crateZ.toFixed(1)}): ` +
+    `front ${crateFront.unlocked}/${crateFront.dots}, back ${crateBack.unlocked}/${crateBack.dots}`,
+);
+check(
+  'the struck face of the crate comes back',
+  crateFront.unlocked === crateFront.dots && crateFront.dots > 10,
+  `${crateFront.unlocked} of ${crateFront.dots} dots, ${crateFront.edgesUnlocked} of ${crateFront.edges} segments`,
+);
+check(
+  'and so does the face behind it — an object you hear, you hear whole',
+  crateBack.unlocked === crateBack.dots && crateBack.dots > 10 && crateBack.edgesInked > 0,
+  `${crateBack.unlocked} of ${crateBack.dots} dots on the far side, ` +
+    `${crateBack.edgesInked} of ${crateBack.edges} segments inked`,
+);
+check(
+  'the beam that did it is a real beam, not a reveal',
+  Number(crateState.structLastDots) > 1000 && Number(crateState.structLastRays) > 1000,
+  `${crateState.structLastRays} rays unlocked ${crateState.structLastDots} dots and ` +
+    `${crateState.structLastEdges} segments in ${Number(crateState.structLastMs).toFixed(1)} ms`,
+);
+check(
+  'the beam is visible',
+  photo(crateShot).lit > 0.01,
+  `lit=${pct(photo(crateShot).lit)}`,
+);
+// The other half of §3.2, on a frame whose contours have finished flashing: cyan, and only cyan.
+const crateHue = hues(crateShot);
+check(
+  'and a settled blueprint is cyan-family, always (§3.2)',
+  crateHue.coolFraction > 0.8 && crateHue.warmFraction < 0.02,
+  `cool=${pct(crateHue.coolFraction)} warm=${pct(crateHue.warmFraction)} of ${crateHue.lit} lit px`,
+);
+
+/*
+ * --- 34c two walls and no path ---------------------------------------------
+ *
+ * The other half of the rule, at room scale. The side chamber's doorway is on a corner, so from
+ * anywhere in the main room every straight line into it is stopped by one of the two partitions.
+ * Whole-object reveal does not leak through that: an object is surfaced by a sound that *touches*
+ * it, and nothing here touches anything in there.
+ */
+await respawn();
+await clearPaint();
+const fromMain = await ping('e-ping');
+await settleInk(60000);
+const chamberBefore = await probeRegion('chamber');
+const chamberCrateBefore = await probeRegion('chamberCrate');
+await shotBuf('52-blueprint-outside-chamber.png');
+console.log(
+  `  from the main room: chamber ${chamberBefore.unlocked}/${chamberBefore.dots} dots, ` +
+    `crate ${chamberCrateBefore.unlocked}/${chamberCrateBefore.dots}`,
+);
+check(
+  'a beam from the main room leaves the side chamber completely black',
+  chamberBefore.unlocked === 0 &&
+    chamberBefore.edgesUnlocked === 0 &&
+    chamberCrateBefore.unlocked === 0,
+  `${chamberBefore.unlocked} of ${chamberBefore.dots} chamber dots and ` +
+    `${chamberCrateBefore.unlocked} of ${chamberCrateBefore.dots} crate dots — ` +
+    `from a beam that unlocked ${fromMain.structLastDots} dots elsewhere`,
+);
+
+/*
+ * Walk it: down the lane, through the chokepoint, then north through the chamber's doorway and
+ * on up the far side of the full-height pillar at (0.5, 7.0) — which stands squarely on the
+ * sight-line from the doorway and shadows the whole of the chamber floor behind it. That is the
+ * rule working, not a hole in it, but it makes the doorway itself a bad place to ask the
+ * question from, so the beam below is fired from a spot with an actual line down the chamber.
+ */
+await page.keyboard.down('w');
+const pastChoke = await poll((s) => Number(s.x) > -2.6, 25000);
+await page.keyboard.up('w');
+await wait(200);
+await turnTo(180, sens); // +Z
+await page.keyboard.down('w');
+const inChamberPos = await poll((s) => Number(s.z) > 8.4, 25000);
+await page.keyboard.up('w');
+await wait(200);
+check(
+  'the doorway is walkable',
+  Number(inChamberPos.z) > 8.4 && Number(pastChoke.x) > -2.6,
+  `walked to (${Number(inChamberPos.x).toFixed(2)}, ${Number(inChamberPos.z).toFixed(2)})`,
+);
+await turnTo(-90, sens); // +X, down the length of the chamber
+// Wiped first, so the answer below can only be the one ping fired from inside.
+await clearPaint();
+const fromInside = await ping('e-ping');
+await settleInk(60000);
+const chamberAfter = await probeRegion('chamber');
+const chamberCrateAfter = await probeRegion('chamberCrate');
+const chamberBuf = await shotBuf('53-blueprint-inside-chamber.png');
+console.log(
+  `  from inside: chamber ${chamberAfter.unlocked}/${chamberAfter.dots} dots ` +
+    `(${chamberAfter.edgesInked} contours), crate ${chamberCrateAfter.unlocked}/${chamberCrateAfter.dots}`,
+);
+check(
+  'step through the doorway and one beam hands you the whole chamber',
+  chamberAfter.unlocked > 500 &&
+    chamberAfter.edgesInked > 0 &&
+    chamberCrateAfter.unlocked > chamberCrateAfter.dots * 0.9,
+  `${chamberAfter.unlocked} of ${chamberAfter.dots} chamber dots (was ${chamberBefore.unlocked}), ` +
+    `${chamberCrateAfter.unlocked} of ${chamberCrateAfter.dots} on the crate (was ${chamberCrateBefore.unlocked}), ` +
+    `${chamberAfter.edgesInked} contours inked`,
+);
+check(
+  'and the chamber reads on screen',
+  photo(chamberBuf).lit > 0.01,
+  `lit=${pct(photo(chamberBuf).lit)} mean=${photo(chamberBuf).mean.toFixed(2)}/255`,
+);
+
+/*
+ * --- 34d ageing to the skeleton --------------------------------------------
+ *
+ * §3.6 applies to the drawing exactly as it does to the cloud: the fine read decays, the map
+ * does not. Nothing may be *forgotten* by the passage of time — only dimmed to the floor.
+ */
+await respawn();
+await clearPaint();
+await ping('q-ping');
+await settleInk(60000);
+const bpFreshBuf = await shotBuf('54-blueprint-fresh.png');
+const bpFresh = photo(bpFreshBuf);
+const bpBeforeAge = await state();
+await setTimeScale(10);
+const bpClock0 = Number((await state()).paintTime);
+await poll((s) => Number(s.paintTime) - bpClock0 >= 20, 25000);
+await setTimeScale(1);
+await wait(250);
+const bpAgedBuf = await shotBuf('55-blueprint-aged.png');
+const bpAged = photo(bpAgedBuf);
+const bpAfterAge = await state();
+check(
+  'the blueprint cools with age',
+  bpAged.mean < bpFresh.mean * 0.75,
+  `mean ${bpFresh.mean.toFixed(2)} → ${bpAged.mean.toFixed(2)}/255 over ` +
+    `${(Number(bpAfterAge.paintTime) - bpClock0).toFixed(0)} s`,
+);
+check(
+  'and settles on a memory skeleton rather than on nothing',
+  bpAged.mean > bpFresh.mean * 0.02 && bpAged.lit > 0.005,
+  `mean=${bpAged.mean.toFixed(3)}/255 (${pct(bpAged.mean / bpFresh.mean)} of fresh) lit=${pct(bpAged.lit)}`,
+);
+check(
+  'ageing unlocks nothing and forgets nothing (§3.6)',
+  Number(bpAfterAge.structUnlockedDots) === Number(bpBeforeAge.structUnlockedDots) &&
+    Number(bpAfterAge.structUnlockedEdges) === Number(bpBeforeAge.structUnlockedEdges),
+  `dots ${bpBeforeAge.structUnlockedDots} → ${bpAfterAge.structUnlockedDots}, ` +
+    `segments ${bpBeforeAge.structUnlockedEdges} → ${bpAfterAge.structUnlockedEdges}`,
+);
+
+/*
+ * --- 34e the cost of a reveal ----------------------------------------------
+ *
+ * Law 5 again, and it bites harder here than on the sampling looks: unlocking a beam's worth of
+ * lattice is tens of thousands of point-in-radius tests. It is amortised over frames for the same
+ * reason ray sampling is, and the assertion is the same shape — what matters is the worst single
+ * frame, not the total.
+ */
+await respawn();
+await clearPaint();
+const bpCost = [];
+for (let i = 0; i < 6; i++) {
+  const s = await ping('e-ping');
+  bpCost.push({
+    total: Number(s.structLastMs),
+    worst: Number(s.structLastChunkMs),
+    chunks: Number(s.structLastChunks),
+    rays: Number(s.structLastRays),
+    dots: Number(s.structLastDots),
+  });
+}
+await settleInk(60000);
+const bpStress = await state();
+console.log(
+  `  blueprint CPU: ${mean(bpCost.map((c) => c.total)).toFixed(1)} ms per beam ` +
+    `(${mean(bpCost.map((c) => c.rays)).toFixed(0)} items tested, ${bpCost[0].dots} dots unlocked on the first), ` +
+    `spread over ${mean(bpCost.map((c) => c.chunks)).toFixed(1)} frames, ` +
+    `worst single frame ${Math.max(...bpCost.map((c) => c.worst)).toFixed(1)} ms`,
+);
+check(
+  'six blueprint beams keep the frame rate up',
+  Number(bpStress.fps) > 8,
+  `${Number(bpStress.fps).toFixed(1)} fps (software GL) · ` +
+    `${bpStress.structUnlockedDots} dots and ${bpStress.structUnlockedEdges} segments known`,
+);
+const bpWorst = Math.max(...bpCost.map((c) => c.worst));
+check(
+  'no single frame pays for a whole reveal',
+  bpWorst < 16 && bpCost[0].chunks >= 2 && bpCost[0].worst < bpCost[0].total * 0.75,
+  `first beam ${bpCost[0].total.toFixed(1)} ms over ${bpCost[0].chunks} frames ` +
+    `(worst ${bpCost[0].worst.toFixed(1)} ms) · worst across all six ${bpWorst.toFixed(1)} ms`,
+);
+check(
+  'and unlocking always finishes — nothing is left pending',
+  Number(bpStress.structPending) === 0 && Number(bpStress.structPendingEdges) === 0,
+  `pending=${bpStress.structPending} pendingEdges=${bpStress.structPendingEdges}`,
+);
+await shotBuf('56-blueprint-stress.png');
+
+/*
+ * --- 34f switching looks -----------------------------------------------------
+ *
+ * Two representations exist and only one may ever be live. Switching drops whatever the other
+ * one knew, so a look change can neither leave a ghost of the previous look on screen nor paint
+ * the same event twice.
+ */
+await setVariant('1', 'Dust');
+await wait(250);
+const backToDust = await state();
+const dustAfterBp = photo(await shotBuf('57-blueprint-switch-away.png'));
+check(
+  'switching away from Blueprint takes its drawing with it',
+  Number(backToDust.structUnlockedDots) === 0 &&
+    Number(backToDust.points) === 0 &&
+    dustAfterBp.mean < 2,
+  `structDots known=${backToDust.structUnlockedDots} points=${backToDust.points} ` +
+    `mean=${dustAfterBp.mean.toFixed(3)}/255`,
+);
+const dustAgain = await ping('q-ping');
+check(
+  'and the sampling looks still work afterwards',
+  Number(dustAgain.points) > 1000 && Number(dustAgain.structUnlockedDots) === 0,
+  `points=${dustAgain.points} · structured dots known=${dustAgain.structUnlockedDots}`,
+);
+await setVariant('5', 'Blueprint');
+await wait(250);
+const backToBp = await state();
+check(
+  'and switching back drops the blips instead',
+  Number(backToBp.points) === 0 && Number(backToBp.structUnlockedDots) === 0,
+  `points=${backToBp.points} structDots known=${backToBp.structUnlockedDots}`,
+);
+await setVariant('1', 'Dust');
+await clearPaint();
 
 // --- report ----------------------------------------------------------------
 check(

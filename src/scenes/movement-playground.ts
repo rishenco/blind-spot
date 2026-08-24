@@ -681,6 +681,7 @@ export class MovementPlayground implements LabScene {
       camRoll: (cam.rotation.z * 180) / Math.PI,
       steps: this.player.stepCount,
       landDip: this.player.landDipOffset,
+      landDipPeak: this.player.landDipPeakOffset,
       // Camera mode + body: what batch 1.2 added, and what its scenarios assert on.
       view: this.player.viewMode,
       viewBlend: this.player.viewBlend,

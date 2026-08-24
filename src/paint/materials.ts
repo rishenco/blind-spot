@@ -76,3 +76,23 @@ export const MATERIAL_VOICES: readonly MaterialVoice[] = [
 
 /** Where old returns drift before they settle into the skeleton. */
 export const VIOLET: readonly [number, number, number] = [0.42, 0.2, 0.66];
+
+/**
+ * The matter palette of §3.2 — cyan-family only, forever, and shared by every look that obeys
+ * the law (the blip cloud of looks 1-3 and the Blueprint lattice and contours of look 5).
+ *
+ * The cold end is a *rendered* navy, not a paint-chip navy: it is multiplied by the skeleton's
+ * 0.22 alpha before it reaches the screen, so picking a colour that already looks like dim navy
+ * on a swatch dims it twice and the memory skeleton disappears — which would quietly cost the
+ * player the map §3.6 promises they keep.
+ */
+export const MATTER_FRESH = 0xeaffff;
+export const MATTER_MID = 0x28c8e6;
+export const MATTER_COLD = 0x16536e;
+
+/**
+ * Reserved accent for traversal holds (§5: "dots are matter, lines are holds"). The structured
+ * backend carries a per-item channel for it so ledges, rails and rungs can be lifted out of the
+ * cyan band the day the movement verbs arrive; nothing writes it yet.
+ */
+export const ACCENT_GOLD = 0xffc879;

@@ -23,6 +23,13 @@ export interface Aabb {
    * sound. Absent means concrete (0), which is what most of a facility is.
    */
   readonly mat?: number;
+  /**
+   * True when this box *is the room* — a floor, a ceiling, an outer wall, a partition — rather
+   * than a thing standing in it. Collision does not care; the structured reveal of look 5 does,
+   * because hearing one face of a crate tells you a crate is there (so all of it surfaces) while
+   * hearing one patch of a wall tells you nothing whatsoever about the room on its far side.
+   */
+  readonly shell?: boolean;
 }
 
 /** Numerical slack, in metres, used for "were we above this surface" style tests. */
@@ -36,8 +43,9 @@ export function aabbFromBounds(
   maxY: number,
   maxZ: number,
   mat = 0,
+  shell = false,
 ): Aabb {
-  return { minX, minY, minZ, maxX, maxY, maxZ, mat };
+  return { minX, minY, minZ, maxX, maxY, maxZ, mat, shell };
 }
 
 /** Box given by its centre on X/Z, its base on Y, and its full size. */

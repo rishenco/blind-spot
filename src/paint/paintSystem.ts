@@ -77,8 +77,20 @@
 import * as THREE from 'three';
 import type { Aabb, StaticWorld } from '../core/collision';
 import type { SoundClass, SoundEvent } from './soundEvents';
-import { MATERIAL_COUNT, MATERIAL_VOICES, VIOLET } from './materials';
+import {
+  MATERIAL_COUNT,
+  MATERIAL_VOICES,
+  MATTER_COLD,
+  MATTER_FRESH,
+  MATTER_MID,
+  VIOLET,
+} from './materials';
 import { MAX_LIVE_WAVES, TracerStreaks, WaveDust, type LiveWave } from './waveFx';
+import {
+  StructuredPaint,
+  defaultStructuredTunables,
+  type StructuredTunables,
+} from './structured';
 
 // ---------------------------------------------------------------------------
 // Look profiles
@@ -127,6 +139,14 @@ export interface PaintProfile {
   dissolve: number;
   /** Whether this look asks for the bloom pass by default. */
   bloom: boolean;
+  /**
+   * True for a look that answers events with the *structured* reveal of `structured.ts` — exact
+   * lattices and contours unlocked by sound — instead of the stochastic splat path. The two
+   * never run at once: only one of them may consume an event, and switching looks clears both
+   * (see `setProfile`), because a room half-painted in blips and half in contours would be two
+   * pictures of the same room drawn to different laws.
+   */
+  structured: boolean;
 }
 
 export function paintProfiles(): PaintProfile[] {
@@ -147,6 +167,7 @@ export function paintProfiles(): PaintProfile[] {
       materialMix: 0,
       dissolve: 0,
       bloom: false,
+      structured: false,
     },
     {
       // Sonar register: fewer, fatter, soft-edged returns. Reads at a glance, loses detail.
@@ -164,6 +185,7 @@ export function paintProfiles(): PaintProfile[] {
       materialMix: 0,
       dissolve: 0,
       bloom: false,
+      structured: false,
     },
     {
       // Textured register: mid density, heavy per-point jitter — noisy, filmic, less clinical.
@@ -181,6 +203,7 @@ export function paintProfiles(): PaintProfile[] {
       materialMix: 0,
       dissolve: 0,
       bloom: false,
+      structured: false,
     },
     {
       /*
@@ -208,6 +231,39 @@ export function paintProfiles(): PaintProfile[] {
       materialMix: 1,
       dissolve: 0.55,
       bloom: true,
+      structured: false,
+    },
+    {
+      /*
+       * Blueprint (Чертёж) — the structured candidate, and the only look that is not a cloud.
+       *
+       * Nothing here is sampled: the level's geometry is known, so a sound *unlocks* the part of
+       * it that the sound actually reached — a uniform lattice of dim dots across every revealed
+       * face and a bright contour along every revealed edge. What the player reads is a CAD
+       * drawing being surveyed by ear, arriving as a two-phase pressure front (see
+       * `structured.ts`): probed and displaced at the front, exact and inked a fifth of a second
+       * behind it.
+       *
+       * The splat fields below are inert for this look — it never deposits a blip — and are kept
+       * at look 1's values purely so the shared Paint folder has something sane to show.
+       */
+      name: 'Blueprint',
+      density: 1.0,
+      cellSize: 0.1,
+      sizeWorld: 0.065,
+      minPixels: 1.0,
+      maxPixels: 18,
+      depthExp: 1.0,
+      softness: 0.3,
+      sizeJitter: 0.15,
+      brightJitter: 0.12,
+      brightness: 1.0,
+      materialMix: 0,
+      dissolve: 0,
+      // Contours are thin bright lines on black, which is exactly what a mild bloom flatters:
+      // the ink gains a halo and the lattice stays quiet. Vetoed automatically under software GL.
+      bloom: true,
+      structured: true,
     },
   ];
 }
@@ -291,18 +347,6 @@ export function defaultWaveTunables(): WaveTunables {
     dustShell: 2.0,
   };
 }
-
-/**
- * Matter palette for looks 1-3 — cyan-family only, forever (§3.2).
- *
- * The cold end is a *rendered* navy, not a paint-chip navy: it is multiplied by the skeleton's
- * 0.22 alpha before it reaches the screen, so picking a colour that already looks like dim navy
- * on a swatch dims it twice and the memory skeleton disappears — which would quietly cost the
- * player the map §3.6 promises they keep.
- */
-const MATTER_FRESH = 0xeaffff;
-const MATTER_MID = 0x28c8e6;
-const MATTER_COLD = 0x16536e;
 
 /** Event-layer palette (§3.2): self is amber, and the pings are the same self, brighter. */
 const EVENT_COLORS: Record<SoundClass, number> = {
@@ -970,6 +1014,9 @@ export class PaintSystem {
   private readonly tracer: TracerStreaks;
   private readonly dust: WaveDust;
 
+  /** The structured reveal of look 5. Inert — and unbuilt — until that look is selected. */
+  readonly structured: StructuredPaint;
+
   private readonly root = new THREE.Group();
 
   private time = 0;
@@ -1063,12 +1110,18 @@ export class PaintSystem {
       tunables?: PaintTunables;
       ramp?: AgeRamp;
       wave?: WaveTunables;
+      structured?: StructuredTunables;
     } = {},
   ) {
     this.capacity = options.capacity ?? DEFAULT_CAPACITY;
     this.tunables = options.tunables ?? defaultPaintTunables();
     this.ramp = options.ramp ?? defaultAgeRamp();
     this.wave = options.wave ?? defaultWaveTunables();
+    this.structured = new StructuredPaint(
+      world,
+      this.ramp,
+      options.structured ?? defaultStructuredTunables(),
+    );
     this.stats.capacity = this.capacity;
 
     this.positions = new Float32Array(this.capacity * 3);
@@ -1176,7 +1229,14 @@ export class PaintSystem {
     this.births.fill(NEVER);
     this.priors.fill(NEVER);
 
-    this.root.add(this.points, this.eventPoints, this.tracer.object, this.dust.object);
+    this.root.add(
+      this.points,
+      this.eventPoints,
+      this.tracer.object,
+      this.dust.object,
+      this.structured.object,
+    );
+    this.structured.applyLook(this.tunables.windowRadius);
   }
 
   /** The object to add to the scene. */
@@ -1207,6 +1267,18 @@ export class PaintSystem {
     if (index < 0 || index >= this.profiles.length) return;
     this.profileIndex = index;
     this.applyProfile();
+    /*
+     * Clear-on-switch, for both representations at once.
+     *
+     * The two paint paths answer the same events in incompatible currencies — one deposits
+     * blips, the other unlocks known geometry — so a run that crossed a look switch would leave
+     * the room drawn half one way and half the other, with the halves ageing on two clocks. The
+     * doctrine that already governs looks 1-4 (density and cell size are *sampling* parameters,
+     * so the honest comparison is the same events resampled, never the same paint restyled)
+     * gives the same answer here, and it is the only policy that cannot double-paint.
+     */
+    this.structured.setActive(this.profile.structured);
+    this.points.visible = !this.profile.structured;
     this.clear();
   }
 
@@ -1242,6 +1314,7 @@ export class PaintSystem {
     u.uRimSize!.value = this.wave.rimSize;
     this.tracer.setLook(this.wave.tracerSeconds, this.wave.tracerBrightness);
     this.dust.setLook(this.wave.dustGain, this.wave.dustSize, this.wave.dustShell);
+    this.structured.applyLook(this.tunables.windowRadius);
   }
 
   /**
@@ -1261,6 +1334,8 @@ export class PaintSystem {
     if (this.job !== null && performance.now() - this.lastChunkAt >= this.tunables.chunkGapMs) {
       this.runChunk(this.tunables.chunkRays, this.tunables.chunkMs);
     }
+    // The structured backend amortises its unlocking the same way and for the same reason.
+    this.structured.advance(seconds, this.tunables.chunkGapMs);
 
     for (let i = this.waves.length - 1; i >= 0; i--) {
       const w = this.waves[i]!;
@@ -1277,6 +1352,7 @@ export class PaintSystem {
   setListener(x: number, y: number, z: number): void {
     this.listener.set(x, y, z);
     (this.material.uniforms.uListener!.value as THREE.Vector3).set(x, y, z);
+    this.structured.setListener(x, y, z);
   }
 
   /**
@@ -1289,6 +1365,7 @@ export class PaintSystem {
     this.material.uniforms.uProjScale!.value = this.projScale;
     this.eventMaterial.uniforms.uProjScale!.value = this.projScale;
     this.dust.setProjScale(this.projScale);
+    this.structured.setProjScale(this.projScale);
     camera.getWorldPosition(this.camPos);
     camera.getWorldDirection(this.camDir);
   }
@@ -1327,6 +1404,7 @@ export class PaintSystem {
     this.stats.lastSpanDeg = 0;
     this.stats.lastLateral = 0;
     this.diagTime = Number.NaN;
+    this.structured.clear();
     this.flushEvents();
   }
 
@@ -1369,11 +1447,20 @@ export class PaintSystem {
       this.addEventMarker(event);
       this.addWave(event);
       if (event.class === 'e-ping') this.fireTracer(event);
-      if (event.coneAngleDeg >= 359.9) this.planOmni(event);
-      else this.planCone(event);
-      // The first chunk runs now, whatever the budget: a ping must answer on the frame it is
-      // pressed, even if the far half of the answer catches up over the next two.
-      if (this.job !== null) this.runChunk(this.tunables.chunkRays, this.tunables.chunkMs);
+      /*
+       * One representation consumes the event, never both. Everything above this line — the
+       * event marker, the travelling front, the firing streak — belongs to the *sound* and is
+       * shared; everything below is how a look chooses to answer it.
+       */
+      if (this.profile.structured) {
+        this.structured.handle(event, this.time);
+      } else {
+        if (event.coneAngleDeg >= 359.9) this.planOmni(event);
+        else this.planCone(event);
+        // The first chunk runs now, whatever the budget: a ping must answer on the frame it is
+        // pressed, even if the far half of the answer catches up over the next two.
+        if (this.job !== null) this.runChunk(this.tunables.chunkRays, this.tunables.chunkMs);
+      }
     }
     this.diagTime = Number.NaN;
   };
@@ -2134,6 +2221,7 @@ export class PaintSystem {
     this.eventMaterial.dispose();
     this.tracer.dispose();
     this.dust.dispose();
+    this.structured.dispose();
     this.root.clear();
   }
 }

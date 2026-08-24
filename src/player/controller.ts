@@ -428,6 +428,13 @@ export class PlayerController {
   private bobGain = 0;
   private prevBobGain = 0;
   private landDip = 0;
+  /**
+   * Largest dip since the last respawn. The dip peaks and decays inside a few fixed ticks, and
+   * an observer outside the loop only ever sees the value the *last* tick of a rendered frame
+   * happened to leave behind — on a slow host that is reliably past the peak. Held here so that
+   * "landing dips the camera" can be measured at simulation rate rather than at frame rate.
+   */
+  private landDipPeak = 0;
   private prevLandDip = 0;
   private landDipTarget = 0;
   /** Footfalls emitted since boot — HUD readout and a hook for the sound layer. */
@@ -558,6 +565,7 @@ export class PlayerController {
     this.landDip = 0;
     this.prevLandDip = 0;
     this.landDipTarget = 0;
+    this.landDipPeak = 0;
     this.facingYaw = this.yaw;
     this.prevFacingYaw = this.yaw;
     this.yawRate = 0;
@@ -633,6 +641,11 @@ export class PlayerController {
   /** Current render-only landing dip, metres (0 when settled). Exposed for tooling/HUD. */
   get landDipOffset(): number {
     return this.landDip;
+  }
+
+  /** Deepest dip since the last respawn, metres. Tooling only — see `landDipPeak`. */
+  get landDipPeakOffset(): number {
+    return this.landDipPeak;
   }
 
   get mantling(): boolean {
@@ -1055,6 +1068,7 @@ export class PlayerController {
       this.landDip = 0;
       this.landDipTarget = 0;
     }
+    if (this.landDip > this.landDipPeak) this.landDipPeak = this.landDip;
 
     const targetEye = this.crouched ? m.eyeCrouch : m.eyeStand;
     this.eyeHeight += (targetEye - this.eyeHeight) * smoothFactor(m.eyeSmoothRate, dt);

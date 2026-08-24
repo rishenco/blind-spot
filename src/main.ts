@@ -136,9 +136,11 @@ loop.start();
 // Deliberately exposes no setters: tooling drives the game through real input.
 interface DebugHandle {
   getState(): Record<string, unknown>;
+  probe(name: string, args?: Record<string, unknown>): unknown;
   listScenes(): string[];
 }
 (window as unknown as { __blindspot: DebugHandle }).__blindspot = {
+  probe: (name, args) => host.current?.debugProbe?.(name, args) ?? null,
   getState: () => ({
     scene: host.currentId,
     variant: host.currentVariantName,

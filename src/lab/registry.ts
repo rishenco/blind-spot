@@ -41,6 +41,12 @@ export interface LabScene {
   setVariant?(index: number): void;
   /** Optional structured state for the screenshot driver and other tooling. */
   debugState?(): Record<string, unknown>;
+  /**
+   * Optional named query for tooling that needs to ask a *question* rather than read the whole
+   * state — "how much of the geometry inside this box is known?" — where returning the answer for
+   * every possible box in `debugState` would be absurd. Read-only, like everything else here.
+   */
+  debugProbe?(name: string, args?: Record<string, unknown>): unknown;
   dispose(): void;
 }
 
