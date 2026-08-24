@@ -175,35 +175,18 @@ If (1) stalls, no content fixes it.
 
 ## 9. Spice — the creative pass
 
-- **Dock Bloom.** Docking is deafening: the top floors flash-paint in one bloom and fade;
-  every constellation below flinches toward it. The clang carries the day's weather.
-- **Weather (one draw per run; symmetric, audible):** storm — gusts telegraph ~3 s, then
-  2–4 s of halved hearing both ways (wind-ups still cut through) · rain — the sky faintly
-  paints all exposed frame, all hearing −35 % · fog — propagation −40 %, E-ping 25 m.
 - **Masking law + hum-walking.** Any sound covers sounds under half its intensity,
   symmetrically for all ears. Corollary: the hum masks walk-steps inside its 12 m — step
   on the beat and vanish inside the beacon everyone hears.
-- **Bolts.** Scavenged, max 8, zero energy. A thrown handful scatters 2 m paint pops with
-  11 m clinks; litter persists and crunches. Dropped off the rim: a plumb line that paints
-  a strip down the flank, ringing every floor it clips.
-- **Girder chord.** Kick an exposed member: the whole girder rings ~3 s, painting a sleeve
-  along its full length — and anything standing on it, silent spiders included.
-- **Molt.** Each spider molts on a learnable ~4 min cycle: a 10 s chitin chorus, then ~20 s
-  stationary, half-deaf, self-painting, pounce offline. The husk stays: a crackle-trap.
-- **Clutches.** Dispatch hatches are egg clutches, ticking faintly. Stealing sacs quietly
-  (2 s each) cuts that hatch's capacity forever; smashing does the same at a 22 m clang.
-- **The funeral.** Spiders within 60 m converge on a detonation crater for ~20 s; blasts
-  damage spiders, so a besieged cluster chain-spends on one juke. A pounce missing within
-  1 m grazes: 1 dmg and a screech that paints the duel.
-- **Brownout.** At heat 3 a zone's breaker dies audibly and its lighthouses wind down —
-  loudness punished with darkness you caused. A 4 s loud crank relights them; idle
-  machines start the same way: install a lighthouse, pay in heat.
-- **The choir.** Banked artifacts hum in sync — the crane becomes a lighthouse you built —
-  and the carried 4th answers antiphonally; spiders drift toward the song. The last ascent
-  is the brightest and the most besieged, unscripted.
+- **Everything that falls, paints.** Any loose object can be picked up, dropped, or thrown:
+  flight is silent; the impact sounds in its material's voice, paints the area around the
+  landing, and draws investigation. Every piece of debris is a portable question and a
+  portable lure — spiders divert to it like to any other sound origin.
 - **Wounded reactor.** Under 25 HP the cracked chassis whines every 3 s (6 m audible):
   dying makes you glow. Banking repairs.
-- **Shelf (post-MVP):** Broodmother nest-heist · ghost freight · stolen tripwires · scribe slides.
+- **Shelf (post-MVP):** Dock Bloom · weather draws · girder chord · molt cycle · egg
+  clutches · the funeral · brownout · the choir · Broodmother · ghost freight · stolen
+  tripwires · scribe slides.
 
 ## 10. Overrides vs doc/vision.md
 
