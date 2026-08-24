@@ -53,10 +53,10 @@ your body. Walk, and your own footfalls light the room ~4 m at a time. Sprint, a
 Around the reticle: a ring whose brightness is your current audible radius, and a printed readout
 of that radius in metres plus the reactor (`⚡ energy/max`). A refused ping prints why.
 
-Keys `1`/`2`/`3` are the three art directions. `2` (Blueprint — line-led drafting look) and `3`
-(Signal — raw-data decode look: quantized samples that resolve into the lattice) are authored; `1` (Phosphor) **is not
-authored yet**: it renders the debug look under its own id and says so on screen, which exercises
-the real switch path (dispose materials, rebuild the scene, leave the paint buffers untouched).
+Keys `1`/`2`/`3` are the three art directions, all authored: `1` (Phosphor — slow-decay
+sonar-scope look: every dot a struck phosphor grain that flares, breathes, and refuses to die),
+`2` (Blueprint — line-led drafting look), `3` (Signal — raw-data decode look: quantized samples
+that resolve into the lattice). `0` is the plain debug look the engine shipped with.
 
 ## Controls
 
@@ -73,7 +73,7 @@ starts the audio context.
 | `E` | Directed ping — 25° cone, 40 m, 18 energy. Heard 30 m at **both** ends of the beam | `src/main.ts:317` |
 | `Q` | Spatial ping — 360°, 12 m, 10 energy | `src/main.ts:320` |
 | `0` | Look: debug (the neutral one; the engine ships with it up) | `src/main.ts:303`, `src/looks/index.ts:37` |
-| `1` `2` `3` | Look: phosphor / blueprint / signal — reserved, currently the debug look | `src/looks/index.ts:38` |
+| `1` `2` `3` | Look: phosphor / blueprint / signal — the three authored art directions | `src/looks/index.ts:38` |
 | `M` | Top-down debug plan: the authored map, doors, patrol routes and your own trail | `src/main.ts:323` |
 | `N` | Mute / unmute audio | `src/main.ts:342` |
 | `B` | Camera motion effects on/off (head bob, landing dip, slide roll) | `src/main.ts:339` |
@@ -209,7 +209,7 @@ doc/engine-plan.md    architecture, module map, the look contract, milestones
 doc/visual-brief.md   what a tester must be able to feel, and the look direction
 doc/sample-map.md     "Dock Approach": zones, doors, patrol, test choreography
 src/core/             sim, events, surfels, paint, movement, player, dog, props, audio, map
-src/looks/            the look contract + debug look; phosphor/blueprint/signal reserved
+src/looks/            the look contract + debug look + the three authored looks
 src/main.ts           boot: wires sim -> bus -> paint -> looks, input, the frame loop
 test/                 vitest specs
 scripts/verify.mjs    the browser verification run
