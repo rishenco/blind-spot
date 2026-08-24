@@ -1,0 +1,505 @@
+/**
+ * BLIND SPOT — M1 "чёрный зал".
+ *
+ * One question, and the whole milestone exists to answer it: can you navigate a black, cluttered
+ * hall on lidar alone? Everything here is in service of that — the hall, the ping, the touch
+ * layer, the debug views you need to check your own answer, and the frame timer that decides
+ * whether the answer is worth anything.
+ *
+ * The scene renders nothing by default. Black is the ground state, not a background.
+ */
+import * as THREE from 'three';
+import GUI from 'lil-gui';
+
+import { Input } from './core/input';
+import { Loop } from './core/loop';
+import { SoundBus } from './events/bus';
+import { Hud, type HelpRow } from './debug/hud';
+import { Lidar, defaultLidarTunables } from './lidar/lidar';
+import { StructuredPaint, defaultStructuredTunables } from './lidar/structured';
+import { defaultAgeRamp } from './lidar/palette';
+import { TouchLayer, defaultTouchTunables } from './touch/touch';
+import {
+  PlayerController,
+  defaultCameraTunables,
+  defaultMovementTunables,
+  type PlayerEvent,
+} from './player/controller';
+import { GATE_TARGET, HALL, LANDMARKS, buildHall } from './world/hall';
+
+type ViewMode = 'player' | 'third' | 'top';
+
+const HELP: HelpRow[] = [
+  { keys: 'W A S D', action: 'move' },
+  { keys: 'Shift / Ctrl', action: 'run / crouch' },
+  { keys: 'Space', action: 'jump, climb at a ledge' },
+  { keys: 'F  or  RMB', action: 'lidar ping — cone forward + halo around you' },
+  { keys: 'L', action: 'debug: darkness off (lights on)' },
+  { keys: 'V', action: 'debug: view — player / third / top' },
+  { keys: 'T', action: 'debug: touch layer on/off' },
+  { keys: 'K', action: 'debug: clear the accumulated map' },
+  { keys: 'J', action: 'debug: refill the lidar' },
+  { keys: 'G', action: 'debug: tuning panel' },
+  { keys: 'R', action: 'respawn' },
+  { keys: 'H', action: 'this help' },
+];
+
+const HINT =
+  'WASD move · Shift run · Ctrl crouch · F lidar ping · L lights · V view · T touch · G tuning · H help';
+
+/** How much of the loudness scale each thing the body does is worth, in metres of notice. */
+const STEP_LOUDNESS: Record<string, number> = { crouch: 3, walk: 9, sprint: 16 };
+
+interface Perf {
+  simMs: number;
+  paintMs: number;
+  renderMs: number;
+  frameMs: number;
+}
+
+class App {
+  private readonly params = new URLSearchParams(location.search);
+  readonly harness = this.params.get('harness') === '1';
+  /**
+   * Harness only: force-finish the unlock inside the frame that started it, so a screenshot
+   * never catches a half-painted map. It is a determinism aid and NOT how the game runs, so
+   * the perf pass turns it off — measuring it would measure the harness, not the lidar.
+   */
+  private syncPaint = true;
+  private readonly seed = Number(this.params.get('seed') ?? '20260824');
+
+  private readonly renderer: THREE.WebGLRenderer;
+  private readonly scene = new THREE.Scene();
+  private readonly camera: THREE.PerspectiveCamera;
+  private readonly topCamera = new THREE.PerspectiveCamera(60, 1, 0.5, 400);
+  private readonly hud = new Hud();
+  private readonly input: Input;
+  private readonly loop: Loop;
+
+  private readonly hall = buildHall(this.seed);
+  private readonly bus = new SoundBus();
+  private readonly lidar = new Lidar(defaultLidarTunables());
+  private readonly paint: StructuredPaint;
+  private readonly touch: TouchLayer;
+  private readonly player: PlayerController;
+
+  private readonly lights = new THREE.Group();
+  private gui: GUI | null = null;
+
+  /** Simulation clock, seconds. Never wall-clock: the keyframe generator depends on it. */
+  private time = 0;
+  private view: ViewMode = 'player';
+  private lightsOn = false;
+  private pendingFire = false;
+  private buildMs = 0;
+
+  private readonly frameTimes: number[] = [];
+  private perf: Perf = { simMs: 0, paintMs: 0, renderMs: 0, frameMs: 0 };
+  private topHeight = 62;
+
+  /** Live look/quality knobs the tuning panel owns. */
+  private readonly look = {
+    windowRadius: 55,
+    refreshSeconds: 0.3,
+    featherStart: 0.55,
+    renderScale: 1,
+    chunkGapMs: 0,
+  };
+
+  constructor() {
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;display:block';
+    document.body.append(canvas);
+
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: false,
+      alpha: false,
+      powerPreference: 'high-performance',
+      preserveDrawingBuffer: this.harness,
+    });
+    this.renderer.setClearColor(0x000000, 1);
+
+    const cameraTunables = defaultCameraTunables();
+    this.camera = new THREE.PerspectiveCamera(cameraTunables.fov, 1, 0.05, 260);
+
+    this.player = new PlayerController(this.hall.world, defaultMovementTunables(), cameraTunables);
+    this.player.setSpawn(HALL.spawn, HALL.spawnYawDeg);
+
+    this.paint = new StructuredPaint(this.hall.world, defaultAgeRamp(), defaultStructuredTunables());
+    const t0 = performance.now();
+    this.paint.ensureBuilt();
+    this.buildMs = performance.now() - t0;
+    this.paint.setActive(true);
+    this.paint.applyLook(this.look.windowRadius, this.look.refreshSeconds, this.look.featherStart);
+    this.scene.add(this.paint.object);
+
+    this.touch = new TouchLayer(this.hall.world, defaultTouchTunables());
+    this.scene.add(this.touch.object);
+
+    // Lights-on debug view. Off by default and, being a Group, costs nothing while it is.
+    this.lights.add(new THREE.HemisphereLight(0xbfd4e6, 0x202428, 2.1));
+    const key = new THREE.DirectionalLight(0xffffff, 1.5);
+    key.position.set(0.4, 1, 0.25);
+    this.lights.add(key);
+    this.hall.reveal.visible = false;
+    this.lights.visible = false;
+    this.scene.add(this.hall.reveal, this.lights);
+
+    this.input = new Input(canvas);
+    if (this.harness || this.params.get('look') === 'drag') this.input.forceDragLook();
+    else this.input.detectLookMode();
+
+    this.player.onEvent((event) => this.onPlayerEvent(event));
+
+    this.hud.setSceneLabel('BLIND SPOT', 'M1 — dark hall');
+    this.hud.setHelp(HELP);
+    this.hud.setHint(HINT);
+    this.hud.setHelpVisible(false);
+
+    canvas.addEventListener('mousedown', (e) => {
+      if (e.button === 2) this.pendingFire = true;
+    });
+    window.addEventListener('resize', () => this.resize());
+    this.resize();
+
+    this.loop = new Loop(
+      { fixedUpdate: (dt) => this.fixedUpdate(dt), render: (a) => this.render(a) },
+      { hz: 120 },
+    );
+    if (!this.harness) this.loop.start();
+  }
+
+  // ---- simulation ---------------------------------------------------------
+
+  private fixedUpdate(dt: number): void {
+    const t0 = performance.now();
+    this.time += dt;
+    this.bus.setTime(this.time);
+
+    this.hotkeys();
+    this.player.update(dt, this.input);
+    this.lidar.update(dt);
+
+    if (this.pendingFire) {
+      this.pendingFire = false;
+      this.fire();
+    }
+
+    const eye = this.player.eye;
+    this.touch.update(eye.x, eye.y, eye.z);
+
+    this.input.endTick();
+    this.perf.simMs = performance.now() - t0;
+  }
+
+  private hotkeys(): void {
+    const i = this.input;
+    if (i.wasKeyPressed('KeyF')) this.pendingFire = true;
+    if (i.wasKeyPressed('KeyL')) this.setLights(!this.lightsOn);
+    if (i.wasKeyPressed('KeyV')) this.cycleView();
+    if (i.wasKeyPressed('KeyT')) this.touch.setVisible(!this.touch.visible);
+    if (i.wasKeyPressed('KeyK')) this.clearMap();
+    if (i.wasKeyPressed('KeyJ')) this.lidar.refill();
+    if (i.wasKeyPressed('KeyG')) this.toggleGui();
+    if (i.wasKeyPressed('KeyH')) this.hud.toggleHelp();
+    if (i.wasKeyPressed('KeyR')) this.player.respawn();
+  }
+
+  /** Fires the lidar from the eye, along the look direction. */
+  fire(): boolean {
+    const eye = this.player.eye;
+    const forward = new THREE.Vector3();
+    this.camera.getWorldDirection(forward);
+    if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
+    return this.lidar.fire(eye, forward, this.time);
+  }
+
+  private onPlayerEvent(event: PlayerEvent): void {
+    // The body is the only thing making noise in M1 — and, as the concept points out, it is
+    // noise that tells *you* nothing. It is here because the bus has to be load-bearing from
+    // the first milestone, not because it helps you see.
+    if (event.type === 'footstep') {
+      this.bus.emit({
+        source: 'player-step',
+        x: event.x, y: event.y, z: event.z,
+        loudness: STEP_LOUDNESS[event.tier] ?? 9,
+      });
+      return;
+    }
+    this.bus.emit({
+      source: 'player-land',
+      x: event.x, y: event.y, z: event.z,
+      loudness: Math.min(26, 6 + event.impactSpeed * 2.2),
+    });
+  }
+
+  // ---- render -------------------------------------------------------------
+
+  private render(alpha: number): void {
+    const frameStart = performance.now();
+    this.player.applyToCamera(this.camera, alpha);
+
+    const renderTime = this.time + alpha * this.loop.stepSeconds;
+    const eye = this.camera.position;
+    this.paint.setListener(eye.x, eye.y, eye.z);
+
+    const paintStart = performance.now();
+    // One front at a time: the renderer finishes unlocking before it is handed the next.
+    this.lidar.pump(this.paint.getStats().pending > 0, (ping) => {
+      this.paint.handle(ping, renderTime, 0);
+      if (this.harness && this.syncPaint) this.paint.drain();
+    });
+    this.paint.advance(renderTime, this.look.chunkGapMs);
+    this.perf.paintMs = performance.now() - paintStart;
+
+    const camera = this.activeCamera();
+    this.paint.setProjScale((camera.projectionMatrix.elements[5] ?? 1) * this.drawHeight() * 0.5);
+
+    const renderStart = performance.now();
+    this.renderer.render(this.scene, camera);
+    this.perf.renderMs = performance.now() - renderStart;
+
+    this.perf.frameMs = performance.now() - frameStart;
+    this.frameTimes.push(this.perf.frameMs);
+    if (this.frameTimes.length > 240) this.frameTimes.shift();
+    this.updateHud();
+  }
+
+  private activeCamera(): THREE.PerspectiveCamera {
+    if (this.view !== 'top') return this.camera;
+    const p = this.player.position;
+    this.topCamera.position.set(p.x, this.topHeight, p.z + 0.001);
+    this.topCamera.lookAt(p.x, 0, p.z);
+    this.topCamera.updateMatrixWorld();
+    this.topCamera.updateProjectionMatrix();
+    return this.topCamera;
+  }
+
+  private drawHeight(): number {
+    const size = new THREE.Vector2();
+    this.renderer.getSize(size);
+    return size.y * this.renderer.getPixelRatio();
+  }
+
+  private percentile(p: number): number {
+    if (this.frameTimes.length === 0) return 0;
+    const sorted = [...this.frameTimes].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!;
+  }
+
+  private updateHud(): void {
+    const p = this.player.position;
+    const st = this.lidar.state;
+    const paint = this.paint.getStats();
+    const counts = this.bus.countsBySource();
+    const gate = Math.hypot(p.x - GATE_TARGET.x, p.z - GATE_TARGET.z);
+
+    this.hud.setDebug([
+      ['pos', `${p.x.toFixed(1)} ${p.y.toFixed(1)} ${p.z.toFixed(1)}`],
+      ['near', this.nearestLandmark(p.x, p.z)],
+      ['gate', `${gate.toFixed(1)} m`],
+      ['lidar', st.ready ? `ready ${st.charge.toFixed(2)}` : `charging ${(st.progress * 100) | 0}%`],
+      ['pings', `${st.fired}${st.queued > 0 ? ` (+${st.queued})` : ''}`],
+      ['sound', `${this.bus.emitted} ev · step ${counts.get('player-step') ?? 0}`],
+      ['view', this.lightsOn ? `${this.view} + lights` : this.view],
+    ]);
+
+    this.hud.setPerf([
+      // Under the keyframe harness the rAF loop is not running at all — the sim is stepped by
+      // hand — so there is no such thing as a frame rate. Say so instead of printing a zero that
+      // reads like a hang.
+      ['fps', this.loop.fps > 0 ? this.loop.fps.toFixed(0) : 'n/a (stepped)'],
+      ['frame', `${this.perf.frameMs.toFixed(1)} ms · p95 ${this.percentile(0.95).toFixed(1)}`],
+      ['sim/gpu', `${this.perf.simMs.toFixed(2)} / ${this.perf.renderMs.toFixed(2)} ms`],
+      ['paint', `${this.perf.paintMs.toFixed(2)} ms · pend ${paint.pending}`],
+      ['dots', `${paint.unlockedDots} / ${paint.dots}`],
+      ['edges', `${paint.unlockedEdges} / ${paint.edges}`],
+      ['touch', `${this.touch.getStats().segments} seg`],
+      ['calls', `${this.renderer.info.render.calls}`],
+    ]);
+
+    this.hud.setCapturePrompt(
+      this.harness || this.input.isCapturing ? null : 'click to capture the mouse',
+    );
+  }
+
+  private nearestLandmark(x: number, z: number): string {
+    let best = LANDMARKS[0]!;
+    let bestD = Infinity;
+    for (const l of LANDMARKS) {
+      const d = Math.hypot(l.x - x, l.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = l;
+      }
+    }
+    return `${best.name} ${bestD.toFixed(0)} m`;
+  }
+
+  // ---- debug switches -----------------------------------------------------
+
+  setLights(on: boolean): void {
+    this.lightsOn = on;
+    this.hall.reveal.visible = on;
+    this.lights.visible = on;
+    this.paint.setActive(!on);
+    this.touch.setVisible(!on);
+  }
+
+  setView(mode: ViewMode): void {
+    this.view = mode;
+    this.player.setViewMode(mode === 'third' ? 'third' : 'first');
+    // The top camera sits above the ceiling, so from up there the lit hall would be one grey
+    // slab. Drop the roof for that view only; the lidar map never has this problem because an
+    // unscanned ceiling is not drawn at all.
+    this.hall.setRoofVisible(mode !== 'top');
+  }
+
+  private cycleView(): void {
+    this.setView(this.view === 'player' ? 'third' : this.view === 'third' ? 'top' : 'player');
+  }
+
+  clearMap(): void {
+    this.paint.clear();
+    this.touch.clear();
+  }
+
+  private toggleGui(): void {
+    if (this.gui !== null) {
+      this.gui.destroy();
+      this.gui = null;
+      return;
+    }
+    const gui = new GUI({ title: 'lidar / perf' });
+    this.gui = gui;
+    const t = this.paint.tunables;
+    const lidar = this.lidar.tunables;
+
+    const shape = gui.addFolder('ping shape');
+    shape.add(lidar, 'coneAngleDeg', 10, 180, 1);
+    shape.add(lidar, 'coneRange', 5, 60, 1);
+    shape.add(lidar, 'haloRange', 1, 20, 0.5);
+    shape.add(lidar, 'waveSpeed', 8, 120, 1);
+    shape.add(lidar, 'rechargeSeconds', 0.2, 20, 0.1);
+
+    const cost = gui.addFolder('cost (the lag knobs)');
+    cost.add(t, 'spacing', 0.08, 0.6, 0.01).onFinishChange(() => this.rebuildPaint());
+    cost.add(t, 'segment', 0.1, 1, 0.05).onFinishChange(() => this.rebuildPaint());
+    cost.add(t, 'pixelCap', 1, 24, 1).onChange(() => this.applyLook());
+    cost.add(this.look, 'windowRadius', 5, 140, 1).onChange(() => this.applyLook());
+    cost.add(t, 'chunkItems', 250, 20000, 250);
+    cost.add(t, 'chunkMs', 0.5, 16, 0.5);
+    cost.add(this.look, 'chunkGapMs', 0, 33, 1);
+    cost.add(this.look, 'renderScale', 0.35, 1, 0.05).onChange(() => this.resize());
+
+    const style = gui.addFolder('look');
+    style.add(t, 'dotBright', 0, 2, 0.01).onChange(() => this.applyLook());
+    style.add(t, 'dotSize', 0.01, 0.2, 0.005).onChange(() => this.applyLook());
+    style.add(t, 'contourBright', 0, 3, 0.05).onChange(() => this.applyLook());
+    style.add(t, 'ripple', 0, 0.3, 0.005).onChange(() => this.applyLook());
+    style.add(this.look, 'refreshSeconds', 0, 2, 0.05).onChange(() => this.applyLook());
+    style.close();
+
+    const tactile = gui.addFolder('touch');
+    tactile.add(this.touch.tunables, 'range', 0.2, 2, 0.05);
+    tactile.add(this.touch.tunables, 'nearAlpha', 0, 1, 0.02);
+    tactile.add(this.touch.tunables, 'memoryAlpha', 0, 0.6, 0.01);
+    tactile.close();
+  }
+
+  private applyLook(): void {
+    this.paint.applyLook(this.look.windowRadius, this.look.refreshSeconds, this.look.featherStart);
+  }
+
+  private rebuildPaint(): void {
+    const t0 = performance.now();
+    this.paint.rebuild();
+    this.buildMs = performance.now() - t0;
+    this.applyLook();
+  }
+
+  private resize(): void {
+    const w = Math.max(1, window.innerWidth);
+    const h = Math.max(1, window.innerHeight);
+    const scale = this.look.renderScale;
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2) * scale);
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.topCamera.aspect = w / h;
+    this.topCamera.updateProjectionMatrix();
+  }
+
+  // ---- keyframe-generator surface -----------------------------------------
+
+  /**
+   * Everything `tools/shoot.mjs` is allowed to touch. The generator drives the simulation by
+   * hand — fixed step, fixed seed, no wall clock anywhere — because a scenario that depends on
+   * how fast the machine ran is not a proof of anything.
+   */
+  api(): Record<string, unknown> {
+    return {
+      seed: this.seed,
+      boxes: this.hall.boxCount,
+      buildMs: () => this.buildMs,
+      step: (seconds: number) => {
+        const n = Math.max(0, Math.round(seconds / this.loop.stepSeconds));
+        for (let i = 0; i < n; i++) this.fixedUpdate(this.loop.stepSeconds);
+      },
+      draw: () => this.render(0),
+      fire: () => {
+        this.pendingFire = true;
+      },
+      pose: (x: number, z: number, yawDeg: number) => {
+        this.player.setSpawn(new THREE.Vector3(x, 0, z), yawDeg);
+        // The ping direction is read off the camera, so the camera has to already be there.
+        this.player.applyToCamera(this.camera, 0);
+      },
+      aim: (yawDeg: number, pitchDeg = 0) => {
+        this.player.setHeading(yawDeg, pitchDeg);
+        this.player.applyToCamera(this.camera, 0);
+      },
+      keys: (down: string[], up: string[]) => {
+        for (const code of down) window.dispatchEvent(new KeyboardEvent('keydown', { code }));
+        for (const code of up) window.dispatchEvent(new KeyboardEvent('keyup', { code }));
+      },
+      lights: (on: boolean) => this.setLights(on),
+      view: (mode: ViewMode) => this.setView(mode),
+      topHeight: (h: number) => {
+        this.topHeight = h;
+      },
+      touch: (on: boolean) => this.touch.setVisible(on),
+      clear: () => this.clearMap(),
+      refill: () => this.lidar.refill(),
+      hud: (on: boolean) => this.hudVisible(on),
+      sync: (on: boolean) => {
+        this.syncPaint = on;
+      },
+      stats: () => ({
+        time: this.time,
+        pos: this.player.position.toArray(),
+        eye: this.player.eye.toArray(),
+        lidar: this.lidar.state,
+        paint: { ...this.paint.getStats() },
+        diag: this.paint.diagnostics(),
+        touch: this.touch.getStats(),
+        sound: { emitted: this.bus.emitted, last: this.bus.lastEvent },
+        gate: Math.hypot(this.player.position.x - GATE_TARGET.x, this.player.position.z - GATE_TARGET.z),
+        frameMs: this.perf,
+        calls: this.renderer.info.render.calls,
+      }),
+      region: (b: number[]) =>
+        this.paint.regionStats(b[0]!, b[1]!, b[2]!, b[3]!, b[4]!, b[5]!),
+    };
+  }
+
+  private hudVisible(on: boolean): void {
+    document.querySelectorAll<HTMLElement>('.bs-hud').forEach((el) => {
+      el.style.display = on ? '' : 'none';
+    });
+  }
+}
+
+const app = new App();
+(window as unknown as Record<string, unknown>).bs = app.api();
