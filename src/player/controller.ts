@@ -18,10 +18,12 @@ import {
   canOccupy,
   canOccupyWorld,
   circleOverlapsFootprint,
+  createMoveResult,
   moveBody,
   sweepSphereWorld,
   type Aabb,
   type BodyShape,
+  type MoveResult,
   type StaticWorld,
 } from '../core/collision';
 
@@ -487,6 +489,12 @@ export class PlayerController {
 
   private readonly wishDir = new THREE.Vector3();
   private readonly shape: BodyShape;
+  /**
+   * This controller's own `moveBody` output, allocated once. Not per tick, and not the module
+   * default: once other bodies (thrown props, spiders) move in the same fixed update, the shared
+   * instance is whoever moved last, and this one is read after `moveBody` returns.
+   */
+  private readonly moveResult: MoveResult = createMoveResult();
   private readonly probeScratch: Aabb[] = [];
   private readonly listeners = new Set<PlayerEventListener>();
 
@@ -725,7 +733,15 @@ export class PlayerController {
     this.shape.height = this.colliderHeight;
     this.shape.stepHeight = m.stepHeight;
     const wasGrounded = this.grounded;
-    const res = moveBody(this.world, this.position, this.velocity, dt, this.shape, wasGrounded);
+    const res = moveBody(
+      this.world,
+      this.position,
+      this.velocity,
+      dt,
+      this.shape,
+      wasGrounded,
+      this.moveResult,
+    );
 
     this.grounded = res.grounded;
     if (res.landingSpeed > 0) {

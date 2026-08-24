@@ -6,6 +6,33 @@
  * Resolution is split: vertical first (gravity, landing, ceilings), then horizontal
  * (collide-and-slide with a step-up tolerance), then an optional ground snap so walking
  * down stairs and ramps doesn't launch the player into the air.
+ *
+ * ## Module-level scratch: what it does and does not promise
+ *
+ * This file keeps several module-level scratch objects — `candidateScratch`, `queryScratch`,
+ * `sweepScratch`, `pushScratch`, `slidePlain`, `slideStepped` — so the hot path allocates
+ * nothing per tick. They are **deliberate and correct for the way this module is used**: any
+ * number of bodies may be moved through `moveBody` (or `canOccupyWorld` / `sweepSphereWorld`)
+ * as long as the calls happen *sequentially on one thread*. Each call fills the scratch it
+ * needs at the top and is finished with it before it returns, so body N+1 never sees body N's
+ * leftovers. Ticking a player, twenty thrown cans and six spiders one after another in a fixed
+ * update is exactly that pattern, and needs no change here.
+ *
+ * They break in only two ways, neither of which occurs today:
+ *
+ * - **Reentrancy** — calling back into this module from inside a call already in progress
+ *   (e.g. a collision callback that itself calls `moveBody`, or moving bodies from a Worker
+ *   sharing this module instance). The inner call would stomp the outer call's candidate list
+ *   mid-loop. Nothing in this codebase takes callbacks, so this cannot currently happen; if a
+ *   callback is ever added, that is the moment to give the scratch a per-call owner, not before.
+ * - **Retention** — holding a returned array past the next call. `world.query` returns the very
+ *   buffer it was handed, so `const c = world.query(..., scratch)` is only valid until the next
+ *   call that uses `scratch`. Copy it if you need it to survive.
+ *
+ * `MoveResult` used to be in this list and is not any more: `moveBody` takes an optional `out`,
+ * so a caller that wants to keep its result across other bodies' calls owns one (see
+ * `createMoveResult`). Omitting `out` still returns the shared instance, which is fine for the
+ * overwhelmingly common read-it-immediately case.
  */
 
 import type * as THREE from 'three';
@@ -303,17 +330,29 @@ export interface MoveResult {
 
 const candidateScratch: Aabb[] = [];
 const queryScratch: Aabb[] = [];
-const result: MoveResult = {
-  grounded: false,
-  hitCeiling: false,
-  hitWall: false,
-  stepUp: 0,
-  landingSpeed: 0,
-};
+
+/** A zeroed result, for a caller that wants one of its own. Allocate once, not per tick. */
+export function createMoveResult(): MoveResult {
+  return {
+    grounded: false,
+    hitCeiling: false,
+    hitWall: false,
+    stepUp: 0,
+    landingSpeed: 0,
+  };
+}
+
+/** The default `out` for `moveBody` — see the note on scratch at the top of the file. */
+const sharedResult: MoveResult = createMoveResult();
 
 /**
  * Integrates `position` by `velocity * dt` against the world, mutating both.
- * `position` is the centre of the body's feet. Returns a shared result object.
+ * `position` is the centre of the body's feet.
+ *
+ * Returns `out`, every field of which is overwritten. `out` defaults to a module-shared
+ * instance, so a caller that reads the result before moving anything else can ignore it; a
+ * caller that keeps the result across another body's move must pass its own (`createMoveResult`,
+ * allocated once at construction — never per tick).
  */
 export function moveBody(
   world: StaticWorld,
@@ -322,8 +361,10 @@ export function moveBody(
   dt: number,
   shape: BodyShape,
   wasGrounded: boolean,
+  out: MoveResult = sharedResult,
 ): MoveResult {
   const { radius, height, stepHeight } = shape;
+  const result = out;
   result.grounded = false;
   result.hitCeiling = false;
   result.hitWall = false;

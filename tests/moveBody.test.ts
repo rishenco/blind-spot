@@ -10,7 +10,13 @@
 
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { StaticWorld, aabbFromBounds, moveBody, type MoveResult } from '../src/core/collision';
+import {
+  StaticWorld,
+  aabbFromBounds,
+  createMoveResult,
+  moveBody,
+  type MoveResult,
+} from '../src/core/collision';
 import { defaultMovementTunables } from '../src/player/controller';
 
 /**
@@ -33,7 +39,7 @@ function flatWorld(): StaticWorld {
   return w;
 }
 
-/** Copies the shared result object, which the next `moveBody` call would otherwise overwrite. */
+/** Copies a result object, which the next `moveBody` call into it would otherwise overwrite. */
 function snapshot(r: MoveResult): MoveResult {
   return { ...r };
 }
@@ -298,12 +304,14 @@ describe('an inner corner (two boxes pushing at once)', () => {
   });
 });
 
-describe('the shared MoveResult', () => {
-  it('HAZARD: every call returns the same object, overwriting the previous result', () => {
-    // `moveBody` returns a module-level singleton. Holding on to a result across a second call —
-    // two bodies in one tick, a queued replay, a diagnostic that logs later — silently reads the
-    // *newer* values. Pinned so that the next work item's fix (returning a fresh object, or
-    // taking an out-parameter) shows up here as a deliberate change and not as a regression.
+describe('the MoveResult out-parameter', () => {
+  it('SHARP EDGE of the default path: omitting `out` returns one reused singleton', () => {
+    // Documented, not a bug: with no `out`, `moveBody` writes into a module-level instance so the
+    // hot path allocates nothing. Reading it immediately — which is what every caller in the game
+    // does — is correct. *Holding* it across a second call is not: the second call overwrites it
+    // in place, and the first caller silently reads the newer body's answer. A caller that needs
+    // its result to survive another body's move passes its own `out` (test below); this pins that
+    // the cheap default is still the cheap default, so the change stayed bit-neutral.
     const w = flatWorld();
 
     const pLand = new THREE.Vector3(0, 0.05, 0);
@@ -319,6 +327,85 @@ describe('the shared MoveResult', () => {
     expect(second).toBe(first); // same reference
     expect(first.grounded).toBe(false); // the first caller's answer is gone
     expect(first.landingSpeed).toBe(0);
+  });
+
+  it('two bodies with their own `out` keep independent results across interleaved calls', () => {
+    // The N-entity case M2 (thrown props) and M4 (spiders) create: several bodies moved one after
+    // another inside a single fixed update, each keeping its own flags. Two lanes of one world so
+    // the bodies genuinely produce different answers rather than coincidentally matching ones.
+    const w = flatWorld();
+    w.add(aabbFromBounds(2, 0, -20, 3, 3, 0)); // lane A (z <= 0): a full-height wall
+    w.add(aabbFromBounds(2, 0, 5, 20, 0.25, 20)); // lane B (z >= 5): a 0.25 m riser
+
+    const outA = createMoveResult();
+    const outB = createMoveResult();
+    expect(outA).not.toBe(outB);
+
+    // A falls onto the floor and slams into the wall; B walks up the riser.
+    const pA = new THREE.Vector3(1.7, 0.05, -5);
+    const vA = new THREE.Vector3(6, -9, 0);
+    const pB = new THREE.Vector3(1.63, 0, 10);
+    const vB = new THREE.Vector3(3.5, 0, 0);
+
+    const rA = moveBody(w, pA, vA, DT, SHAPE, false, outA);
+    expect(rA).toBe(outA);
+    const aBeforeB = snapshot(outA);
+
+    const rB = moveBody(w, pB, vB, DT, SHAPE, true, outB);
+    expect(rB).toBe(outB);
+    expect(rB).not.toBe(rA);
+
+    // A's answer survived B's move untouched — the whole point of the parameter.
+    expect(snapshot(outA)).toEqual(aBeforeB);
+    expect(snapshot(outA)).toEqual({
+      grounded: true,
+      hitCeiling: false,
+      hitWall: true,
+      stepUp: 0,
+      landingSpeed: 9,
+    });
+    expect(snapshot(outB)).toEqual({
+      grounded: true,
+      hitCeiling: false,
+      hitWall: false,
+      stepUp: 0.25,
+      landingSpeed: 0,
+    });
+
+    // Second interleaved round: A now rests against the wall, B walks on along the riser top.
+    moveBody(w, pA, vA, DT, SHAPE, true, outA);
+    moveBody(w, pB, vB, DT, SHAPE, true, outB);
+    expect(snapshot(outA)).toEqual({
+      grounded: true,
+      hitCeiling: false,
+      hitWall: false, // `hitWall` is an edge, not a state — see the wall test above
+      stepUp: 0,
+      landingSpeed: 0,
+    });
+    expect(snapshot(outB)).toEqual({
+      grounded: true,
+      hitCeiling: false,
+      hitWall: false,
+      stepUp: 0, // the climb already happened
+      landingSpeed: 0,
+    });
+  });
+
+  it('a caller-owned `out` is untouched by moves that do not name it', () => {
+    const w = flatWorld();
+    const mine = createMoveResult();
+    const p = new THREE.Vector3(0, 0.05, 0);
+    const v = new THREE.Vector3(0, -9, 0);
+    moveBody(w, p, v, DT, SHAPE, false, mine);
+    const held = snapshot(mine);
+    expect(held.landingSpeed).toBe(9);
+
+    // Somebody else's body, moved on the default (shared) path.
+    const pOther = new THREE.Vector3(0, 50, 0);
+    const vOther = new THREE.Vector3(0, 0, 0);
+    const shared = moveBody(w, pOther, vOther, DT, SHAPE, false);
+    expect(shared).not.toBe(mine);
+    expect(snapshot(mine)).toEqual(held);
   });
 
   it('resets every field at the top of each call', () => {
