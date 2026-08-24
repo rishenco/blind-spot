@@ -585,9 +585,8 @@ class App {
     sound.add(m, 'pixelsAtOneMetre', 4, 80, 1).onChange(() => this.markers.applyLook());
     sound.add(m, 'minRadius', 2, 30, 1).onChange(() => this.markers.applyLook());
     sound.add(m, 'maxRadius', 10, 160, 2).onChange(() => this.markers.applyLook());
-    sound.add(m, 'dotPixels', 1, 6, 0.2).onChange(() => this.markers.applyLook());
+    sound.add(m, 'softness', 0.6, 6, 0.1).onChange(() => this.markers.applyLook());
     sound.add(m, 'brightness', 0, 2, 0.05).onChange(() => this.markers.applyLook());
-    sound.add(m, 'glitchSeconds', 0, 1.5, 0.05).onChange(() => this.markers.applyLook());
     sound.close();
 
     const ear = gui.addFolder('audio');
@@ -703,7 +702,13 @@ class App {
         props: this.props?.getStats() ?? null,
         dyn: this.dyn?.getStats() ?? null,
         propsMs: this.propsMs,
-        sound: { emitted: this.bus.emitted, last: this.bus.lastEvent },
+        sound: {
+          emitted: this.bus.emitted,
+          last: this.bus.lastEvent,
+          // Per source, so a scenario can tell "the hall is noisy" from "you are noisy" — the
+          // distinction the concept's whole cost/benefit joke rests on.
+          bySource: Object.fromEntries(this.bus.countsBySource()),
+        },
         gate: Math.hypot(this.player.position.x - GATE_TARGET.x, this.player.position.z - GATE_TARGET.z),
         frameMs: this.perf,
         calls: this.renderer.info.render.calls,

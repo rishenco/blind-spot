@@ -2,88 +2,74 @@
  * The sound layer — concept, "Звуковой слой — это НЕ свет".
  *
  * This is the law that gets misread most often, so it is worth restating at the top of the file
- * that implements it: a marker is drawn **at the point where the event happened, and nowhere
+ * that implements it: a mark is drawn **at the point where the event happened, and nowhere
  * else.** It lights nothing. It casts nothing. It does not enter any lighting calculation,
  * because there is no lighting calculation. A can that clatters two metres from a wall leaves a
- * marker floating in the dark two metres from a wall, and the wall stays black unless the lidar
- * or your hand has been there. If you can tell what a room looks like from its sounds, this file
- * is broken.
+ * blob floating in the dark two metres from a wall, and the wall stays black unless the lidar or
+ * your hand has been there. If you can tell what a room looks like from its sounds, this file is
+ * broken. A soft blurred blob is a way of drawing the *fact* "a sound happened here" — it is not
+ * a lamp, and nothing downstream may treat it as one.
  *
- * By the fiction, the player wears a tactical HUD that hears, localises and *annotates*. That is
- * why the visual language is a software marker and not a wave or a puff: a hard little bracket
- * of stipples, dead-sterile, that twitches once or twice as the HUD re-solves the position, and
- * then bleeds away. It is the machine telling you a fact, not the world glowing.
+ * The visual language is a thermal imager: almost the whole frame is transparent, and there is
+ * "heat" exactly where the sound was. Soft, blurred, hot in the middle and bleeding to nothing at
+ * the edge. This is deliberately the opposite of the geometry layer, which is hard cold pixel-size
+ * dots and thin contour lines. Matter is points; sound is a blob. At a glance you must never have
+ * to work out which of the two you are looking at — one is sharp and cold, the other is soft and
+ * warm, and they never rhyme.
  *
- * Markers outlive their sounds and fade slowly, so what you are really looking at is a decaying
+ * Marks outlive their sounds and fade slowly, so what you are really looking at is a decaying
  * heat-map of the last few seconds of the room. Your own footsteps are in it. They are drawn
  * under your own feet, they tell you nothing you did not know, and that is the joke the concept
  * is making — the cost is real and the information is zero.
  *
- * Implementation: one persistent GPU point buffer used as a ring. Nothing is rebuilt when a
- * marker ages; the shader derives everything from `now - birth`. Emitting an event writes a
- * handful of floats into a slot and uploads that slot's range, so a collapsing stack costs a few
- * kilobytes of `bufferSubData` and no allocation at all.
+ * Implementation: one persistent GPU point buffer used as a ring, one point per event, expanded
+ * to a soft sprite in the fragment shader. Nothing is rebuilt when a mark ages; the shader
+ * derives everything from `now - birth`. Emitting an event writes a handful of floats into a slot
+ * and uploads that slot's range, so a collapsing stack costs a few hundred bytes of
+ * `bufferSubData` and no allocation at all.
  */
 import * as THREE from 'three';
 
 import type { SoundEvent, SoundSource } from '../events/bus';
 
-/** Stipples per marker. The bracket is a fixed screen-space figure, so this is a constant. */
-const PER_MARKER = 16;
+/** One sprite per event. The blob is made in the fragment shader, not out of particles. */
+const PER_MARKER = 1;
 
 /**
- * The figure itself, in units of the marker's screen radius: four corner brackets and a centre
- * pip. Deliberately not a circle — a circle reads as a radius, i.e. as a claim about how far the
- * sound carries, which is a debug question and gets its own overlay below.
+ * Per-source hot-core colour and weight. Everything lives in the warm half of the spectrum on
+ * purpose — the geometry layer owns cold white/grey, so warmth alone already says "this is the
+ * other channel". Your own noise is dull ember; other people's things burn.
  */
-const FIGURE: Array<[number, number]> = (() => {
-  const pts: Array<[number, number]> = [];
-  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
-    pts.push([sx * 1.0, sy * 1.0]);
-    pts.push([sx * 0.45, sy * 1.0]);
-    pts.push([sx * 1.0, sy * 0.45]);
-  }
-  pts.push([0, 0]);
-  pts.push([0, -0.28]);
-  pts.push([0, 0.28]);
-  pts.push([-0.28, 0]);
-  return pts;
-})();
-
-/** Per-source colour and weight. Yours are dim; other people's things are what you care about. */
 const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number }> = {
-  'player-step': { color: 0x5d6b74, gain: 0.55 },
-  'player-land': { color: 0x6d7a82, gain: 0.7 },
-  'prop-impact': { color: 0xd8f2ff, gain: 1 },
-  gunshot: { color: 0xffd9a8, gain: 1 },
-  'bullet-hit': { color: 0xffe6c0, gain: 1 },
-  spider: { color: 0xffb0c4, gain: 1 },
+  'player-step': { color: 0xff7a3c, gain: 0.4 },
+  'player-land': { color: 0xff8a44, gain: 0.55 },
+  'prop-impact': { color: 0xffc46a, gain: 1 },
+  gunshot: { color: 0xfff0c0, gain: 1.15 },
+  'bullet-hit': { color: 0xffd890, gain: 1 },
+  spider: { color: 0xff9ec0, gain: 1 },
 };
 
 export interface MarkerTunables {
-  /** How long a marker survives, seconds. Far longer than the sound — that is the point. */
+  /** How long a mark survives, seconds. Far longer than the sound — that is the point. */
   life: number;
-  /** Screen radius of a marker at one metre, pixels — before the loudness term. */
+  /** Blob radius at one metre, pixels — before the loudness term and the distance falloff. */
   pixelsAtOneMetre: number;
   /** Smallest and largest on-screen radius, pixels. */
   minRadius: number;
   maxRadius: number;
-  /** Stipple size, pixels. */
-  dotPixels: number;
+  /** Falloff exponent of the blob. Low = wide woolly haze, high = tight core. */
+  softness: number;
   brightness: number;
-  /** Seconds the HUD spends "re-solving" — the window in which the figure twitches. */
-  glitchSeconds: number;
 }
 
 export function defaultMarkerTunables(): MarkerTunables {
   return {
     life: 7,
-    pixelsAtOneMetre: 26,
-    minRadius: 5,
-    maxRadius: 46,
-    dotPixels: 2.4,
+    pixelsAtOneMetre: 120,
+    minRadius: 13,
+    maxRadius: 96,
+    softness: 1.5,
     brightness: 1,
-    glitchSeconds: 0.35,
   };
 }
 
@@ -93,21 +79,15 @@ const VERTEX = /* glsl */ `
   uniform float uPixelsAtOneMetre;
   uniform float uMinRadius;
   uniform float uMaxRadius;
-  uniform float uDotPixels;
-  uniform float uBright;
-  uniform float uGlitch;
-  uniform vec2  uViewport;
 
-  attribute vec2  aFigure;
   attribute float aBirth;
   attribute float aLoud;
   attribute float aSeed;
   attribute vec3  aTint;
 
   varying vec3  vColor;
-  varying float vAlpha;
-
-  float hash(float n) { return fract(sin(n) * 43758.5453123); }
+  varying float vFade;
+  varying float vSeed;
 
   void main() {
     float age = uTime - aBirth;
@@ -126,46 +106,70 @@ const VERTEX = /* glsl */ `
     }
 
     /*
-     * Screen-space, on purpose. The marker is a HUD annotation, not an object in the room: it
-     * has to stay legible at forty metres, and a world-space bracket would be one pixel wide.
-     * Loudness sets the size, so a barrel going over reads as louder than a can from across
-     * the hall even when both are far away — the *radius* is the HUD's confidence display, not
-     * a distance.
+     * Size is loudness, softened by distance. Not pure screen space: a barrel going over at the
+     * far wall would then paint the same crater as one going over at your feet, and the frame
+     * turns into a flare. Not honest perspective either: a far-off sound would shrink to a pixel
+     * and start passing for geometry, which is the one thing this layer must never do. So the
+     * blob falls off slower than perspective (d^0.65) and never gets smaller than uMinRadius
+     * — far noises stay small, soft smudges you can still tell from a dot.
      */
-    float radius = clamp(uPixelsAtOneMetre * (0.35 + aLoud * 0.09), uMinRadius, uMaxRadius);
-
-    // The HUD re-solving: for the first fraction of a second the figure snaps between two or
-    // three offsets, then settles. One hash per marker, so all sixteen stipples agree.
-    float g = 1.0 - clamp(age / max(0.01, uGlitch), 0.0, 1.0);
-    float step0 = floor(age * 24.0);
-    vec2 jitter = vec2(hash(aSeed + step0) - 0.5, hash(aSeed + step0 + 7.3) - 0.5) * g * radius * 0.5;
-    // A late second-guess: one brief re-solve halfway through the life, so a settled marker is
-    // not perfectly dead. Cheap, and it is what sells "software" over "glow".
-    float late = step(0.5, hash(aSeed + 3.1)) * (1.0 - smoothstep(0.0, 0.12, abs(age - uLife * 0.35)));
-    jitter += vec2(hash(aSeed + 11.0) - 0.5, hash(aSeed + 13.0) - 0.5) * late * radius * 0.35;
-
-    vec2 offset = (aFigure * radius + jitter) / uViewport * 2.0 * clip.w;
-    clip.xy += offset;
-
-    // Fade: fast off the peak, then a long shallow tail. A hitmap of the last few seconds, not
-    // a set of lamps that switch off.
+    float dist = max(1.0, -mv.z);
+    float radius = clamp(uPixelsAtOneMetre * (0.42 + aLoud * 0.12) / pow(dist, 0.65),
+                         uMinRadius, uMaxRadius);
+    // A blob swells for a moment as the sound registers, then settles back. Cheap, and it is the
+    // difference between "heat bloomed here" and "a circle switched on".
     float t = age / uLife;
-    float fade = (1.0 - t) * (1.0 - t) * (0.35 + 0.65 * (1.0 - smoothstep(0.0, 0.15, t)));
+    radius *= 0.72 + 0.38 * (1.0 - exp(-age * 9.0)) - 0.10 * t;
 
-    vColor = aTint * uBright * fade * (0.75 + 0.5 * hash(aSeed + aFigure.x * 3.7));
-    vAlpha = 1.0;
-    gl_PointSize = uDotPixels;
+    // Fade: bright while the noise is news, then a long shallow tail. Written in *seconds*, not
+    // in fractions of the lifetime, because what the eye reads is "that happened a moment ago" —
+    // an earlier version dropped to 40% inside a second and the mark of a barrel going over was
+    // already a smudge by the time you turned to look at it.
+    vFade = pow(1.0 - t, 1.5) * (0.55 + 0.45 * exp(-age * 1.2));
+    // Spread, not gain: a blob that covers four times the screen is not four times the event, so
+    // the closer and wider it gets the thinner it is painted. Without this a can dropped at your
+    // feet burns a white disc in the middle of the frame and starts looking like a light.
+    vFade *= clamp(38.0 / radius, 0.4, 1.0);
+    vColor = aTint;
+    vSeed = aSeed;
+    gl_PointSize = radius * 2.0;
     gl_Position = clip;
   }
 `;
 
 const FRAGMENT = /* glsl */ `
   precision highp float;
+  uniform float uSoftness;
+  uniform float uBright;
   varying vec3  vColor;
-  varying float vAlpha;
+  varying float vFade;
+  varying float vSeed;
+
   void main() {
-    // Square stipples. A round dot reads as organic; this thing is software.
-    gl_FragColor = vec4(vColor, vAlpha);
+    vec2 d = gl_PointCoord - 0.5;
+    float ang = atan(d.y, d.x);
+    /*
+     * A silhouette, not a disc. The radius is warped by two low-frequency lobes seeded per mark,
+     * so every blob has its own lopsided shape — a smear of heat rather than a UI circle. The
+     * warp is small: it must never read as a shape claim about the object that made the noise.
+     */
+    float warp = 1.0 + 0.18 * sin(ang * 2.0 + vSeed) + 0.11 * sin(ang * 3.0 - vSeed * 2.3);
+    float r = length(d) * 2.0 / warp;
+    if (r > 1.0) discard;
+
+    // Thermal falloff: hot core, wide soft shoulder, nothing at the rim. Almost the whole sprite
+    // is nearly transparent — that is what makes it read as heat and not as a dot.
+    float body = pow(max(0.0, 1.0 - r), uSoftness);
+    float core = pow(max(0.0, 1.0 - r), uSoftness * 2.8);
+    float a = (body * 0.85 + core * 0.55) * vFade * uBright;
+    if (a <= 0.002) discard;
+
+    // Colour ramp along the falloff, like a thermal palette: the middle whitens out, the shoulder
+    // keeps the source's hue, the rim bleeds into deep red before it vanishes.
+    vec3 rim = vColor * vec3(0.75, 0.18, 0.06);
+    vec3 c = mix(rim, vColor, smoothstep(0.0, 0.55, body));
+    c = mix(c, vec3(1.0, 0.94, 0.86), core * 0.5);
+    gl_FragColor = vec4(c * a, a);
   }
 `;
 
@@ -207,9 +211,9 @@ const RING_FRAGMENT = /* glsl */ `
 const NEVER = -1e9;
 
 export interface MarkerStats {
-  /** Markers currently inside their lifetime. */
+  /** Marks currently inside their lifetime. */
   alive: number;
-  /** Markers written since the start. */
+  /** Marks written since the start. */
   written: number;
   capacity: number;
 }
@@ -251,16 +255,9 @@ export class SoundMarkers {
     this.loud = new Float32Array(n);
     this.seed = new Float32Array(n);
     this.tint = new Float32Array(n * 3);
-    const figure = new Float32Array(n * 2);
-    for (let i = 0; i < n; i++) {
-      const f = FIGURE[i % PER_MARKER]!;
-      figure[i * 2] = f[0];
-      figure[i * 2 + 1] = f[1];
-    }
 
     const g = this.geometry;
     g.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
-    g.setAttribute('aFigure', new THREE.BufferAttribute(figure, 2));
     g.setAttribute('aBirth', new THREE.BufferAttribute(this.birth, 1));
     g.setAttribute('aLoud', new THREE.BufferAttribute(this.loud, 1));
     g.setAttribute('aSeed', new THREE.BufferAttribute(this.seed, 1));
@@ -274,10 +271,8 @@ export class SoundMarkers {
         uPixelsAtOneMetre: { value: tunables.pixelsAtOneMetre },
         uMinRadius: { value: tunables.minRadius },
         uMaxRadius: { value: tunables.maxRadius },
-        uDotPixels: { value: tunables.dotPixels },
+        uSoftness: { value: tunables.softness },
         uBright: { value: tunables.brightness },
-        uGlitch: { value: tunables.glitchSeconds },
-        uViewport: { value: new THREE.Vector2(1280, 720) },
       },
       vertexShader: VERTEX,
       fragmentShader: FRAGMENT,
@@ -351,8 +346,9 @@ export class SoundMarkers {
     this.ringMaterial.uniforms.uTime!.value = seconds;
   }
 
-  setViewport(w: number, h: number): void {
-    (this.material.uniforms.uViewport!.value as THREE.Vector2).set(w, h);
+  setViewport(_w: number, _h: number): void {
+    // The blob is sized in pixels straight out of `gl_PointSize`, so the viewport no longer enters
+    // the shader. Kept so the caller does not have to know that.
   }
 
   setProjScale(v: number): void {
@@ -366,9 +362,8 @@ export class SoundMarkers {
     u.uPixelsAtOneMetre!.value = t.pixelsAtOneMetre;
     u.uMinRadius!.value = t.minRadius;
     u.uMaxRadius!.value = t.maxRadius;
-    u.uDotPixels!.value = t.dotPixels;
+    u.uSoftness!.value = t.softness;
     u.uBright!.value = t.brightness;
-    u.uGlitch!.value = t.glitchSeconds;
     this.ringMaterial.uniforms.uLife!.value = t.life;
   }
 
@@ -383,39 +378,37 @@ export class SoundMarkers {
     const r = c.r * look.gain;
     const g = c.g * look.gain;
     const b = c.b * look.gain;
-    const s = (this.written * 0.6180339887) % 1;
+    const s = ((this.written * 0.6180339887) % 1) * 6.283;
 
-    const base = slot * PER_MARKER;
-    for (let k = 0; k < PER_MARKER; k++) {
-      const i = base + k;
-      this.pos[i * 3] = event.x;
-      this.pos[i * 3 + 1] = event.y;
-      this.pos[i * 3 + 2] = event.z;
-      this.birth[i] = event.time;
-      this.loud[i] = event.loudness;
-      this.seed[i] = s * 100 + k * 0.37;
-      this.tint[i * 3] = r;
-      this.tint[i * 3 + 1] = g;
-      this.tint[i * 3 + 2] = b;
-    }
-    upload(this.geometry, 'position', base * 3, PER_MARKER * 3);
-    upload(this.geometry, 'aBirth', base, PER_MARKER);
-    upload(this.geometry, 'aLoud', base, PER_MARKER);
-    upload(this.geometry, 'aSeed', base, PER_MARKER);
-    upload(this.geometry, 'aTint', base * 3, PER_MARKER * 3);
+    const i = slot * PER_MARKER;
+    this.pos[i * 3] = event.x;
+    this.pos[i * 3 + 1] = event.y;
+    this.pos[i * 3 + 2] = event.z;
+    this.birth[i] = event.time;
+    this.loud[i] = event.loudness;
+    this.seed[i] = s;
+    this.tint[i * 3] = r;
+    this.tint[i * 3 + 1] = g;
+    this.tint[i * 3 + 2] = b;
+
+    upload(this.geometry, 'position', i * 3, PER_MARKER * 3);
+    upload(this.geometry, 'aBirth', i, PER_MARKER);
+    upload(this.geometry, 'aLoud', i, PER_MARKER);
+    upload(this.geometry, 'aSeed', i, PER_MARKER);
+    upload(this.geometry, 'aTint', i * 3, PER_MARKER * 3);
 
     if (this.radiusOn) {
       const rb = slot * RING_POINTS;
       for (let k = 0; k < RING_POINTS; k++) {
-        const i = rb + k;
-        this.ringPos[i * 3] = event.x;
-        this.ringPos[i * 3 + 1] = event.y + 0.03;
-        this.ringPos[i * 3 + 2] = event.z;
-        this.ringBirth[i] = event.time;
-        this.ringLoud[i] = event.loudness;
-        this.ringTint[i * 3] = r;
-        this.ringTint[i * 3 + 1] = g;
-        this.ringTint[i * 3 + 2] = b;
+        const j = rb + k;
+        this.ringPos[j * 3] = event.x;
+        this.ringPos[j * 3 + 1] = event.y + 0.03;
+        this.ringPos[j * 3 + 2] = event.z;
+        this.ringBirth[j] = event.time;
+        this.ringLoud[j] = event.loudness;
+        this.ringTint[j * 3] = r;
+        this.ringTint[j * 3 + 1] = g;
+        this.ringTint[j * 3 + 2] = b;
       }
       upload(this.ringGeometry, 'position', rb * 3, RING_POINTS * 3);
       upload(this.ringGeometry, 'aBirth', rb, RING_POINTS);
