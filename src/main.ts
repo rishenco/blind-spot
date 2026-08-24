@@ -9,12 +9,13 @@ import * as THREE from 'three';
 import GUI from 'lil-gui';
 import { Input } from './core/input';
 import { Loop } from './core/loop';
-import { Hud, DEFAULT_HINT } from './ui/hud';
+import { Hud, DEFAULT_HELP, DEFAULT_HINT } from './ui/hud';
 import { SceneHost, hasScene, listScenes } from './lab/registry';
 import { ScenePicker } from './lab/picker';
 
 // Scene modules self-register on import; add future scenes here.
 import './scenes/movement-playground';
+import './scenes/sonar-lab';
 
 const DEFAULT_SCENE = 'movement-playground';
 
@@ -58,6 +59,10 @@ function activate(id: string): void {
   host.activate(id);
   picker.setActive(id);
   hud.setSceneLabel(host.current?.title ?? id, host.currentVariantName);
+  // Scenes may own the hint line and the help card; both fall back to the lab defaults, so
+  // switching away from a scene that customised them restores the originals.
+  hud.setHint(host.current?.hint ?? DEFAULT_HINT);
+  hud.setHelp(host.current?.help ?? DEFAULT_HELP);
 }
 
 activate(sceneIdFromHash());

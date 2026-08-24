@@ -67,7 +67,7 @@ export interface HelpRow {
   action: string;
 }
 
-const DEFAULT_HELP: HelpRow[] = [
+export const DEFAULT_HELP: HelpRow[] = [
   { keys: 'W A S D', action: 'move' },
   { keys: 'Shift', action: 'sprint (forward)' },
   { keys: 'C / Ctrl', action: 'crouch' },

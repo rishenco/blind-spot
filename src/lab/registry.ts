@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import type GUI from 'lil-gui';
 import type { Input } from '../core/input';
-import type { Hud } from '../ui/hud';
+import type { HelpRow, Hud } from '../ui/hud';
 
 export interface SceneCtx {
   scene: THREE.Scene;
@@ -22,6 +22,10 @@ export interface LabScene {
   title: string;
   /** Display names of the scene's variants; switched with number keys 1..9. */
   variants?: string[];
+  /** Replaces the bottom hint line while this scene is active. */
+  hint?: string;
+  /** Replaces the H help card while this scene is active. */
+  help?: HelpRow[];
   init(ctx: SceneCtx): void;
   /** Fixed-step simulation tick. */
   update(dt: number): void;

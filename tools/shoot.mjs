@@ -13,10 +13,11 @@
  */
 
 import { chromium } from 'playwright';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { decodePng, meanLuminance, litFraction } from './png.mjs';
 
 const DEFAULT_HTML = 'dist/index.html';
 const DEFAULT_OUT =
@@ -66,6 +67,35 @@ const shot = async (name) => {
   await page.screenshot({ path: join(outDir, name) });
   console.log(`[shoot] wrote ${name}`);
 };
+
+/** Same, but hands back the PNG so it can be measured as well as looked at. */
+const shotBuf = async (name) => {
+  const buf = await page.screenshot();
+  await writeFile(join(outDir, name), buf);
+  console.log(`[shoot] wrote ${name}`);
+  return buf;
+};
+
+/**
+ * The sonar lab's assertions are photometric, and the only things on screen that the renderer
+ * did *not* draw are DOM: the HUD panel (top left), the lil-gui panel (right), the hint line
+ * and capture prompt (bottom) and the reticle (centre). This window sits clear of all of them
+ * except the reticle, which is punched out.
+ */
+const FRAME = { x: 400, y: 200, w: 600, h: 420 };
+const FRAME_HOLES = [{ x: 620, y: 340, w: 40, h: 40 }];
+/** The near floor: where a footstep's paint lands when you are looking straight ahead. */
+const FLOOR_BAND = { x: 300, y: 430, w: 700, h: 190 };
+
+/** Mean luminance (0-255) and lit fraction of a screenshot, over a DOM-free window. */
+function photo(buf, rect = FRAME, holes = FRAME_HOLES) {
+  const img = decodePng(buf);
+  return {
+    mean: meanLuminance(img, rect, holes).mean,
+    lit: litFraction(img, rect, 8).fraction,
+  };
+}
+const pct = (v) => `${(v * 100).toFixed(2)}%`;
 const wait = (ms) => page.waitForTimeout(ms);
 const state = () => page.evaluate(() => window.__blindspot.getState());
 
@@ -821,8 +851,10 @@ check(
   Math.abs(strafeRoll) > 0.9 && Math.abs(strafeRoll) < 2.6,
   `${strafeRoll.toFixed(2)} deg mean over ${strafing.length} frames (strafeRollDeg = 1.5)`,
 );
+// Sleep the release time, then poll: under a stalled software-GL frame the loop clamps its
+// accumulator, so a wall-clock wait does not guarantee the same amount of *simulated* time.
 await wait(500);
-const afterStrafe = await state();
+const afterStrafe = await poll((s) => Math.abs(Number(s.camRoll)) < 0.2, 2000);
 check(
   'the strafe lean releases',
   Math.abs(Number(afterStrafe.camRoll)) < 0.2,
@@ -849,11 +881,384 @@ check(
   `${rollProbe.maxAbsRoll.toFixed(2)} deg peak over ${rollProbe.samples} frames (1.5 strafe + 1.0 turn + 0.25 stride)`,
 );
 await wait(600);
-const settled = await state();
+const settled = await poll((s) => Math.abs(Number(s.camRoll)) < 0.2, 2000);
 check(
   'roll returns to zero within 0.5 s of the input stopping',
   Math.abs(Number(settled.camRoll)) < 0.2,
   `${Number(settled.camRoll).toFixed(4)} deg`,
+);
+
+// ===========================================================================
+//  SONAR LAB
+//
+//  Everything past here is about one question: does the dark read? The scene draws exactly
+//  one thing — the point cloud sound paints — so every assertion is either "the buffer has
+//  the blips it should" (state) or "the frame looks the way it should" (pixels).
+// ===========================================================================
+
+/** Yaw, in the controller's convention, that points from one XZ spot at another. */
+const yawTo = (fromX, fromZ, toX, toZ) =>
+  (Math.atan2(-(toX - fromX), -(toZ - fromZ)) * 180) / Math.PI;
+
+/** Pitches the view by dragging vertically. Dragging down looks down, hence the sign. */
+async function pitchBy(degrees, sensitivity) {
+  const dy = -degrees / sensitivity;
+  await page.mouse.move(640, 360);
+  await page.mouse.down();
+  for (let i = 1; i <= 10; i++) {
+    await page.mouse.move(640, 360 + (dy * i) / 10);
+    await wait(6);
+  }
+  await page.mouse.up();
+  await wait(120);
+}
+
+/** Turns to an absolute yaw by dragging. Dragging right lowers yaw, hence the sign. */
+async function turnTo(targetDeg, sensitivity) {
+  const current = Number((await state()).yawDeg);
+  let delta = targetDeg - current;
+  while (delta > 180) delta -= 360;
+  while (delta < -180) delta += 360;
+  if (Math.abs(delta) > 0.5) await dragLook(-delta, sensitivity);
+  await wait(120);
+}
+
+/**
+ * Fires a ping and waits for the bus to have delivered it.
+ *
+ * Waits out the shared cooldown first. A ping pressed while the previous one is still cooling
+ * is refused by design, and a refused ping would otherwise surface much later as a mystery:
+ * stale, zeroed stats belonging to whatever event actually landed last.
+ */
+async function ping(cls) {
+  await poll((s) => Number(s.pingCooldown) === 0, 6000);
+  const before = Number((await state()).soundEvents);
+  await page.keyboard.press(cls === 'q-ping' ? 'q' : 'e');
+  const landed = await poll((x) => Number(x.soundEvents) > before && x.lastEvent === cls, 6000);
+  check(
+    `${cls} landed`,
+    Number(landed.soundEvents) > before && landed.lastEvent === cls,
+    `soundEvents ${before} -> ${landed.soundEvents}, lastEvent=${landed.lastEvent}`,
+  );
+  await wait(180); // one more frame, so the screenshot has the new blips in it
+  return state();
+}
+
+/** Empties the painted map and waits for it to actually be empty. */
+async function clearPaint() {
+  await page.keyboard.press('k');
+  await poll((s) => Number(s.points) === 0, 4000);
+}
+
+/**
+ * Cycles the paint clock's debug multiplier (T: ×1 → ×10 → ×60) until it reads `target`.
+ *
+ * One press per step, each confirmed before the next: key presses are edge-triggered per sim
+ * tick, so two presses inside one tick collapse into one and the scale silently lands on the
+ * wrong rung.
+ */
+async function setTimeScale(target) {
+  for (let i = 0; i < 4; i++) {
+    const before = Number((await state()).paintTimeScale);
+    if (before === target) return;
+    await page.keyboard.press('t');
+    await poll((s) => Number(s.paintTimeScale) !== before, 3000);
+  }
+  const s = await state();
+  check(`paint clock reached x${target}`, Number(s.paintTimeScale) === target, `x${s.paintTimeScale}`);
+}
+
+// --- 23 sonar lab loads black ----------------------------------------------
+await page.goto(`${url}#sonar-lab`);
+await page.waitForFunction(() => window.__blindspot !== undefined, null, { timeout: 15000 });
+await wait(900);
+
+const sonar = await state();
+console.log('[shoot] sonar-lab state', JSON.stringify(sonar));
+check('sonar lab booted from the hash route', sonar.scene === 'sonar-lab', `scene=${sonar.scene}`);
+check('sonar renderer running', Number(sonar.fps) > 0, `fps=${Number(sonar.fps).toFixed(1)}`);
+check('the map starts empty', Number(sonar.points) === 0, `points=${sonar.points}`);
+check(
+  'the scene owns the hint line',
+  (await page.textContent('.bs-hint')).includes('Q ping · E beam · L reveal · 1-3 looks'),
+  await page.textContent('.bs-hint'),
+);
+
+const darkBuf = await shotBuf('23-sonar-dark.png');
+const dark = photo(darkBuf);
+// Law 3: absence is black. Nothing but the point cloud may put light on the screen, so with
+// nothing painted the frame has to be *actually* black, not nearly black.
+check(
+  'the unpainted frame is black',
+  dark.mean < 2 && dark.lit < 0.005,
+  `mean=${dark.mean.toFixed(3)}/255 lit=${pct(dark.lit)}`,
+);
+
+// --- 24 footsteps paint ----------------------------------------------------
+// Eyes down, the way you walk in the dark. A footstep paints a 4 m puddle around the sole,
+// and at a level gaze that puddle lives in the bottom sliver of the frame — the paint is
+// identical either way, but this is the pose that shows it.
+await pitchBy(-22, sens);
+const looking = await state();
+check(
+  'looking down at the floor ahead',
+  Math.abs(Number(looking.pitchDeg) + 22) < 3,
+  `pitch=${Number(looking.pitchDeg).toFixed(1)} deg`,
+);
+await page.keyboard.down('w');
+await wait(2200);
+const walkBuf = await shotBuf('24-sonar-walk.png');
+const walking = await state();
+await page.keyboard.up('w');
+await wait(250);
+
+check(
+  'walking paints the floor',
+  Number(walking.points) > 500 && String(walking.lastEvent).endsWith('step'),
+  `points=${walking.points} lastEvent=${walking.lastEvent} +${walking.lastDeposited}/~${walking.lastRefreshed} rays=${walking.lastRays}`,
+);
+check(
+  'a footstep paints out to about its 4 m radius',
+  Number(walking.lastMaxRange) > 2.5 && Number(walking.lastMaxRange) <= 4.01,
+  `lastMaxRange=${Number(walking.lastMaxRange).toFixed(2)} m`,
+);
+const walkShot = photo(walkBuf, FLOOR_BAND, []);
+check(
+  'the footstep trail is visible in front of the player',
+  walkShot.mean > 0.5 && walkShot.lit > 0.02,
+  `floor band mean=${walkShot.mean.toFixed(3)}/255 lit=${pct(walkShot.lit)}`,
+);
+
+// The trail behind you is out of frame in first person — this is the shot that shows it.
+await page.keyboard.press('v');
+await poll((s) => Number(s.viewBlend) > 0.99, 4000);
+await wait(250);
+const trailBuf = await shotBuf('25-sonar-walk-third.png');
+const trail = photo(trailBuf);
+check(
+  'the trail reads from behind the rig',
+  trail.lit > 0.02 && (await state()).view === 'third',
+  `lit=${pct(trail.lit)} mean=${trail.mean.toFixed(2)}/255`,
+);
+await page.keyboard.press('v');
+await poll((s) => Number(s.viewBlend) < 0.01, 4000);
+
+// --- 25 Q ping: the room read ----------------------------------------------
+await clearPaint();
+await respawn();
+await wait(250);
+const qState = await ping('q-ping');
+const qBuf = await shotBuf('26-sonar-qping.png');
+const q = photo(qBuf);
+check(
+  'the Q ping reads the room',
+  Number(qState.points) > 5000 && Number(qState.lastDeposited) > 5000,
+  `points=${qState.points} +${qState.lastDeposited}/~${qState.lastRefreshed} in ${Number(qState.lastPaintMs).toFixed(1)} ms`,
+);
+check(
+  'the Q ping paints its whole 12 m radius and no further',
+  Number(qState.lastMaxRange) > 9 && Number(qState.lastMaxRange) <= 12.01,
+  `lastMaxRange=${Number(qState.lastMaxRange).toFixed(2)} m`,
+);
+check(
+  'the room read lights the frame',
+  q.mean > 4 && q.lit > 0.05,
+  `mean=${q.mean.toFixed(2)}/255 lit=${pct(q.lit)}`,
+);
+
+// The shared 0.75 s cooldown (§3.5). Fired back to back with no waiting in between, so the
+// test does not depend on how long a software-GL screenshot happens to take.
+await poll((s) => Number(s.pingCooldown) === 0, 4000);
+const beforeCooldown = Number((await state()).soundEvents);
+await page.keyboard.press('q');
+await page.keyboard.press('e');
+await poll((s) => Number(s.soundEvents) > beforeCooldown, 4000);
+await wait(200);
+const cooling = await state();
+check(
+  'a second ping inside the cooldown is refused',
+  Number(cooling.soundEvents) === beforeCooldown + 1 && cooling.lastEvent === 'q-ping',
+  `soundEvents ${beforeCooldown} -> ${cooling.soundEvents}, lastEvent=${cooling.lastEvent}, cooldown=${Number(cooling.pingCooldown).toFixed(2)} s`,
+);
+// ...and once it has expired the same key works.
+await poll((s) => Number(s.pingCooldown) === 0, 4000);
+const afterCooldown = await ping('e-ping');
+check(
+  'the beam fires once the cooldown expires',
+  Number(afterCooldown.soundEvents) === beforeCooldown + 2,
+  `soundEvents=${afterCooldown.soundEvents} lastEvent=${afterCooldown.lastEvent}`,
+);
+
+// --- 26 E beam: the 40 m question ------------------------------------------
+await clearPaint();
+await respawn();
+await wait(250);
+const eState = await ping('e-ping');
+const eBuf = await shotBuf('27-sonar-eping.png');
+check(
+  'the E beam reaches across the far room',
+  Number(eState.lastMaxRange) > 20 && Number(eState.lastFar20) > 0,
+  `lastMaxRange=${Number(eState.lastMaxRange).toFixed(2)} m · ${eState.lastFar20} blips past 20 m`,
+);
+check(
+  'the E beam is a cone, not a sphere',
+  Number(eState.lastDeposited) < Number(qState.lastDeposited),
+  `+${eState.lastDeposited} over 40 m vs +${qState.lastDeposited} over 12 m`,
+);
+check(
+  'the beam is visible',
+  photo(eBuf).lit > 0.01,
+  `lit=${pct(photo(eBuf).lit)}`,
+);
+
+// The landmark shot: walk up to the doorway and put the beam on the tank at (8.5, -2).
+await clearPaint();
+await respawn();
+await wait(200);
+await hold(['w'], 2000);
+await wait(300);
+await clearPaint();
+const atDoor = await state();
+await turnTo(yawTo(Number(atDoor.x), Number(atDoor.z), 8.5, -2), sens);
+const tankState = await ping('e-ping');
+await shot('28-sonar-eping-tank.png');
+check(
+  'the beam lands on the landmark tank',
+  Number(tankState.lastMaxRange) > 8 && Number(tankState.lastMaxRange) < 16,
+  `from x=${Number(atDoor.x).toFixed(1)} yaw=${Number(tankState.yawDeg).toFixed(1)} · lastMaxRange=${Number(tankState.lastMaxRange).toFixed(2)} m`,
+);
+
+// L is a debug reveal, not a light source the game has: it must change the picture completely.
+await page.keyboard.press('l');
+await poll((s) => s.reveal === true, 3000);
+await wait(300);
+const revealBuf = await shotBuf('29-sonar-reveal.png');
+const reveal = photo(revealBuf);
+check(
+  'the reveal shows the geometry the beam found',
+  reveal.mean > 40 && reveal.lit > 0.5,
+  `mean=${reveal.mean.toFixed(1)}/255 lit=${pct(reveal.lit)}`,
+);
+await page.keyboard.press('l');
+await poll((s) => s.reveal === false, 3000);
+
+// --- 27 ageing: the memory skeleton ----------------------------------------
+await clearPaint();
+await respawn();
+await wait(250);
+await ping('q-ping');
+const freshBuf = await shotBuf('30-sonar-fresh.png');
+const fresh = photo(freshBuf);
+const beforeAge = await state();
+
+// The paint clock has a debug multiplier on T (×1 → ×10 → ×60) so ageing can be watched
+// without waiting a minute for it. Poll the clock rather than sleeping a guessed amount.
+await setTimeScale(10);
+const clock0 = Number((await state()).paintTime);
+await poll((s) => Number(s.paintTime) - clock0 >= 20, 15000);
+await setTimeScale(1);
+await wait(200);
+
+const agedBuf = await shotBuf('31-sonar-aged.png');
+const aged = photo(agedBuf);
+const afterAge = await state();
+check(
+  'painted geometry cools with age',
+  aged.mean < fresh.mean * 0.75,
+  `mean ${fresh.mean.toFixed(2)} -> ${aged.mean.toFixed(2)}/255 over ${(Number(afterAge.paintTime) - clock0).toFixed(0)} s`,
+);
+check(
+  'it cools to a memory skeleton, not to nothing',
+  aged.mean > fresh.mean * 0.02 && aged.lit > 0.01,
+  `mean=${aged.mean.toFixed(3)}/255 (${pct(aged.mean / fresh.mean)} of fresh) lit=${pct(aged.lit)}`,
+);
+check(
+  'ageing costs no blips — the map persists (§3.6)',
+  Number(afterAge.points) === Number(beforeAge.points),
+  `points ${beforeAge.points} -> ${afterAge.points}`,
+);
+
+// --- 28 the three looks ----------------------------------------------------
+// Identical scripted sequence for each look, from the same spawn with the same seed, so the
+// three frames differ only in how the same events were sampled and drawn.
+const looks = [];
+for (const [key, name] of [
+  ['1', 'Dust'],
+  ['2', 'Blips'],
+  ['3', 'Grain'],
+]) {
+  await setVariant(key, name);
+  await respawn();
+  await clearPaint();
+  await wait(200);
+  await ping('q-ping');
+  await wait(800);
+  const s = await ping('e-ping');
+  const buf = await shotBuf(`32-sonar-look-${name.toLowerCase()}.png`);
+  const m = photo(buf);
+  looks.push({ name, points: Number(s.points), ...m });
+  console.log(
+    `  look ${name}: points=${s.points} mean=${m.mean.toFixed(2)}/255 lit=${pct(m.lit)}`,
+  );
+}
+check(
+  'all three looks paint a legible frame',
+  looks.every((l) => l.points > 1000 && l.lit > 0.05),
+  looks.map((l) => `${l.name} ${l.points} pts ${pct(l.lit)}`).join(' · '),
+);
+check(
+  'the looks are genuinely different samplings, not restyles',
+  new Set(looks.map((l) => l.points)).size === 3,
+  looks.map((l) => `${l.name}=${l.points}`).join(' '),
+);
+
+// --- 29 perf and the ring buffer -------------------------------------------
+await setVariant('1', 'Dust');
+await respawn();
+await clearPaint();
+for (let i = 0; i < 10; i++) await ping('e-ping'); // ping() waits out the cooldown itself
+await wait(400);
+const stressed = await state();
+console.log('[shoot] after 10 E pings', JSON.stringify(stressed));
+check(
+  'ten E beams keep the frame rate up',
+  Number(stressed.fps) > 8,
+  `${Number(stressed.fps).toFixed(1)} fps (software GL) · ${stressed.points} blips`,
+);
+check(
+  'the ring buffer is inside its cap',
+  Number(stressed.points) <= Number(stressed.capacity) && stressed.wrapped === false,
+  `${stressed.points} / ${stressed.capacity} blips, wrapped=${stressed.wrapped}`,
+);
+check(
+  'one ping never stalls a frame for long',
+  Number(stressed.lastPaintMs) < 80,
+  `${Number(stressed.lastPaintMs).toFixed(1)} ms of sampling for the last beam`,
+);
+await shot('33-sonar-stress.png');
+
+// A painted third-person frame, and back — both views must draw the same cloud.
+await page.keyboard.press('v');
+await poll((s) => Number(s.viewBlend) > 0.99, 4000);
+await wait(250);
+const tpBuf = await shotBuf('34-sonar-third.png');
+check(
+  'the cloud draws in third person too',
+  photo(tpBuf).lit > 0.03,
+  `lit=${pct(photo(tpBuf).lit)}`,
+);
+await page.keyboard.press('v');
+await poll((s) => Number(s.viewBlend) < 0.01, 4000);
+
+// K clears the map: the black we started from is reachable again.
+await clearPaint();
+await wait(250);
+const cleared = await state();
+const clearedShot = photo(await shotBuf('35-sonar-cleared.png'));
+check(
+  'clearing the map returns the scene to black',
+  Number(cleared.points) === 0 && clearedShot.mean < 2,
+  `points=${cleared.points} mean=${clearedShot.mean.toFixed(3)}/255`,
 );
 
 // --- report ----------------------------------------------------------------
