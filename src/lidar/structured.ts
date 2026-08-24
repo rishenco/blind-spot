@@ -326,7 +326,7 @@ const DOT_VERTEX = /* glsl */ `
        * source — and that is the *only* other way a point may be on screen. Grey, bright under
        * the hand and a faint trail behind it, and never anything more than the point itself.
        */
-      if (aTouch < 0.5 || uTouchOn < 0.5 || distance(position, uListener) > uWindowRadius) {
+      if (aTouch <= -1.0e8 || uTouchOn < 0.5 || distance(position, uListener) > uWindowRadius) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         gl_PointSize = 0.0;
         return;
@@ -341,7 +341,16 @@ const DOT_VERTEX = /* glsl */ `
       // at 45% of the range, which made a felt patch read as three bright dots and a smudge —
       // technically honest, visually unreadable.
       float prox = 1.0 - smoothstep(uTouchRange * 0.8, uTouchRange * 1.25, td);
-      float ta = max(prox * uTouchNear, uTouchMemory);
+      /*
+       * The trail behind the hand fades on the same ramp as the lidar map — m2 §6, "упрощаем
+       * там, где нет резона делать сложно". It used to be a flat constant, which meant a wall
+       * you brushed an hour ago was exactly as present as one you are touching now: the one
+       * channel in the game that never forgot anything.
+       */
+      vec3 memCol;
+      float memAlpha;
+      ageRamp(uTime - aTouch, memCol, memAlpha);
+      float ta = max(prox * uTouchNear, uTouchMemory * memAlpha);
       if (ta < 0.004) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         gl_PointSize = 0.0;
@@ -1427,7 +1436,7 @@ export class StructuredPaint {
     this.dotWave = new Float32Array(dots);
     this.dotAccent = new Float32Array(dots);
     this.dotRefresh = unbounded(dots);
-    this.dotTouch = new Float32Array(dots);
+    this.dotTouch = new Float32Array(dots).fill(NEVER);
 
     const verts = this.pieces * 2;
     this.edgePos = new Float32Array(epos);
@@ -1600,10 +1609,11 @@ export class StructuredPaint {
     tests += out.length;
     for (let n = 0; n < out.length; n++) {
       const i = out[n]!;
-      if (this.dotTouch[i] === 1) continue;
+      if (this.dotTouch[i]! > NEVER) continue;
       const i3 = i * 3;
       if (near2(this.dotPos[i3]!, this.dotPos[i3 + 1]!, this.dotPos[i3 + 2]!) > r2) continue;
-      this.dotTouch[i] = 1;
+      // The *time* it was felt, not a flag: the trail has to age like everything else.
+      this.dotTouch[i] = this.time;
       this.markTouchDots(i, i);
       fresh++;
     }
@@ -1626,7 +1636,7 @@ export class StructuredPaint {
     this.edgePrior.fill(NEVER);
     this.edgeRefresh.set(unbounded(this.edgeRefresh.length / 2));
     this.waveMeta.fill(0);
-    this.dotTouch.fill(0);
+    this.dotTouch.fill(NEVER);
     this.markTouchDots(0, this.dotTouch.length - 1);
     this.stats.unlockedDots = 0;
     this.stats.unlockedEdges = 0;
@@ -2329,7 +2339,7 @@ export class StructuredPaint {
       const z = this.dotPos[i3 + 2]!;
       if (x < minX || x > maxX || y < minY || y > maxY || z < minZ || z > maxZ) continue;
       out.dots++;
-      if (this.dotTouch[i] === 1) out.touched++;
+      if (this.dotTouch[i]! > NEVER) out.touched++;
       const birth = this.dotBirth[i]!;
       if (birth <= -1e8) continue;
       out.unlocked++;

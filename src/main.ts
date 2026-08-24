@@ -30,6 +30,7 @@ import { PropWorld, defaultPropTunables, loadRapier } from './props/props';
 import { PropReveal } from './props/reveal';
 import { DynamicPaint } from './lidar/dynamic';
 import { ARCHETYPES } from './props/shapes';
+import { SoundMarkers, defaultMarkerTunables } from './sound/markers';
 
 type ViewMode = 'player' | 'third' | 'top';
 
@@ -41,6 +42,8 @@ const HELP: HelpRow[] = [
   { keys: 'L', action: 'debug: darkness off (lights on)' },
   { keys: 'V', action: 'debug: view — player / third / top' },
   { keys: 'T', action: 'debug: touch layer on/off' },
+  { keys: 'M', action: 'sound markers on/off' },
+  { keys: 'N', action: 'debug: audibility radius of each sound event' },
   { keys: 'K', action: 'debug: clear the accumulated map' },
   { keys: 'B', action: 'debug: shove the clutter in front of you (make a mess)' },
   { keys: 'J', action: 'debug: refill the lidar' },
@@ -50,7 +53,7 @@ const HELP: HelpRow[] = [
 ];
 
 const HINT =
-  'WASD move · Shift run · Ctrl crouch · F lidar ping · L lights · V view · T touch · G tuning · H help';
+  'WASD move · Shift run · Ctrl crouch · F lidar ping · L lights · V view · T touch · M markers · G tuning · H help';
 
 /** How much of the loudness scale each thing the body does is worth, in metres of notice. */
 const STEP_LOUDNESS: Record<string, number> = { crouch: 3, walk: 9, sprint: 16 };
@@ -86,6 +89,11 @@ class App {
   private readonly lidar = new Lidar(defaultLidarTunables());
   private readonly paint: StructuredPaint;
   private readonly touch: TouchLayer;
+  /**
+   * The sound layer. It listens to the bus and to nothing else, exactly as the concept demands:
+   * it has no idea what physics or the player did, only that a noise happened at a point.
+   */
+  private readonly markers = new SoundMarkers(3072, defaultMarkerTunables());
   private readonly player: PlayerController;
   /** Built after the wasm is up, so everything that touches them is null-guarded. */
   private props: PropWorld | null = null;
@@ -104,6 +112,11 @@ class App {
   private propsMs = 0;
 
   private readonly scratchDir = new THREE.Vector3();
+  private readonly scratchSize = new THREE.Vector2();
+  /** Rolling events/sec, sampled once a second — the overlay line the spec asks for. */
+  private eventRate = 0;
+  private rateAt = 0;
+  private rateSeq = 0;
   private readonly frameTimes: number[] = [];
   private perf: Perf = { simMs: 0, paintMs: 0, renderMs: 0, frameMs: 0 };
   private topHeight = 62;
@@ -150,6 +163,13 @@ class App {
     // The hand writes into the paint's mask rather than owning geometry of its own, so it needs
     // the paint and nothing else — and it adds no draw call.
     this.touch = new TouchLayer(this.paint, defaultTouchTunables());
+
+    // Concept §"звуковой слой — это НЕ свет": the marker is drawn at the point the event
+    // happened and nowhere else. It is a bus subscriber, so it cannot accidentally learn
+    // anything the ear would not have known.
+    this.markers.applyLook();
+    this.bus.subscribe((event) => this.markers.handle(event));
+    this.scene.add(this.markers.object);
 
     // Lights-on debug view. Off by default and, being a Group, costs nothing while it is.
     this.lights.add(new THREE.HemisphereLight(0xbfd4e6, 0x202428, 2.1));
@@ -255,6 +275,8 @@ class App {
     if (i.wasKeyPressed('KeyL')) this.setLights(!this.lightsOn);
     if (i.wasKeyPressed('KeyV')) this.cycleView();
     if (i.wasKeyPressed('KeyT')) this.touch.setVisible(!this.touch.visible);
+    if (i.wasKeyPressed('KeyM')) this.markers.setVisible(!this.markers.visible);
+    if (i.wasKeyPressed('KeyN')) this.markers.setRadiusVisible(!this.markers.radiusVisible);
     if (i.wasKeyPressed('KeyK')) this.clearMap();
     if (i.wasKeyPressed('KeyB')) this.shove();
     if (i.wasKeyPressed('KeyJ')) this.lidar.refill();
@@ -352,6 +374,11 @@ class App {
     const projScale = (camera.projectionMatrix.elements[5] ?? 1) * this.drawHeight() * 0.5;
     this.paint.setProjScale(projScale);
     this.dyn?.setProjScale(projScale);
+    // Markers size themselves in pixels, so they need the drawing-buffer size, not the CSS one.
+    const buffer = this.renderer.getDrawingBufferSize(this.scratchSize);
+    this.markers.setTime(renderTime);
+    this.markers.setViewport(buffer.x, buffer.y);
+    this.markers.setProjScale(projScale);
 
     const renderStart = performance.now();
     this.renderer.render(this.scene, camera);
@@ -397,6 +424,12 @@ class App {
     const props = this.props?.getStats() ?? null;
     const dyn = this.dyn?.getStats() ?? null;
     const counts = this.bus.countsBySource();
+    const marks = this.markers.getStats();
+    if (this.time - this.rateAt >= 1) {
+      this.eventRate = (this.bus.emitted - this.rateSeq) / Math.max(0.001, this.time - this.rateAt);
+      this.rateAt = this.time;
+      this.rateSeq = this.bus.emitted;
+    }
     const gate = Math.hypot(p.x - GATE_TARGET.x, p.z - GATE_TARGET.z);
 
     this.hud.setDebug([
@@ -420,8 +453,9 @@ class App {
       ['dots', `${paint.unlockedDots} / ${paint.dots}`],
       ['edges', `${paint.unlockedEdges} / ${paint.edges}`],
       ['touch', `${this.touch.getStats().remembered} pt`],
-      ['props', props === null ? 'off' : `${props.awake}/${props.bodies} awake · ${props.stepMs.toFixed(2)} ms`],
+      ['props', props === null ? 'off' : `${props.awake} awake / ${props.bodies - props.awake} asleep · ${props.stepMs.toFixed(2)} ms`],
       ['prop pts', dyn === null ? '-' : `${dyn.revealed} / ${dyn.points}`],
+      ['marks', `${marks.alive} live · ${this.eventRate.toFixed(1)} ev/s`],
       ['calls', `${this.renderer.info.render.calls}`],
     ]);
 
@@ -472,6 +506,7 @@ class App {
   clearMap(): void {
     this.paint.clear();
     this.touch.clear();
+    this.markers.clear();
   }
 
   private toggleGui(): void {
@@ -516,6 +551,17 @@ class App {
     tactile.add(this.touch.tunables, 'nearAlpha', 0, 1, 0.02);
     tactile.add(this.touch.tunables, 'memoryAlpha', 0, 0.6, 0.01);
     tactile.close();
+
+    const sound = gui.addFolder('sound markers');
+    const m = this.markers.tunables;
+    sound.add(m, 'life', 1, 20, 0.5).onChange(() => this.markers.applyLook());
+    sound.add(m, 'pixelsAtOneMetre', 4, 80, 1).onChange(() => this.markers.applyLook());
+    sound.add(m, 'minRadius', 2, 30, 1).onChange(() => this.markers.applyLook());
+    sound.add(m, 'maxRadius', 10, 160, 2).onChange(() => this.markers.applyLook());
+    sound.add(m, 'dotPixels', 1, 6, 0.2).onChange(() => this.markers.applyLook());
+    sound.add(m, 'brightness', 0, 2, 0.05).onChange(() => this.markers.applyLook());
+    sound.add(m, 'glitchSeconds', 0, 1.5, 0.05).onChange(() => this.markers.applyLook());
+    sound.close();
   }
 
   private applyLook(): void {
@@ -586,6 +632,8 @@ class App {
       solids: () =>
         this.hall.world.boxes.map((b) => [b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ]),
       touch: (on: boolean) => this.touch.setVisible(on),
+      markers: (on: boolean) => this.markers.setVisible(on),
+      radii: (on: boolean) => this.markers.setRadiusVisible(on),
       /** Debug: shove the clutter around a world point. Returns how many bodies woke up. */
       disturb: (x: number, y: number, z: number, radius: number, impulse: number) =>
         this.props?.disturb(x, y, z, radius, impulse) ?? 0,
@@ -617,6 +665,7 @@ class App {
         paint: { ...this.paint.getStats() },
         diag: this.paint.diagnostics(),
         touch: this.touch.getStats(),
+        marks: this.markers.getStats(),
         props: this.props?.getStats() ?? null,
         dyn: this.dyn?.getStats() ?? null,
         propsMs: this.propsMs,
