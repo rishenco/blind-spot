@@ -4,14 +4,9 @@
 extends doc/vision.md — perception and movement stay there; the mode, the enemy, and the map are
 defined here. Overrides of vision.md are listed in §10.*
 
-## 0. The loop and the Razor
+## 0. The loop
 
-**The loop:** spend noise to buy the map on the way down; spend the map to outrun your noise on
-the way home.
-
-**The Razor.** Every rule must be expressible in the currency **sound → knowledge → risk**. If a
-mechanic cannot be restated that way, it does not ship. Corollary: express a need in this
-currency before importing a foreign one — no timers, no stamina, no encumbrance.
+Spend noise to buy the map on the way down; spend the map to outrun your noise on the way home.
 
 ## 1. Setting — the Unfinished Tower
 
