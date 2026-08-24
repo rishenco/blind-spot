@@ -18,6 +18,7 @@ import {
   meanLuminance as meanLuminanceRect,
   litFraction as litFractionRect,
   whiteFraction as whiteFractionRect,
+  hueFamilies as hueFamiliesRect,
 } from './png.mjs';
 
 /** png.mjs measures rectangles and returns records; M1 only ever asks about the whole frame. */
@@ -25,6 +26,7 @@ const whole = (img) => ({ x: 0, y: 0, w: img.width, h: img.height });
 const litFraction = (img) => litFractionRect(img, whole(img)).fraction;
 const meanLuminance = (img) => meanLuminanceRect(img, whole(img)).mean;
 const whiteFraction = (img, threshold = 100) => whiteFractionRect(img, whole(img), threshold).fraction;
+const hueFamilies = (img, rect) => hueFamiliesRect(img, rect);
 
 const htmlPath = resolve(process.argv[2] ?? 'dist/index.html');
 const outDir = resolve(process.argv[3] ?? 'out');
@@ -203,17 +205,98 @@ await advance(0.1, 2);
 await shot('08-accum-top.png', 'the same accumulated map from above — what you have learned so far');
 await call('view', 'player');
 
-// --- 09 the tactile layer up against a shelf ------------------------------
+// --- 09 the shared mask: two sources, per point, nothing wholesale ---------
+// The east rack run is one box 24 m long and 6 m tall (x 22..23.4, z -18..6). It is the exact
+// shape the playtest complained about: before this batch, brushing it or clipping it with the
+// cone handed you the whole twenty metres. These four frames are the proof it no longer does.
+// Padded outward by 10 cm: a lattice dot sits *on* the surface, which is a hair outside the
+// collision box it belongs to, so a region query cut exactly at the box misses every one of them.
+const RACK = [21.9, -0.1, -18.1, 23.5, 6.1, 6.1];
+const rackSouth = [21.9, -0.1, -18.1, 23.5, 6.1, -6];
+const rackNorth = [21.9, -0.1, 1.9, 23.5, 6.1, 6.1];
+
 await call('clear');
-await call('pose', -27.4, 8, 90);
+await call('lights', false);
 await call('touch', true);
+// Pressed to the east face of the rack, in one of the gaps between its shelf decks.
+await call('pose', 23.75, -14.2, 90);
 await advance(0.6, 3);
-const touchStats = await stats();
-const t1 = await shot('09-touch-shelf.png', 'no scan at all: only what is within arm\'s reach of you');
-check('touch layer finds the shelf', touchStats.touch.segments > 0,
-  `${touchStats.touch.segments} segments, ${touchStats.touch.near} in reach, ${touchStats.touch.remembered} remembered`);
-check('touch shows something', litFraction(t1) > 0.0005, `lit=${litFraction(t1).toFixed(4)}`);
-check('touch shows almost nothing else', litFraction(t1) < 0.08, `lit=${litFraction(t1).toFixed(4)}`);
+const feel = await stats();
+const eye = feel.eye;
+const near = await call('region', [eye[0] - 1.2, eye[1] - 1.2, eye[2] - 1.2, eye[0] + 1.2, eye[1] + 1.2, eye[2] + 1.2]);
+const rackAll = await call('region', RACK);
+const t1 = await shot('09-touch-shelf.png', "pressed to a 24 m rack run, no ping ever fired: only the patch under your hand");
+check('touch reaches the rack at all', rackAll.touched > 0,
+  `${rackAll.touched} points felt on the rack, ${feel.paint.touchedDots} in the world`);
+check('touch reveals a patch, not the shelf', rackAll.touched === near.touched && rackAll.touched < 400,
+  `all ${rackAll.touched} felt rack points are within 1.2 m of the hand`);
+const runSouth = await call('region', [21.9, -0.1, -18.1, 23.5, 6.1, eye[2] - 1.2]);
+const runNorth = await call('region', [21.9, -0.1, eye[2] + 1.2, 23.5, 6.1, 6.1]);
+check('the other 21 metres of the run stay unknown',
+  runSouth.touched === 0 && runNorth.touched === 0,
+  `${runSouth.dots + runNorth.dots} mask points along the rest of the run, 0 revealed`);
+check('nothing but touch is on screen', feel.paint.unlockedDots === 0,
+  `${feel.paint.unlockedDots} dots unlocked by lidar`);
+check('a felt patch is a patch', litFraction(t1) > 0.0002 && litFraction(t1) < 0.02,
+  `lit=${litFraction(t1).toFixed(4)}`);
+const feelHue = hueFamilies(t1, whole(t1));
+check('touch draws grey, not lidar cyan', feelHue.coolFraction < 0.35,
+  `cool ${(feelHue.coolFraction * 100).toFixed(0)}% of ${feelHue.lit} lit pixels`);
+
+// --- 09b a wall answers the hand exactly like a crate does ----------------
+await call('clear');
+// The north wall is a single 68 m slab. Before this batch it had no edges within a hundred
+// metres of you, so the tactile layer appeared to ignore walls entirely.
+const WALL = [-34.1, -0.1, -24.6, 34.1, 9.1, -23.9];
+await call('pose', 6, -23.5, 0);
+await advance(0.6, 3);
+const wallFeel = await stats();
+const wallEye = wallFeel.eye;
+const wallHit = await call('region', WALL);
+const wallFar = await call('region', [-34.1, -0.1, -24.6, wallEye[0] - 1.5, 9.1, -23.9]);
+const t2 = await shot('09b-touch-wall.png', 'pressed to the flat north wall: the wall answers, and only where you touch it');
+check('the wall reacts to the hand', wallHit.touched > 0, `${wallHit.touched} wall points felt`);
+check('the rest of the wall does not', wallFar.touched === 0, '0 points felt more than 1.5 m along the wall');
+check('a felt wall is a patch too', litFraction(t2) > 0.0002 && litFraction(t2) < 0.02,
+  `lit=${litFraction(t2).toFixed(4)}`);
+
+// --- 09c the lidar clips the end of the run, and lights only the end ------
+await call('clear');
+await call('touch', false);
+await call('pose', 16, 10, 0);
+await call('aim', -60, -4);
+await call('refill');
+await ping();
+await advance(0.8, 4);
+const edgeNorth = await call('region', rackNorth);
+const edgeSouth = await call('region', rackSouth);
+const t3 = await shot('09c-lidar-shelf-edge.png', 'the cone clips the north end of the same rack run — the other twenty metres stay dark');
+check('the clipped end is drawn', edgeNorth.unlocked > 200,
+  `${edgeNorth.unlocked} of ${edgeNorth.dots} dots on the north end`);
+check('the far end of the run is not', edgeSouth.unlocked === 0,
+  `${edgeSouth.unlocked} dots on the south end (${edgeSouth.dots} in the mask there)`);
+
+// --- 09d lidar outranks the hand on the points they share ----------------
+await call('clear');
+await call('touch', true);
+await call('pose', 23.75, -14.2, 90);
+await advance(0.6, 3);
+const greyBefore = await call('region', [eye[0] - 1.2, eye[1] - 1.2, eye[2] - 1.2, eye[0] + 1.2, eye[1] + 1.2, eye[2] + 1.2]);
+await call('refill');
+await ping();
+await advance(1.2, 4);
+const mixed = await call('region', [eye[0] - 1.2, eye[1] - 1.2, eye[2] - 1.2, eye[0] + 1.2, eye[1] + 1.2, eye[2] + 1.2]);
+const t4 = await shot('09d-touch-then-lidar.png', 'the same felt patch after a ping: the shared points are redrawn in the lidar colours');
+check('the ping lands on ground the hand already knew',
+  greyBefore.touched > 0 && mixed.unlocked >= greyBefore.touched,
+  `${greyBefore.touched} felt, ${mixed.unlocked} of them now scanned`);
+// Touch is strictly neutral grey and the lidar's matter palette is strictly cyan-family, so a
+// cool pixel where there was none is the recolouring, measured rather than asserted by eye.
+const mixedHue = hueFamilies(t4, whole(t4));
+check('the shared points are redrawn in the lidar colours',
+  mixedHue.cool > 50 && feelHue.cool * 4 < mixedHue.cool,
+  `cool pixels ${feelHue.cool} felt -> ${mixedHue.cool} scanned`);
+await call('touch', true);
 
 // --- 10..13 the readability gate: spawn -> gate on lidar alone ------------
 await call('clear');
