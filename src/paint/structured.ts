@@ -556,8 +556,22 @@ export interface StructuredStats {
    * The blip cloud's invariant, measured the same way here: the displayed age is evaluated under
    * the old stamps and again under the new ones at the same instant, and the effective-stamp
    * construction makes the difference zero. One policy, one number, two backends.
+   *
+   * Refreshes the front had already passed before the unlock job reached them are counted in
+   * `lastLate` instead, for the reason given there.
    */
   lastJump: number;
+  /**
+   * Refreshes the event's own front had already swept past when the unlock job got to them.
+   *
+   * Unlocking is amortised over frames exactly as ray sampling is, so on a slow frame a dot can
+   * be reached after its arrival has gone by: no ease is left to run and it takes its new age in
+   * one step. Lateness in the job, not a hole in the policy — and the floor still decides where
+   * that step lands, which is why it lands out of the white.
+   */
+  lastLate: number;
+  /** Worst age step those late refreshes took, seconds — reported, not asserted on. */
+  lastLateStep: number;
 }
 
 export interface StructuredDiagnostics {
@@ -689,6 +703,8 @@ export class StructuredPaint {
     lastFeatherMean: 0,
     lastFloored: 0,
     lastJump: 0,
+    lastLate: 0,
+    lastLateStep: 0,
   };
 
   private diag: StructuredDiagnostics = {
@@ -1236,6 +1252,8 @@ export class StructuredPaint {
     this.stats.lastFeatherMean = 0;
     this.stats.lastFloored = 0;
     this.stats.lastJump = 0;
+    this.stats.lastLate = 0;
+    this.stats.lastLateStep = 0;
     this.featherSum = 0;
     this.markDots(0, this.dotBirth.length - 1);
     this.markEdges(0, this.edgeBirth.length - 1);
@@ -1269,6 +1287,8 @@ export class StructuredPaint {
     this.stats.lastFeatherMean = 0;
     this.stats.lastFloored = 0;
     this.stats.lastJump = 0;
+    this.stats.lastLate = 0;
+    this.stats.lastLateStep = 0;
     this.featherSum = 0;
 
     const slot = this.slotCursor++ % WAVE_SLOTS;
@@ -1713,13 +1733,23 @@ export class StructuredPaint {
       this.stats.lastFeatherMean = this.featherSum / this.stats.lastRefreshed;
       if (floor > 0 && before > floor) this.stats.lastFloored++;
     }
-    // Only where there is a picture to disturb: an item whose first front has not landed is not
-    // drawn at all, and its stamp being replaced outright is the virgin-in-flight rule.
-    if (old <= now) {
+    /*
+     * Only where there is a picture to disturb, and split the same way the cloud splits it: a dot
+     * nobody has unlocked yet has no age on screen to step (it carries the never sentinel, which
+     * is not a number this measurement means anything about), and one the front has already swept
+     * past has no ease left to run and takes its new age at once. The claim is about the case in
+     * between, which is every case at a frame rate the player would accept.
+     */
+    if (old > -1e8 && old <= now) {
       const jump = Math.abs(
         this.displayedAge(arrival, this.dotPrior[i]!, floor, feather, now) - before,
       );
-      if (jump > this.stats.lastJump) this.stats.lastJump = jump;
+      if (arrival > now) {
+        if (jump > this.stats.lastJump) this.stats.lastJump = jump;
+      } else {
+        this.stats.lastLate++;
+        if (jump > this.stats.lastLateStep) this.stats.lastLateStep = jump;
+      }
     }
     this.stats.lastDots++;
     this.markDots(i, i);

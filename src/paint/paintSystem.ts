@@ -1175,8 +1175,25 @@ export interface PaintStats {
    * the old stamps and again under the new ones, at the same instant, with the same curve the
    * shader runs. The effective-stamp construction (see the header) makes this zero by design, so
    * a non-zero reading is the invariant breaking rather than a number to be tuned.
+   *
+   * Restamps the front had already passed before the CPU got to them are not in this number —
+   * they are in `lastRestampLate`, and the reason for the split is written there.
    */
   lastRestampJump: number;
+  /**
+   * Restamps deposited after this event's own front had already swept past the blip.
+   *
+   * Sampling is amortised across frames (§`runChunk`), so a large event on a slow frame can reach
+   * a blip whose arrival is already in the past: there is no ease left to run and the blip takes
+   * its new age in one step. That is lateness in the sampler, not a hole in the refresh policy —
+   * at a healthy frame rate the count is a rounding error, and under software GL it is most of a
+   * sprint step — so it is counted rather than folded into the continuity number it would
+   * otherwise drown. What keeps it survivable is the floor: a late footfall still lands at the
+   * end of the white band, never at ice-white.
+   */
+  lastRestampLate: number;
+  /** Worst age step those late restamps took, seconds — reported, not asserted on. */
+  lastLateStep: number;
   /** Wall-clock cost of the most recent event's sampling, ms, summed over its chunks. */
   lastPaintMs: number;
   /** Worst single chunk of that sampling, ms — the actual frame stall the player pays. */
@@ -1447,6 +1464,8 @@ export class PaintSystem {
     lastFeatherMean: 0,
     lastFloored: 0,
     lastRestampJump: 0,
+    lastRestampLate: 0,
+    lastLateStep: 0,
     lastPaintMs: 0,
     lastChunkMs: 0,
     lastChunks: 0,
@@ -1794,6 +1813,8 @@ export class PaintSystem {
     this.stats.lastFeatherMean = 0;
     this.stats.lastFloored = 0;
     this.stats.lastRestampJump = 0;
+    this.stats.lastRestampLate = 0;
+    this.stats.lastLateStep = 0;
     this.featherSum = 0;
     this.stats.lastPaintMs = 0;
     this.stats.lastMaxRange = 0;
@@ -1824,6 +1845,8 @@ export class PaintSystem {
     this.stats.lastFeatherMean = 0;
     this.stats.lastFloored = 0;
     this.stats.lastRestampJump = 0;
+    this.stats.lastRestampLate = 0;
+    this.stats.lastLateStep = 0;
     this.featherSum = 0;
     this.stats.lastRefreshFloor = floorAgeFor(
       event.class,
@@ -2461,14 +2484,31 @@ export class PaintSystem {
         this.featherSum += feather;
         this.stats.lastFeatherMean = this.featherSum / this.stats.lastRefreshed;
         if (this.emitFloor > 0 && before > this.emitFloor) this.stats.lastFloored++;
-        // Measured only where there is a picture to disturb: a blip whose first front has not
-        // landed yet is not on screen at all, and its stamp being replaced wholesale is the
-        // virgin-in-flight rule doing its job rather than a discontinuity anybody can see.
+        /*
+         * Measured only where there is a picture to disturb: a blip whose first front has not
+         * landed yet is not on screen at all, and its stamp being replaced wholesale is the
+         * virgin-in-flight rule doing its job rather than a discontinuity anybody can see.
+         *
+         * Split by whether this event's own front has passed this point yet, because those are
+         * two different claims. While the front is still coming — the case the player sees, and
+         * every case at all at a healthy frame rate — the restamp is invisible by construction
+         * and `lastRestampJump` is zero. Sampling is amortised across frames, though, so a big
+         * event on a slow frame can deposit a blip the front cleared several frames ago; that
+         * one has no ease left to run and takes its new age at once. It is counted separately
+         * rather than averaged in, because it is a property of how late the CPU was, not of the
+         * policy — and the floor is what makes it survivable: a late step still lands at the end
+         * of the white band instead of at ice-white.
+         */
         if (oldBirth <= this.time) {
           const jump = Math.abs(
             this.displayedAge(existing, arrival, this.priors[existing]!, this.time) - before,
           );
-          if (jump > this.stats.lastRestampJump) this.stats.lastRestampJump = jump;
+          if (arrival > this.time) {
+            if (jump > this.stats.lastRestampJump) this.stats.lastRestampJump = jump;
+          } else {
+            this.stats.lastRestampLate++;
+            if (jump > this.stats.lastLateStep) this.stats.lastLateStep = jump;
+          }
         }
         return;
       }

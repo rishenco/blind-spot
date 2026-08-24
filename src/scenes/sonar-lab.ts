@@ -910,6 +910,10 @@ export class SonarLab implements LabScene {
       lastFeatherMean: stats.lastFeatherMean,
       lastFloored: stats.lastFloored,
       lastRestampJump: stats.lastRestampJump,
+      // Restamps the sampler reached after their own front had gone by — a slow-frame artefact,
+      // reported next to the invariant so the two are never read as one number.
+      lastRestampLate: stats.lastRestampLate,
+      lastLateStep: stats.lastLateStep,
       // Total CPU spent sampling the last event, and the worst single frame's share of it —
       // the second is the one that can be felt, so it is the one the driver asserts on.
       lastPaintMs: stats.lastPaintMs,
@@ -994,6 +998,8 @@ export class SonarLab implements LabScene {
       structLastFeatherMean: s.lastFeatherMean,
       structLastFloored: s.lastFloored,
       structLastJump: s.lastJump,
+      structLastLate: s.lastLate,
+      structLastLateStep: s.lastLateStep,
       structLastMs: s.lastMs,
       structLastChunkMs: s.lastChunkMs,
       structLastChunks: s.lastChunks,

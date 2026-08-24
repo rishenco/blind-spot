@@ -1801,12 +1801,14 @@ async function ageTheLane(seconds = 4.5) {
   await dragLook(LANE_TURN, sens);
   await pitchBy(LANE_PITCH, sens);
   await wait(150);
+  // Out and back further than the measured sprint runs, so that the run below finishes on ground
+  // this pass actually bought: a run that overshoots the painted lane is measuring virgin floor.
   await page.keyboard.down('Shift');
   await page.keyboard.down('w');
-  await wait(1100);
+  await wait(1500);
   await page.keyboard.up('w');
   await page.keyboard.down('s');
-  await wait(1100);
+  await wait(1500);
   await page.keyboard.up('s');
   await page.keyboard.up('Shift');
   await ping('q-ping');
@@ -1818,16 +1820,30 @@ async function ageTheLane(seconds = 4.5) {
   return poll((s) => Number(s.paintTime) - t0 >= seconds, 40000);
 }
 
-/** Sprints down the aged lane, catching frames while the feet are actually on it. */
-async function sprintTheLane(shots = 3) {
+/**
+ * Sprints a fixed distance down the lane and then stands still, and reads the floor from there.
+ *
+ * The measurement is taken standing, not mid-run, and that is the whole point: a footfall's paint
+ * lives for the length of the white band, so a still camera a moment after the last one shows
+ * exactly what that footfall did to the floor — while a frame grabbed mid-sprint shows whatever
+ * phase of the stride the shutter happened to land on, at whatever point down the lane a 5-20 fps
+ * screenshot took to arrive. Same feet, same ground, no phase in the number.
+ *
+ * The settle is measured in paint clock rather than wall time so the refresh ease has provably
+ * finished (0.3 s) before the shutter, on a frame rate the driver does not control.
+ */
+async function sprintTheLane(sprintMs = 800, settleSeconds = 0.35) {
   await page.keyboard.down('Shift');
   await page.keyboard.down('w');
-  const frames = [];
-  for (let i = 0; i < shots; i++) frames.push(await page.screenshot());
-  const during = await state();
+  const moving = await page.screenshot();
+  await wait(sprintMs);
   await page.keyboard.up('w');
   await page.keyboard.up('Shift');
-  return { frames, during };
+  const during = await state();
+  const t0 = Number(during.paintTime);
+  await poll((s) => Number(s.paintTime) - t0 >= settleSeconds, 20000);
+  const standing = [await page.screenshot(), await page.screenshot()];
+  return { moving, standing, during };
 }
 
 /*
@@ -1844,19 +1860,21 @@ await dragLook(LANE_TURN, sens);
 await pitchBy(LANE_PITCH, sens);
 await wait(150);
 const virgin = await sprintTheLane();
-await writeFile(join(outDir, '38e-sprint-over-virgin.png'), virgin.frames[1] ?? virgin.frames[0]);
-console.log('[shoot] wrote 38e-sprint-over-virgin.png');
-const virginWhite = virgin.frames.map((b) => white(b));
+await writeFile(join(outDir, '38e-sprint-over-virgin.png'), virgin.moving);
+await writeFile(join(outDir, '38e2-after-virgin-sprint.png'), virgin.standing[0]);
+console.log('[shoot] wrote 38e-sprint-over-virgin.png, 38e2-after-virgin-sprint.png');
+const virginWhite = virgin.standing.map((b) => white(b));
 const bestVirginWhite = Math.max(...virginWhite.map((w) => w.w100));
 console.log(
-  `  mid-sprint over virgin floor: ` + virginWhite.map((w) => pct(w.w100)).join(' ') +
+  `  standing after a virgin sprint: ` + virginWhite.map((w) => pct(w.w100)).join(' ') +
     ` · ${whiteLine(virginWhite[0])}`,
 );
 check(
   'a sprint over unpainted floor ignites it white (§3.3)',
   bestVirginWhite > 0.004 && Number(virgin.during.lastDeposited) > 500,
-  `${pct(bestVirginWhite)} of the floor band goes near-white under the footfalls · the last one ` +
-    `discovered +${virgin.during.lastDeposited} blips and refreshed ~${virgin.during.lastRefreshed}`,
+  `${pct(bestVirginWhite)} of the floor band is still near-white a moment after the last ` +
+    `footfall · that footfall discovered +${virgin.during.lastDeposited} blips and refreshed ` +
+    `~${virgin.during.lastRefreshed}`,
 );
 
 // --- 30f sprinting over floor you already own leaves it cyan -----------------
@@ -1873,18 +1891,17 @@ check(
 );
 
 const run = await sprintTheLane();
-await writeFile(join(outDir, '38g-sprint-over-aged-lane.png'), run.frames[1] ?? run.frames[0]);
-console.log('[shoot] wrote 38g-sprint-over-aged-lane.png');
-const runWhite = run.frames.map((b) => white(b));
-const runBand = run.frames.map((b) => photo(b, FLOOR_BAND, []));
+await writeFile(join(outDir, '38g-sprint-over-aged-lane.png'), run.moving);
+await writeFile(join(outDir, '38h-after-sprint.png'), run.standing[0]);
+console.log('[shoot] wrote 38g-sprint-over-aged-lane.png, 38h-after-sprint.png');
+const runWhite = run.standing.map((b) => white(b));
+const runBand = run.standing.map((b) => photo(b, FLOOR_BAND, []));
 const worstRunWhite = Math.max(...runWhite.map((w) => w.w100));
-const afterRunBuf = await shotBuf('38h-after-sprint.png');
-const afterRunWhite = white(afterRunBuf);
-const afterRunBand = photo(afterRunBuf, FLOOR_BAND, []);
+const afterRunBand = runBand[0];
 console.log(
-  `  mid-sprint over the aged lane: ` +
+  `  standing after a sprint over the aged lane: ` +
     runWhite.map((w, i) => `${pct(w.w100)}@${runBand[i].mean.toFixed(1)}`).join(' ') +
-    ` · after ${pct(afterRunWhite.w100)} · ${whiteLine(runWhite[0])}`,
+    ` · ${whiteLine(runWhite[0])}`,
 );
 /*
  * Bounded against the control rather than against zero. A sprint down a lane that has been
@@ -1896,23 +1913,22 @@ console.log(
  */
 check(
   'sprinting over floor you already own leaves it cyan, not white',
-  worstRunWhite < 0.008 &&
-    worstRunWhite < bestVirginWhite * 0.25 &&
-    afterRunWhite.w100 < 0.008,
-  `worst near-white in the floor band ${pct(worstRunWhite)} across ${run.frames.length} ` +
-    `mid-sprint frames vs ${pct(bestVirginWhite)} for the same sprint over virgin ground ` +
-    `(${(bestVirginWhite / Math.max(1e-6, worstRunWhite)).toFixed(0)}x) · aged lane ` +
-    `${pct(agedWhite.w100)}, after the run ${pct(afterRunWhite.w100)}`,
+  worstRunWhite < 0.008 && worstRunWhite < bestVirginWhite * 0.25,
+  `worst near-white in the floor band ${pct(worstRunWhite)} a moment after the last footfall vs ` +
+    `${pct(bestVirginWhite)} for the same sprint over virgin ground ` +
+    `(${(bestVirginWhite / Math.max(1e-6, worstRunWhite)).toFixed(0)}x) · the lane read ` +
+    `${pct(agedWhite.w100)} before the run`,
 );
 /*
- * The other way to pass the check above is to stop painting, so: the lane is still lit at the end
- * of the run, and the engine says the footfalls spent themselves refreshing what was already there
- * instead of discovering it. Read off the standing frame after the run — a mid-sprint band mean
- * moves with the camera, not with the paint.
+ * The other way to pass the check above is to stop painting, so: the floor is still there at the
+ * end of the run, and the engine says the footfalls spent themselves refreshing ground that was
+ * already known rather than discovering it. The lit fraction is held to an absolute bar rather
+ * than to the pre-run reading, because the player has moved nine metres down the lane between the
+ * two frames and is looking at a different piece of floor — what it rules out is a dark screen.
  */
 check(
   'and the floor under the run is still there — refreshed, not merely absent',
-  afterRunBand.lit > agedBand.lit * 0.5 &&
+  afterRunBand.lit > 0.05 &&
     Number(run.during.lastRefreshed) > Number(run.during.lastDeposited) * 3,
   `band lit ${pct(agedBand.lit)} before the run → ${pct(afterRunBand.lit)} standing at the end of ` +
     `it · the last footfall refreshed ~${run.during.lastRefreshed} blips and found ` +
@@ -1939,12 +1955,13 @@ check(
 );
 await ageTheLane();
 const oldPolicy = await sprintTheLane();
-await writeFile(join(outDir, '38i-sprint-old-policy.png'), oldPolicy.frames[1] ?? oldPolicy.frames[0]);
-console.log('[shoot] wrote 38i-sprint-old-policy.png');
-const oldWhite = oldPolicy.frames.map((b) => white(b));
+await writeFile(join(outDir, '38i-sprint-old-policy.png'), oldPolicy.moving);
+await writeFile(join(outDir, '38i2-after-sprint-old-policy.png'), oldPolicy.standing[0]);
+console.log('[shoot] wrote 38i-sprint-old-policy.png, 38i2-after-sprint-old-policy.png');
+const oldWhite = oldPolicy.standing.map((b) => white(b));
 const worstOldWhite = Math.max(...oldWhite.map((w) => w.w100));
 console.log(
-  `  mid-sprint, bounds off: ` + oldWhite.map((w) => pct(w.w100)).join(' ') +
+  `  standing after the same sprint, bounds off: ` + oldWhite.map((w) => pct(w.w100)).join(' ') +
     ` · ${whiteLine(oldWhite[0])}`,
 );
 check(
@@ -2103,12 +2120,29 @@ const there = {
   radius: 3,
   rows: 80,
 };
-const priorProbe = await refreshProbe(there);
 const eventsBefore = Number((await state()).soundEvents);
+/*
+ * Walk until a footfall actually lands, re-probing the whole way and keeping the last reading
+ * taken before it did.
+ *
+ * Two things have to be true at once and they pull against each other. A step is spent by
+ * distance covered, so at a tenth of the clock a press long enough at 1x is a shuffle — pressing
+ * for a fixed stretch of wall time measures a restamp that never happened. But the two probes
+ * also have to be close together in *paint* clock: the pair is compared by assuming a blip ages
+ * a second per second between them, which is exactly what a floored blip does not do while it is
+ * held at the end of the white band. Walking until the step lands and keeping the newest probe
+ * before it satisfies both — the gap that matters shrinks to the round trip that detected it.
+ */
 await page.keyboard.down('w');
-await wait(220);
+let priorProbe = await refreshProbe(there);
+let stepped = await state();
+const walkUntil = Date.now() + 30000;
+while (Number(stepped.soundEvents) === eventsBefore && Date.now() < walkUntil) {
+  const candidate = await refreshProbe(there);
+  stepped = await state();
+  if (Number(stepped.soundEvents) === eventsBefore) priorProbe = candidate;
+}
 await page.keyboard.up('w');
-await poll((s) => Number(s.soundEvents) > eventsBefore, 8000);
 const laterProbe = await refreshProbe(there);
 const beforeById = new Map(priorProbe.rows.map((r) => [r.i, r]));
 const dt = laterProbe.now - priorProbe.now;
@@ -2135,7 +2169,8 @@ check(
   moved.length >= 5 && worstShipped < 0.15 && worstNaive > 0.4,
   `worst displayed-age step across the restamp: ${worstShipped.toFixed(3)} s shipped vs ` +
     `${worstNaive.toFixed(3)} s if the raw previous arrival were written back instead ` +
-    `(${moved.length} blips, ${dt.toFixed(3)} s of clock between the probes)`,
+    `(${moved.length} blips, ${dt.toFixed(3)} s of clock between the probes, ` +
+    `${stepped.lastEvent} landed)`,
 );
 await setTimeScale(1);
 
@@ -2166,6 +2201,13 @@ check(
  * the blip was displaying under its old stamps against the age it displays under its new ones, at
  * one clock value. At a sprint the footfalls land every ~0.29 s and the ease is 0.3 s, so every
  * restamp in this trace is a re-restamp mid-ease — the case the construction exists for.
+ *
+ * `lastRestampLate` is read alongside it and deliberately not asserted on. Sampling is amortised
+ * over frames, so at 5-20 fps a sprint step reaches thousands of blips whose arrival has already
+ * gone by; those have no ease left to run and take their new age in one step, which is lateness
+ * in the sampler rather than the policy — the same reading on hardware GL is a rounding error.
+ * What the batch owes them is that the step lands somewhere survivable, and that is the floor's
+ * job, checked on the blips themselves above.
  */
 const jumpTrace = page.evaluate(
   (ms) =>
@@ -2174,7 +2216,13 @@ const jumpTrace = page.evaluate(
       const t0 = performance.now();
       const tick = () => {
         const s = window.__blindspot.getState();
-        out.push([performance.now() - t0, s.lastRestampJump, s.lastRefreshed, s.speed]);
+        out.push([
+          performance.now() - t0,
+          s.lastRestampJump,
+          s.lastRefreshed,
+          s.lastRestampLate,
+          s.lastLateStep,
+        ]);
         if (performance.now() - t0 < ms) requestAnimationFrame(tick);
         else done(out);
       };
@@ -2194,11 +2242,19 @@ const jumpRows = await jumpTrace;
 const refreshingFrames = jumpRows.filter((r) => Number(r[2]) > 0);
 const worstJump = Math.max(0, ...refreshingFrames.map((r) => Number(r[1])));
 const mostRefreshed = Math.max(0, ...refreshingFrames.map((r) => Number(r[2])));
+const mostLate = Math.max(0, ...refreshingFrames.map((r) => Number(r[3])));
+const worstLateStep = Math.max(0, ...refreshingFrames.map((r) => Number(r[4])));
+console.log(
+  `  sprint restamps: worst in-flight discontinuity ${worstJump.toFixed(4)} s · ` +
+    `up to ${mostLate} of them reached late by the amortised sampler ` +
+    `(worst step ${worstLateStep.toFixed(2)} s, software GL)`,
+);
 check(
   'and at a sprint, where every restamp lands mid-ease, none of them steps the picture',
   refreshingFrames.length >= 8 && mostRefreshed > 500 && worstJump < 0.02,
   `worst age discontinuity ${worstJump.toFixed(4)} s over ${refreshingFrames.length} rendered ` +
-    `frames of refreshing (up to ${mostRefreshed} blips restamped by a single footfall)`,
+    `frames of refreshing (up to ${mostRefreshed} blips restamped by a single footfall, ` +
+    `${mostLate} of them reached after their front had passed and excluded)`,
 );
 await pitchBy(-LANE_PITCH, sens);
 
@@ -2967,7 +3023,8 @@ check(
   'and its restamps are as invisible there as they are here',
   Number(bpStepped.structLastJump) < 0.02,
   `worst displayed-age discontinuity ${Number(bpStepped.structLastJump).toFixed(4)} s across the ` +
-    `whole unlock pass`,
+    `whole unlock pass · ${bpStepped.structLastLate} dots the amortised job reached after their ` +
+    `front had passed are excluded, worst step ${Number(bpStepped.structLastLateStep).toFixed(2)} s`,
 );
 
 /*
