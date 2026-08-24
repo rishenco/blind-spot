@@ -630,6 +630,35 @@ check(
   `cool=${pct(qHue.coolFraction)} warm=${pct(qHue.warmFraction)} of ${qHue.lit} lit px`,
 );
 
+/*
+ * --- bloom -----------------------------------------------------------------------
+ *
+ * This is the one path the headless run would otherwise never take. Bloom is what a real GPU
+ * boots with, and software GL vetoes it — so without pressing B here, `renderFrame` returns
+ * false on every frame of the suite and the composer is never even constructed. The room is
+ * already drawn, so the pair below is the same picture through the two paths.
+ */
+const bloomOff = photo(qBuf);
+await page.keyboard.press('b');
+await poll((s) => s.bloom === true, 4000);
+await wait(400);
+const bloomBuf = await shot('05b-bloom.png');
+const bloomOn = photo(bloomBuf);
+check(
+  'B takes the frame through the bloom chain',
+  (await state()).bloom === true && bloomOn.lit > bloomOff.lit,
+  `lit ${pct(bloomOff.lit)} → ${pct(bloomOn.lit)}, mean ${bloomOff.mean.toFixed(2)} → ` +
+    `${bloomOn.mean.toFixed(2)}/255 (halo spreads light into pixels the raw path leaves black)`,
+);
+check(
+  'and does not re-grade it: bloom adds a halo, it does not clip the picture',
+  bloomOn.sat < 0.02 && hues(bloomBuf).warmFraction < 0.02,
+  `saturated=${pct(bloomOn.sat)} hot=${pct(bloomOn.hot)} warm=${pct(hues(bloomBuf).warmFraction)}`,
+);
+await page.keyboard.press('b');
+await poll((s) => s.bloom === false, 4000);
+await wait(250);
+
 // --- the shared cooldown (§3.5) --------------------------------------------------
 // Fired back to back with no waiting in between, so the test does not depend on how long a
 // software-GL screenshot happens to take.
