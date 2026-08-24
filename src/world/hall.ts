@@ -120,14 +120,13 @@ class Builder {
     maxY: number,
     maxZ: number,
     kind: keyof BuiltMaterials = 'prop',
-    shell = false,
   ): void {
     const sx = maxX - minX;
     const sy = maxY - minY;
     const sz = maxZ - minZ;
     if (sx <= 0 || sy <= 0 || sz <= 0) return;
     this.instances[kind].push(minX + sx / 2, minY + sy / 2, minZ + sz / 2, sx, sy, sz);
-    this.world.add(aabbFromBounds(minX, minY, minZ, maxX, maxY, maxZ, 0, shell));
+    this.world.add(aabbFromBounds(minX, minY, minZ, maxX, maxY, maxZ));
     this.boxCount++;
   }
 
@@ -140,9 +139,8 @@ class Builder {
     sy: number,
     sz: number,
     kind: keyof BuiltMaterials = 'prop',
-    shell = false,
   ): void {
-    this.bounds(cx - sx / 2, baseY, cz - sz / 2, cx + sx / 2, baseY + sy, cz + sz / 2, kind, shell);
+    this.bounds(cx - sx / 2, baseY, cz - sz / 2, cx + sx / 2, baseY + sy, cz + sz / 2, kind);
   }
 
   /**
@@ -214,12 +212,12 @@ export function buildHall(seed = 20260824): Hall {
   const { halfX, halfZ, height, wallThickness: t } = HALL;
 
   // --- shell -------------------------------------------------------------
-  b.bounds(-halfX - t, -1, -halfZ - t, halfX + t, 0, halfZ + t, 'shell', true);
-  b.bounds(-halfX - t, height, -halfZ - t, halfX + t, height + t, halfZ + t, 'roof', true);
-  b.bounds(-halfX - t, 0, -halfZ - t, -halfX, height, halfZ + t, 'shell', true);
-  b.bounds(halfX, 0, -halfZ - t, halfX + t, height, halfZ + t, 'shell', true);
-  b.bounds(-halfX, 0, -halfZ - t, halfX, height, -halfZ, 'shell', true);
-  b.bounds(-halfX, 0, halfZ, halfX, height, halfZ + t, 'shell', true);
+  b.bounds(-halfX - t, -1, -halfZ - t, halfX + t, 0, halfZ + t, 'shell');
+  b.bounds(-halfX - t, height, -halfZ - t, halfX + t, height + t, halfZ + t, 'roof');
+  b.bounds(-halfX - t, 0, -halfZ - t, -halfX, height, halfZ + t, 'shell');
+  b.bounds(halfX, 0, -halfZ - t, halfX + t, height, halfZ + t, 'shell');
+  b.bounds(-halfX, 0, -halfZ - t, halfX, height, -halfZ, 'shell');
+  b.bounds(-halfX, 0, halfZ, halfX, height, halfZ + t, 'shell');
 
   // The gate: a break in the east wall with a heavy lintel and two jambs. The one part of the
   // shell with a silhouette, so it reads as "the way out" from across the hall.
@@ -272,9 +270,9 @@ export function buildHall(seed = 20260824): Hall {
   scatterCrates(b, rng, -24, 14, 10, 7, 40);
 
   // --- loose partitions: half-height walls that break sightlines ----------
-  b.bounds(-6, 0, -14, -5.4, 2.4, -4, 'shell', true);
-  b.bounds(4, 0, 6, 14, 2.4, 4.6, 'shell', true);
-  b.bounds(-14, 0, 16, -4, 2.0, 16.6, 'shell', true);
+  b.bounds(-6, 0, -14, -5.4, 2.4, -4, 'shell');
+  b.bounds(4, 0, 6, 14, 2.4, 4.6, 'shell');
+  b.bounds(-14, 0, 16, -4, 2.0, 16.6, 'shell');
 
   // --- a few oddities, so places are telling apart from each other --------
   b.box(28, 0, -20, 3, 1.2, 3, 'prop'); // squat block in the NE corner
