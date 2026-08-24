@@ -125,7 +125,8 @@ const loop = new Loop({
   },
   render: (alpha) => {
     host.render(alpha);
-    renderer.render(host.scene, camera);
+    // A scene with its own post chain draws itself; everything else takes the direct path.
+    if (!host.renderFrame()) renderer.render(host.scene, camera);
   },
 });
 

@@ -31,29 +31,64 @@ export type SoundClass =
   | 'q-ping'
   | 'e-ping';
 
+/**
+ * Which wavefront speed a class travels at. Three groups rather than a number per class:
+ * everything a body does to the floor propagates alike, the two pings are the two deliberate
+ * acts, and three sliders are a tuning surface a playtest can actually hold in its head.
+ */
+export type WaveGroup = 'step' | 'ping' | 'beam';
+
+/**
+ * How fast each group's wavefront expands, m/s. Runtime-tunable from the lab GUI.
+ *
+ * Not the speed of sound: 343 m/s crosses a 30 m room in 90 ms, which at any frame rate is
+ * an instant pop — the thing the wave engine exists to abolish. These are *readable* speeds,
+ * chosen so a room read takes about half a second to sweep: the player watches the answer
+ * arrive and can tell near from far by when it lit, which is information the pop never gave.
+ * The beam is the faster of the two because a directed question should feel like a thrown
+ * torch, not a released balloon.
+ */
+export const WAVE_SPEEDS: Record<WaveGroup, number> = {
+  step: 25,
+  ping: 25,
+  beam: 45,
+};
+
 export interface SoundClassProfile {
-  /** Paint radius at intensity 1, metres (§3.3). */
-  readonly paintRadius: number;
+  /** Paint radius at intensity 1, metres (§3.3). Tunable at runtime. */
+  paintRadius: number;
   /** How far a dog hears it, metres (§3.3). Not consumed yet — the enemy arrives later. */
-  readonly hearingRadius: number;
+  hearingRadius: number;
   /** Full apex angle of the emission cone in degrees; 360 means omnidirectional. */
-  readonly coneAngleDeg: number;
+  coneAngleDeg: number;
   /** Loudness multiplier applied when the emitter does not name one. */
-  readonly intensity: number;
+  intensity: number;
+  /** Which entry of `WAVE_SPEEDS` this class's front travels at. */
+  readonly wave: WaveGroup;
 }
 
 /**
  * §3.3, verbatim where the table gives a single number. `landing` is the one range in the
  * table (8-14 m); its emitter picks a point in that range from the impact speed, so the value
  * here is only the floor.
+ *
+ * **The E-ping deliberately deviates from §3.3/§3.5.** The doc specifies a 25° cone reaching
+ * 40 m: a telescope. Played, that is a bad question — a 25° slit answers "what is exactly
+ * where I am already looking", which the player mostly knows, and answers it about a room they
+ * cannot reach before the paint has cooled. Batch 2.1 re-roles it as *look around*: a 110°
+ * cone at 22 m, which is the width of a corridor plus both its walls and the depth of one
+ * decision. Q stays the 360° behind-your-back read, so the two now differ in *shape* rather
+ * than in reach, and the E-ping's price (§3.3 right column: dogs hear it at both ends of the
+ * beam) is unchanged. The docs get updated when the design settles; until then this comment is
+ * the record that the difference is a choice and not a drift.
  */
 export const SOUND_CLASSES: Record<SoundClass, SoundClassProfile> = {
-  'crouch-step': { paintRadius: 1.5, hearingRadius: 2, coneAngleDeg: 360, intensity: 0.7 },
-  'walk-step': { paintRadius: 4, hearingRadius: 11, coneAngleDeg: 360, intensity: 0.9 },
-  'sprint-step': { paintRadius: 7, hearingRadius: 24, coneAngleDeg: 360, intensity: 1.0 },
-  landing: { paintRadius: 8, hearingRadius: 28, coneAngleDeg: 360, intensity: 1.0 },
-  'q-ping': { paintRadius: 12, hearingRadius: 18, coneAngleDeg: 360, intensity: 1.05 },
-  'e-ping': { paintRadius: 40, hearingRadius: 30, coneAngleDeg: 25, intensity: 1.15 },
+  'crouch-step': { paintRadius: 1.5, hearingRadius: 2, coneAngleDeg: 360, intensity: 0.7, wave: 'step' },
+  'walk-step': { paintRadius: 4, hearingRadius: 11, coneAngleDeg: 360, intensity: 0.9, wave: 'step' },
+  'sprint-step': { paintRadius: 7, hearingRadius: 24, coneAngleDeg: 360, intensity: 1.0, wave: 'step' },
+  landing: { paintRadius: 8, hearingRadius: 28, coneAngleDeg: 360, intensity: 1.0, wave: 'step' },
+  'q-ping': { paintRadius: 12, hearingRadius: 18, coneAngleDeg: 360, intensity: 1.05, wave: 'ping' },
+  'e-ping': { paintRadius: 22, hearingRadius: 30, coneAngleDeg: 110, intensity: 1.15, wave: 'beam' },
 };
 
 /** Softest landing that rings out at all, m/s — roughly a 0.8 m drop at the default gravity. */
@@ -79,6 +114,11 @@ export interface SoundEvent {
   readonly dirZ: number;
   /** Full apex angle in degrees; 360 for omnidirectional. */
   readonly coneAngleDeg: number;
+  /**
+   * How fast this event's wavefront expands, m/s. Nothing the event reveals exists before the
+   * front has physically reached it: a blip's birth stamp is `time + distance / waveSpeed`.
+   */
+  readonly waveSpeed: number;
   /** Scene clock at emission, seconds. */
   readonly time: number;
   /** Monotonic counter — a stable identity for tooling and for seeding per-event sampling. */
@@ -99,6 +139,8 @@ export interface SoundEmitSpec {
   dirY?: number;
   dirZ?: number;
   coneAngleDeg?: number;
+  /** Overrides the class's wave group speed (chips that change how a ping propagates). */
+  waveSpeed?: number;
 }
 
 export type SoundListener = (event: SoundEvent) => void;
@@ -164,6 +206,7 @@ export class SoundBus {
       dirY: dy,
       dirZ: dz,
       coneAngleDeg: len > 1e-6 ? cone : 360,
+      waveSpeed: Math.max(0.5, spec.waveSpeed ?? WAVE_SPEEDS[profile.wave]),
       time: this.now,
       seq: this.seq++,
     };

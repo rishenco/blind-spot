@@ -127,6 +127,48 @@ export function meanLuminance(image, rect, holes = []) {
   return { mean: count === 0 ? 0 : sum / count, samples: count };
 }
 
+/**
+ * Splits the lit pixels of a rectangle into hue families.
+ *
+ * Look 4 is the only one that gives geometry a colour that is not in the cyan band: concrete
+ * cools toward cyan, metal toward gold. That is a claim about pixels, so this counts them —
+ * "cool" is anything whose blue clearly leads its red, "warm" the reverse, "neutral" the ice-
+ * white core that both materials share when a blip is fresh. The margin is deliberately wide
+ * (16/255): a nearly-white pixel must land in `neutral`, or a frame of fresh paint would report
+ * whichever family won by one code value.
+ */
+export function hueFamilies(image, rect, { threshold = 24, margin = 16 } = {}) {
+  const { width, height, channels, data } = image;
+  const x0 = Math.max(0, rect.x);
+  const y0 = Math.max(0, rect.y);
+  const x1 = Math.min(width, rect.x + rect.w);
+  const y1 = Math.min(height, rect.y + rect.h);
+  let cool = 0;
+  let warm = 0;
+  let neutral = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * width + x) * channels;
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      if (0.2126 * r + 0.7152 * g + 0.0722 * b <= threshold) continue;
+      if (b - r > margin) cool++;
+      else if (r - b > margin) warm++;
+      else neutral++;
+    }
+  }
+  const lit = cool + warm + neutral;
+  return {
+    lit,
+    cool,
+    warm,
+    neutral,
+    coolFraction: lit === 0 ? 0 : cool / lit,
+    warmFraction: lit === 0 ? 0 : warm / lit,
+  };
+}
+
 /** Fraction of pixels in a rectangle brighter than `threshold` (0-255 luminance). */
 export function litFraction(image, rect, threshold = 8) {
   const { width, height, channels, data } = image;

@@ -17,7 +17,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { decodePng, meanLuminance, litFraction } from './png.mjs';
+import { decodePng, meanLuminance, litFraction, hueFamilies } from './png.mjs';
 
 const DEFAULT_HTML = 'dist/index.html';
 const DEFAULT_OUT =
@@ -86,6 +86,15 @@ const FRAME = { x: 400, y: 200, w: 600, h: 420 };
 const FRAME_HOLES = [{ x: 620, y: 340, w: 40, h: 40 }];
 /** The near floor: where a footstep's paint lands when you are looking straight ahead. */
 const FLOOR_BAND = { x: 300, y: 430, w: 700, h: 190 };
+/**
+ * Everything the renderer drew, minus the DOM. Wider than FRAME on purpose: the material
+ * voices only show where the materials are, and the metal in this room (tank, crates) sits off
+ * to one side, so a window tight around the reticle would report a cyan-only frame and call the
+ * gold missing.
+ */
+const CANVAS = { x: 360, y: 40, w: 650, h: 600 };
+/** A box around the reticle, where the firing streak lands and nothing else does. */
+const AIM_BOX = { x: 500, y: 230, w: 280, h: 260 };
 
 /** Mean luminance (0-255) and lit fraction of a screenshot, over a DOM-free window. */
 function photo(buf, rect = FRAME, holes = FRAME_HOLES) {
@@ -94,6 +103,10 @@ function photo(buf, rect = FRAME, holes = FRAME_HOLES) {
     mean: meanLuminance(img, rect, holes).mean,
     lit: litFraction(img, rect, 8).fraction,
   };
+}
+/** Splits a screenshot's lit pixels into the cool (cyan) and warm (gold) families. */
+function hues(buf, rect = CANVAS) {
+  return hueFamilies(decodePng(buf), rect);
 }
 const pct = (v) => `${(v * 100).toFixed(2)}%`;
 const wait = (ms) => page.waitForTimeout(ms);
@@ -940,8 +953,22 @@ async function ping(cls) {
     Number(landed.soundEvents) > before && landed.lastEvent === cls,
     `soundEvents ${before} -> ${landed.soundEvents}, lastEvent=${landed.lastEvent}`,
   );
+  await settle();
   await wait(180); // one more frame, so the screenshot has the new blips in it
   return state();
+}
+
+/**
+ * Waits for a ping to have finished happening.
+ *
+ * Two things now outlive the keystroke. The front takes travel time to cross the room, and
+ * blips are invisible until it reaches them; and sampling is amortised over several frames, so
+ * the last rays of a beam are cast well after it was fired. A screenshot taken before both are
+ * done is a picture of a ping in progress, which is a fine thing to assert on deliberately (see
+ * the wave-in-flight section) and a terrible thing to assert on by accident.
+ */
+async function settle(budgetMs = 12000) {
+  return poll((s) => s.waveLive === false && Number(s.pendingRays) === 0, budgetMs);
 }
 
 /** Empties the painted map and waits for it to actually be empty. */
@@ -980,7 +1007,7 @@ check('sonar renderer running', Number(sonar.fps) > 0, `fps=${Number(sonar.fps).
 check('the map starts empty', Number(sonar.points) === 0, `points=${sonar.points}`);
 check(
   'the scene owns the hint line',
-  (await page.textContent('.bs-hint')).includes('Q ping · E beam · L reveal · 1-3 looks'),
+  (await page.textContent('.bs-hint')).includes('Q ping · E beam · L reveal · 1-4 looks'),
   await page.textContent('.bs-hint'),
 );
 
@@ -1089,21 +1116,39 @@ check(
   `soundEvents=${afterCooldown.soundEvents} lastEvent=${afterCooldown.lastEvent}`,
 );
 
-// --- 26 E beam: the 40 m question ------------------------------------------
+/*
+ * --- 26 E beam: the 22 m look-around ---------------------------------------
+ *
+ * Batch 2.1 changed what this key is for. It used to be a 25° × 40 m telescope; it is now a
+ * 110° × 22 m look-around, and the assertions below were rewritten to match — the old ones
+ * ("reaches across the far room", "is a cone, not a sphere") are gone because they described a
+ * shape the beam deliberately no longer has. Note that this is a *documented* deviation from
+ * vision §3.3/§3.5, recorded in SOUND_CLASSES; the numbers here and there must move together.
+ */
 await clearPaint();
 await respawn();
 await wait(250);
 const eState = await ping('e-ping');
 const eBuf = await shotBuf('27-sonar-eping.png');
 check(
-  'the E beam reaches across the far room',
-  Number(eState.lastMaxRange) > 20 && Number(eState.lastFar20) > 0,
-  `lastMaxRange=${Number(eState.lastMaxRange).toFixed(2)} m · ${eState.lastFar20} blips past 20 m`,
+  'the E beam reaches its 22 m range and stops there',
+  Number(eState.lastMaxRange) > 18 && Number(eState.lastMaxRange) <= 22.01,
+  `lastMaxRange=${Number(eState.lastMaxRange).toFixed(2)} m of ${eState.eRange} m · ${eState.lastFar20} blips past 20 m`,
 );
 check(
-  'the E beam is a cone, not a sphere',
-  Number(eState.lastDeposited) < Number(qState.lastDeposited),
-  `+${eState.lastDeposited} over 40 m vs +${qState.lastDeposited} over 12 m`,
+  'the beam opens at least 90° across',
+  Number(eState.lastSpanDeg) >= 90 && Number(eState.lastSpanDeg) <= Number(eState.eConeDeg) + 2,
+  `span=${Number(eState.lastSpanDeg).toFixed(1)}° of a ${eState.eConeDeg}° cone`,
+);
+check(
+  'the beam is that wide at range, not just at the muzzle',
+  Number(eState.lastLateral) > 6.5,
+  `paint reaches ${Number(eState.lastLateral).toFixed(2)} m off the aim axis (≥6.5 m is 110° held out to 8 m)`,
+);
+check(
+  'the beam is still a cone: nothing lands behind the player',
+  Number(eState.lastSpanDeg) < 180,
+  `span=${Number(eState.lastSpanDeg).toFixed(1)}° · +${eState.lastDeposited} blips over 22 m vs +${qState.lastDeposited} for Q over 12 m`,
 );
 check(
   'the beam is visible',
@@ -1111,7 +1156,16 @@ check(
   `lit=${pct(photo(eBuf).lit)}`,
 );
 
-// The landmark shot: walk up to the doorway and put the beam on the tank at (8.5, -2).
+/*
+ * The landmark shot: walk up to the doorway and put the beam on the tank at (8.5, -2).
+ *
+ * This used to assert that the furthest blip came back from roughly the tank's distance, which
+ * worked while the beam was a 25° slit — aim it at a thing and that thing is what answers. A
+ * 110° beam is not a pointer: the same shot now takes in the tank *and* the wall behind it and
+ * both side walls, so `lastMaxRange` reports the room, not the landmark. What is asserted
+ * instead is the property the wide beam is *for*: from one press at the doorway, the whole
+ * depth of the room comes back at once.
+ */
 await clearPaint();
 await respawn();
 await wait(200);
@@ -1121,11 +1175,14 @@ await clearPaint();
 const atDoor = await state();
 await turnTo(yawTo(Number(atDoor.x), Number(atDoor.z), 8.5, -2), sens);
 const tankState = await ping('e-ping');
-await shot('28-sonar-eping-tank.png');
+const tankBuf = await shotBuf('28-sonar-eping-tank.png');
 check(
-  'the beam lands on the landmark tank',
-  Number(tankState.lastMaxRange) > 8 && Number(tankState.lastMaxRange) < 16,
-  `from x=${Number(atDoor.x).toFixed(1)} yaw=${Number(tankState.yawDeg).toFixed(1)} · lastMaxRange=${Number(tankState.lastMaxRange).toFixed(2)} m`,
+  'one look from the doorway takes in the landmark and the room behind it',
+  Number(tankState.lastMaxRange) > 15 &&
+    Number(tankState.lastSpanDeg) >= 90 &&
+    photo(tankBuf).lit > 0.05,
+  `from x=${Number(atDoor.x).toFixed(1)} yaw=${Number(tankState.yawDeg).toFixed(1)} · ` +
+    `${Number(tankState.lastMaxRange).toFixed(2)} m deep, ${Number(tankState.lastSpanDeg).toFixed(0)}° wide, lit=${pct(photo(tankBuf).lit)}`,
 );
 
 // L is a debug reveal, not a light source the game has: it must change the picture completely.
@@ -1178,14 +1235,15 @@ check(
   `points ${beforeAge.points} -> ${afterAge.points}`,
 );
 
-// --- 28 the three looks ----------------------------------------------------
+// --- 28 the four looks -----------------------------------------------------
 // Identical scripted sequence for each look, from the same spawn with the same seed, so the
-// three frames differ only in how the same events were sampled and drawn.
+// four frames differ only in how the same events were sampled and drawn.
 const looks = [];
 for (const [key, name] of [
   ['1', 'Dust'],
   ['2', 'Blips'],
   ['3', 'Grain'],
+  ['4', 'Afterimage'],
 ]) {
   await setVariant(key, name);
   await respawn();
@@ -1196,30 +1254,274 @@ for (const [key, name] of [
   const s = await ping('e-ping');
   const buf = await shotBuf(`32-sonar-look-${name.toLowerCase()}.png`);
   const m = photo(buf);
-  looks.push({ name, points: Number(s.points), ...m });
+  const h = hues(buf);
+  looks.push({ name, points: Number(s.points), mix: Number(s.materialMix), ...m, hue: h });
   console.log(
-    `  look ${name}: points=${s.points} mean=${m.mean.toFixed(2)}/255 lit=${pct(m.lit)}`,
+    `  look ${name}: points=${s.points} mean=${m.mean.toFixed(2)}/255 lit=${pct(m.lit)} ` +
+      `cool=${pct(h.coolFraction)} warm=${pct(h.warmFraction)} of ${h.lit} lit px`,
   );
 }
 check(
-  'all three looks paint a legible frame',
+  'all four looks paint a legible frame',
   looks.every((l) => l.points > 1000 && l.lit > 0.05),
   looks.map((l) => `${l.name} ${l.points} pts ${pct(l.lit)}`).join(' · '),
 );
 check(
   'the looks are genuinely different samplings, not restyles',
-  new Set(looks.map((l) => l.points)).size === 3,
+  new Set(looks.map((l) => l.points)).size === 4,
   looks.map((l) => `${l.name}=${l.points}`).join(' '),
 );
 
-// --- 29 perf and the ring buffer -------------------------------------------
+/*
+ * §3.2: geometry is cyan-family, always — except that look 4 is the candidate that gives matter
+ * a material voice, so it is the one look allowed a second hue family. Both halves are asserted,
+ * because "look 4 has gold in it" is only interesting if the others provably do not.
+ */
+const cyanOnly = looks.filter((l) => l.name !== 'Afterimage');
+check(
+  'looks 1-3 keep matter inside the cyan band (§3.2)',
+  cyanOnly.every((l) => l.hue.warmFraction < 0.02 && l.hue.coolFraction > 0.2 && l.mix === 0),
+  cyanOnly.map((l) => `${l.name} warm=${pct(l.hue.warmFraction)} cool=${pct(l.hue.coolFraction)}`).join(' · '),
+);
+const after = looks.find((l) => l.name === 'Afterimage');
+check(
+  'look 4 speaks in two material voices at once — cyan concrete and gold metal',
+  after.hue.coolFraction > 0.1 && after.hue.warmFraction > 0.02 && after.mix === 1,
+  `cool=${pct(after.hue.coolFraction)} warm=${pct(after.hue.warmFraction)} of ${after.hue.lit} lit px · materialMix=${after.mix}`,
+);
+
+/*
+ * --- 29 the wave in flight -------------------------------------------------
+ *
+ * The batch's headline change: a sound no longer paints instantly. Every blip carries the
+ * instant its own front reaches it, and the shader will not draw it before then, so a ping is a
+ * shell expanding through the room rather than a room appearing.
+ *
+ * Two claims are worth machine-checking, and they are opposite sides of the same invariant.
+ * Nothing may be lit *outside* the front — that would be the system lying about what it has
+ * heard (law 2) — and something must still be waiting *inside* the range, or the front has
+ * already finished and there is nothing to see. The map is cleared first so every blip on
+ * screen belongs to the event under test: a blip remembered from an earlier ping is legitimately
+ * drawn ahead of the new front, and would make the first claim meaningless.
+ */
+await setVariant('1', 'Dust');
+await respawn();
+await setTimeScale(0.1);
+
+/** Fires one ping on an empty map and reports at fractions of the front's travel. */
+async function waveInFlight(cls, tag, fractions) {
+  await clearPaint();
+  await poll((s) => Number(s.pingCooldown) === 0, 8000);
+  const before = Number((await state()).soundEvents);
+  await page.keyboard.press(cls === 'q-ping' ? 'q' : 'e');
+  await poll((x) => Number(x.soundEvents) > before && x.lastEvent === cls, 8000);
+  const seen = [];
+  for (const f of fractions) {
+    const s = await poll((x) => Number(x.waveProgress) >= f, 40000);
+    const buf = await shotBuf(`36-sonar-wave-${tag}-${Math.round(f * 100)}.png`);
+    const front = Number(s.waveFront);
+    const arrived = Number(s.arrivedMax);
+    const pending = Number(s.pendingMin);
+    const m = photo(buf);
+    seen.push({ f, front, lit: m.lit, visible: Number(s.visiblePoints), points: Number(s.points) });
+    console.log(
+      `  ${tag} @${pct(Number(s.waveProgress))}: front=${front.toFixed(2)} m ` +
+        `arrived=${arrived.toFixed(2)} pending=${pending.toFixed(2)} ` +
+        `visible=${s.visiblePoints}/${s.points} lit=${pct(m.lit)}`,
+    );
+    check(
+      `${tag} @${Math.round(f * 100)}%: nothing is lit beyond the front`,
+      arrived <= front + 0.02,
+      `furthest lit blip ${arrived.toFixed(2)} m, front ${front.toFixed(2)} m`,
+    );
+    check(
+      `${tag} @${Math.round(f * 100)}%: the far side is still dark`,
+      pending < 0 || pending >= front - 0.02,
+      `nearest unlit blip ${pending.toFixed(2)} m, front ${front.toFixed(2)} m`,
+    );
+    check(
+      `${tag} @${Math.round(f * 100)}%: the map is only partly drawn`,
+      Number(s.visiblePoints) < Number(s.points),
+      `${s.visiblePoints} of ${s.points} blips drawn`,
+    );
+  }
+  /*
+   * "More of the map is drawn each time", counted in blips rather than in lit pixels. Screen
+   * brightness is not monotonic and should not be: the arrival flash is the brightest thing in
+   * the frame, so as the front moves off to the far wall it takes its own glare with it and
+   * leaves cooled paint behind. Lit fraction is printed above because it is worth reading; it
+   * is not asserted on, because a falling one is the ramp working, not the wave failing.
+   */
+  check(
+    `${tag}: the map fills in as the front travels`,
+    seen.every((v, i) => i === 0 || v.visible > seen[i - 1].visible),
+    seen.map((v) => `${Math.round(v.f * 100)}%=${v.visible}`).join(' → ') + ' blips drawn',
+  );
+  await settle(40000);
+}
+
+await waveInFlight('q-ping', 'q', [0.2, 0.5, 0.9]);
+await waveInFlight('e-ping', 'e', [0.2, 0.5, 0.9]);
+
+/*
+ * --- 30 the firing streak --------------------------------------------------
+ *
+ * The E beam has to have a visible cause. The proof is arranged so that nothing else can
+ * account for it: the map is emptied, the view is pitched up at open air, and the shot is taken
+ * while the front has travelled under two metres — there is no geometry that close in that
+ * direction, so any light in the box around the reticle is the streak.
+ */
+await clearPaint();
+await respawn();
+await pitchBy(28, sens);
+await wait(200);
+const beforeFire = photo(await shotBuf('37-sonar-tracer-before.png'), AIM_BOX, []);
+check(
+  'the aim box is black before firing',
+  beforeFire.mean < 1 && beforeFire.lit < 0.002,
+  `mean=${beforeFire.mean.toFixed(3)}/255 lit=${pct(beforeFire.lit)}`,
+);
+
+await poll((s) => Number(s.pingCooldown) === 0, 8000);
+const beforeTracer = Number((await state()).soundEvents);
+await page.keyboard.press('e');
+const fired = await poll((x) => Number(x.soundEvents) > beforeTracer && x.tracerAlive === true, 8000);
+const tracerBuf = await shotBuf('38-sonar-tracer.png');
+const tracerShot = photo(tracerBuf, AIM_BOX, []);
+const tracerFront = Number(fired.waveFront);
+check(
+  'the streak is on screen the moment the beam fires',
+  fired.tracerAlive === true && tracerShot.lit > beforeFire.lit + 0.001 && tracerFront < 2,
+  `lit ${pct(beforeFire.lit)} → ${pct(tracerShot.lit)} with the front only ${tracerFront.toFixed(2)} m out`,
+);
+const goneAt = await poll((s) => s.tracerAlive === false, 30000);
+check(
+  'and it is gone well inside 0.4 s',
+  goneAt.tracerAlive === false && Number(goneAt.tracerAge) < 0.4,
+  `age=${Number(goneAt.tracerAge).toFixed(3)} s`,
+);
+await shotBuf('39-sonar-tracer-gone.png');
+await settle(40000);
+
+// The air itself: a field of motes lit only by a passing front, and not drawn at all otherwise.
+const airLive = await state();
+check(
+  'the lit air is switched off when no front is travelling',
+  airLive.dustLit === false,
+  `dustLit=${airLive.dustLit} waveLive=${airLive.waveLive}`,
+);
+
+await setTimeScale(1);
+await pitchBy(-28, sens);
+
+/*
+ * --- 31 the near field -----------------------------------------------------
+ *
+ * A world-sized splat grows as 1/depth, so pinging a wall you are hugging used to fill the
+ * screen with overlapping dinner plates. The clamp is what makes that a look rather than a bug,
+ * and the assertion has two halves: the splat the formula *wanted* has to be far over the cap
+ * (or the test is proving nothing) and what is drawn has to be under it.
+ */
+await clearPaint();
+await respawn();
+await page.keyboard.down('w');
+await poll((s) => Number(s.speed) < 0.4 && Number(s.x) > -6, 15000);
+await page.keyboard.up('w');
+await wait(300);
+await clearPaint();
+const nearState = await ping('e-ping');
+await shotBuf('40-sonar-near-wall.png');
+check(
+  'nose to a wall, no blip exceeds the screen-size cap',
+  Number(nearState.maxBlipPixels) <= Number(nearState.pixelCap) + 0.01 &&
+    Number(nearState.maxBlipWant) > Number(nearState.pixelCap) * 5,
+  `wanted ${Number(nearState.maxBlipWant).toFixed(0)} px, drew ${Number(nearState.maxBlipPixels).toFixed(2)} px, cap ${nearState.pixelCap}`,
+);
+
+/*
+ * --- 32 bloom --------------------------------------------------------------
+ *
+ * Look 4 asks for a bloom pass. Under a software rasteriser it is vetoed on sight — the pass
+ * costs more than the whole rest of the frame there — so headless boots it off and B forces it
+ * on for the comparison pair. Off must cost exactly nothing: the composer is bypassed, not run
+ * with its strength at zero.
+ */
+await setVariant('4', 'Afterimage');
+await respawn();
+await clearPaint();
+await ping('q-ping');
+const bloomOff = await state();
+check(
+  'software GL vetoes bloom on its own',
+  bloomOff.softwareGl === true ? bloomOff.bloom === false : bloomOff.bloom === true,
+  `softwareGl=${bloomOff.softwareGl} bloom=${bloomOff.bloom}`,
+);
+/*
+ * Each frame of the pair gets its own fresh ping first. Paint cools in real time and the three
+ * shots are seconds apart, so comparing them without repainting would be measuring the age ramp
+ * and calling it bloom — the first version of this test "proved" that switching bloom off makes
+ * a frame 43 % darker than it started, which was entirely the paint getting older.
+ */
+const plainBuf = await shotBuf('41-sonar-bloom-off.png');
+const plain = photo(plainBuf);
+const plainFps = Number((await state()).fps);
+await page.keyboard.press('b');
+await poll((s) => s.bloom === true, 5000);
+await ping('q-ping');
+await wait(600);
+const bloomedBuf = await shotBuf('42-sonar-bloom-on.png');
+const bloomed = photo(bloomedBuf);
+const bloomState = await state();
+check(
+  'bloom lifts the frame',
+  bloomed.mean > plain.mean * 1.15 && bloomed.lit > plain.lit,
+  `mean ${plain.mean.toFixed(2)} → ${bloomed.mean.toFixed(2)}/255 · lit ${pct(plain.lit)} → ${pct(bloomed.lit)} · ` +
+    `${plainFps.toFixed(1)} → ${Number(bloomState.fps).toFixed(1)} fps (software GL, half-res pass)`,
+);
+await page.keyboard.press('b');
+await poll((s) => s.bloom === false, 5000);
+await ping('q-ping');
+await wait(600);
+const backBuf = await shotBuf('43-sonar-bloom-off-again.png');
+const back = photo(backBuf);
+/*
+ * Not pixel-identical to the first frame, and it should not be: every shot in this trio is
+ * preceded by its own ping, which restamps the room fresh *and* finds a few voxels the last one
+ * missed, so the plain frame creeps up a little each time. What is asserted is the claim that
+ * matters — the glow is gone, and the frame is back in the same register it started in.
+ */
+check(
+  'and turning it off takes the glow with it',
+  back.mean < bloomed.mean * 0.6 &&
+    back.lit < bloomed.lit * 0.5 &&
+    back.mean < plain.mean * 1.6,
+  `mean ${plain.mean.toFixed(2)} → ${bloomed.mean.toFixed(2)} → ${back.mean.toFixed(2)}/255 · ` +
+    `lit ${pct(plain.lit)} → ${pct(bloomed.lit)} → ${pct(back.lit)}`,
+);
+
+// --- 33 perf and the ring buffer -------------------------------------------
 await setVariant('1', 'Dust');
 await respawn();
 await clearPaint();
-for (let i = 0; i < 10; i++) await ping('e-ping'); // ping() waits out the cooldown itself
+const cost = [];
+for (let i = 0; i < 10; i++) {
+  const s = await ping('e-ping'); // ping() waits out the cooldown and the wave itself
+  cost.push({
+    total: Number(s.lastPaintMs),
+    worstFrame: Number(s.lastChunkMs),
+    chunks: Number(s.lastChunks),
+    rays: Number(s.lastRays),
+  });
+}
 await wait(400);
 const stressed = await state();
 console.log('[shoot] after 10 E pings', JSON.stringify(stressed));
+console.log(
+  `  E-ping CPU: ${mean(cost.map((c) => c.total)).toFixed(1)} ms total per beam ` +
+    `(${mean(cost.map((c) => c.rays)).toFixed(0)} rays), spread over ` +
+    `${mean(cost.map((c) => c.chunks)).toFixed(1)} frames, ` +
+    `worst single frame ${Math.max(...cost.map((c) => c.worstFrame)).toFixed(1)} ms`,
+);
 check(
   'ten E beams keep the frame rate up',
   Number(stressed.fps) > 8,
@@ -1230,18 +1532,38 @@ check(
   Number(stressed.points) <= Number(stressed.capacity) && stressed.wrapped === false,
   `${stressed.points} / ${stressed.capacity} blips, wrapped=${stressed.wrapped}`,
 );
+/*
+ * Law 5: movement never pays for information. A 110° beam is ten thousand rays and tens of
+ * thousands of blips — done in one tick that is a visible hitch, so sampling is amortised over
+ * however many frames it takes. What must stay small is therefore not the beam's total cost but
+ * its worst *single frame's* share, which is what a player would feel.
+ */
+const worstFrame = Math.max(...cost.map((c) => c.worstFrame));
+const meanTotal = mean(cost.map((c) => c.total));
 check(
-  'one ping never stalls a frame for long',
-  Number(stressed.lastPaintMs) < 80,
-  `${Number(stressed.lastPaintMs).toFixed(1)} ms of sampling for the last beam`,
+  'no single frame pays for a whole beam',
+  // Two bounds, because one alone would lie. The absolute one is what a player would feel; the
+  // relative one is what actually proves the work is being spread, and it holds whatever speed
+  // the host runs at — a machine half as fast fails the first and still passes the second.
+  worstFrame < 16 && worstFrame < meanTotal * 0.75 && cost.every((c) => c.chunks >= 2),
+  cost
+    .slice(0, 4)
+    .map((c) => `${c.total.toFixed(1)} ms over ${c.chunks}`)
+    .join(' · ') +
+    ` … worst frame ${worstFrame.toFixed(1)} ms of ${meanTotal.toFixed(1)} ms mean`,
 );
-await shot('33-sonar-stress.png');
+check(
+  'and sampling always finishes — nothing is left pending',
+  Number(stressed.pendingRays) === 0,
+  `pendingRays=${stressed.pendingRays}`,
+);
+await shot('44-sonar-stress.png');
 
 // A painted third-person frame, and back — both views must draw the same cloud.
 await page.keyboard.press('v');
 await poll((s) => Number(s.viewBlend) > 0.99, 4000);
 await wait(250);
-const tpBuf = await shotBuf('34-sonar-third.png');
+const tpBuf = await shotBuf('45-sonar-third.png');
 check(
   'the cloud draws in third person too',
   photo(tpBuf).lit > 0.03,
@@ -1254,7 +1576,7 @@ await poll((s) => Number(s.viewBlend) < 0.01, 4000);
 await clearPaint();
 await wait(250);
 const cleared = await state();
-const clearedShot = photo(await shotBuf('35-sonar-cleared.png'));
+const clearedShot = photo(await shotBuf('46-sonar-cleared.png'));
 check(
   'clearing the map returns the scene to black',
   Number(cleared.points) === 0 && clearedShot.mean < 2,

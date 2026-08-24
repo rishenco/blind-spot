@@ -31,6 +31,13 @@ export interface LabScene {
   update(dt: number): void;
   /** Optional per-frame hook; `alpha` is the fraction into the next sim step. */
   render?(alpha: number): void;
+  /**
+   * Optional custom draw. Return true to say "I have already put this frame on the screen" —
+   * the harness then skips its own `renderer.render`. A scene needs this only when it owns a
+   * post-processing chain; returning false (or not implementing it) keeps the default path,
+   * which is what every scene without one wants and what costs nothing.
+   */
+  renderFrame?(scene: THREE.Scene, camera: THREE.PerspectiveCamera): boolean;
   setVariant?(index: number): void;
   /** Optional structured state for the screenshot driver and other tooling. */
   debugState?(): Record<string, unknown>;
@@ -157,6 +164,11 @@ export class SceneHost {
 
   render(alpha: number): void {
     this.active?.render?.(alpha);
+  }
+
+  /** True when the active scene drew the frame itself and the harness should not. */
+  renderFrame(): boolean {
+    return this.active?.renderFrame?.(this.threeScene, this.deps.camera) ?? false;
   }
 
   private disposeActive(): void {

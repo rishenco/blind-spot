@@ -4,16 +4,19 @@
  * This is the game's identity: a dead industrial room with no lights, no fog and no ambient
  * anything, where the *only* thing ever drawn is the point cloud that sound paints (vision
  * §3). Walk and your footsteps light the floor ahead of you; press Q for a 12 m room read;
- * press E to ask a 25° question 40 m long. Everything you learn is bought with noise, and
- * everything you have learned cools from ice-white to a permanent navy memory skeleton.
+ * press E to look around a 110° arc of the next 22 m. Everything you learn is bought with
+ * noise, everything is learned at the speed the wavefront travels, and everything you have
+ * learned cools from ice-white to a permanent navy memory skeleton.
  *
  * The meshes that make up the room exist only so the `L` key can turn the lights on for
  * comparison — collision and paint sampling both run against the `StaticWorld` box list, never
  * against the meshes. With the reveal group hidden the scene renders exactly one thing: points.
+ * Every box carries a material class as well as a reveal colour, because a return off metal
+ * and a return off concrete are not the same sound (see `paint/materials.ts`).
  *
- * Three looks are on 1/2/3 (§Variants in the batch brief). Switching one clears the cloud and
- * reseeds the sampler, because density and cell size are *sampling* parameters — the honest
- * comparison is the same events resampled, not the same blips restyled.
+ * Four looks are on 1/2/3/4. Switching one clears the cloud and reseeds the sampler, because
+ * density and cell size are *sampling* parameters — the honest comparison is the same events
+ * resampled, not the same blips restyled.
  */
 
 import * as THREE from 'three';
@@ -31,8 +34,21 @@ import {
   type PlayerEvent,
 } from '../player/controller';
 import type { Input } from '../core/input';
-import { LANDING_MIN_IMPACT, SoundBus, type SoundClass } from '../paint/soundEvents';
-import { PaintSystem, defaultAgeRamp, defaultPaintTunables } from '../paint/paintSystem';
+import {
+  LANDING_MIN_IMPACT,
+  SOUND_CLASSES,
+  SoundBus,
+  WAVE_SPEEDS,
+  type SoundClass,
+} from '../paint/soundEvents';
+import {
+  PaintSystem,
+  defaultAgeRamp,
+  defaultPaintTunables,
+  defaultWaveTunables,
+} from '../paint/paintSystem';
+import { MAT_CONCRETE, MAT_METAL, MAT_STONE } from '../paint/materials';
+import { BloomChain, defaultBloomTunables, isSoftwareRenderer } from '../paint/post';
 
 const SCENE_ID = 'sonar-lab';
 
@@ -63,36 +79,49 @@ const E_PING_HEIGHT = 1.5;
  */
 const STEP_HEIGHT = 0.65;
 
-/** Debug-only paint clock multipliers, cycled with T. Ageing takes a minute; tests do not. */
-const TIME_SCALES = [1, 10, 60];
+/**
+ * Debug-only paint clock multipliers, cycled with T.
+ *
+ * ×10 and ×60 exist because ageing takes a minute and tests do not. ×0.1 exists for the
+ * opposite reason: a wavefront crosses a room in half a second, which at software-GL frame
+ * rates is three frames, and the only way to *look* at a front in flight — or to screenshot one
+ * at a known fraction of its travel — is to slow the clock the wave rides on.
+ */
+const TIME_SCALES = [1, 0.1, 10, 60];
 
-const VARIANTS = ['Dust', 'Blips', 'Grain'];
+const VARIANTS = ['Dust', 'Blips', 'Grain', 'Afterimage'];
 
-/** The per-look numbers the Paint folder edits. All of them are plain numbers. */
+/** The per-look numbers the Paint folder edits. */
 type PaintKnob =
   | 'density'
   | 'cellSize'
   | 'sizeWorld'
   | 'minPixels'
   | 'maxPixels'
+  | 'depthExp'
   | 'softness'
   | 'sizeJitter'
   | 'brightJitter'
-  | 'brightness';
+  | 'brightness'
+  | 'materialMix'
+  | 'dissolve';
 const PAINT_KNOBS: readonly PaintKnob[] = [
   'density',
   'cellSize',
   'sizeWorld',
   'minPixels',
   'maxPixels',
+  'depthExp',
   'softness',
   'sizeJitter',
   'brightJitter',
   'brightness',
+  'materialMix',
+  'dissolve',
 ];
 
 const HINT =
-  'WASD move · Q ping · E beam · L reveal · 1-3 looks · T clock · V view · R respawn · H help';
+  'WASD move · Q ping · E beam · L reveal · 1-4 looks · B bloom · T clock · K clear · V view · R respawn · H help';
 
 /** Reveal-mode albedos. Never seen in the dark — this palette only exists for the L key. */
 const REVEAL_COLORS = {
@@ -101,6 +130,7 @@ const REVEAL_COLORS = {
   wall: 0x99a1a8,
   prop: 0x7d858c,
   accent: 0x2d6b78,
+  tank: 0x6b6558,
 };
 
 interface RevealMaterials {
@@ -108,11 +138,16 @@ interface RevealMaterials {
   wall: THREE.Material;
   prop: THREE.Material;
   accent: THREE.Material;
+  tank: THREE.Material;
 }
 
 /**
  * Adds a box to the collision/paint world and, in lockstep, a mesh for the reveal view.
  * Nothing may ever enter one without entering the other — the sonar would then be lying.
+ *
+ * The `mat` argument is what the *sonar* hears; the material argument is what the debug lights
+ * show. They are independent on purpose: a look that spends hue on material must not be able to
+ * borrow the reveal view's art direction.
  */
 class Builder {
   constructor(
@@ -130,6 +165,7 @@ class Builder {
     sy: number,
     sz: number,
     material: THREE.Material,
+    mat: number,
   ): void {
     this.bounds(
       cx - sx / 2,
@@ -139,6 +175,7 @@ class Builder {
       baseY + sy,
       cz + sz / 2,
       material,
+      mat,
     );
   }
 
@@ -151,6 +188,7 @@ class Builder {
     maxY: number,
     maxZ: number,
     material: THREE.Material,
+    mat: number,
   ): void {
     const sx = maxX - minX;
     const sy = maxY - minY;
@@ -160,7 +198,7 @@ class Builder {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.position.set(minX + sx / 2, minY + sy / 2, minZ + sz / 2);
     this.group.add(mesh);
-    this.world.add(aabbFromBounds(minX, minY, minZ, maxX, maxY, maxZ));
+    this.world.add(aabbFromBounds(minX, minY, minZ, maxX, maxY, maxZ, mat));
   }
 
   /**
@@ -177,13 +215,14 @@ class Builder {
     topY: number,
     strips: number,
     material: THREE.Material,
+    mat: number,
   ): void {
     const step = (radius * 2) / strips;
     for (let i = 0; i < strips; i++) {
       const zLo = cz - radius + step * i;
       const zMid = zLo + step / 2 - cz;
       const halfX = Math.sqrt(Math.max(0.01, radius * radius - zMid * zMid));
-      this.bounds(cx - halfX, baseY, zLo, cx + halfX, topY, zLo + step, material);
+      this.bounds(cx - halfX, baseY, zLo, cx + halfX, topY, zLo + step, material, mat);
     }
   }
 }
@@ -197,11 +236,12 @@ export class SonarLab implements LabScene {
     { keys: 'W A S D', action: 'move' },
     { keys: 'Shift / C', action: 'sprint / crouch — louder and quieter paint' },
     { keys: 'Space', action: 'jump — landings paint hard' },
-    { keys: 'Q', action: 'spatial ping — 360°, 12 m' },
-    { keys: 'E', action: 'directed ping — 25° cone, 40 m' },
+    { keys: 'Q', action: 'spatial ping — 360°, 12 m, the room read' },
+    { keys: 'E', action: 'directed ping — 110°, 22 m, the look-around' },
     { keys: 'L', action: 'reveal — lights on, for comparison only' },
-    { keys: '1 2 3', action: 'look: Dust / Blips / Grain' },
-    { keys: 'T', action: 'paint clock speed (debug ageing)' },
+    { keys: '1 2 3 4', action: 'look: Dust / Blips / Grain / Afterimage' },
+    { keys: 'B', action: 'bloom on / off' },
+    { keys: 'T', action: 'paint clock speed — x1, x0.1 (watch a wave), x10, x60' },
     { keys: 'K', action: 'clear the painted map' },
     { keys: 'V / R', action: 'view / respawn' },
     { keys: 'H', action: 'toggle this help' },
@@ -230,6 +270,11 @@ export class SonarLab implements LabScene {
   private revealOn = false;
   private rigMarker!: THREE.Mesh;
 
+  private readonly bloomTunables = defaultBloomTunables();
+  private bloomChain: BloomChain | null = null;
+  private bloomOn = false;
+  private softwareGl = false;
+
   private paintTime = 0;
   private timeScaleIndex = 0;
   private pingCooldown = 0;
@@ -245,8 +290,8 @@ export class SonarLab implements LabScene {
    * Every property forwards to the live profile, which is what lets `updateDisplay()` pick up
    * a variant switch without the folder being torn down.
    */
-  private makePaintKnobs(): Record<PaintKnob | 'look', number | string> {
-    const knobs = {} as Record<PaintKnob | 'look', number | string>;
+  private makePaintKnobs(): Record<PaintKnob | 'look' | 'bloom', number | string | boolean> {
+    const knobs = {} as Record<PaintKnob | 'look' | 'bloom', number | string | boolean>;
     for (const key of PAINT_KNOBS) {
       Object.defineProperty(knobs, key, {
         enumerable: true,
@@ -257,6 +302,14 @@ export class SonarLab implements LabScene {
       });
     }
     Object.defineProperty(knobs, 'look', { enumerable: true, get: () => this.paint.profileName });
+    Object.defineProperty(knobs, 'bloom', {
+      enumerable: true,
+      get: () => this.bloomOn,
+      set: (value: boolean) => {
+        this.paint.profile.bloom = value;
+        this.bloomOn = value;
+      },
+    });
     return knobs;
   }
 
@@ -286,10 +339,20 @@ export class SonarLab implements LabScene {
     this.paint = new PaintSystem(this.world, {
       tunables: defaultPaintTunables(),
       ramp: defaultAgeRamp(),
+      wave: defaultWaveTunables(),
     });
     ctx.scene.add(this.paint.object);
     this.unsubscribeBus = this.bus.subscribe(this.paint.handle);
     this.unsubscribePlayer = this.player.onEvent(this.onPlayerEvent);
+
+    /*
+     * Bloom is what makes look 4 read the way the reference does, and it is also five mip
+     * levels of separable gaussian — which a CPU rasteriser will not give away. Under software
+     * GL it is off by default and the pass runs at half resolution when it is turned on, so
+     * the headless driver can still take an on/off pair without the frame rate collapsing.
+     */
+    this.softwareGl = isSoftwareRenderer(ctx.renderer);
+    this.bloomOn = this.paint.profile.bloom && !this.softwareGl;
 
     // The only thing drawn that sound did not paint: your own reactor, and only from outside
     // your own head. Without it the third-person view has no anchor at all in the dark.
@@ -319,20 +382,22 @@ export class SonarLab implements LabScene {
       wall: this.makeMaterial(REVEAL_COLORS.wall, 0.98),
       prop: this.makeMaterial(REVEAL_COLORS.prop, 0.9),
       accent: this.makeMaterial(REVEAL_COLORS.accent, 0.85),
+      tank: this.makeMaterial(REVEAL_COLORS.tank, 0.55),
     };
 
     const b = new Builder(this.reveal, this.world, this.geometries);
 
     // --- shell: floor, ceiling and four walls. A closed box, so every ping has something
-    // to come back from in every direction.
-    b.bounds(-HALF_X, -1, -HALF_Z, HALF_X, 0, HALF_Z, mats.floor);
-    b.bounds(-HALF_X, ROOM_H, -HALF_Z, HALF_X, ROOM_H + 0.5, HALF_Z, mats.wall);
-    b.bounds(-HALF_X - WALL_T, 0, -HALF_Z - WALL_T, -HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall);
-    b.bounds(HALF_X, 0, -HALF_Z - WALL_T, HALF_X + WALL_T, ROOM_H, HALF_Z + WALL_T, mats.wall);
-    b.bounds(-HALF_X, 0, -HALF_Z - WALL_T, HALF_X, ROOM_H, -HALF_Z, mats.wall);
-    b.bounds(-HALF_X, 0, HALF_Z, HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall);
+    // to come back from in every direction. All of it poured concrete.
+    b.bounds(-HALF_X, -1, -HALF_Z, HALF_X, 0, HALF_Z, mats.floor, MAT_CONCRETE);
+    b.bounds(-HALF_X, ROOM_H, -HALF_Z, HALF_X, ROOM_H + 0.5, HALF_Z, mats.wall, MAT_CONCRETE);
+    b.bounds(-HALF_X - WALL_T, 0, -HALF_Z - WALL_T, -HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE);
+    b.bounds(HALF_X, 0, -HALF_Z - WALL_T, HALF_X + WALL_T, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE);
+    b.bounds(-HALF_X, 0, -HALF_Z - WALL_T, HALF_X, ROOM_H, -HALF_Z, mats.wall, MAT_CONCRETE);
+    b.bounds(-HALF_X, 0, HALF_Z, HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE);
 
-    // --- near room: the stair flight and its deck, hard against the -Z wall.
+    // --- near room: the stair flight and its deck, hard against the -Z wall. Cut stone: the
+    // third voice, so a staircase is identifiable by sound alone before you have touched it.
     const RISER = 0.28;
     const TREAD = 0.55;
     const STEPS = 9;
@@ -340,10 +405,10 @@ export class SonarLab implements LabScene {
     const DECK_TOP = RISER * STEPS; // 2.52
     for (let i = 0; i < STEPS; i++) {
       const x0 = STAIR_X0 + TREAD * i;
-      b.bounds(x0, 0, -9.4, x0 + TREAD, RISER * (i + 1), -5.8, mats.accent);
+      b.bounds(x0, 0, -9.4, x0 + TREAD, RISER * (i + 1), -5.8, mats.accent, MAT_STONE);
     }
     const deckX0 = STAIR_X0 + TREAD * STEPS;
-    b.bounds(deckX0, DECK_TOP - 0.3, -9.4, -5.2, DECK_TOP, -5.8, mats.accent);
+    b.bounds(deckX0, DECK_TOP - 0.3, -9.4, -5.2, DECK_TOP, -5.8, mats.accent, MAT_STONE);
     // Legs, not a solid block: the space *under* the deck is a real place a ping can find.
     for (const [lx, lz] of [
       [deckX0 + 0.3, -9.1],
@@ -351,34 +416,35 @@ export class SonarLab implements LabScene {
       [-5.5, -9.1],
       [-5.5, -6.1],
     ] as const) {
-      b.box(lx, 0, lz, 0.3, DECK_TOP - 0.3, 0.3, mats.accent);
+      b.box(lx, 0, lz, 0.3, DECK_TOP - 0.3, 0.3, mats.accent, MAT_STONE);
     }
 
-    // --- near room: pillars and crates flanking the spawn lane (z ~ 0).
+    // --- near room: pillars and crates flanking the spawn lane (z ~ 0). Crates and stanchions
+    // are metal — the hot voice, and the one that tells you which shapes are cargo.
     for (const [x, z] of [
       [-9.5, 6.5],
       [-6.0, 3.0],
     ] as const) {
-      b.box(x, 0, z, 0.9, ROOM_H, 0.9, mats.prop);
+      b.box(x, 0, z, 0.9, ROOM_H, 0.9, mats.prop, MAT_METAL);
     }
-    b.box(-9.0, 0, 2.2, 1.8, 1.8, 1.8, mats.prop);
-    b.box(-6.8, 0, 4.4, 1.2, 1.0, 1.2, mats.prop);
-    b.box(-10.6, 0, 5.6, 1.4, 2.2, 1.4, mats.prop);
-    b.box(-7.6, 0, -2.0, 1.0, 0.6, 1.0, mats.prop);
-    b.box(-11.5, 0, -3.5, 2.0, 1.2, 1.2, mats.prop);
+    b.box(-9.0, 0, 2.2, 1.8, 1.8, 1.8, mats.prop, MAT_METAL);
+    b.box(-6.8, 0, 4.4, 1.2, 1.0, 1.2, mats.prop, MAT_METAL);
+    b.box(-10.6, 0, 5.6, 1.4, 2.2, 1.4, mats.prop, MAT_METAL);
+    b.box(-7.6, 0, -2.0, 1.0, 0.6, 1.0, mats.prop, MAT_METAL);
+    b.box(-11.5, 0, -3.5, 2.0, 1.2, 1.2, mats.prop, MAT_METAL);
 
     // --- the chokepoint: a full-height partition with a 3.8 m doorway on the spawn axis.
-    // The E-ping cone is 1.88 m wide by the time it gets here, so it squeezes through with
-    // just enough overspill to light the jambs — a beam through a door, which is the shot.
-    b.bounds(-4.2, 0, -HALF_Z, -3.8, ROOM_H, -1.9, mats.wall);
-    b.bounds(-4.2, 0, 1.9, -3.8, ROOM_H, HALF_Z, mats.wall);
+    // At 110° the beam no longer squeezes through the door — it lights the whole wall and both
+    // jambs, and the doorway reads as the hole in the answer. That is the shot now.
+    b.bounds(-4.2, 0, -HALF_Z, -3.8, ROOM_H, -1.9, mats.wall, MAT_CONCRETE);
+    b.bounds(-4.2, 0, 1.9, -3.8, ROOM_H, HALF_Z, mats.wall, MAT_CONCRETE);
 
     // --- far room: the landmark. A 6.4 m wide, 6 m tall tank with a collar and a neck —
     // vision §11 wants one large silhouette per floor, because a point cloud transmits mass
-    // long before it transmits detail.
-    b.tower(8.5, -2.0, 3.2, 0, 6.0, 9, mats.accent);
-    b.tower(8.5, -2.0, 3.6, 5.5, 5.85, 9, mats.accent);
-    b.box(8.5, 6.0, -2.0, 2.6, 0.9, 2.6, mats.accent);
+    // long before it transmits detail. Steel, so it announces itself in gold.
+    b.tower(8.5, -2.0, 3.2, 0, 6.0, 9, mats.tank, MAT_METAL);
+    b.tower(8.5, -2.0, 3.6, 5.5, 5.85, 9, mats.tank, MAT_METAL);
+    b.box(8.5, 6.0, -2.0, 2.6, 0.9, 2.6, mats.tank, MAT_METAL);
 
     for (const [x, z] of [
       [0.5, 7.0],
@@ -386,12 +452,12 @@ export class SonarLab implements LabScene {
       [13.0, 6.0],
       [13.0, -7.5],
     ] as const) {
-      b.box(x, 0, z, 0.9, ROOM_H, 0.9, mats.prop);
+      b.box(x, 0, z, 0.9, ROOM_H, 0.9, mats.prop, MAT_METAL);
     }
-    b.box(2.5, 0, 2.0, 1.6, 1.6, 1.6, mats.prop);
-    b.box(4.2, 0, 3.4, 1.1, 0.9, 1.1, mats.prop);
-    b.box(1.5, 0, -4.5, 2.2, 2.4, 1.6, mats.prop);
-    b.box(12.0, 0, 1.5, 4.0, 0.9, 1.0, mats.prop);
+    b.box(2.5, 0, 2.0, 1.6, 1.6, 1.6, mats.prop, MAT_METAL);
+    b.box(4.2, 0, 3.4, 1.1, 0.9, 1.1, mats.prop, MAT_METAL);
+    b.box(1.5, 0, -4.5, 2.2, 2.4, 1.6, mats.prop, MAT_METAL);
+    b.box(12.0, 0, 1.5, 4.0, 0.9, 1.0, mats.prop, MAT_METAL);
 
     // Reveal-only lighting. Parented to the reveal group so a single `visible` flag turns the
     // entire comparison view — geometry and light — on and off together.
@@ -463,12 +529,13 @@ export class SonarLab implements LabScene {
     const s = gui.addFolder('Scene');
     s.add({ respawn: () => this.player.respawn() }, 'respawn').name('Respawn (R)');
     s.add({ ping: () => this.firePing('q-ping') }, 'ping').name('Q ping (360°, 12 m)');
-    s.add({ beam: () => this.firePing('e-ping') }, 'beam').name('E beam (25°, 40 m)');
-    s.add({ clear: () => this.paint.clear() }, 'clear').name('Clear paint');
+    s.add({ beam: () => this.firePing('e-ping') }, 'beam').name('E beam (110°, 22 m)');
+    s.add({ clear: () => this.paint.clear() }, 'clear').name('Clear paint (K)');
     s.add({ toggle: () => this.setReveal(!this.revealOn) }, 'toggle').name('Reveal lights (L)');
     s.add({ view: () => this.player.toggleView() }, 'view').name('Toggle view (V)');
 
     this.buildPaintGui();
+    this.buildWaveGui();
 
     const r = gui.addFolder('Age ramp');
     const ramp = this.paint.ramp;
@@ -483,17 +550,34 @@ export class SonarLab implements LabScene {
     const tun = this.paint.tunables;
     t.add(tun, 'hearingRange', 2, 60, 1).name('hearing (m)');
     t.add(tun, 'windowRadius', 5, 120, 1).name('draw window (m)').onChange(push);
+    t.add(tun, 'pixelCap', 2, 40, 0.5).name('blip px cap').onChange(push);
+    t.add(tun, 'rayCap', 500, 20000, 100).name('ray cap / event');
+    t.add(tun, 'roughness', 0, 3, 0.05).name('micro-relief ×');
     t.add(tun, 'splatFill', 0.1, 2, 0.05).name('peak density ×grid');
     t.add(tun, 'falloffK', 0, 24, 0.5).name('quadratic falloff');
     t.add(tun, 'featherStart', 0.1, 1, 0.02).name('rim feather');
     t.add(tun, 'rimDim', 0, 1, 0.02).name('rim dim');
     t.add(tun, 'grazeDim', 0, 1, 0.02).name('grazing return');
+    t.add(tun, 'coneFeather', 0, 0.9, 0.02).name('cone edge feather');
     t.add(tun, 'edgeStart', 1, 40, 0.5).name('E edge start (m)');
     t.add(tun, 'edgeFull', 2, 60, 0.5).name('E edge full (m)');
     t.add(tun, 'edgeBand', 0.05, 1.5, 0.05).name('E edge band (m)');
     t.add(tun, 'farThin', 0.01, 1, 0.01).name('E far thinning');
     t.add(tun, 'edgeBoost', 1, 4, 0.05).name('E edge boost');
     t.add(tun, 'dedupe').name('voxel dedupe');
+
+    const beam = gui.addFolder('Ping shape');
+    beam
+      .add(SOUND_CLASSES['e-ping'], 'coneAngleDeg', 10, 180, 1)
+      .name('E cone (°)');
+    beam.add(SOUND_CLASSES['e-ping'], 'paintRadius', 5, 60, 1).name('E range (m)');
+    beam.add(SOUND_CLASSES['q-ping'], 'paintRadius', 3, 30, 1).name('Q range (m)');
+
+    const bl = gui.addFolder('Bloom');
+    bl.add(this.paintKnobs, 'bloom').name('bloom (B)').listen();
+    bl.add(this.bloomTunables, 'strength', 0, 2, 0.02).name('strength');
+    bl.add(this.bloomTunables, 'radius', 0, 1, 0.02).name('radius');
+    bl.add(this.bloomTunables, 'threshold', 0, 1, 0.01).name('threshold');
   }
 
   /**
@@ -508,18 +592,43 @@ export class SonarLab implements LabScene {
     this.paintFolder = folder;
     const p = this.paintKnobs;
     const apply = (): void => this.paint.applyProfile();
-    folder.add(p, 'look').name('look (1-3)').disable();
+    folder.add(p, 'look').name('look (1-4)').disable();
     // Sampling parameters: they change what the *next* event deposits, not what is on screen.
     folder.add(p, 'density', 0.05, 3, 0.05).name('density ×(next paint)');
-    folder.add(p, 'cellSize', 0.02, 0.6, 0.01).name('cell size m (next paint)');
+    folder.add(p, 'cellSize', 0.02, 0.6, 0.005).name('cell size m (next paint)');
     folder.add(p, 'sizeWorld', 0.005, 0.4, 0.005).name('blip size (m)').onChange(apply);
     folder.add(p, 'minPixels', 0.5, 6, 0.1).name('min px').onChange(apply);
     folder.add(p, 'maxPixels', 1, 40, 0.5).name('max px').onChange(apply);
+    folder.add(p, 'depthExp', 0.5, 1.2, 0.01).name('depth exponent').onChange(apply);
     folder.add(p, 'softness', 0, 1, 0.02).name('softness').onChange(apply);
     folder.add(p, 'sizeJitter', 0, 1.5, 0.05).name('size jitter').onChange(apply);
     folder.add(p, 'brightJitter', 0, 1, 0.02).name('bright jitter').onChange(apply);
     folder.add(p, 'brightness', 0.1, 3, 0.05).name('brightness').onChange(apply);
+    folder.add(p, 'materialMix', 0, 1, 0.05).name('material voice').onChange(apply);
+    folder.add(p, 'dissolve', 0, 1, 0.02).name('grain dissolve').onChange(apply);
     folder.add({ repaint: () => this.paint.clear() }, 'repaint').name('Clear (resample)');
+  }
+
+  /** How the wave announces itself: speed, arrival flash, the firing streak, the lit air. */
+  private buildWaveGui(): void {
+    const folder = this.ctx.gui.addFolder('Wave');
+    const w = this.paint.wave;
+    const push = (): void => this.paint.applyTunables();
+    folder.add(WAVE_SPEEDS, 'step', 4, 120, 1).name('speed: steps (m/s)');
+    folder.add(WAVE_SPEEDS, 'ping', 4, 120, 1).name('speed: Q ping (m/s)');
+    folder.add(WAVE_SPEEDS, 'beam', 4, 200, 1).name('speed: E beam (m/s)');
+    folder.add(w, 'rimSeconds', 0.05, 1.5, 0.01).name('arrival flash (s)').onChange(push);
+    folder.add(w, 'rimBoost', 0, 6, 0.1).name('arrival boost ×').onChange(push);
+    folder.add(w, 'rimSize', 0, 4, 0.05).name('arrival swell ×').onChange(push);
+    folder.add(w, 'tracerSeconds', 0.05, 1, 0.01).name('tracer life (s)').onChange(push);
+    folder.add(w, 'tracerStart', 0, 4, 0.05).name('tracer start (m)');
+    folder.add(w, 'tracerLength', 1, 22, 0.5).name('tracer length (m)');
+    folder.add(w, 'tracerDrop', 0, 1.2, 0.05).name('tracer drop (m)');
+    folder.add(w, 'tracerBrightness', 0, 2, 0.05).name('tracer brightness').onChange(push);
+    folder.add(w, 'dust').name('front dust');
+    folder.add(w, 'dustGain', 0, 4, 0.05).name('dust gain').onChange(push);
+    folder.add(w, 'dustSize', 0.002, 0.05, 0.001).name('dust size (m)').onChange(push);
+    folder.add(w, 'dustShell', 0.2, 6, 0.1).name('dust shell (m)').onChange(push);
   }
 
   // ---- lifecycle -----------------------------------------------------------
@@ -528,6 +637,8 @@ export class SonarLab implements LabScene {
     if (index < 0 || index >= VARIANTS.length) return;
     this.variantIndex = index;
     this.paint.setProfile(index);
+    // Each look states whether it wants bloom; software GL vetoes it until B says otherwise.
+    this.bloomOn = this.paint.profile.bloom && !this.softwareGl;
     for (const c of this.paintFolder?.controllers ?? []) c.updateDisplay();
     this.ctx.hud.setSceneLabel(this.title, VARIANTS[index] ?? null);
   }
@@ -541,12 +652,13 @@ export class SonarLab implements LabScene {
   update(dt: number): void {
     this.paintTime += dt * TIME_SCALES[this.timeScaleIndex]!;
     this.bus.setTime(this.paintTime);
-    this.paint.setTime(this.paintTime);
     this.syncListener();
+    this.paint.advance(this.paintTime);
 
     if (this.input.wasKeyPressed('KeyR')) this.player.respawn();
     if (this.input.wasKeyPressed('KeyV')) this.player.toggleView();
     if (this.input.wasKeyPressed('KeyL')) this.setReveal(!this.revealOn);
+    if (this.input.wasKeyPressed('KeyB')) this.bloomOn = !this.bloomOn;
     if (this.input.wasKeyPressed('KeyT')) {
       this.timeScaleIndex = (this.timeScaleIndex + 1) % TIME_SCALES.length;
     }
@@ -572,8 +684,12 @@ export class SonarLab implements LabScene {
     const last = this.bus.lastEvent;
     const scale = TIME_SCALES[this.timeScaleIndex]!;
     const s = this.player.state;
+    const diag = this.paint.diagnostics();
     this.ctx.hud.setDebug([
-      ['look', `${this.paint.profileName}${this.revealOn ? ' · REVEAL' : ''}`],
+      [
+        'look',
+        `${this.paint.profileName}${this.bloomOn ? ' +bloom' : ''}${this.revealOn ? ' · REVEAL' : ''}`,
+      ],
       [
         'points',
         `${stats.points.toLocaleString('en-US')} / ${(stats.capacity / 1000).toFixed(0)}k · ${(
@@ -586,6 +702,14 @@ export class SonarLab implements LabScene {
         last === null
           ? '—'
           : `${last.class} · ${stats.lastRays} rays · +${stats.lastDeposited}/~${stats.lastRefreshed}`,
+      ],
+      [
+        'wave',
+        diag.waveLive
+          ? `${diag.waveFront.toFixed(1)} / ${diag.waveRange.toFixed(0)} m · ${(
+              diag.waveProgress * 100
+            ).toFixed(0)}%`
+          : 'settled',
       ],
       [
         'ping',
@@ -604,11 +728,30 @@ export class SonarLab implements LabScene {
     this.rigMarker.visible = this.player.viewBlend > 0.05;
   }
 
+  /**
+   * Bloom is the only reason this scene draws itself. Off — which is every look but 4, and
+   * every look under software GL until B says otherwise — this returns false immediately and
+   * the frame takes the harness's direct path at zero cost. The reveal view is excluded
+   * because its lit materials are graded by the renderer, and a composer without an output
+   * pass would hand them to the screen ungraded.
+   */
+  renderFrame(scene: THREE.Scene, camera: THREE.PerspectiveCamera): boolean {
+    if (!this.bloomOn || this.revealOn) return false;
+    this.bloomChain ??= new BloomChain(
+      this.ctx.renderer,
+      this.bloomTunables,
+      this.softwareGl ? 0.5 : 1,
+    );
+    this.bloomChain.render(scene, camera);
+    return true;
+  }
+
   debugState(): Record<string, unknown> {
     const stats = this.paint.getStats();
     const s = this.player.state;
     const cam = this.ctx.camera;
     const last = this.bus.lastEvent;
+    const diag = this.paint.diagnostics();
     return {
       variant: VARIANTS[this.variantIndex],
       variantIndex: this.variantIndex,
@@ -634,17 +777,46 @@ export class SonarLab implements LabScene {
       wrapped: stats.wrapped,
       lastEvent: last?.class ?? null,
       lastEventSeq: last?.seq ?? -1,
+      lastEventTime: last?.time ?? -1,
+      lastEventSpeed: last?.waveSpeed ?? 0,
       lastRays: stats.lastRays,
       lastDeposited: stats.lastDeposited,
       lastRefreshed: stats.lastRefreshed,
+      // Total CPU spent sampling the last event, and the worst single frame's share of it —
+      // the second is the one that can be felt, so it is the one the driver asserts on.
       lastPaintMs: stats.lastPaintMs,
+      lastChunkMs: stats.lastChunkMs,
+      lastChunks: stats.lastChunks,
+      pendingRays: stats.pendingRays,
       lastMaxRange: stats.lastMaxRange,
       lastFar20: stats.lastFar20,
+      lastSpanDeg: stats.lastSpanDeg,
+      lastLateral: stats.lastLateral,
       soundEvents: this.bus.emitted,
       pingCooldown: Math.max(0, this.pingCooldown),
       paintTime: this.paintTime,
       paintTimeScale: TIME_SCALES[this.timeScaleIndex],
       reveal: this.revealOn,
+      // --- wave readouts
+      waveLive: diag.waveLive,
+      waveFront: diag.waveFront,
+      waveRange: diag.waveRange,
+      waveProgress: diag.waveProgress,
+      arrivedMax: diag.arrivedMax,
+      pendingMin: Number.isFinite(diag.pendingMin) ? diag.pendingMin : -1,
+      visiblePoints: diag.visible,
+      maxBlipPixels: diag.maxBlipPixels,
+      maxBlipWant: diag.maxBlipWant,
+      pixelCap: this.paint.tunables.pixelCap,
+      dustLit: this.paint.dustLit,
+      tracerAlive: this.paint.tracerAlive,
+      tracerAge: this.paint.tracerAge,
+      // --- look readouts
+      bloom: this.bloomOn,
+      softwareGl: this.softwareGl,
+      materialMix: this.paint.profile.materialMix,
+      eConeDeg: SOUND_CLASSES['e-ping'].coneAngleDeg,
+      eRange: SOUND_CLASSES['e-ping'].paintRadius,
     };
   }
 
@@ -653,6 +825,8 @@ export class SonarLab implements LabScene {
     this.unsubscribePlayer?.();
     this.bus.dispose();
     this.paint.dispose();
+    this.bloomChain?.dispose();
+    this.bloomChain = null;
     this.ctx.scene.remove(this.paint.object);
     this.ctx.scene.remove(this.reveal);
     this.ctx.scene.remove(this.rigMarker);

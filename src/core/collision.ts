@@ -17,6 +17,12 @@ export interface Aabb {
   readonly maxX: number;
   readonly maxY: number;
   readonly maxZ: number;
+  /**
+   * What this box is made of — an index into `paint/materials`. Collision does not care; the
+   * paint system does, because a return off metal and a return off concrete are not the same
+   * sound. Absent means concrete (0), which is what most of a facility is.
+   */
+  readonly mat?: number;
 }
 
 /** Numerical slack, in metres, used for "were we above this surface" style tests. */
@@ -29,8 +35,9 @@ export function aabbFromBounds(
   maxX: number,
   maxY: number,
   maxZ: number,
+  mat = 0,
 ): Aabb {
-  return { minX, minY, minZ, maxX, maxY, maxZ };
+  return { minX, minY, minZ, maxX, maxY, maxZ, mat };
 }
 
 /** Box given by its centre on X/Z, its base on Y, and its full size. */

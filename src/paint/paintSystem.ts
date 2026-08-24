@@ -6,9 +6,16 @@
  * paint radius deposits a blip. Nothing else draws the world: the meshes are dark, the lights
  * are off, and this point cloud is the entire picture.
  *
- * Four properties are load-bearing:
+ * Five properties are load-bearing:
  *
- *  1. **Rays answer visibility; splats carry density.** A ray is a cone, not a line: everything
+ *  1. **Sound travels.** A blip is not born when the event fires, it is born when the event's
+ *     wavefront physically *reaches* it: birth = `event.time + distance / waveSpeed`. Before
+ *     that instant the shader will not draw it. A ping is therefore a front sweeping outward
+ *     across the geometry — near walls answer first, the far end of the room a third of a
+ *     second later — and the delay is real information: you can hear how far away a thing is
+ *     by *when* it lit. See "The wave engine" below.
+ *
+ *  2. **Rays answer visibility; splats carry density.** A ray is a cone, not a line: everything
  *     inside its share of the solid angle landed on the patch of surface it found, so it
  *     deposits blips across that whole footprint. Because the footprints tile the surface,
  *     asking each one for `targetDensity × footprintArea` blips yields exactly `targetDensity`
@@ -18,19 +25,48 @@
  *     point: a sprint step and a crouch step both cover their own radius, so at 1.5 m the
  *     sprint step is five times the density of the crouch step.
  *
- *  2. **Age is the only colour axis for matter (§3.2).** Blips are cyan-family regardless of
- *     what painted them: ice-white → cyan → dim navy → a permanent skeleton at alpha 0.22.
- *     The source's colour lives on the event layer, never on geometry.
+ *  3. **Age is the colour axis for matter (§3.2).** In looks 1-3 blips are cyan-family
+ *     regardless of what painted them: ice-white → cyan → dim navy → a permanent skeleton at
+ *     alpha 0.22. Look 4 ("Afterimage") is a candidate that spends the hue on *material* and
+ *     carries age in brightness and a violet drift instead; the two share one ramp and are
+ *     separated by a single `materialMix` uniform, so the law and the experiment cannot drift
+ *     apart. See `materials.ts`.
  *
- *  3. **Ageing is free.** Points are written once, with a birth stamp, into a preallocated
+ *  4. **Ageing is free.** Points are written once, with a birth stamp, into a preallocated
  *     ring buffer; the shader derives everything from `now - birth`. No per-point CPU work
  *     ever runs per frame — only when an event actually paints.
  *
- *  4. **Re-hearing a surface refreshes it.** A blip is a voxel of knowledge, not a particle:
+ *  5. **Re-hearing a surface refreshes it.** A blip is a voxel of knowledge, not a particle:
  *     a hit that lands in an already-occupied cell restamps that point instead of stacking a
  *     second one on top of it. That is what keeps repeat-scanned floors from blowing out into
  *     white mush, and it bounds the buffer by the surface area of the level rather than by how
  *     long the player has been walking around.
+ *
+ * ## The wave engine
+ *
+ * Every blip carries *two* stamps instead of one.
+ *
+ *   `aBirth` — when this event's front arrives here. Ahead of the front this is in the future.
+ *   `aPrior` — the arrival stamp this blip had *before* the new event restamped it, or -1e9 if
+ *              this is the first time anything has ever painted here.
+ *
+ * The shader picks: past `aBirth` it runs the normal age ramp from `aBirth`; before `aBirth`
+ * it falls back to `aPrior`, and if there is no prior it draws nothing at all. That one branch
+ * buys three things at once — an expanding front on virgin geometry, no flicker when a second
+ * ping sweeps a room you already know (the old paint simply stays up until the new front
+ * overtakes it), and zero per-frame CPU, because the front is a comparison against a uniform
+ * rather than a list the CPU has to walk.
+ *
+ * At the instant of arrival a blip flashes ice-white and swells, then settles into the ramp
+ * within a fraction of a second. That flash *is* the visible wavefront on surfaces; `waveFx.ts`
+ * adds the part that happens in the air.
+ *
+ * The wave also pays for itself on the CPU. Because a blip's stamp is a function of the event's
+ * own time and the distance to it — and of nothing about *when* it was sampled — the sampler is
+ * free to take several frames over a ping without anyone being able to tell: a ray cast three
+ * frames late deposits a blip that lights at exactly the instant it would have anyway. That is
+ * what lets a 110° beam cost ten thousand rays without ever costing one frame more than a few
+ * milliseconds (`chunkRays`/`chunkMs`).
  *
  * Known v0 limits: when the ring wraps, the oldest blips are silently overwritten (at the
  * default cap and cell size that is several levels' worth of surface, so it is a theoretical
@@ -41,15 +77,18 @@
 import * as THREE from 'three';
 import type { Aabb, StaticWorld } from '../core/collision';
 import type { SoundClass, SoundEvent } from './soundEvents';
+import { MATERIAL_COUNT, MATERIAL_VOICES, VIOLET } from './materials';
+import { MAX_LIVE_WAVES, TracerStreaks, WaveDust, type LiveWave } from './waveFx';
 
 // ---------------------------------------------------------------------------
 // Look profiles
 // ---------------------------------------------------------------------------
 
 /**
- * One "look" of the point cloud. The three shipped profiles are the same physics with
- * different sampling and splat parameters — the readability question they answer is whether
- * the dark reads better as fine dust, as sparse sonar blips, or as noisy grain.
+ * One "look" of the point cloud. Looks 1-3 are the same physics with different sampling and
+ * splat parameters — the readability question they answer is whether the dark reads better as
+ * fine dust, as sparse sonar blips, or as noisy grain. Look 4 additionally turns on the
+ * material palette, the sub-linear depth curve and the per-grain cooling spread.
  */
 export interface PaintProfile {
   readonly name: string;
@@ -62,6 +101,13 @@ export interface PaintProfile {
   /** Screen-space clamp on the splat, in drawing-buffer pixels. */
   minPixels: number;
   maxPixels: number;
+  /**
+   * Exponent on depth in the splat's screen size. 1 is a true world-space disc. Below 1 the
+   * splat grows more slowly as you close on a surface and more quickly as it recedes, which
+   * pulls a distant wall together into continuous texture without letting a near one become a
+   * field of dinner plates — the reference's trick, and the reason look 4 can be this dense.
+   */
+  depthExp: number;
   /** 0 = crisp disc, 1 = fully feathered. */
   softness: number;
   /** ±fraction of per-point size jitter. */
@@ -70,6 +116,17 @@ export interface PaintProfile {
   brightJitter: number;
   /** Overall output gain. */
   brightness: number;
+  /** 0 = cyan band only (§3.2, the law). 1 = material voices (look 4, the candidate). */
+  materialMix: number;
+  /**
+   * ±fraction of per-grain spread on the *cooling rate*. At 0 a scanned surface cools as one
+   * sheet; turned up, each grain ages at its own pace and the cloud visibly breaks apart into
+   * the skeleton grain by grain — the reference's dissolve, except that ours never reaches
+   * zero (§3.6: the map is never lost, only the fine read).
+   */
+  dissolve: number;
+  /** Whether this look asks for the bloom pass by default. */
+  bloom: boolean;
 }
 
 export function paintProfiles(): PaintProfile[] {
@@ -82,10 +139,14 @@ export function paintProfiles(): PaintProfile[] {
       sizeWorld: 0.065,
       minPixels: 1.0,
       maxPixels: 18,
+      depthExp: 1.0,
       softness: 0.3,
       sizeJitter: 0.15,
       brightJitter: 0.12,
       brightness: 1.0,
+      materialMix: 0,
+      dissolve: 0,
+      bloom: false,
     },
     {
       // Sonar register: fewer, fatter, soft-edged returns. Reads at a glance, loses detail.
@@ -95,10 +156,14 @@ export function paintProfiles(): PaintProfile[] {
       sizeWorld: 0.175,
       minPixels: 1.6,
       maxPixels: 40,
+      depthExp: 1.0,
       softness: 0.92,
       sizeJitter: 0.3,
       brightJitter: 0.15,
       brightness: 0.95,
+      materialMix: 0,
+      dissolve: 0,
+      bloom: false,
     },
     {
       // Textured register: mid density, heavy per-point jitter — noisy, filmic, less clinical.
@@ -108,10 +173,41 @@ export function paintProfiles(): PaintProfile[] {
       sizeWorld: 0.115,
       minPixels: 1.2,
       maxPixels: 26,
+      depthExp: 1.0,
       softness: 0.5,
       sizeJitter: 0.8,
       brightJitter: 0.55,
       brightness: 0.95,
+      materialMix: 0,
+      dissolve: 0,
+      bloom: false,
+    },
+    {
+      /*
+       * Afterimage register, ported from the reference: dense fine grain at a nearly uniform
+       * point size, so salience is carried by *brightness* and never by size; concrete cools
+       * white → cyan and metal white → gold, so the cloud tells you what a thing is made of;
+       * grains cool at their own pace so the picture breaks up rather than dimming as a sheet;
+       * and bloom does the rest.
+       *
+       * Density is up and cell size is down because the whole character depends on the grain
+       * being finer than the eye can resolve individually at a distance — the reference runs a
+       * ~6 cm near-field spacing, and 7.5 cm is what our budget buys over a whole room.
+       */
+      name: 'Afterimage',
+      density: 1.6,
+      cellSize: 0.075,
+      sizeWorld: 0.042,
+      minPixels: 1.0,
+      maxPixels: 7,
+      depthExp: 0.85,
+      softness: 0.4,
+      sizeJitter: 0.14,
+      brightJitter: 0.34,
+      brightness: 1.35,
+      materialMix: 1,
+      dissolve: 0.55,
+      bloom: true,
     },
   ];
 }
@@ -144,7 +240,60 @@ export function defaultAgeRamp(): AgeRamp {
 }
 
 /**
- * Matter palette — cyan-family only, forever (§3.2).
+ * The wave's own numbers: how the front announces itself, what the firing looks like, and
+ * whether the air shows it. Speeds live on the sound classes (`WAVE_SPEEDS`), because how fast
+ * a noise travels is a property of the noise, not of how we draw it.
+ */
+export interface WaveTunables {
+  /** Extra brightness at the instant of arrival, on top of the ice-white flash. */
+  rimBoost: number;
+  /** Time constant of that flash, seconds — the visible thickness of the front is speed × this. */
+  rimSeconds: number;
+  /** How much the splat swells at arrival (0 = none). */
+  rimSize: number;
+  /** Lifetime of the E-ping's tracer streak, seconds (§brief: ≤0.3). */
+  tracerSeconds: number;
+  /** How far ahead of the rig the fan begins, metres. */
+  tracerStart: number;
+  /** How far along the aim the streak reaches from there, metres. */
+  tracerLength: number;
+  /** How far below the emission point the fan starts, metres — a small drop puts it under the
+   *  reticle instead of concentric with it, which reads as coming from the rig. */
+  tracerDrop: number;
+  /** Streak gain. Dim on purpose: this is a question being asked, not a shot being fired. */
+  tracerBrightness: number;
+  /** Whether suspended particulate shows the front crossing empty air. */
+  dust: boolean;
+  /** Mote gain. */
+  dustGain: number;
+  /** Mote diameter, world metres. */
+  dustSize: number;
+  /** Thickness of the lit shell behind the front, metres. Distance, never time: the shell must
+   *  look the same at 25 m/s and at 45 m/s or the fast beam reads as a filled cone. */
+  dustShell: number;
+}
+
+export function defaultWaveTunables(): WaveTunables {
+  return {
+    // The reference's flash is exp(-age * 7); ours is exp(-age * 3 / rimSeconds), so 0.42 s
+    // reproduces it exactly and the default sits a little tighter than that.
+    rimBoost: 2.1,
+    rimSeconds: 0.28,
+    rimSize: 1.35,
+    tracerSeconds: 0.25,
+    tracerStart: 1.4,
+    tracerLength: 3.2,
+    tracerDrop: 0.05,
+    tracerBrightness: 0.55,
+    dust: true,
+    dustGain: 1.7,
+    dustSize: 0.02,
+    dustShell: 2.0,
+  };
+}
+
+/**
+ * Matter palette for looks 1-3 — cyan-family only, forever (§3.2).
  *
  * The cold end is a *rendered* navy, not a paint-chip navy: it is multiplied by the skeleton's
  * 0.22 alpha before it reaches the screen, so picking a colour that already looks like dim navy
@@ -165,23 +314,18 @@ const EVENT_COLORS: Record<SoundClass, number> = {
   'e-ping': 0xfff0cc,
 };
 
-const CLASS_INDEX: Record<SoundClass, number> = {
-  'crouch-step': 0,
-  'walk-step': 1,
-  'sprint-step': 2,
-  landing: 3,
-  'q-ping': 4,
-  'e-ping': 5,
-};
-
 /**
  * Ray budget per event at profile density 1 and intensity 1.
  *
  * These set *angular resolution*, not density — the splat handles density. A budget of n rays
  * resolves features about `sqrt(4/n)` radians wide, so a walk step can tell a crate from a wall
- * and the E-ping can pick a railing out at 30 m. Rays are also the expensive half of painting
- * (a cast costs roughly four times a blip), which is why they are spent on the events whose
- * whole job is to answer a question.
+ * and the E-ping can pick a railing out across the room. Rays are also the expensive half of
+ * painting (a cast costs roughly four times a blip), which is why they are spent on the events
+ * whose whole job is to answer a question.
+ *
+ * The E-ping's budget went up with its cone: 110° is eighteen times the solid angle of the old
+ * 25° slit, and at 5600 rays that cone would have resolved nothing finer than a doorway. 9000
+ * over 2.68 sr gives a ~0.01 rad footprint — 21 cm at the 22 m limit — which is a handrail.
  */
 const CLASS_RAYS: Record<SoundClass, number> = {
   'crouch-step': 260,
@@ -189,7 +333,7 @@ const CLASS_RAYS: Record<SoundClass, number> = {
   'sprint-step': 1200,
   landing: 1900,
   'q-ping': 3600,
-  'e-ping': 5600,
+  'e-ping': 9000,
 };
 
 // ---------------------------------------------------------------------------
@@ -239,6 +383,45 @@ export interface PaintTunables {
   coneFeather: number;
   /** Hard ceiling on blips deposited by one event, so no ping can stall a frame. */
   maxPerEvent: number;
+  /** Hard ceiling on rays cast by one event, whatever the class and profile ask for. */
+  rayCap: number;
+  /**
+   * Most rays one *chunk* of sampling may cast, and the wall-clock budget it may spend.
+   *
+   * A 110° E-ping is ten thousand rays and forty thousand blips; done in one tick that is a
+   * 30 ms hitch, and law 5 says movement never pays for information. So sampling is amortised:
+   * the event is planned in the tick it fires, the first chunk runs immediately so the ping
+   * always answers on the same frame, and the rest are drained a chunk per frame. This is only
+   * possible *because* of the wave — a blip's arrival stamp comes from the event's own time and
+   * the distance to it, so a point sampled three frames late still lights at exactly the
+   * instant the front reaches it, and no one can tell.
+   */
+  chunkRays: number;
+  chunkMs: number;
+  /**
+   * Most blips one chunk may lay down, wall clock notwithstanding.
+   *
+   * The clock is polled every sixteenth ray, and a ray in a dense look can splat a hundred and
+   * twenty blips, so the poll alone lets a chunk run two thousand deposits past its deadline —
+   * measured at three times the budget on a loaded software rasteriser. Deposits are what the
+   * time actually goes on, so counting them is the bound that holds when the wall clock's
+   * resolution does not.
+   */
+  chunkBlips: number;
+  /** Minimum wall-clock gap between chunks, ms — what makes it one chunk per frame. */
+  chunkGapMs: number;
+  /**
+   * Screen-size ceiling on a blip, in drawing-buffer pixels.
+   *
+   * A world-sized splat grows as 1/depth, so at arm's length from a wall one return covers a
+   * quarter of the screen and the frame becomes a wall of overlapping dinner plates — the
+   * single ugliest thing the old E-ping did, and the reason "ping the wall you are hugging"
+   * looked like a bug. The clamp is a soft knee rather than a `min`, so nothing below about
+   * half the cap is touched at all and there is no visible size cliff.
+   */
+  pixelCap: number;
+  /** Scale on the per-material micro-relief the deposit is displaced by (0 = perfectly flat). */
+  roughness: number;
 }
 
 export function defaultPaintTunables(): PaintTunables {
@@ -247,8 +430,11 @@ export function defaultPaintTunables(): PaintTunables {
     windowRadius: 45,
     featherStart: 0.72,
     rimDim: 0.6,
-    edgeStart: 10,
-    edgeFull: 26,
+    // Pulled in with the E-ping's range: the silhouette collapse has to finish inside the beam
+    // to mean anything, and a 22 m beam that only starts thinning at 10 m and never completes
+    // is just a dimmer beam.
+    edgeStart: 12,
+    edgeFull: 22,
     edgeBand: 0.5,
     farThin: 0.3,
     edgeBoost: 2.4,
@@ -260,10 +446,17 @@ export function defaultPaintTunables(): PaintTunables {
     grazeDim: 0.68,
     coneFeather: 0.32,
     maxPerEvent: 60_000,
+    rayCap: 10_000,
+    chunkRays: 2500,
+    chunkMs: 4,
+    chunkBlips: 6000,
+    chunkGapMs: 6,
+    pixelCap: 10,
+    roughness: 1,
   };
 }
 
-/** Default ring capacity. 500k blips × 28 B of attributes ≈ 14 MB on the GPU and again on the CPU. */
+/** Default ring capacity. 500k blips × 32 B of attributes ≈ 16 MB on the GPU and again on the CPU. */
 export const DEFAULT_CAPACITY = 500_000;
 /** How many event-layer markers can be alive at once. */
 const EVENT_CAPACITY = 512;
@@ -271,6 +464,27 @@ const EVENT_CAPACITY = 512;
 const EVENT_FADE = 2.5;
 /** Event marker diameter, world metres. */
 const EVENT_SIZE = 0.55;
+/**
+ * Motes in the dust field, and the side of the cube they wrap around the listener in.
+ *
+ * These two are really one number — motes per m³ — because that is what decides how many grains
+ * a passing shell actually lights, and the count in view is what makes it read as a front rather
+ * than as noise. The shell's lit volume grows as r², so a field big enough to cover a 22 m beam
+ * is a field too thin to see: 14k motes in a 34 m cube (0.36/m³, the first pass) lit about forty
+ * grains anywhere in view, which looked like sensor noise. 48k in a 14 m cube is 17 per m³ — 50×
+ * denser, a few hundred grains at the front — at the price of the effect being a near-field one.
+ * That is the right trade: past a few metres the front is already carried by the geometry it is
+ * painting, and dust that dims with distance is what suspended particulate actually does.
+ *
+ * The reference gets away with 0.25 motes/m³ because its field carries an ambient term: its motes
+ * glow faintly at all times, so the air reads as a medium and a passing front reads as that
+ * medium brightening. Law 3 forbids us that — unlit air is never drawn — so here the front has to
+ * carry the whole effect on its own, and density is the only lever left.
+ */
+const DUST_COUNT = 48_000;
+const DUST_EXTENT = 14;
+/** Birth stamp meaning "nothing was ever known here". */
+const NEVER = -1e9;
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 /**
@@ -298,6 +512,40 @@ function makeRng(seed: number): () => number {
 /** Colours are authored in sRGB and written straight to the framebuffer by the raw shader. */
 function rawColor(hex: number): THREE.Color {
   return new THREE.Color().setHex(hex, THREE.LinearSRGBColorSpace);
+}
+
+/**
+ * Value noise on a 3D lattice, one octave.
+ *
+ * Only the deposit path uses it, once per ray, to displace a whole footprint along the surface
+ * normal by the material's micro-relief. Coherence is the point: a per-blip random offset is
+ * just fuzz, whereas a field that varies over ~30 cm reads as a *surface* — pitted concrete,
+ * milled metal, cut stone. One sample per footprint is plenty; the patch is 20 cm across.
+ */
+function valueNoise(x: number, y: number, z: number): number {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const zi = Math.floor(z);
+  const xf = x - xi;
+  const yf = y - yi;
+  const zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const w = zf * zf * (3 - 2 * zf);
+  let out = 0;
+  for (let k = 0; k < 8; k++) {
+    const cx = xi + (k & 1);
+    const cy = yi + ((k >> 1) & 1);
+    const cz = zi + ((k >> 2) & 1);
+    let h = Math.imul(cx, 374761393) ^ Math.imul(cy, 668265263) ^ Math.imul(cz, 2246822519);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    const g = ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    const wx = (k & 1) === 1 ? u : 1 - u;
+    const wy = ((k >> 1) & 1) === 1 ? v : 1 - v;
+    const wz = ((k >> 2) & 1) === 1 ? w : 1 - w;
+    out += g * wx * wy * wz;
+  }
+  return out * 2 - 1;
 }
 
 // ---- ray / AABB -----------------------------------------------------------
@@ -416,32 +664,54 @@ function castRay(
 // Shaders
 // ---------------------------------------------------------------------------
 
+/**
+ * Everything about a blip's appearance is a function of its own attributes and the clock, so
+ * all of it is computed once per vertex and handed to the fragment stage as a colour and an
+ * alpha. The fragment shader's only job is the splat's shape.
+ */
 const MATTER_VERTEX = /* glsl */ `
   uniform float uTime;
   uniform float uSizeWorld;
   uniform float uProjScale;
   uniform float uMinPixels;
   uniform float uMaxPixels;
+  uniform float uPixelCap;
+  uniform float uDepthExp;
   uniform float uSizeJitter;
+  uniform float uBrightJitter;
+  uniform float uBrightness;
   uniform float uWindowRadius;
+  uniform float uSkeletonAlpha;
+  uniform float uSkeletonSize;
+  uniform float uRimK;
+  uniform float uRimBoost;
+  uniform float uRimSize;
+  uniform float uDissolve;
+  uniform float uMaterialMix;
   uniform vec3  uListener;
   uniform vec3  uRampTimes;      // fresh, cool, cold
-  uniform float uSkeletonSize;
+  uniform vec3  uFresh;
+  uniform vec3  uMid;
+  uniform vec3  uCold;
+  uniform vec3  uViolet;
+  uniform vec3  uMatHot[${MATERIAL_COUNT}];
+  uniform vec3  uMatCool[${MATERIAL_COUNT}];
+  uniform float uMatSize[${MATERIAL_COUNT}];
 
   attribute float aBirth;
+  attribute float aPrior;
   attribute float aIntensity;
   attribute float aSeed;
+  attribute float aMat;
 
-  varying float vAge;
-  varying float vIntensity;
-  varying float vSeed;
-  varying float vCoverage;
+  varying vec3  vColor;
+  varying float vAlpha;
+
+  float hash11(float p) { p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p); }
 
   void main() {
-    vAge = max(0.0, uTime - aBirth);
-    vIntensity = aIntensity;
-    vSeed = aSeed;
-    vCoverage = 1.0;
+    vColor = vec3(0.0);
+    vAlpha = 0.0;
 
     // §3.6: the map persists, the *rendering* is windowed. Outside the window, drop the vertex.
     if (distance(position, uListener) > uWindowRadius) {
@@ -450,18 +720,82 @@ const MATTER_VERTEX = /* glsl */ `
       return;
     }
 
+    // The wave: nothing exists here until the front has arrived. Ahead of it, fall back to
+    // whatever was already known at this spot — and if that is nothing, draw nothing.
+    float age = uTime - aBirth;
+    float flash = 0.0;
+    if (age < 0.0) {
+      age = uTime - aPrior;
+      if (aPrior <= -1.0e8 || age < 0.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+      }
+    } else {
+      flash = exp(-age * uRimK);
+    }
+
+    // Per-grain cooling spread: at uDissolve = 0 the surface cools as one sheet.
+    float grain = 1.0 + uDissolve * (hash11(aSeed * 91.7) - 0.5) * 2.0;
+    float rampAge = age * max(0.08, grain);
+
+    // Material voice. Looks 1-3 hold uMaterialMix at 0 and never leave the cyan band (§3.2).
+    vec3 hot = uMatHot[0];
+    vec3 cool = uMatCool[0];
+    float matSize = uMatSize[0];
+    for (int i = 1; i < ${MATERIAL_COUNT}; i++) {
+      if (abs(float(i) - aMat) < 0.5) {
+        hot = uMatHot[i];
+        cool = uMatCool[i];
+        matSize = uMatSize[i];
+      }
+    }
+    // Size, like hue, is a material cue only where a look has asked for one.
+    matSize = mix(1.0, matSize, uMaterialMix);
+    vec3 cFresh = mix(uFresh, hot, uMaterialMix);
+    vec3 cMid = mix(uMid, cool, uMaterialMix);
+    vec3 cCold = mix(uCold, mix(cool, uViolet, 0.85), uMaterialMix);
+
+    vec3 col;
+    float alpha;
+    if (rampAge < uRampTimes.x) {
+      float t = rampAge / max(0.001, uRampTimes.x);
+      col = mix(cFresh, cMid, t * t);
+      alpha = mix(1.0, 0.9, t);
+    } else if (rampAge < uRampTimes.y) {
+      float t = (rampAge - uRampTimes.x) / max(0.001, uRampTimes.y - uRampTimes.x);
+      col = mix(cMid, cCold, t);
+      alpha = mix(0.9, 0.42, t);
+    } else {
+      float t = clamp((rampAge - uRampTimes.y) / max(0.001, uRampTimes.z - uRampTimes.y), 0.0, 1.0);
+      col = cCold;
+      alpha = mix(0.42, uSkeletonAlpha, t);
+    }
+    // The instant of return: the front itself, drawn on the surface it just reached.
+    col = mix(col, vec3(1.0), flash * 0.88);
+
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     float depth = max(0.001, -mv.z);
-
-    float cooled = clamp(vAge / max(0.001, uRampTimes.z), 0.0, 1.0);
+    float cooled = clamp(rampAge / max(0.001, uRampTimes.z), 0.0, 1.0);
     float jitter = 1.0 + uSizeJitter * (aSeed - 0.5) * 2.0;
     float shrink = mix(1.0, uSkeletonSize, cooled);
-    float want = uSizeWorld * jitter * shrink * uProjScale / depth;
-    float px = clamp(want, uMinPixels, uMaxPixels);
+    float want = uSizeWorld * jitter * shrink * matSize * (1.0 + flash * uRimSize)
+      * uProjScale / pow(depth, uDepthExp);
+    // Soft knee into the screen-size cap: transparent below half of it, asymptotic above.
+    float q = want / max(0.5, uPixelCap);
+    float px = want / pow(1.0 + q * q * q, 0.33333334);
+    px = min(px, uMaxPixels);
+    px = max(px, uMinPixels);
     // Below the minimum splat size the blip covers more screen than it should; give back the
     // difference in brightness so distant clouds fade out instead of aliasing into a bright wash.
-    vCoverage = min(1.0, (want * want) / (px * px));
+    float coverage = min(1.0, (want * want) / (px * px));
 
+    float bright = uBrightness * aIntensity * coverage
+      * (1.0 + uBrightJitter * (fract(aSeed * 37.13) - 0.5) * 2.0)
+      * (1.0 + uRimBoost * flash);
+
+    vColor = col * max(0.0, bright);
+    vAlpha = alpha;
     gl_PointSize = px;
     gl_Position = projectionMatrix * mv;
   }
@@ -470,19 +804,10 @@ const MATTER_VERTEX = /* glsl */ `
 const MATTER_FRAGMENT = /* glsl */ `
   precision highp float;
 
-  uniform vec3  uFresh;
-  uniform vec3  uMid;
-  uniform vec3  uCold;
-  uniform vec3  uRampTimes;      // fresh, cool, cold
-  uniform float uSkeletonAlpha;
-  uniform float uBrightness;
   uniform float uSoftness;
-  uniform float uBrightJitter;
 
-  varying float vAge;
-  varying float vIntensity;
-  varying float vSeed;
-  varying float vCoverage;
+  varying vec3  vColor;
+  varying float vAlpha;
 
   void main() {
     vec2 pc = gl_PointCoord - 0.5;
@@ -490,28 +815,7 @@ const MATTER_FRAGMENT = /* glsl */ `
     float inner = 1.0 - clamp(uSoftness, 0.0, 0.999);
     float shape = 1.0 - smoothstep(inner, 1.0, r);
     if (shape <= 0.002) discard;
-
-    // Matter is cyan-family always; only *age* moves along the band (§3.2).
-    vec3 col;
-    float alpha;
-    if (vAge < uRampTimes.x) {
-      float t = vAge / max(0.001, uRampTimes.x);
-      col = mix(uFresh, uMid, t * t);
-      alpha = mix(1.0, 0.9, t);
-    } else if (vAge < uRampTimes.y) {
-      float t = (vAge - uRampTimes.x) / max(0.001, uRampTimes.y - uRampTimes.x);
-      col = mix(uMid, uCold, t);
-      alpha = mix(0.9, 0.42, t);
-    } else {
-      float t = clamp((vAge - uRampTimes.y) / max(0.001, uRampTimes.z - uRampTimes.y), 0.0, 1.0);
-      col = uCold;
-      alpha = mix(0.42, uSkeletonAlpha, t);
-    }
-
-    float bright = uBrightness * vIntensity * vCoverage
-      * (1.0 + uBrightJitter * (fract(vSeed * 37.13) - 0.5) * 2.0);
-
-    gl_FragColor = vec4(col * max(0.0, bright), shape * alpha);
+    gl_FragColor = vec4(vColor, shape * vAlpha);
   }
 `;
 
@@ -573,20 +877,61 @@ export interface PaintStats {
   lastDeposited: number;
   /** Existing blips restamped by the most recent event. */
   lastRefreshed: number;
-  /** Wall-clock cost of the most recent event's sampling, ms. */
+  /** Wall-clock cost of the most recent event's sampling, ms, summed over its chunks. */
   lastPaintMs: number;
+  /** Worst single chunk of that sampling, ms — the actual frame stall the player pays. */
+  lastChunkMs: number;
+  /** How many chunks the most recent event took. */
+  lastChunks: number;
+  /** Rays of the most recent event still unsampled. */
+  pendingRays: number;
   /** Distance of the most distant blip the last event produced, metres. */
   lastMaxRange: number;
   /** How many of the last event's blips landed beyond `FAR_RANGE`. */
   lastFar20: number;
+  /** Horizontal angular spread of the last cone event's returns, degrees. */
+  lastSpanDeg: number;
+  /** Furthest a return of the last cone event landed from the beam axis, metres. */
+  lastLateral: number;
 }
 
 /** Reporting threshold for "this event reached across the room", metres. */
 const FAR_RANGE = 20;
 
+/**
+ * A read-only snapshot of the wave in flight and of the splat sizes on screen. The screenshot
+ * driver asserts against this: it is the only way to prove from outside that a front really is
+ * a front and not a fade, and that the near-field cap is doing its job.
+ */
+export interface PaintDiagnostics {
+  /** True while the newest event's front is still expanding. */
+  waveLive: boolean;
+  /** Radius the newest front has reached, metres. */
+  waveFront: number;
+  /** That front's full paint radius. */
+  waveRange: number;
+  /** 0-1 along its travel. */
+  waveProgress: number;
+  /**
+   * Furthest *drawable* blip from the newest event's origin. On a cleared map this must never
+   * exceed `waveFront`: anything past the front has a birth stamp in the future and the shader
+   * refuses to draw it.
+   */
+  arrivedMax: number;
+  /** Nearest blip the front has not reached yet — the other side of the same edge. */
+  pendingMin: number;
+  /** Blips currently drawable. */
+  visible: number;
+  /** Largest splat on screen, in drawing-buffer pixels. */
+  maxBlipPixels: number;
+  /** What that splat's size would have been without the near-field cap. */
+  maxBlipWant: number;
+}
+
 export class PaintSystem {
   readonly tunables: PaintTunables;
   readonly ramp: AgeRamp;
+  readonly wave: WaveTunables;
   readonly profiles = paintProfiles();
 
   private profileIndex = 0;
@@ -594,10 +939,13 @@ export class PaintSystem {
 
   // ---- matter layer ring buffer -------------------------------------------
   private readonly positions: Float32Array;
+  /** When this event's front reaches this blip. May be in the future. */
   private readonly births: Float32Array;
+  /** The arrival stamp this blip had before the newest event restamped it, or NEVER. */
+  private readonly priors: Float32Array;
   private readonly intensities: Float32Array;
   private readonly seeds: Float32Array;
-  private readonly classes: Float32Array;
+  private readonly mats: Float32Array;
   /** Dedup cell key currently held by each slot, or -1. Lets a ring wrap unmap cleanly. */
   private readonly slotKeys: Float64Array;
   private readonly cells = new Map<number, number>();
@@ -617,6 +965,11 @@ export class PaintSystem {
   private readonly eventMaterial: THREE.ShaderMaterial;
   private readonly eventPoints: THREE.Points;
 
+  // ---- wave layer ----------------------------------------------------------
+  private readonly waves: LiveWave[] = [];
+  private readonly tracer: TracerStreaks;
+  private readonly dust: WaveDust;
+
   private readonly root = new THREE.Group();
 
   private time = 0;
@@ -628,10 +981,21 @@ export class PaintSystem {
   private targetDensity = 90;
   /** Blips the current event may still deposit. */
   private budget = 0;
+  // Where and when the event being sampled went off, and one over how fast its front travels.
+  // Held here rather than threaded through the splat loop: every blip of an event needs them,
+  // and they are what `arrivalAt` turns into a birth stamp.
+  private emitX = 0;
+  private emitY = 0;
+  private emitZ = 0;
+  private emitTime = 0;
+  private emitInvSpeed = 0;
   private readonly candidates: Aabb[] = [];
   private readonly listener = new THREE.Vector3();
   private readonly viewportSize = new THREE.Vector2();
   private readonly scratchColor = new THREE.Color();
+  private readonly camPos = new THREE.Vector3();
+  private readonly camDir = new THREE.Vector3(0, 0, -1);
+  private projScale = 500;
 
   // Dirty tracking: appended blips are contiguous, restamped ones are scattered, so the two
   // get separate ranges — a ping in a well-scanned room must not re-upload the whole buffer.
@@ -639,6 +1003,28 @@ export class PaintSystem {
   private appendMax = -Infinity;
   private touchMin = Infinity;
   private touchMax = -Infinity;
+
+  /**
+   * Sampling work still to do for the most recent event. At most one exists at a time: a new
+   * event drains the outstanding one first, which is also what keeps the module-level candidate
+   * and bounding-sphere scratch valid across the chunks of a single job.
+   */
+  private job: {
+    event: SoundEvent;
+    cone: boolean;
+    candidates: readonly Aabb[];
+    n: number;
+    cursor: number;
+    phi0: number;
+    cosMax: number;
+    ux: number;
+    uy: number;
+    uz: number;
+    tx: number;
+    ty: number;
+    tz: number;
+  } | null = null;
+  private lastChunkAt = 0;
 
   private stats: PaintStats = {
     points: 0,
@@ -648,37 +1034,64 @@ export class PaintSystem {
     lastDeposited: 0,
     lastRefreshed: 0,
     lastPaintMs: 0,
+    lastChunkMs: 0,
+    lastChunks: 0,
+    pendingRays: 0,
     lastMaxRange: 0,
     lastFar20: 0,
+    lastSpanDeg: 0,
+    lastLateral: 0,
   };
+
+  private diag: PaintDiagnostics = {
+    waveLive: false,
+    waveFront: 0,
+    waveRange: 0,
+    waveProgress: 0,
+    arrivedMax: 0,
+    pendingMin: Infinity,
+    visible: 0,
+    maxBlipPixels: 0,
+    maxBlipWant: 0,
+  };
+  private diagTime = Number.NaN;
 
   constructor(
     private readonly world: StaticWorld,
-    options: { capacity?: number; tunables?: PaintTunables; ramp?: AgeRamp } = {},
+    options: {
+      capacity?: number;
+      tunables?: PaintTunables;
+      ramp?: AgeRamp;
+      wave?: WaveTunables;
+    } = {},
   ) {
     this.capacity = options.capacity ?? DEFAULT_CAPACITY;
     this.tunables = options.tunables ?? defaultPaintTunables();
     this.ramp = options.ramp ?? defaultAgeRamp();
+    this.wave = options.wave ?? defaultWaveTunables();
     this.stats.capacity = this.capacity;
 
     this.positions = new Float32Array(this.capacity * 3);
     this.births = new Float32Array(this.capacity);
+    this.priors = new Float32Array(this.capacity);
     this.intensities = new Float32Array(this.capacity);
     this.seeds = new Float32Array(this.capacity);
-    this.classes = new Float32Array(this.capacity);
+    this.mats = new Float32Array(this.capacity);
     this.slotKeys = new Float64Array(this.capacity).fill(-1);
 
     this.geometry.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
     this.geometry.setAttribute('aBirth', new THREE.BufferAttribute(this.births, 1));
+    this.geometry.setAttribute('aPrior', new THREE.BufferAttribute(this.priors, 1));
     this.geometry.setAttribute('aIntensity', new THREE.BufferAttribute(this.intensities, 1));
     this.geometry.setAttribute('aSeed', new THREE.BufferAttribute(this.seeds, 1));
-    // Reserved: the source class travels with every blip so a later batch can tint the *event*
-    // layer (or debug-colour by source) without a second pass over the buffer. Matter itself
-    // must never read it — §3.2.
-    this.geometry.setAttribute('aClass', new THREE.BufferAttribute(this.classes, 1));
+    this.geometry.setAttribute('aMat', new THREE.BufferAttribute(this.mats, 1));
     this.geometry.setDrawRange(0, 0);
 
     const p = this.profiles[0]!;
+    const hotColors = MATERIAL_VOICES.map((m) => new THREE.Vector3(...m.hot));
+    const coolColors = MATERIAL_VOICES.map((m) => new THREE.Vector3(...m.cool));
+    const matSizes = MATERIAL_VOICES.map((m) => m.sizeBias);
+
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
@@ -686,6 +1099,8 @@ export class PaintSystem {
         uProjScale: { value: 500 },
         uMinPixels: { value: p.minPixels },
         uMaxPixels: { value: p.maxPixels },
+        uPixelCap: { value: this.tunables.pixelCap },
+        uDepthExp: { value: p.depthExp },
         uSizeJitter: { value: p.sizeJitter },
         uBrightJitter: { value: p.brightJitter },
         uBrightness: { value: p.brightness },
@@ -701,9 +1116,18 @@ export class PaintSystem {
         },
         uSkeletonAlpha: { value: this.ramp.skeletonAlpha },
         uSkeletonSize: { value: this.ramp.skeletonSize },
+        uRimK: { value: 3 / this.wave.rimSeconds },
+        uRimBoost: { value: this.wave.rimBoost },
+        uRimSize: { value: this.wave.rimSize },
+        uDissolve: { value: p.dissolve },
+        uMaterialMix: { value: p.materialMix },
         uFresh: { value: rawColor(MATTER_FRESH) },
         uMid: { value: rawColor(MATTER_MID) },
         uCold: { value: rawColor(MATTER_COLD) },
+        uViolet: { value: new THREE.Vector3(...VIOLET) },
+        uMatHot: { value: hotColors },
+        uMatCool: { value: coolColors },
+        uMatSize: { value: matSizes },
       },
       vertexShader: MATTER_VERTEX,
       fragmentShader: MATTER_FRAGMENT,
@@ -724,7 +1148,7 @@ export class PaintSystem {
     this.eventGeometry.setAttribute('aBirth', new THREE.BufferAttribute(this.eventBirths, 1));
     this.eventGeometry.setAttribute('aScale', new THREE.BufferAttribute(this.eventScales, 1));
     this.eventGeometry.setDrawRange(0, 0);
-    this.eventBirths.fill(-1e9);
+    this.eventBirths.fill(NEVER);
 
     this.eventMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -744,7 +1168,15 @@ export class PaintSystem {
     this.eventPoints.frustumCulled = false;
     this.eventPoints.renderOrder = 2;
 
-    this.root.add(this.points, this.eventPoints);
+    this.tracer = new TracerStreaks(rawColor(EVENT_COLORS['e-ping']));
+    this.tracer.setLook(this.wave.tracerSeconds, this.wave.tracerBrightness);
+    this.dust = new WaveDust(DUST_COUNT, DUST_EXTENT, makeRng(0xd0757));
+    this.dust.setLook(this.wave.dustGain, this.wave.dustSize, this.wave.dustShell);
+
+    this.births.fill(NEVER);
+    this.priors.fill(NEVER);
+
+    this.root.add(this.points, this.eventPoints, this.tracer.object, this.dust.object);
   }
 
   /** The object to add to the scene. */
@@ -769,7 +1201,7 @@ export class PaintSystem {
   /**
    * Switches look. Repainting is deliberate rather than optional: density and cell size are
    * *sampling* parameters, so the honest comparison is the same events resampled, not the same
-   * blips restyled. Reseeding keeps the three shots comparable.
+   * blips restyled. Reseeding keeps the shots comparable.
    */
   setProfile(index: number): void {
     if (index < 0 || index >= this.profiles.length) return;
@@ -784,13 +1216,16 @@ export class PaintSystem {
     u.uSizeWorld!.value = p.sizeWorld;
     u.uMinPixels!.value = p.minPixels;
     u.uMaxPixels!.value = p.maxPixels;
+    u.uDepthExp!.value = p.depthExp;
     u.uSizeJitter!.value = p.sizeJitter;
     u.uBrightJitter!.value = p.brightJitter;
     u.uBrightness!.value = p.brightness;
     u.uSoftness!.value = p.softness;
+    u.uDissolve!.value = p.dissolve;
+    u.uMaterialMix!.value = p.materialMix;
   }
 
-  /** Pushes ramp/window edits from the GUI into the shader. */
+  /** Pushes ramp/window/wave edits from the GUI into the shaders. */
   applyTunables(): void {
     const u = this.material.uniforms;
     (u.uRampTimes!.value as THREE.Vector3).set(
@@ -801,13 +1236,37 @@ export class PaintSystem {
     u.uSkeletonAlpha!.value = this.ramp.skeletonAlpha;
     u.uSkeletonSize!.value = this.ramp.skeletonSize;
     u.uWindowRadius!.value = this.tunables.windowRadius;
+    u.uPixelCap!.value = this.tunables.pixelCap;
+    u.uRimK!.value = 3 / Math.max(0.02, this.wave.rimSeconds);
+    u.uRimBoost!.value = this.wave.rimBoost;
+    u.uRimSize!.value = this.wave.rimSize;
+    this.tracer.setLook(this.wave.tracerSeconds, this.wave.tracerBrightness);
+    this.dust.setLook(this.wave.dustGain, this.wave.dustSize, this.wave.dustShell);
   }
 
-  /** Paint clock, in seconds. The scene owns it so it can be scaled for ageing tests. */
-  setTime(seconds: number): void {
+  /**
+   * Advances the paint clock and everything derived from it: which fronts are still expanding,
+   * and what the air between them looks like. The scene owns the clock so it can be scaled for
+   * ageing and wave-travel tests.
+   */
+  advance(seconds: number): void {
     this.time = seconds;
     this.material.uniforms.uTime!.value = seconds;
     this.eventMaterial.uniforms.uTime!.value = seconds;
+    this.tracer.setTime(seconds);
+
+    // One chunk of outstanding sampling per frame. The gap is wall clock, not sim time, which
+    // is what makes it self-limiting: a frame's worth of fixed updates all run back to back in
+    // under a millisecond, so only the first of them is ever old enough to take a turn.
+    if (this.job !== null && performance.now() - this.lastChunkAt >= this.tunables.chunkGapMs) {
+      this.runChunk(this.tunables.chunkRays, this.tunables.chunkMs);
+    }
+
+    for (let i = this.waves.length - 1; i >= 0; i--) {
+      const w = this.waves[i]!;
+      if ((seconds - w.t0) * w.speed > w.radius) this.waves.splice(i, 1);
+    }
+    this.dust.update(seconds, this.listener, this.waves, this.wave.dust);
   }
 
   get clock(): number {
@@ -826,9 +1285,12 @@ export class PaintSystem {
    */
   updateView(camera: THREE.PerspectiveCamera, renderer: THREE.WebGLRenderer): void {
     renderer.getDrawingBufferSize(this.viewportSize);
-    const projScale = (camera.projectionMatrix.elements[5] ?? 1) * this.viewportSize.y * 0.5;
-    this.material.uniforms.uProjScale!.value = projScale;
-    this.eventMaterial.uniforms.uProjScale!.value = projScale;
+    this.projScale = (camera.projectionMatrix.elements[5] ?? 1) * this.viewportSize.y * 0.5;
+    this.material.uniforms.uProjScale!.value = this.projScale;
+    this.eventMaterial.uniforms.uProjScale!.value = this.projScale;
+    this.dust.setProjScale(this.projScale);
+    camera.getWorldPosition(this.camPos);
+    camera.getWorldDirection(this.camDir);
   }
 
   /** Discards every blip and reseeds the sampler. */
@@ -836,10 +1298,18 @@ export class PaintSystem {
     this.writeIndex = 0;
     this.cells.clear();
     this.slotKeys.fill(-1);
-    this.births.fill(-1e9);
+    this.births.fill(NEVER);
+    this.priors.fill(NEVER);
     this.eventIndex = 0;
-    this.eventBirths.fill(-1e9);
+    this.eventBirths.fill(NEVER);
     this.rng = makeRng(this.seed);
+    this.waves.length = 0;
+    this.tracer.clear();
+    // Cancel outstanding sampling too. Since a ping is now spread over several frames, a clear
+    // that only emptied the buffer would be undone a frame later by the chunks still queued for
+    // the event that was in flight when the key was pressed.
+    this.job = null;
+    this.stats.pendingRays = 0;
     // Nothing needs re-uploading: the draw range is zero, so whatever stale bytes the GPU
     // still holds beyond it are never read, and the next event overwrites from slot 0 up.
     this.geometry.setDrawRange(0, 0);
@@ -854,6 +1324,9 @@ export class PaintSystem {
     this.stats.lastPaintMs = 0;
     this.stats.lastMaxRange = 0;
     this.stats.lastFar20 = 0;
+    this.stats.lastSpanDeg = 0;
+    this.stats.lastLateral = 0;
+    this.diagTime = Number.NaN;
     this.flushEvents();
   }
 
@@ -866,12 +1339,21 @@ export class PaintSystem {
   // ---- the hook the bus calls ---------------------------------------------
 
   handle = (event: SoundEvent): void => {
-    const t0 = performance.now();
+    // Whatever the last event still owed gets paid before this one starts: the sampler's
+    // scratch arrays are shared, and its statistics belong to the event that earned them.
+    this.drain();
+
     this.stats.lastRays = 0;
     this.stats.lastDeposited = 0;
     this.stats.lastRefreshed = 0;
+    this.stats.lastPaintMs = 0;
+    this.stats.lastChunkMs = 0;
+    this.stats.lastChunks = 0;
+    this.stats.pendingRays = 0;
     this.stats.lastMaxRange = 0;
     this.stats.lastFar20 = 0;
+    this.stats.lastSpanDeg = 0;
+    this.stats.lastLateral = 0;
 
     // §3.1: no free intel. An event you cannot hear paints you nothing.
     const heard = Math.hypot(
@@ -885,21 +1367,128 @@ export class PaintSystem {
       const cell = this.profile.cellSize;
       this.targetDensity = this.tunables.splatFill / (cell * cell);
       this.addEventMarker(event);
-      if (event.coneAngleDeg >= 359.9) this.paintOmni(event);
-      else this.paintCone(event);
+      this.addWave(event);
+      if (event.class === 'e-ping') this.fireTracer(event);
+      if (event.coneAngleDeg >= 359.9) this.planOmni(event);
+      else this.planCone(event);
+      // The first chunk runs now, whatever the budget: a ping must answer on the frame it is
+      // pressed, even if the far half of the answer catches up over the next two.
+      if (this.job !== null) this.runChunk(this.tunables.chunkRays, this.tunables.chunkMs);
     }
-    this.stats.lastPaintMs = performance.now() - t0;
-    this.flush();
+    this.diagTime = Number.NaN;
   };
+
+  /** Finishes any outstanding sampling immediately, whatever it costs. */
+  private drain(): void {
+    let guard = 0;
+    while (this.job !== null && guard++ < 64) this.runChunk(Infinity, Infinity);
+    this.job = null;
+  }
+
+  /** Fronts still expanding, newest last. Read by the dust field and by the diagnostics. */
+  get liveWaves(): readonly LiveWave[] {
+    return this.waves;
+  }
+
+  /** Whether the air is currently showing a front. False costs nothing at all — the field is
+   *  not in the draw list. */
+  get dustLit(): boolean {
+    return this.dust.object.visible;
+  }
+
+  get tracerAlive(): boolean {
+    return this.tracer.alive(this.time);
+  }
+
+  get tracerAge(): number {
+    return this.time - this.tracer.lastFired;
+  }
+
+  private addWave(event: SoundEvent): void {
+    const omni = event.coneAngleDeg >= 359.9;
+    this.waves.push({
+      x: event.x,
+      y: event.y,
+      z: event.z,
+      dirX: event.dirX,
+      dirY: event.dirY,
+      dirZ: event.dirZ,
+      cosHalf: omni ? -1 : Math.cos((event.coneAngleDeg * Math.PI) / 360),
+      t0: event.time,
+      speed: event.waveSpeed,
+      radius: event.paintRadius,
+      intensity: event.intensity,
+    });
+    while (this.waves.length > MAX_LIVE_WAVES) this.waves.shift();
+  }
+
+  private fireTracer(event: SoundEvent): void {
+    this.tracer.fire(
+      event.x,
+      event.y - this.wave.tracerDrop,
+      event.z,
+      event.dirX,
+      event.dirY,
+      event.dirZ,
+      this.wave.tracerStart,
+      this.wave.tracerLength,
+      event.time,
+    );
+  }
 
   // ---- sampling -----------------------------------------------------------
 
   private rayBudget(event: SoundEvent): number {
     const base = CLASS_RAYS[event.class];
-    return Math.max(16, Math.round(base * this.profile.density * event.intensity));
+    const want = Math.round(base * this.profile.density * event.intensity);
+    return Math.max(16, Math.min(this.tunables.rayCap, want));
   }
 
-  private paintOmni(event: SoundEvent): void {
+  /**
+   * Drops candidates the event cannot physically reach, before a single ray is cast.
+   *
+   * The world query is a box, and a 110° cone's bounding box is most of the room — so without
+   * this every ray pays the full slab test against every wall in the level. A sphere-vs-cone
+   * and sphere-vs-range reject costs sixty tests once instead of ten thousand times sixty.
+   */
+  private cull(
+    list: Aabb[],
+    ox: number,
+    oy: number,
+    oz: number,
+    radius: number,
+    dirX: number,
+    dirY: number,
+    dirZ: number,
+    half: number,
+  ): void {
+    const cone = half < Math.PI / 2 + 1e-3;
+    let keep = 0;
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i]!;
+      const cx = (b.minX + b.maxX) / 2;
+      const cy = (b.minY + b.maxY) / 2;
+      const cz = (b.minZ + b.maxZ) / 2;
+      const hx = (b.maxX - b.minX) / 2;
+      const hy = (b.maxY - b.minY) / 2;
+      const hz = (b.maxZ - b.minZ) / 2;
+      const br = Math.sqrt(hx * hx + hy * hy + hz * hz);
+      const ex = cx - ox;
+      const ey = cy - oy;
+      const ez = cz - oz;
+      const d = Math.sqrt(ex * ex + ey * ey + ez * ez);
+      if (d - br > radius) continue;
+      if (cone && d > br) {
+        const cosA = (ex * dirX + ey * dirY + ez * dirZ) / d;
+        const angle = Math.acos(cosA < -1 ? -1 : cosA > 1 ? 1 : cosA);
+        if (angle - Math.asin(Math.min(1, br / d)) > half) continue;
+      }
+      list[keep++] = b;
+    }
+    list.length = keep;
+  }
+
+  private planOmni(event: SoundEvent): void {
     const r = event.paintRadius;
     const candidates = this.world.query(
       event.x - r,
@@ -910,6 +1499,7 @@ export class PaintSystem {
       event.z + r,
       this.candidates,
     );
+    this.cull(candidates, event.x, event.y, event.z, r, 0, 0, 0, Math.PI);
     if (candidates.length === 0) return;
     buildSpheres(candidates);
 
@@ -920,26 +1510,29 @@ export class PaintSystem {
     this.spread = Math.sqrt(4 / n);
     this.budget = this.tunables.maxPerEvent;
 
-    // A jittered Fibonacci sphere: even coverage without the visible spiral of the pure form.
-    // Both jitters earn their keep. Stratifying `y` spaces the rays evenly in polar angle, and
-    // scattering `phi` by one footprint's worth of arc breaks up the lattice's spiral arms —
-    // which otherwise project onto a floor as concentric rings centred on the player, the most
-    // obvious "this is a sampling pattern, not a room" tell the cloud can produce.
-    const phi0 = this.rng() * Math.PI * 2;
-    for (let i = 0; i < n; i++) {
-      const y = 1 - (2 * (i + this.rng())) / n;
-      const rr = Math.sqrt(Math.max(0, 1 - y * y));
-      const phi = i * GOLDEN_ANGLE + phi0 + (this.rng() - 0.5) * (this.spread / Math.max(0.15, rr));
-      this.shoot(event, candidates, Math.cos(phi) * rr, y, Math.sin(phi) * rr, false, 0);
-      if (this.budget <= 0) return;
-    }
+    this.job = {
+      event,
+      cone: false,
+      candidates,
+      n,
+      cursor: 0,
+      phi0: this.rng() * Math.PI * 2,
+      cosMax: -1,
+      ux: 0,
+      uy: 0,
+      uz: 0,
+      tx: 0,
+      ty: 0,
+      tz: 0,
+    };
   }
 
-  private paintCone(event: SoundEvent): void {
+  private planCone(event: SoundEvent): void {
     const r = event.paintRadius;
     const half = (event.coneAngleDeg * Math.PI) / 360;
     const cosMax = Math.cos(half);
-    const capRadius = r * Math.tan(half);
+    // A cone wider than a right angle has no finite far cap; its bounding box is the sphere.
+    const capRadius = half >= Math.PI / 2 - 1e-3 ? r : r * Math.tan(half);
 
     // Conservative AABB of the cone: the apex plus the far cap's bounding cube.
     const cx = event.x + event.dirX * r;
@@ -954,6 +1547,7 @@ export class PaintSystem {
       Math.max(event.z, cz + capRadius),
       this.candidates,
     );
+    this.cull(candidates, event.x, event.y, event.z, r, event.dirX, event.dirY, event.dirZ, half);
     if (candidates.length === 0) return;
     buildSpheres(candidates);
 
@@ -981,34 +1575,106 @@ export class PaintSystem {
     this.spread = Math.sqrt(solidAngle / (Math.PI * n));
     this.budget = this.tunables.maxPerEvent;
 
+    this.job = {
+      event,
+      cone: true,
+      candidates,
+      n,
+      cursor: 0,
+      phi0: this.rng() * Math.PI * 2,
+      cosMax,
+      ux,
+      uy,
+      uz,
+      tx,
+      ty,
+      tz,
+    };
+  }
+
+  /**
+   * Casts the next slice of the outstanding job's rays.
+   *
+   * Ray directions are a pure function of the ray *index*, so a job can stop and resume between
+   * frames without the pattern shifting; the only shared state is the seeded RNG, and nothing
+   * else is allowed to draw from it while a job is open.
+   */
+  private runChunk(maxRays: number, budgetMs: number): void {
+    const job = this.job;
+    if (job === null) return;
+    const t0 = performance.now();
+    const { event, candidates, n, phi0, cosMax } = job;
+    // Re-seated every chunk, because a job outlives the frame that started it.
+    this.emitX = event.x;
+    this.emitY = event.y;
+    this.emitZ = event.z;
+    this.emitTime = event.time;
+    this.emitInvSpeed = 1 / event.waveSpeed;
     const feather = this.tunables.coneFeather;
-    const phi0 = this.rng() * Math.PI * 2;
-    for (let i = 0; i < n; i++) {
-      // Stratified in solid angle: `u` is the fraction of the cap's area, so it is also how
-      // far out toward the rim this ray sits — which is exactly what the edge feather wants.
-      const u = (i + this.rng()) / n;
-      const cosT = 1 - u * (1 - cosMax);
-      const sinT = Math.sqrt(Math.max(0, 1 - cosT * cosT));
-      const phi = i * GOLDEN_ANGLE + phi0 + (this.rng() - 0.5) * (this.spread / Math.max(0.06, sinT));
-      const cp = Math.cos(phi) * sinT;
-      const sp = Math.sin(phi) * sinT;
-      // A beam with a stencilled edge reads as a projected disc, not as a beam.
-      let rim = 0;
-      if (u > 1 - feather) {
-        rim = (u - (1 - feather)) / feather;
-        if (this.rng() < rim * rim) continue;
+    const blipCap =
+      this.stats.lastDeposited + this.stats.lastRefreshed + this.tunables.chunkBlips;
+    let processed = 0;
+
+    while (job.cursor < n && this.budget > 0) {
+      const i = job.cursor++;
+      processed++;
+      if (job.cone) {
+        // Stratified in solid angle: `u` is the fraction of the cap's area, so it is also how
+        // far out toward the rim this ray sits — which is exactly what the edge feather wants.
+        const u = (i + this.rng()) / n;
+        const cosT = 1 - u * (1 - cosMax);
+        const sinT = Math.sqrt(Math.max(0, 1 - cosT * cosT));
+        const phi =
+          i * GOLDEN_ANGLE + phi0 + (this.rng() - 0.5) * (this.spread / Math.max(0.06, sinT));
+        const cp = Math.cos(phi) * sinT;
+        const sp = Math.sin(phi) * sinT;
+        // A beam with a stencilled edge reads as a projected disc, not as a beam.
+        let rim = 0;
+        if (u > 1 - feather) {
+          rim = (u - (1 - feather)) / feather;
+          if (this.rng() < rim * rim) {
+            if (processed >= maxRays) break;
+            continue;
+          }
+        }
+        this.shoot(
+          event,
+          candidates,
+          job.ux * cp + job.tx * sp + event.dirX * cosT,
+          job.uy * cp + job.ty * sp + event.dirY * cosT,
+          job.uz * cp + job.tz * sp + event.dirZ * cosT,
+          true,
+          rim,
+        );
+      } else {
+        // A jittered Fibonacci sphere: even coverage without the visible spiral of the pure
+        // form. Both jitters earn their keep. Stratifying `y` spaces the rays evenly in polar
+        // angle, and scattering `phi` by one footprint's worth of arc breaks up the lattice's
+        // spiral arms — which otherwise project onto a floor as concentric rings centred on
+        // the player, the most obvious "this is a sampling pattern, not a room" tell the cloud
+        // can produce.
+        const y = 1 - (2 * (i + this.rng())) / n;
+        const rr = Math.sqrt(Math.max(0, 1 - y * y));
+        const phi =
+          i * GOLDEN_ANGLE + phi0 + (this.rng() - 0.5) * (this.spread / Math.max(0.15, rr));
+        this.shoot(event, candidates, Math.cos(phi) * rr, y, Math.sin(phi) * rr, false, 0);
       }
-      this.shoot(
-        event,
-        candidates,
-        ux * cp + tx * sp + event.dirX * cosT,
-        uy * cp + ty * sp + event.dirY * cosT,
-        uz * cp + tz * sp + event.dirZ * cosT,
-        true,
-        rim,
-      );
-      if (this.budget <= 0) return;
+      if (processed >= maxRays) break;
+      if (this.stats.lastDeposited + this.stats.lastRefreshed >= blipCap) break;
+      // Polled every 16 rays, not every 64: a single ray in a dense look can splat hundreds of
+      // blips, so a coarser poll overshot the budget by nearly 2× on the first chunk.
+      if ((processed & 15) === 0 && performance.now() - t0 >= budgetMs) break;
     }
+
+    if (job.cursor >= n || this.budget <= 0) this.job = null;
+    const ms = performance.now() - t0;
+    this.lastChunkAt = performance.now();
+    this.stats.lastPaintMs += ms;
+    if (ms > this.stats.lastChunkMs) this.stats.lastChunkMs = ms;
+    this.stats.lastChunks++;
+    this.stats.pendingRays = this.job === null ? 0 : n - job.cursor;
+    this.diagTime = Number.NaN;
+    this.flush();
   }
 
   /** Casts one ray and, if it lands, splats its footprint onto the surface it found. */
@@ -1037,9 +1703,29 @@ export class PaintSystem {
       if (this.rng() > fade) return;
     }
 
+    const mat = box.mat ?? 0;
+    const voice = MATERIAL_VOICES[mat] ?? MATERIAL_VOICES[0]!;
+    // The material voice is a look-4 candidate, not a law (§3.2): where a look has not asked
+    // for it, reflectivity and micro-relief blend back to the neutral surface looks 1-3 have
+    // always sampled, so switching looks compares sampling and drawing, never two worlds.
+    const voiceMix = this.profile.materialMix;
+
     const dAxis = axis === 0 ? dx : axis === 1 ? dy : dz;
     const normal = dAxis > 0 ? -1 : 1;
-    const off = tun.surfaceOffset * normal;
+    // Micro-relief: a coherent displacement along the normal, so a surface has a grain of its
+    // own instead of being a mathematically perfect plane. Sampled once per footprint.
+    const relief =
+      voiceMix === 0
+        ? 0
+        : voice.rough *
+          tun.roughness *
+          voiceMix *
+          valueNoise(
+            (event.x + dx * t) * 3.1,
+            (event.y + dy * t) * 3.1,
+            (event.z + dz * t) * 3.1,
+          );
+    const off = (tun.surfaceOffset + Math.abs(relief)) * normal;
     const px = event.x + dx * t + (axis === 0 ? off : 0);
     const py = event.y + dy * t + (axis === 1 ? off : 0);
     const pz = event.z + dz * t + (axis === 2 ? off : 0);
@@ -1048,12 +1734,13 @@ export class PaintSystem {
     // is both true of sound and the cheapest shape cue the cloud has.
     let intensity =
       event.intensity *
+      (1 + (voice.refl - 1) * voiceMix) *
       (tun.rimDim + (1 - tun.rimDim) * (1 - rel)) *
       (tun.grazeDim + (1 - tun.grazeDim) * Math.abs(dAxis)) *
       (1 - 0.55 * rim);
 
     if (edgeBias && t > tun.edgeStart) {
-      // §3.5: at range the E-ping returns silhouettes, not fog. Distance from the hit to the
+      // §3.5: at range the beam returns silhouettes, not fog. Distance from the hit to the
       // border of the face it landed on stands in for "is this an edge" — cheap, and exactly
       // right for a world made of boxes.
       const eu =
@@ -1072,9 +1759,30 @@ export class PaintSystem {
       intensity *= 1 + (tun.edgeBoost - 1) * edgeW * farT;
     }
 
+    if (edgeBias) {
+      /*
+       * The cone's own geometry readout, taken here — after every rejection — so it describes
+       * paint that actually landed rather than rays that were merely fired. How wide the answer
+       * came back, and how far off the axis it reached: the only way tooling outside the
+       * renderer can prove that a beam is a beam and that its shape is the one that was asked
+       * for.
+       */
+      const along = dx * event.dirX + dy * event.dirY + dz * event.dirZ;
+      const offAxis = Math.sqrt(Math.max(0, 1 - along * along));
+      const lateral = t * offAxis;
+      if (lateral > this.stats.lastLateral) this.stats.lastLateral = lateral;
+      // Horizontal span only: a cone aimed at the floor has no meaningful compass bearing.
+      if (Math.hypot(event.dirX, event.dirZ) > 0.2 && Math.hypot(dx, dz) > 1e-4) {
+        let hAngle = Math.atan2(dz, dx) - Math.atan2(event.dirZ, event.dirX);
+        if (hAngle > Math.PI) hAngle -= 2 * Math.PI;
+        if (hAngle < -Math.PI) hAngle += 2 * Math.PI;
+        const span = 2 * Math.abs(hAngle) * (180 / Math.PI);
+        if (span > this.stats.lastSpanDeg) this.stats.lastSpanDeg = span;
+      }
+    }
+
     if (t > this.stats.lastMaxRange) this.stats.lastMaxRange = t;
     const far = t >= FAR_RANGE;
-    const cls = CLASS_INDEX[event.class];
 
     /*
      * A ray heard a *patch*, not a point, so its return is spread over the footprint it
@@ -1136,7 +1844,7 @@ export class PaintSystem {
         if (axis !== 2 && (qz <= box.minZ || qz >= box.maxZ)) continue;
       }
       if (far) this.stats.lastFar20++;
-      this.deposit(qx, qy, qz, intensity, cls);
+      this.deposit(qx, qy, qz, intensity, mat);
       if (--this.budget <= 0) return;
     }
   }
@@ -1151,13 +1859,48 @@ export class PaintSystem {
     return (ix * 65536 + iy) * 65536 + iz;
   }
 
-  private deposit(x: number, y: number, z: number, intensity: number, cls: number): void {
+  /**
+   * When the front of the event now being sampled reaches a given place.
+   *
+   * Taken from the position that will actually be *drawn*, never from the ray's hit distance.
+   * A footprint met at a grazing angle stretches radially by up to MAX_FOOTPRINT_STRETCH, so
+   * stamping a whole patch with its ray's hit distance lit the far end of the patch metres
+   * before the front got there; and a voxel that already holds a blip keeps its stored position,
+   * so its stamp has to be recomputed from that position rather than from the new sample that
+   * landed a fraction of a cell away. Both together make the invariant exact rather than
+   * approximate: no blip is ever visible outside its own front. A blip visible before its wave
+   * arrives is the system lying (law 2), which is the one thing it may never do.
+   */
+  private arrivalAt(x: number, y: number, z: number): number {
+    const dx = x - this.emitX;
+    const dy = y - this.emitY;
+    const dz = z - this.emitZ;
+    return this.emitTime + Math.sqrt(dx * dx + dy * dy + dz * dz) * this.emitInvSpeed;
+  }
+
+  private deposit(x: number, y: number, z: number, intensity: number, mat: number): void {
     if (this.tunables.dedupe) {
       const key = this.cellKey(x, y, z);
       const existing = this.cells.get(key);
       if (existing !== undefined) {
-        // Already known ground: restamp it rather than pile a second blip on the same voxel.
-        this.births[existing] = this.time;
+        /*
+         * Already known ground: restamp it rather than pile a second blip on the same voxel.
+         *
+         * The prior stamp is what stops a second ping from *erasing* a room while its front
+         * crosses it. The blip keeps showing the arrival it already had until the new front
+         * overtakes that spot; only an arrival that has genuinely landed is allowed to become
+         * the fallback, so a point restamped twice in flight does not fall back to a stamp
+         * that never happened either.
+         */
+        const i3 = existing * 3;
+        const arrival = this.arrivalAt(
+          this.positions[i3]!,
+          this.positions[i3 + 1]!,
+          this.positions[i3 + 2]!,
+        );
+        const oldBirth = this.births[existing]!;
+        if (oldBirth <= this.time) this.priors[existing] = oldBirth;
+        this.births[existing] = arrival;
         if (intensity > this.intensities[existing]!) this.intensities[existing] = intensity;
         this.markTouched(existing, existing);
         this.stats.lastRefreshed++;
@@ -1168,10 +1911,18 @@ export class PaintSystem {
       if (stale >= 0) this.cells.delete(stale);
       this.slotKeys[slot] = key;
       this.cells.set(key, slot);
-      this.writeSlot(slot, x, y, z, intensity, cls);
+      this.writeSlot(slot, x, y, z, intensity, mat, this.arrivalAt(x, y, z));
       return;
     }
-    this.writeSlot(this.writeIndex % this.capacity, x, y, z, intensity, cls);
+    this.writeSlot(
+      this.writeIndex % this.capacity,
+      x,
+      y,
+      z,
+      intensity,
+      mat,
+      this.arrivalAt(x, y, z),
+    );
   }
 
   private writeSlot(
@@ -1180,16 +1931,19 @@ export class PaintSystem {
     y: number,
     z: number,
     intensity: number,
-    cls: number,
+    mat: number,
+    arrival: number,
   ): void {
     const i3 = slot * 3;
     this.positions[i3] = x;
     this.positions[i3 + 1] = y;
     this.positions[i3 + 2] = z;
-    this.births[slot] = this.time;
+    this.births[slot] = arrival;
+    // A brand-new blip has no history, so there is nothing to show ahead of the front.
+    this.priors[slot] = NEVER;
     this.intensities[slot] = intensity;
     this.seeds[slot] = this.rng();
-    this.classes[slot] = cls;
+    this.mats[slot] = mat;
     this.markAppended(slot, slot);
     this.markTouched(slot, slot);
     this.writeIndex++;
@@ -1216,7 +1970,7 @@ export class PaintSystem {
       const count = this.appendMax - this.appendMin + 1;
       this.uploadRange('position', start * 3, count * 3);
       this.uploadRange('aSeed', start, count);
-      this.uploadRange('aClass', start, count);
+      this.uploadRange('aMat', start, count);
       this.appendMin = Infinity;
       this.appendMax = -Infinity;
     }
@@ -1224,6 +1978,7 @@ export class PaintSystem {
       const start = this.touchMin;
       const count = this.touchMax - this.touchMin + 1;
       this.uploadRange('aBirth', start, count);
+      this.uploadRange('aPrior', start, count);
       this.uploadRange('aIntensity', start, count);
       this.touchMin = Infinity;
       this.touchMax = -Infinity;
@@ -1239,6 +1994,112 @@ export class PaintSystem {
     const attr = this.geometry.getAttribute(name) as THREE.BufferAttribute;
     attr.addUpdateRange(start, count);
     attr.needsUpdate = true;
+  }
+
+  // ---- diagnostics ---------------------------------------------------------
+
+  /**
+   * Walks the live buffer once and reports what a viewer could actually see this instant.
+   *
+   * This is a measurement, not a restatement: it re-derives visibility from the same birth and
+   * prior stamps the vertex shader reads, so "nothing is drawn past the front" is checked
+   * against the data rather than against the formula that produced it. Cached per clock value,
+   * because the driver polls far faster than the simulation ticks.
+   */
+  diagnostics(): PaintDiagnostics {
+    if (this.diagTime === this.time) return this.diag;
+    this.diagTime = this.time;
+
+    const d = this.diag;
+    const newest = this.waves.length > 0 ? this.waves[this.waves.length - 1]! : null;
+    if (newest === null) {
+      d.waveLive = false;
+      d.waveFront = 0;
+      d.waveRange = 0;
+      d.waveProgress = 1;
+    } else {
+      const front = Math.max(0, (this.time - newest.t0) * newest.speed);
+      d.waveLive = front <= newest.radius;
+      d.waveFront = Math.min(front, newest.radius);
+      d.waveRange = newest.radius;
+      d.waveProgress = newest.radius > 0 ? Math.min(1, front / newest.radius) : 1;
+    }
+
+    const drawn = Math.min(this.writeIndex, this.capacity);
+    const now = this.time;
+    const window = this.tunables.windowRadius;
+    const lx = this.listener.x;
+    const ly = this.listener.y;
+    const lz = this.listener.z;
+    const cx = this.camPos.x;
+    const cy = this.camPos.y;
+    const cz = this.camPos.z;
+    const dxv = this.camDir.x;
+    const dyv = this.camDir.y;
+    const dzv = this.camDir.z;
+    const ox = newest?.x ?? 0;
+    const oy = newest?.y ?? 0;
+    const oz = newest?.z ?? 0;
+
+    let arrivedMax = 0;
+    let pendingMin = Infinity;
+    let visible = 0;
+    let minDepth = Infinity;
+
+    for (let i = 0; i < drawn; i++) {
+      const i3 = i * 3;
+      const px = this.positions[i3]!;
+      const py = this.positions[i3 + 1]!;
+      const pz = this.positions[i3 + 2]!;
+      const wx = px - lx;
+      const wy = py - ly;
+      const wz = pz - lz;
+      if (wx * wx + wy * wy + wz * wz > window * window) continue;
+
+      const birth = this.births[i]!;
+      const prior = this.priors[i]!;
+      const shown = birth <= now || (prior > -1e8 && prior <= now);
+      if (newest !== null) {
+        const ex = px - ox;
+        const ey = py - oy;
+        const ez = pz - oz;
+        const dist = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        if (shown) {
+          if (dist > arrivedMax) arrivedMax = dist;
+        } else if (dist < pendingMin) pendingMin = dist;
+      }
+      if (!shown) continue;
+      visible++;
+      const depth = (px - cx) * dxv + (py - cy) * dyv + (pz - cz) * dzv;
+      if (depth > 0.05 && depth < minDepth) minDepth = depth;
+    }
+
+    d.arrivedMax = arrivedMax;
+    d.pendingMin = pendingMin;
+    d.visible = visible;
+
+    /*
+     * The largest splat on screen. Bounded rather than measured per point: the size formula is
+     * monotone in `want`, and `want` is bounded above by the biggest per-point multiplier over
+     * the nearest visible blip — which costs one `pow` instead of half a million.
+     */
+    if (minDepth === Infinity) {
+      d.maxBlipPixels = 0;
+      d.maxBlipWant = 0;
+    } else {
+      const p = this.profile;
+      // 1.15 is the largest material size bias (stone), and it only applies where a look asked.
+      const biggestBias = 1 + 0.15 * p.materialMix;
+      const factor = (1 + p.sizeJitter) * (1 + this.wave.rimSize) * biggestBias;
+      const want = (p.sizeWorld * factor * this.projScale) / Math.pow(minDepth, p.depthExp);
+      const q = want / Math.max(0.5, this.tunables.pixelCap);
+      let size = want / Math.cbrt(1 + q * q * q);
+      size = Math.min(size, p.maxPixels);
+      size = Math.max(size, p.minPixels);
+      d.maxBlipWant = want;
+      d.maxBlipPixels = size;
+    }
+    return d;
   }
 
   // ---- event layer ---------------------------------------------------------
@@ -1271,6 +2132,8 @@ export class PaintSystem {
     this.material.dispose();
     this.eventGeometry.dispose();
     this.eventMaterial.dispose();
+    this.tracer.dispose();
+    this.dust.dispose();
     this.root.clear();
   }
 }
