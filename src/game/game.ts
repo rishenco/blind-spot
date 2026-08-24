@@ -141,6 +141,8 @@ export class Game {
   private hudTimer = 0;
 
   private readonly aim = new THREE.Vector3();
+  /** The folders this game added to the shared panel, so `dispose` can take them with it. */
+  private readonly folders: GUI[] = [];
 
   constructor(ctx: GameCtx) {
     this.ctx = ctx;
@@ -255,8 +257,14 @@ export class Game {
   // ---- dev panel -----------------------------------------------------------
 
   private buildGui(): void {
-    const gui = this.ctx.gui;
     const push = (): void => this.paint.applyTunables();
+    const gui = {
+      addFolder: (name: string): GUI => {
+        const folder = this.ctx.gui.addFolder(name);
+        this.folders.push(folder);
+        return folder;
+      },
+    };
 
     const g = gui.addFolder('Game');
     g.add({ respawn: () => this.player.respawn() }, 'respawn').name('Respawn (R)');
@@ -585,5 +593,7 @@ export class Game {
     this.rigGeometry.dispose();
     this.rigMaterial.dispose();
     this.world.clear();
+    for (const folder of this.folders) folder.destroy();
+    this.folders.length = 0;
   }
 }

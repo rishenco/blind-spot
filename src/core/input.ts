@@ -125,8 +125,22 @@ export class Input {
 
   // ---- handlers ------------------------------------------------------------
 
+  /**
+   * True while the keystroke belongs to a text field rather than to the game.
+   *
+   * The dev panel is full of editable number fields, and without this typing a value into one
+   * also respawns the player (`r`), clears the map (`k`) and crouches him (`c`) on the way past.
+   */
+  private static isTyping(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (el === null || el.tagName === undefined) return false;
+    const tag = el.tagName.toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.repeat) return;
+    if (Input.isTyping(e.target)) return;
     this.codesPressedThisTick.add(e.code);
     const action = KEY_BINDINGS[e.code];
     if (action === undefined) return;
@@ -136,6 +150,8 @@ export class Input {
     this.pressedThisTick.add(action);
   };
 
+  // No typing guard on the way up: a key pressed in the world and released over a text field
+  // has to be released, or the body walks off on its own.
   private onKeyUp = (e: KeyboardEvent): void => {
     const action = KEY_BINDINGS[e.code];
     if (action !== undefined) this.down.delete(action);

@@ -169,46 +169,6 @@ export function hueFamilies(image, rect, { threshold = 24, margin = 16 } = {}) {
   };
 }
 
-/**
- * Fraction of a rectangle that has gone *white*, as opposed to merely bright.
- *
- * The matter layer is cyan-family at every age but the freshest (§3.2), and the cloud is drawn
- * additively — so a heavily overlapped patch of cooled paint pins green and blue and still leaves
- * red far behind. Ice-white is the one thing that lifts all three at once. Taking the dimmest
- * channel of a pixel therefore separates "young paint" from "a lot of old paint" in a way that
- * luminance cannot: the batch-2.3.1 complaint is specifically about white patches appearing on
- * cyan floor, and this is the number that sees them.
- *
- * Holes are punched out of it the way `meanLuminance` does, since DOM text is white by definition.
- */
-export function whiteFraction(image, rect, threshold = 100, holes = []) {
-  const { width, height, channels, data } = image;
-  const x0 = Math.max(0, rect.x);
-  const y0 = Math.max(0, rect.y);
-  const x1 = Math.min(width, rect.x + rect.w);
-  const y1 = Math.min(height, rect.y + rect.h);
-  let white = 0;
-  let count = 0;
-  for (let y = y0; y < y1; y++) {
-    for (let x = x0; x < x1; x++) {
-      let masked = false;
-      for (const h of holes) {
-        if (x >= h.x && x < h.x + h.w && y >= h.y && y < h.y + h.h) {
-          masked = true;
-          break;
-        }
-      }
-      if (masked) continue;
-      const i = (y * width + x) * channels;
-      const min = Math.min(data[i], data[i + 1], data[i + 2]);
-      if (min >= threshold) white++;
-      count++;
-    }
-  }
-  return { fraction: count === 0 ? 0 : white / count, white, samples: count };
-}
-
-/** Fraction of pixels in a rectangle brighter than `threshold` (0-255 luminance). */
 export function litFraction(image, rect, threshold = 8) {
   const { width, height, channels, data } = image;
   const x0 = Math.max(0, rect.x);
