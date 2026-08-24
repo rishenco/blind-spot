@@ -68,6 +68,7 @@ export class SoundBus {
   private now = 0;
   private last: SoundEvent | null = null;
   private readonly recent: SoundEvent[] = [];
+  private readonly totals = new Map<SoundSource, number>();
   /** How many events the ring buffer keeps for the debug overlay. */
   private readonly keep = 32;
 
@@ -113,17 +114,21 @@ export class SoundBus {
       seq: this.seq++,
     };
     this.last = event;
+    this.totals.set(spec.source, (this.totals.get(spec.source) ?? 0) + 1);
     this.recent.push(event);
     if (this.recent.length > this.keep) this.recent.shift();
     for (const listener of this.listeners) listener(event);
     return event;
   }
 
-  /** Per-source counters, for the overlay's "events flowing" readout. */
+  /**
+   * Lifetime per-source totals. It used to count the 32-event `recent` window instead, which
+   * made the overlay's "step N · prop M" read as totals while quietly being a sample: walk
+   * through a pile and the step counter goes *down*. Totals are what both the overlay and the
+   * keyframe scenarios actually want.
+   */
   countsBySource(): Map<SoundSource, number> {
-    const out = new Map<SoundSource, number>();
-    for (const e of this.recent) out.set(e.source, (out.get(e.source) ?? 0) + 1);
-    return out;
+    return this.totals;
   }
 
   dispose(): void {
