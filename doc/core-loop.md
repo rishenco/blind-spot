@@ -2,7 +2,7 @@
 
 *Draft for playtest, 2026-08-24. Laws are fixed; numbers are first-pass tuning values. This doc
 extends doc/vision.md — perception and movement stay there; the mode, the enemy, and the map are
-defined here. Overrides of vision.md are listed in §9.*
+defined here. Overrides of vision.md are listed in §10.*
 
 ## 0. The loop and the Razor
 
@@ -43,8 +43,9 @@ diegetic per vision §10).
 - **Objective.** 4 humming artifacts (power cells) sit in finished-room pockets at increasing
   depth. Free order. Carry each to the crane base; a banked artifact is locked forever — the
   run ratchet. Win = all 4 banked. Solo death = run over.
-- **The artifact, not the player, is the sound source.** It hums every 2 s, audible 12 m. It is
-  throwable: landing = a loud clang that paints. A parked or thrown artifact accrues spiders
+- **The artifact, not the player, is the sound source.** It hums every 2 s (audible 12 m) when
+  held or at rest; flight is silent — a throw teleports the sound origin, and the landing is a
+  loud clang that paints. A parked or thrown artifact accrues spiders
   around it. Throwing down through gaps is legal — gravity is a currency: passing down is
   free-but-loud; up must be carried. Co-op: throw/catch = handoff; a caught hum switches
   pursuit mid-air.
@@ -98,8 +99,8 @@ Delta over vision §3.2 and §3.7, which otherwise stand.
 
 - **Detonation on contact:** 100 dmg ≤2 m / 45 at 4 m / 12 at 6 m, plus knockback. The blast
   paints 22 m through floors. Spending a spider — baiting its pounce or detonation where you
-  want light or need it gone — is a first-class play. Blast-jumps are legal emergent tech,
-  not a built system.
+  want light or need it gone — is a first-class play. Blast-jumps are formalized: the 5–6 m
+  ring deals 12 dmg and a ~6 m/s impulse — a floor of altitude, bought in HP and noise.
 - **Siege.** Spiders besiege the hum anchor (ceiling positions included), never the player as
   such. Native counters: throw the artifact (displace the anchor), E-ping lure, gondola
   cache, crouch-out without cargo (≤2 m audibility).
@@ -172,7 +173,39 @@ ratchet on. No chips, no vaults, no masking extras. Three falsifiable questions:
 
 If (1) stalls, no content fixes it.
 
-## 9. Overrides vs doc/vision.md
+## 9. Spice — the creative pass
+
+- **Dock Bloom.** Docking is deafening: the top floors flash-paint in one bloom and fade;
+  every constellation below flinches toward it. The clang carries the day's weather.
+- **Weather (one draw per run; symmetric, audible):** storm — gusts telegraph ~3 s, then
+  2–4 s of halved hearing both ways (wind-ups still cut through) · rain — the sky faintly
+  paints all exposed frame, all hearing −35 % · fog — propagation −40 %, E-ping 25 m.
+- **Masking law + hum-walking.** Any sound covers sounds under half its intensity,
+  symmetrically for all ears. Corollary: the hum masks walk-steps inside its 12 m — step
+  on the beat and vanish inside the beacon everyone hears.
+- **Bolts.** Scavenged, max 8, zero energy. A thrown handful scatters 2 m paint pops with
+  11 m clinks; litter persists and crunches. Dropped off the rim: a plumb line that paints
+  a strip down the flank, ringing every floor it clips.
+- **Girder chord.** Kick an exposed member: the whole girder rings ~3 s, painting a sleeve
+  along its full length — and anything standing on it, silent spiders included.
+- **Molt.** Each spider molts on a learnable ~4 min cycle: a 10 s chitin chorus, then ~20 s
+  stationary, half-deaf, self-painting, pounce offline. The husk stays: a crackle-trap.
+- **Clutches.** Dispatch hatches are egg clutches, ticking faintly. Stealing sacs quietly
+  (2 s each) cuts that hatch's capacity forever; smashing does the same at a 22 m clang.
+- **The funeral.** Spiders within 60 m converge on a detonation crater for ~20 s; blasts
+  damage spiders, so a besieged cluster chain-spends on one juke. A pounce missing within
+  1 m grazes: 1 dmg and a screech that paints the duel.
+- **Brownout.** At heat 3 a zone's breaker dies audibly and its lighthouses wind down —
+  loudness punished with darkness you caused. A 4 s loud crank relights them; idle
+  machines start the same way: install a lighthouse, pay in heat.
+- **The choir.** Banked artifacts hum in sync — the crane becomes a lighthouse you built —
+  and the carried 4th answers antiphonally; spiders drift toward the song. The last ascent
+  is the brightest and the most besieged, unscripted.
+- **Wounded reactor.** Under 25 HP the cracked chassis whines every 3 s (6 m audible):
+  dying makes you glow. Banking repairs.
+- **Shelf (post-MVP):** Broodmother nest-heist · ghost freight · stolen tripwires · scribe slides.
+
+## 10. Overrides vs doc/vision.md
 
 - Vision §6 robo-dog → **the spider** (this doc §3–4).
 - Vision §7 Descent Contract (five stacked floors) → **the Retrieval** in the Tower (this
