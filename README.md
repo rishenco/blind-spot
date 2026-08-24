@@ -53,10 +53,10 @@ your body. Walk, and your own footfalls light the room ~4 m at a time. Sprint, a
 Around the reticle: a ring whose brightness is your current audible radius, and a printed readout
 of that radius in metres plus the reactor (`⚡ energy/max`). A refused ping prints why.
 
-Keys `1`/`2`/`3` are the three art directions. `2` (Blueprint — line-led drafting look) is
-authored; `1` (Phosphor) and `3` (Signal) **are not authored yet**: each renders the debug look
-under its own id and says so on screen, which exercises the real switch path (dispose materials,
-rebuild the scene, leave the paint buffers untouched).
+Keys `1`/`2`/`3` are the three art directions. `2` (Blueprint — line-led drafting look) and `3`
+(Signal — raw-data decode look: quantized samples that resolve into the lattice) are authored; `1` (Phosphor) **is not
+authored yet**: it renders the debug look under its own id and says so on screen, which exercises
+the real switch path (dispose materials, rebuild the scene, leave the paint buffers untouched).
 
 ## Controls
 
