@@ -49,7 +49,7 @@
  */
 
 import * as THREE from 'three';
-import type { StaticWorld } from '../core/collision';
+import { raySlabEnter, type StaticWorld } from '../core/collision';
 import { DEFAULT_LATTICE_SEED, makeRng } from '../core/rng';
 import type { SoundEvent } from './soundEvents';
 import type { AgeRamp } from './ageRamp';
@@ -1643,31 +1643,10 @@ export class StructuredPaint {
     if (proj < -r) return false;
     if (ex * ex + ey * ey + ez * ez - proj * proj > r * r) return false;
 
-    const b = this.world.boxes[i]!;
-    let tmin = 0;
-    let tmax = maxT;
-    for (let a = 0; a < 3; a++) {
-      const o = a === 0 ? ox : a === 1 ? oy : oz;
-      const d = a === 0 ? ux : a === 1 ? uy : uz;
-      const lo = a === 0 ? b.minX : a === 1 ? b.minY : b.minZ;
-      const hi = a === 0 ? b.maxX : a === 1 ? b.maxY : b.maxZ;
-      if (d > -1e-9 && d < 1e-9) {
-        if (o < lo || o > hi) return false;
-        continue;
-      }
-      const invD = 1 / d;
-      let t1 = (lo - o) * invD;
-      let t2 = (hi - o) * invD;
-      if (t1 > t2) {
-        const tmp = t1;
-        t1 = t2;
-        t2 = tmp;
-      }
-      if (t1 > tmin) tmin = t1;
-      if (t2 < tmax) tmax = t2;
-      if (tmin > tmax) return false;
-    }
-    return true;
+    // A true ray (no inflation), clamped at the segment end: `Infinity` back means the box was
+    // missed inside `[0, maxT]`, and any real entry distance is ≤ maxT, which is finite here.
+    // The occlusion answer is a boolean, so the distance itself is thrown away.
+    return raySlabEnter(this.world.boxes[i]!, ox, oy, oz, ux, uy, uz, 0, maxT) !== Infinity;
   }
 
   /**

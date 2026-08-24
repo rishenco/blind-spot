@@ -10,10 +10,11 @@
  * ## Module-level scratch: what it does and does not promise
  *
  * This file keeps several module-level scratch objects — `candidateScratch`, `queryScratch`,
- * `sweepScratch`, `pushScratch`, `slidePlain`, `slideStepped` — so the hot path allocates
- * nothing per tick. They are **deliberate and correct for the way this module is used**: any
- * number of bodies may be moved through `moveBody` (or `canOccupyWorld` / `sweepSphereWorld`)
- * as long as the calls happen *sequentially on one thread*. Each call fills the scratch it
+ * `sweepScratch`, `rayScratch`, `pushScratch`, `slidePlain`, `slideStepped` — so the hot path
+ * allocates nothing per tick. They are **deliberate and correct for the way this module is
+ * used**: any number of bodies may be moved through `moveBody` (or `canOccupyWorld` /
+ * `sweepSphereWorld` / `raycastWorld`) as long as the calls happen *sequentially on one
+ * thread*. Each call fills the scratch it
  * needs at the top and is finished with it before it returns, so body N+1 never sees body N's
  * leftovers. Ticking a player, twenty thrown cans and six spiders one after another in a fixed
  * update is exactly that pattern, and needs no change here.
@@ -32,7 +33,13 @@
  * `MoveResult` used to be in this list and is not any more: `moveBody` takes an optional `out`,
  * so a caller that wants to keep its result across other bodies' calls owns one (see
  * `createMoveResult`). Omitting `out` still returns the shared instance, which is fine for the
- * overwhelmingly common read-it-immediately case.
+ * overwhelmingly common read-it-immediately case. `RayHit` and `raycastWorld` follow that same
+ * shape, for the same reason.
+ *
+ * `slabEntryAxis` is scratch too, and the one piece of it that leaves the module's own
+ * functions: `raySlabEnter` is exported (the paint occlusion test in `paint/structured.ts` runs
+ * the same loop) and writes it on every call. Only `raycastWorld` reads it, immediately, on the
+ * winning box — see the note there.
  */
 
 import type * as THREE from 'three';
@@ -525,6 +532,90 @@ export function moveBody(
   return result;
 }
 
+/**
+ * Below this a slab counts as parallel to the ray: the axis only gates the box, it never
+ * contributes a distance.
+ *
+ * The threshold is not about a division by zero — IEEE division copes, and for every direction
+ * component small enough to matter the resulting `t` is so enormous that the box is rejected on
+ * range anyway. What the branch actually protects is the signed zero: a component of exactly
+ * `-0` gives a reciprocal of `-Infinity`, and an origin sitting exactly on the slab's `lo` plane
+ * then computes `(lo - o) * -Infinity === NaN` next to an exit of `-Infinity`, which clamps the
+ * exit behind the origin and throws away a box the ray is running along. A level look direction
+ * is `-sin(0)` — exactly `-0` — so that is not a hypothetical.
+ */
+const SLAB_PARALLEL = 1e-9;
+
+/**
+ * Which axis the last `raySlabEnter` crossed to get in — 0/1/2, or -1 for "it did not cross
+ * one". See the scratch note at the top of the file.
+ */
+let slabEntryAxis = -1;
+
+/**
+ * The one ray-slab loop in the game: where along the ray does it enter this box?
+ *
+ * Returns the entry distance in units of `d` (metres when `d` is unit length), or `Infinity`
+ * when the box is missed inside `[0, tmaxSeed]`. A hit's distance is always ≤ `tmaxSeed`, so
+ * with a finite seed the sentinel cannot collide with a real answer.
+ *
+ * Three callers, three uses of the same arithmetic, which is why it is one function and not
+ * three copies:
+ *  - `inflate` grows the box on every axis first — the Minkowski shortcut that turns a sphere
+ *    sweep into a ray query (`sweepSphereWorld`). Pass 0 for a true ray.
+ *  - `tmaxSeed` is where the exit clamp starts. Seed it with the nearest hit found so far and
+ *    the test prunes for free (a box entered beyond the current best reports a miss); seed it
+ *    with the segment length for a plain any-hit occlusion query (`StructuredPaint.blocked`).
+ *  - the face crossed on the way in is left in `slabEntryAxis`, which only `raycastWorld`
+ *    reads. It is -1 when the entry never moved off `t = 0`: the ray began at or inside this
+ *    box and crossed nothing to get there.
+ *
+ * A NaN direction or origin component makes every comparison on that axis false, so the axis is
+ * silently skipped rather than rejecting the box. That is inherited behaviour, pinned by test,
+ * and the reason `raycastWorld` refuses a non-finite query up front instead of relying on it.
+ */
+export function raySlabEnter(
+  b: Aabb,
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  inflate: number,
+  tmaxSeed: number,
+): number {
+  slabEntryAxis = -1;
+  let tmin = 0;
+  let tmax = tmaxSeed;
+  // One slab per axis, indexed rather than vectorised — the Aabb is six plain numbers.
+  for (let axis = 0; axis < 3; axis++) {
+    const o = axis === 0 ? ox : axis === 1 ? oy : oz;
+    const d = axis === 0 ? dx : axis === 1 ? dy : dz;
+    const lo = (axis === 0 ? b.minX : axis === 1 ? b.minY : b.minZ) - inflate;
+    const hi = (axis === 0 ? b.maxX : axis === 1 ? b.maxY : b.maxZ) + inflate;
+    if (Math.abs(d) < SLAB_PARALLEL) {
+      if (o < lo || o > hi) return Infinity;
+      continue;
+    }
+    const inv = 1 / d;
+    let t1 = (lo - o) * inv;
+    let t2 = (hi - o) * inv;
+    if (t1 > t2) {
+      const tmp = t1;
+      t1 = t2;
+      t2 = tmp;
+    }
+    if (t1 > tmin) {
+      tmin = t1;
+      slabEntryAxis = axis;
+    }
+    if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return Infinity;
+  }
+  return tmin;
+}
+
 const sweepScratch: Aabb[] = [];
 
 /**
@@ -564,40 +655,197 @@ export function sweepSphereWorld(
 
   let nearest = maxDist;
   for (const b of candidates) {
-    let tmin = 0;
-    let tmax = nearest;
-    // One slab per axis, indexed rather than vectorised — the Aabb is six plain numbers.
-    for (let axis = 0; axis < 3; axis++) {
-      const o = axis === 0 ? ox : axis === 1 ? oy : oz;
-      const d = axis === 0 ? dx : axis === 1 ? dy : dz;
-      const lo = (axis === 0 ? b.minX : axis === 1 ? b.minY : b.minZ) - radius;
-      const hi = (axis === 0 ? b.maxX : axis === 1 ? b.maxY : b.maxZ) + radius;
-      if (Math.abs(d) < 1e-9) {
-        if (o < lo || o > hi) {
-          tmin = Infinity;
-          break;
-        }
-        continue;
-      }
-      const inv = 1 / d;
-      let t1 = (lo - o) * inv;
-      let t2 = (hi - o) * inv;
-      if (t1 > t2) {
-        const tmp = t1;
-        t1 = t2;
-        t2 = tmp;
-      }
-      if (t1 > tmin) tmin = t1;
-      if (t2 < tmax) tmax = t2;
-      if (tmin > tmax) {
-        tmin = Infinity;
-        break;
-      }
-    }
+    // Seeding the exit clamp with the running nearest is the pruning: a box entered further
+    // away than the best hit so far comes back as a miss and costs nothing to reject.
+    const tmin = raySlabEnter(b, ox, oy, oz, dx, dy, dz, radius, nearest);
     if (tmin < nearest) nearest = tmin;
     if (nearest <= 0) return 0;
   }
   return nearest;
+}
+
+export interface RayHit {
+  /** Distance along the direction handed in — metres when that direction is unit length. */
+  t: number;
+  /**
+   * The struck face's unit normal, always pointing back towards the ray: `n · d < 0` holds for
+   * every answer this function gives, including the origin-inside case. Consumers lean on that
+   * — a bounce is `v - 2(v·n)n` and wants the near side, a surface-attach wants the face it
+   * arrived at — and none of them should have to special-case a sign.
+   */
+  nx: number;
+  ny: number;
+  nz: number;
+  /**
+   * The box that was struck, not a copy of it: `box.mat` is what makes a can off metal and a
+   * can off concrete different sounds, and `box.shell` is what makes a wall different from a
+   * crate. Valid until the world is rebuilt.
+   */
+  box: Aabb;
+}
+
+/** The placeholder a hit carries before it has been filled in. In no world. */
+const ZERO_BOX: Aabb = aabbFromBounds(0, 0, 0, 0, 0, 0);
+
+/**
+ * A zeroed hit, for a caller that wants one of its own. Allocate once, not per ray.
+ *
+ * Its fields mean nothing until a `raycastWorld` call fills them — in particular `box` is the
+ * placeholder above.
+ */
+export function createRayHit(): RayHit {
+  return { t: 0, nx: 0, ny: 0, nz: 0, box: ZERO_BOX };
+}
+
+/** The default `out` for `raycastWorld` — see the note on scratch at the top of the file. */
+const sharedRayHit: RayHit = createRayHit();
+
+const rayScratch: Aabb[] = [];
+
+/**
+ * Nearest hit of a ray against the static world, with the surface normal.
+ *
+ * `d` should be unit length: `t` comes back in its units, so a half-length direction reports
+ * half the distance. Returns `null` when nothing is struck within `maxDist`, and otherwise
+ * `out`, every field of which is overwritten. A miss leaves `out` alone, so a caller may keep
+ * its last hit there. `out` defaults to a module-shared instance, so a caller that reads the
+ * hit before casting again can ignore it; a caller that keeps a hit across another cast must
+ * own one (`createRayHit`, allocated once — never per ray).
+ *
+ * Decisions a consumer has to be able to rely on, all pinned in `tests/raycast.test.ts`:
+ *
+ *  - **`maxDist` is inclusive.** A surface at exactly `maxDist` is struck. That matches the
+ *    slab test itself, which counts a corner grazed at `tmin === tmax` as a hit, and it is the
+ *    forgiving direction for a thrown object stepped by `speed * dt`: the alternative leaves it
+ *    exactly touching a wall and relying on the next tick to notice.
+ *  - **Ties go to the first box in the world.** Two boxes sharing a face are both entered at
+ *    the same `t`; nothing distinguishes them, and stability beats an arbitrary re-sort.
+ *  - **Contact counts as a hit, and `t === 0` means contact rather than impact.** A ray running
+ *    exactly along a face grazes it; a ray whose origin sits on a surface reports that surface
+ *    at `t = 0` even when it points away from it. Both are the slab test's own rule (it counts
+ *    `tmin === tmax`), and a query has no business hiding geometry it is touching. The
+ *    consequence a consumer must handle: at `t = 0` there is no approach to reverse, so
+ *    separate along `n` — reflecting a velocity there would bounce a can resting on a floor
+ *    back into the floor.
+ *  - **An origin inside a box hits it at `t = 0`**, with the normal of the face the ray is on
+ *    its way out through, reversed. `null` was the alternative and is worse in both directions:
+ *    a thrown can that ended a tick a millimetre inside a wall would have nothing to bounce off
+ *    and would keep going, and a spider probing for the surface under its own foot would lose
+ *    that surface at the exact moment the foot reached it. A containing box with a reflectable
+ *    normal is recoverable; silence is not. It also keeps the story here identical to
+ *    `sweepSphereWorld`'s, which has always reported 0 rather than "clear" from inside a box.
+ *    An origin sitting exactly *on* a face is the same case and takes the same rule, which for
+ *    an axis-aligned ray names the face underfoot and for an oblique one can name whichever
+ *    face it leaves through first. Both are a zero distance away and both face the ray; one
+ *    rule for every `t = 0` answer is worth more than a second rule to tell them apart.
+ *  - **A query that is not a ray returns `null`**: a non-positive or NaN `maxDist`, a non-finite
+ *    origin or direction, or a direction so short that every slab would call it parallel (which
+ *    includes zero). Those have no entry face, so there is no normal to answer with, and
+ *    guessing one would be exactly the kind of lie law 2 forbids.
+ */
+export function raycastWorld(
+  world: StaticWorld,
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  maxDist: number,
+  out: RayHit = sharedRayHit,
+): RayHit | null {
+  if (!(maxDist > 0)) return null; // catches 0, negatives and NaN
+  if (!Number.isFinite(ox) || !Number.isFinite(oy) || !Number.isFinite(oz)) return null;
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dz)) return null;
+  // A direction every slab would call parallel is not a direction: nothing is ever crossed, so
+  // no face and no normal exist. Zero lands here, and so does anything below the threshold.
+  if (
+    !(
+      Math.abs(dx) >= SLAB_PARALLEL ||
+      Math.abs(dy) >= SLAB_PARALLEL ||
+      Math.abs(dz) >= SLAB_PARALLEL
+    )
+  ) {
+    return null;
+  }
+
+  const ex = ox + dx * maxDist;
+  const ey = oy + dy * maxDist;
+  const ez = oz + dz * maxDist;
+  // The broadphase is inflated by EPS where the sweep's is inflated by the sphere radius, and
+  // for the same reason: `query` treats touching as not overlapping, so a ray running exactly
+  // along a floor gives a zero-thickness query slab that culls the very floor it is grazing —
+  // while the slab test below counts that graze as a hit. The narrowphase decides; the
+  // broadphase must not get there first.
+  const candidates = world.query(
+    Math.min(ox, ex) - EPS,
+    Math.min(oy, ey) - EPS,
+    Math.min(oz, ez) - EPS,
+    Math.max(ox, ex) + EPS,
+    Math.max(oy, ey) + EPS,
+    Math.max(oz, ez) + EPS,
+    rayScratch,
+  );
+
+  let nearest = maxDist;
+  let hitBox: Aabb | null = null;
+  let hitAxis = -1;
+  for (const b of candidates) {
+    const t = raySlabEnter(b, ox, oy, oz, dx, dy, dz, 0, nearest);
+    if (t === Infinity) continue;
+    // `>=`, so the first box entered at a given distance keeps the hit. Seeding the slab test
+    // with `nearest` already rejected everything strictly further, so this only settles ties.
+    if (hitBox !== null && t >= nearest) continue;
+    nearest = t;
+    hitBox = b;
+    hitAxis = slabEntryAxis;
+    if (t <= 0) break; // nothing can be nearer than the box we are already inside
+  }
+  if (hitBox === null) return null;
+
+  // No face was crossed on the way in, so the ray started at or inside this box: name the face
+  // it is leaving through instead. Both cases end on the same expression for the normal — the
+  // entry face of a slab and the reversed exit face of one are the same side of it — so the
+  // only thing the inside case has to answer is *which axis*.
+  if (hitAxis < 0) {
+    let exitT = Infinity;
+    for (let axis = 0; axis < 3; axis++) {
+      const d = axis === 0 ? dx : axis === 1 ? dy : dz;
+      if (Math.abs(d) < SLAB_PARALLEL) continue;
+      const o = axis === 0 ? ox : axis === 1 ? oy : oz;
+      const far =
+        d > 0
+          ? axis === 0
+            ? hitBox.maxX
+            : axis === 1
+              ? hitBox.maxY
+              : hitBox.maxZ
+          : axis === 0
+            ? hitBox.minX
+            : axis === 1
+              ? hitBox.minY
+              : hitBox.minZ;
+      const t = (far - o) / d;
+      // `hitAxis < 0` on the first non-parallel axis: the direction guard above proved there is
+      // one, and taking it unconditionally means a pathological `t` can never leave us with no
+      // axis at all. After that, nearest exit wins and ties go to the earlier axis, matching
+      // the entry face's own tie-break.
+      if (hitAxis < 0 || t < exitT) {
+        exitT = t;
+        hitAxis = axis;
+      }
+    }
+  }
+
+  // The face is the low one when the ray runs up the axis and the high one when it runs down,
+  // and its outward normal points back at the origin either way.
+  const sign = (hitAxis === 0 ? dx : hitAxis === 1 ? dy : dz) > 0 ? -1 : 1;
+  out.t = nearest;
+  out.nx = hitAxis === 0 ? sign : 0;
+  out.ny = hitAxis === 1 ? sign : 0;
+  out.nz = hitAxis === 2 ? sign : 0;
+  out.box = hitBox;
+  return out;
 }
 
 /** Convenience wrapper: can the body stand at this spot given the whole world? */
