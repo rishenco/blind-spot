@@ -96,12 +96,22 @@ const CANVAS = { x: 360, y: 40, w: 650, h: 600 };
 /** A box around the reticle, where the firing streak lands and nothing else does. */
 const AIM_BOX = { x: 500, y: 230, w: 280, h: 260 };
 
-/** Mean luminance (0-255) and lit fraction of a screenshot, over a DOM-free window. */
+/**
+ * Mean luminance (0-255) and lit fraction of a screenshot, over a DOM-free window.
+ *
+ * `hot` and `sat` are the top of the same histogram: how much of the window is near the ceiling
+ * of the 8-bit framebuffer, and how much has hit it. The cloud is drawn with additive blending
+ * onto an LDR target, so those two are the only way to see the failure mode the brightness pass
+ * exists to prevent — a frame that is not brighter so much as *clipped*, with the age band and
+ * the material voices flattened into the same white.
+ */
 function photo(buf, rect = FRAME, holes = FRAME_HOLES) {
   const img = decodePng(buf);
   return {
     mean: meanLuminance(img, rect, holes).mean,
     lit: litFraction(img, rect, 8).fraction,
+    hot: litFraction(img, rect, 200).fraction,
+    sat: litFraction(img, rect, 250).fraction,
   };
 }
 /** Splits a screenshot's lit pixels into the cool (cyan) and warm (gold) families. */
@@ -173,9 +183,9 @@ async function poll(pred, budgetMs = 4000) {
  * poll adds a CDP round-trip per sample. Sampling in a rAF loop instead pins the sample
  * rate to the actual frame rate, which is the best any observer can do.
  */
-function sampleFrames(ms) {
+function sampleFrames(ms, minFrames = 0) {
   return page.evaluate(
-    (duration) =>
+    ([duration, wanted]) =>
       new Promise((done) => {
         const out = [];
         const t0 = performance.now();
@@ -195,12 +205,19 @@ function sampleFrames(ms) {
             animTime: s.animTime,
             boom: s.boom,
           });
-          if (t < duration) requestAnimationFrame(tick);
+          /*
+           * The window is a duration *and* a frame count. Headless software GL drops to a few
+           * frames a second under load, and a 700 ms window that returned two samples is not a
+           * short measurement of the thing, it is no measurement of the thing. The wall-clock
+           * ceiling keeps a stalled page from hanging the run.
+           */
+          const enough = t >= duration && out.length >= wanted;
+          if (!enough && t < duration * 4 + 2000) requestAnimationFrame(tick);
           else done(out);
         };
         requestAnimationFrame(tick);
       }),
-    ms,
+    [ms, minFrames],
   );
 }
 
@@ -718,7 +735,10 @@ check(
   `anim=${upToSpeed.anim} at ${Number(upToSpeed.speed).toFixed(2)} m/s, weights ${JSON.stringify(upToSpeed.animWeights)}`,
 );
 await shot('17-tp-run.png');
-const tpRun = await sampleFrames(700);
+// Six frames minimum: the claim is about a clip advancing, and a two-sample window cannot see
+// one advance. Frames past the end of the lane are harmless — both assertions below tolerate a
+// body that has stopped.
+const tpRun = await sampleFrames(700, 6);
 await page.keyboard.up('w');
 await page.keyboard.up('Shift');
 await wait(400);
@@ -845,8 +865,10 @@ await poll((s) => Number(s.viewBlend) <= 0.001, 4000);
 await wait(300);
 const fpBack = await state();
 check(
+  // Not `=== 0`: the blend is an exponential ease and lands on 1e-16 about as often as on a
+  // clean zero. The poll above already treats 0.001 as arrived; the assertion now agrees with it.
   'V returns to first person',
-  fpBack.view === 'first' && Number(fpBack.viewBlend) === 0,
+  fpBack.view === 'first' && Number(fpBack.viewBlend) < 0.001,
   `view=${fpBack.view} blend=${fpBack.viewBlend}`,
 );
 check(
@@ -989,9 +1011,12 @@ async function settle(budgetMs = 12000) {
 }
 
 /**
- * Waits for look 5's second phase as well: the contours ink a fixed delay *behind* the front, so
- * a blueprint frame is not finished when the wave stops. Harmless on looks 1-4, where there are
- * no contours and the counter is always zero.
+ * Waits for look 5's contour strokes as well.
+ *
+ * They start at the front rather than a phase behind it (batch 2.3 removed the delay), but a
+ * stroke still takes `inkSeconds` to draw itself, so the last few segments are still going when
+ * the wave stops. Harmless on looks 1-4, where there are no contours and the counter is always
+ * zero.
  */
 async function settleInk(budgetMs = 40000) {
   await settle(budgetMs);
@@ -1441,15 +1466,322 @@ await shotBuf('39-sonar-tracer-gone.png');
 await settle(40000);
 
 // The air itself: a field of motes lit only by a passing front, and not drawn at all otherwise.
+// Since batch 2.3 the field also ships switched off — §30d checks the default and the checkbox.
 const airLive = await state();
 check(
   'the lit air is switched off when no front is travelling',
   airLive.dustLit === false,
-  `dustLit=${airLive.dustLit} waveLive=${airLive.waveLive}`,
+  `dustLit=${airLive.dustLit} waveLive=${airLive.waveLive} dustEnabled=${airLive.dustEnabled}`,
 );
 
 await setTimeScale(1);
 await pitchBy(-28, sens);
+
+/*
+ * ===========================================================================
+ *  30a-30d THE RESTAMP POLICY (batch 2.3)
+ * ===========================================================================
+ *
+ * Sound that reaches ground somebody has already painted is not news. Before this batch the
+ * renderer treated it as news anyway: a restamped blip was reborn — gated behind the new front,
+ * flashed white when it arrived — so a second ping swept a bright band back across a room you
+ * already knew, and every footfall re-flashed the floor under a sprinting player three times a
+ * second. Two complaints out of the same playtest, one line of shader.
+ *
+ * The policy now branches on whether a blip has a previous arrival stamp. Virgin ground gets the
+ * whole wave, with the arrival eased in over `arriveSeconds` rather than popping. Known ground
+ * refreshes silently: never gated, never flashed, its age gliding from what it was to zero over
+ * `refreshSeconds`. Each half is checked below, in state and in pixels.
+ */
+
+/*
+ * --- 30a a re-ping refreshes known ground silently --------------------------
+ *
+ * Photographed at x0.1, where the 12 m front takes nearly five seconds to cross the room and a
+ * software-GL screenshot is a snapshot rather than a smear. The claim is about what the frame
+ * does *while* the second front travels: it may end brighter — a refresh is supposed to make the
+ * room fresh again — but nothing may ride across it on the way.
+ */
+await setVariant('1', 'Dust');
+await respawn();
+await clearPaint();
+/*
+ * Saturate the voxel grid first. Sampling is stochastic, so an early re-ping still finds
+ * thousands of cells nobody has hit, and those are legitimately new — the case this section is
+ * about is the one where almost everything the front touches is already known.
+ */
+let warmed;
+for (let i = 0; i < 5; i++) warmed = await ping('q-ping');
+check(
+  'after five pings from one spot, a sixth is a refresh rather than a discovery',
+  Number(warmed.lastRefreshed) > Number(warmed.lastDeposited) * 2.5,
+  `+${warmed.lastDeposited} new / ~${warmed.lastRefreshed} refreshed on the fifth ping`,
+);
+
+await setTimeScale(0.1);
+await poll((s) => Number(s.pingCooldown) === 0, 8000);
+const beforeRestamp = Number((await state()).soundEvents);
+await page.keyboard.press('q');
+await poll((s) => Number(s.soundEvents) > beforeRestamp, 8000);
+const sweep = [];
+let sweepShot = false;
+for (let i = 0; i < 30; i++) {
+  const s = await state();
+  const buf = await page.screenshot();
+  const band = photo(buf, FLOOR_BAND, []);
+  const live = s.waveLive === true;
+  sweep.push({ front: Number(s.waveFront), live, refreshing: Number(s.refreshingPoints), ...band });
+  // The picture the complaint was about: the middle of the second wave, over known floor.
+  if (!sweepShot && live && Number(s.waveFront) > 5) {
+    sweepShot = true;
+    await writeFile(join(outDir, '38a-restamp-second-wave.png'), buf);
+    console.log('[shoot] wrote 38a-restamp-second-wave.png');
+  }
+  if (!live && Number(s.refreshingPoints) === 0) break;
+}
+const inFlightBand = sweep.filter((v) => v.live);
+const landedBand = sweep.find((v) => !v.live) ?? sweep[sweep.length - 1];
+const peakRefreshing = Math.max(...sweep.map((v) => v.refreshing));
+console.log(
+  '  second wave over known floor: ' +
+    sweep
+      .map((v) => `${v.live ? v.front.toFixed(1) : 'done'}m:${v.mean.toFixed(1)}`)
+      .join(' '),
+);
+check(
+  'the second front goes down the silent branch, not the arrival branch',
+  peakRefreshing > 1000,
+  `${peakRefreshing} blips easing their age over at the peak, none of them gated or flashed`,
+);
+check(
+  'no bright band travels back across ground you already know',
+  inFlightBand.length >= 3 &&
+    Math.max(...inFlightBand.map((v) => v.mean)) <= landedBand.mean * 1.08 &&
+    Math.max(...inFlightBand.map((v) => v.hot)) <= landedBand.hot * 1.25 + 0.002,
+  `floor band peaks at ${Math.max(...inFlightBand.map((v) => v.mean)).toFixed(2)}/255 while the ` +
+    `front travels and settles at ${landedBand.mean.toFixed(2)} · ` +
+    `near-white ${pct(Math.max(...inFlightBand.map((v) => v.hot)))} vs ${pct(landedBand.hot)} ` +
+    `over ${inFlightBand.length} in-flight frames`,
+);
+check(
+  'and the refresh still lands — the room does come back fresher than it was',
+  landedBand.mean > inFlightBand[0].mean * 1.05,
+  `floor band ${inFlightBand[0].mean.toFixed(2)} → ${landedBand.mean.toFixed(2)}/255`,
+);
+await settle(40000);
+await setTimeScale(1);
+
+/*
+ * --- 30b virgin ground fades in ---------------------------------------------
+ *
+ * The other half of the same complaint — "they don't appear smoothly". New paint is no longer
+ * switched on at full strength the instant its front arrives; it rises over `arriveSeconds`.
+ * Counted rather than photographed, because the ramp is a per-blip property and a screenshot of
+ * a travelling front cannot separate "this blip is dim because it is new" from "this blip is dim
+ * because it is far away". The counter comes off the same stamps the shader eases on.
+ */
+await clearPaint();
+await respawn();
+await poll((s) => Number(s.pingCooldown) === 0, 8000);
+const rampTrace = page.evaluate(
+  (ms) =>
+    new Promise((done) => {
+      const out = [];
+      const t0 = performance.now();
+      const tick = () => {
+        const s = window.__blindspot.getState();
+        out.push([performance.now() - t0, s.rampingPoints, s.visiblePoints]);
+        if (performance.now() - t0 < ms) requestAnimationFrame(tick);
+        else done(out);
+      };
+      requestAnimationFrame(tick);
+    }),
+  2500,
+);
+await page.keyboard.press('q');
+const rampRows = await rampTrace;
+let rampRun = 0;
+let rampBest = 0;
+for (const r of rampRows) {
+  if (r[1] > 0) rampBest = Math.max(rampBest, ++rampRun);
+  else rampRun = 0;
+}
+const rampPeak = Math.max(...rampRows.map((r) => r[1]));
+const rampFinal = Math.max(...rampRows.map((r) => r[2]));
+const rampState = await state();
+check(
+  'virgin blips rise into view over several frames instead of popping',
+  rampBest >= 4 && rampPeak > rampFinal * 0.1 && Number(rampState.arriveSeconds) > 0,
+  `${rampBest} consecutive rendered frames had blips mid-ramp, peaking at ${rampPeak} of ` +
+    `${rampFinal} drawn (${pct(rampPeak / rampFinal)} of the ping in mid-rise at once) · ` +
+    `arrival ramp ${rampState.arriveSeconds} s`,
+);
+await settle(20000);
+
+/*
+ * --- 30c footsteps never re-flash the ground under you ----------------------
+ *
+ * The flicker, measured where it lives. Every visual property of a blip is a function of its
+ * age, so "the dots under my feet flicker" is "the age of the paint under my feet jumps". The
+ * scene reports the mean age of the blips within 3 m of the listener under two curves at once:
+ * the shipped eased one, and the pre-2.3 stepped one computed from the same stamps in the same
+ * frame. Sprinting over painted floor, the old curve drops off a cliff at every footfall and the
+ * new one glides — and having both on the same blips is what makes that a measurement rather
+ * than an assertion of taste.
+ *
+ * Sampled in a rAF loop rather than by screenshot: a footfall cadence is ~3.4 Hz and a
+ * software-GL screenshot takes the better part of a second, so pixels cannot see this at all.
+ */
+await respawn();
+await clearPaint();
+await dragLook(LANE_TURN, sens);
+await wait(150);
+await ping('q-ping');
+await ping('e-ping');
+const paintedLane = await state();
+const feetTrace = page.evaluate(
+  (ms) =>
+    new Promise((done) => {
+      const out = [];
+      const t0 = performance.now();
+      const tick = () => {
+        const s = window.__blindspot.getState();
+        out.push([performance.now() - t0, s.nearBlips, s.nearAgeEased, s.nearAgeStep, s.speed]);
+        if (performance.now() - t0 < ms) requestAnimationFrame(tick);
+        else done(out);
+      };
+      requestAnimationFrame(tick);
+    }),
+  2600,
+);
+// Out and back over the same painted floor, so the run stays inside the lane it painted.
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+await wait(1000);
+await page.keyboard.up('w');
+await page.keyboard.down('s');
+await wait(1000);
+await page.keyboard.up('s');
+await page.keyboard.up('Shift');
+const feetRows = await feetTrace;
+/** Worst single-frame *fall* in one of the two age curves, over frames with enough blips. */
+const worstDrop = (rows, idx) => {
+  let worst = 0;
+  let usable = 0;
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][1] < 200 || rows[i - 1][1] < 200) continue;
+    usable++;
+    worst = Math.max(worst, rows[i - 1][idx] - rows[i][idx]);
+  }
+  return { worst, usable };
+};
+const easedDrop = worstDrop(feetRows, 2);
+const stepDrop = worstDrop(feetRows, 3);
+const moving = feetRows.filter((r) => r[4] > 4).length;
+console.log(
+  `  ${feetRows.length} rendered frames, ${moving} of them at sprint, ` +
+    `${easedDrop.usable} usable frame pairs over ${paintedLane.points} painted blips`,
+);
+check(
+  'a footfall on known ground never snaps the age of the paint under it',
+  easedDrop.usable >= 8 &&
+    easedDrop.worst < 0.25 &&
+    easedDrop.worst < stepDrop.worst * 0.6 &&
+    stepDrop.worst > 0.2,
+  `worst single-frame age drop under the feet: ${easedDrop.worst.toFixed(3)} s eased ` +
+    `vs ${stepDrop.worst.toFixed(3)} s under the old restamp — the same blips, the same frames`,
+);
+
+/*
+ * The half that must not be broken by any of this: your own footsteps are still your headlights
+ * (§3.3). Sprinting into ground nobody has painted has to light it.
+ */
+await respawn();
+await clearPaint();
+await dragLook(LANE_TURN, sens);
+await pitchBy(-25, sens);
+await wait(200);
+const beforeHeadlights = photo(await shotBuf('38b-headlights-dark.png'), FLOOR_BAND, []);
+const darkPoints = Number((await state()).points);
+await page.keyboard.down('Shift');
+await page.keyboard.down('w');
+await wait(1200);
+const headlightBuf = await shotBuf('38c-headlights.png');
+await page.keyboard.up('w');
+await page.keyboard.up('Shift');
+const headlights = photo(headlightBuf, FLOOR_BAND, []);
+const litPoints = Number((await state()).points);
+check(
+  'sprinting into unpainted ground still lights the way ahead (§3.3)',
+  litPoints > darkPoints + 2000 && headlights.mean > beforeHeadlights.mean + 2 && headlights.lit > 0.03,
+  `${darkPoints} → ${litPoints} blips · floor band ${beforeHeadlights.mean.toFixed(2)} → ` +
+    `${headlights.mean.toFixed(2)}/255, lit ${pct(beforeHeadlights.lit)} → ${pct(headlights.lit)}`,
+);
+await pitchBy(25, sens);
+
+/*
+ * --- 30d the front dust ships switched off ----------------------------------
+ *
+ * The airborne shell the same playtest called part of the "second wave". It stays in the build
+ * as a knob, off by default, and off has to mean *absent*: the field's object never enters the
+ * draw list, so a front travelling with dust disabled costs exactly nothing.
+ */
+await setVariant('1', 'Dust');
+await respawn();
+await clearPaint();
+const dustDefault = await state();
+check(
+  'the front dust is off out of the box',
+  dustDefault.dustEnabled === false && dustDefault.dustLit === false,
+  `dustEnabled=${dustDefault.dustEnabled} dustLit=${dustDefault.dustLit}`,
+);
+await poll((s) => Number(s.pingCooldown) === 0, 8000);
+const beforeDustOff = Number((await state()).soundEvents);
+await page.keyboard.press('q');
+const dustOffFlight = await poll(
+  (s) => Number(s.soundEvents) > beforeDustOff && s.waveLive === true,
+  8000,
+);
+check(
+  'and a front travelling with it off draws no air at all',
+  dustOffFlight.dustLit === false,
+  `front at ${Number(dustOffFlight.waveFront).toFixed(2)} m, dustLit=${dustOffFlight.dustLit}`,
+);
+await settle(20000);
+
+// The checkbox is still there, and it still works: found by its own label, clicked, not poked.
+const dustClick = await page.evaluate(() => {
+  const row = [...document.querySelectorAll('.lil-controller')].find(
+    (c) => c.querySelector('.lil-name')?.textContent === 'front dust',
+  );
+  if (row === undefined) return 'no such row';
+  const box = row.querySelector('input[type="checkbox"]');
+  if (box === null) return 'no checkbox';
+  box.click();
+  return 'clicked';
+});
+const dustOn = await poll((s) => s.dustEnabled === true, 4000);
+await poll((s) => Number(s.pingCooldown) === 0, 8000);
+const beforeDustOn = Number((await state()).soundEvents);
+await page.keyboard.press('q');
+const dustOnFlight = await poll(
+  (s) => Number(s.soundEvents) > beforeDustOn && s.dustLit === true,
+  8000,
+);
+await shotBuf('38d-front-dust-on.png');
+check(
+  'the checkbox brings it back',
+  dustClick === 'clicked' && dustOn.dustEnabled === true && dustOnFlight.dustLit === true,
+  `${dustClick} · dustEnabled=${dustOn.dustEnabled} · lit at ${Number(dustOnFlight.waveFront).toFixed(2)} m`,
+);
+await settle(20000);
+await page.evaluate(() => {
+  const row = [...document.querySelectorAll('.lil-controller')].find(
+    (c) => c.querySelector('.lil-name')?.textContent === 'front dust',
+  );
+  row?.querySelector('input[type="checkbox"]')?.click();
+});
+await poll((s) => s.dustEnabled === false, 4000);
 
 /*
  * --- 31 the near field -----------------------------------------------------
@@ -1535,6 +1867,64 @@ check(
   `mean ${plain.mean.toFixed(2)} → ${bloomed.mean.toFixed(2)} → ${back.mean.toFixed(2)}/255 · ` +
     `lit ${pct(plain.lit)} → ${pct(bloomed.lit)} → ${pct(back.lit)}`,
 );
+
+/*
+ * --- 32a ping spam stays inside the band ------------------------------------
+ *
+ * The third thing the playtest reported: hammering Q and E made the frame so bright it was hard
+ * to look at. The cloud is drawn additively onto an 8-bit target, so overlapping returns do not
+ * blend, they *sum* — and a frame that has summed past 255 has thrown away the age band and the
+ * material voices along with the headroom, which is the whole readable language of the look.
+ *
+ * Batch 2.3 took the reference's own answer: hold the return at unit strength, add the arrival
+ * flash rather than multiplying by it, and let age carry the brightness down faster (look 4 cools
+ * at 1.8x the shared ramp). The caps below are measured, not guessed — see the report — and they
+ * sit far under the ceiling: the worst frame here is under a fifth of full scale.
+ *
+ * The mean and the near-white fraction are the discriminating pair: look 4 measured 53.6/255 and
+ * 12.7% before this batch and runs at 33-37 and 3.4-4.2% after, so both caps fail the old build
+ * and pass the new one with room. The clipped fraction is noisier — where the five shots land in
+ * their fronts moves it by 4x run to run — so it is carried as a blowout backstop rather than as
+ * the number the case rests on.
+ */
+for (const [key, name, capMean, capHot, capSat] of [
+  ['1', 'Dust', 60, 0.12, 0.03],
+  ['4', 'Afterimage', 45, 0.06, 0.03],
+]) {
+  await setVariant(key, name);
+  await respawn();
+  await clearPaint();
+  await ping('q-ping');
+  const single = photo(await shotBuf(`43a-spam-${name.toLowerCase()}-single.png`));
+  const spamFrames = [];
+  for (let i = 0; i < 5; i++) {
+    await poll((x) => Number(x.pingCooldown) === 0, 8000);
+    const before = Number((await state()).soundEvents);
+    await page.keyboard.press(i % 2 === 0 ? 'q' : 'e');
+    await poll((x) => Number(x.soundEvents) > before, 8000);
+    spamFrames.push(photo(await page.screenshot()));
+  }
+  const spamBuf = await shotBuf(`43b-spam-${name.toLowerCase()}.png`);
+  const spam = photo(spamBuf);
+  const peak = spamFrames.reduce((a, b) => (b.mean > a.mean ? b : a), spam);
+  console.log(
+    `  ${name}: one ping ${single.mean.toFixed(2)}/255 → five back-to-back ` +
+      `${spamFrames.map((f) => f.mean.toFixed(1)).join(' ')} → ${spam.mean.toFixed(2)} · ` +
+      `near-white ${pct(peak.hot)} · clipped ${pct(peak.sat)}`,
+  );
+  check(
+    `${name}: five pings back to back stay inside the band`,
+    peak.mean < capMean && peak.hot < capHot && peak.sat < capSat,
+    `peak ${peak.mean.toFixed(2)}/255 (cap ${capMean}) · near-white ${pct(peak.hot)} ` +
+      `(cap ${pct(capHot)}) · clipped ${pct(peak.sat)} (cap ${pct(capSat)})`,
+  );
+  check(
+    `${name}: spamming is brighter than one ping, but not by an order of magnitude`,
+    peak.mean > single.mean && peak.mean < single.mean * 4,
+    `${single.mean.toFixed(2)} → ${peak.mean.toFixed(2)}/255 (${(peak.mean / single.mean).toFixed(2)}x)`,
+  );
+  await settle(40000);
+}
 
 // --- 33 perf and the ring buffer -------------------------------------------
 await setVariant('1', 'Dust');
@@ -1685,17 +2075,19 @@ check(
 );
 
 /*
- * --- 34a the two phases ----------------------------------------------------
+ * --- 34a one front, and the drawing happens at it ---------------------------
  *
- * The reveal is deliberately not instantaneous even once the front has arrived. A dot is first
- * *probed* — pushed a few centimetres off its true position by the passing pressure and burned
- * white — and only `phaseDelay` later does it snap back, cool, and let its object's contours ink
- * in. The point is that the two phases are legible as two: a ring of hot uncommitted dots leading
- * a body of quiet cyan drawing.
+ * This section used to assert the opposite, and the change is the point. The reveal ran in two
+ * phases: a ring of hot displaced dots, and then, `phaseDelay` later, a second pass in which the
+ * contours inked. Playtested, the lag read as a bug — a second wave crossing the room behind the
+ * first — so the delay and the wake that bridged it are gone, code and GUI both, and the ink now
+ * happens *at* the ring. What survives is the ripple: the ring is the front itself, displacing
+ * and burning the lattice as it goes, and a contour starts drawing itself the moment the front
+ * reaches it, taking `inkSeconds` to complete the stroke.
  *
- * Both halves are asserted where the front is, not globally, because near the origin the second
- * phase has already landed by the time the ring is out at the doorjamb — which is the whole idea.
- * The clock runs at x0.1 so the 0.3 s delay is three seconds of wall time and can be photographed.
+ * Everything is asserted where the front is, not globally, because near the origin the drawing
+ * has long finished by the time the ring is out at the doorjamb — which is what "at the front"
+ * means. The clock runs at x0.1 so a 0.48 s crossing is five seconds of wall time.
  */
 await setTimeScale(0.1);
 await clearPaint();
@@ -1704,41 +2096,78 @@ const beforeBp = Number((await state()).soundEvents);
 await page.keyboard.press('q');
 await poll((s) => Number(s.soundEvents) > beforeBp && s.lastEvent === 'q-ping', 8000);
 
-// The chokepoint's doorjamb is 8.7 m out; wait for the ring to be past it but still travelling.
-const inFlight = await poll((s) => Number(s.waveFront) >= 9.8, 60000);
-const jambRing = await probeRegion('jamb');
-const ringBuf = await shotBuf('48-blueprint-phase1.png');
+/*
+ * One pass down the room, watching the chokepoint's doorjamb: the front position at which its
+ * lattice first draws, and the front position at which its first contour is finished. The gap
+ * between those two numbers *is* the lag between the ring and the drawing, measured in metres of
+ * travel, and it is the number this batch changed. Sampled rather than asserted at one instant
+ * because a stroke is 0.06 s — a metre and a half of front travel — and a screenshot is slower
+ * than that even at x0.1.
+ */
+let inFlight = null;
+let ringBuf = null;
+let jambRing = null;
+let dotFront = Number.NaN;
+let inkFront = Number.NaN;
+// Bounded by wall time, not by an iteration count: a state read plus a region probe is a few
+// milliseconds and the front takes five seconds to cross, so a count large enough on one host
+// is a count that gives up halfway on the next.
+const bpDeadline = Date.now() + 60000;
+while (Date.now() < bpDeadline) {
+  const s = await state();
+  const j = await probeRegion('jamb');
+  const front = s.waveLive === true ? Number(s.waveFront) : Number(s.waveRange);
+  if (Number.isNaN(dotFront) && j.drawn > 20) dotFront = front;
+  if (Number.isNaN(inkFront) && j.edgesInked > 0) inkFront = front;
+  if (inFlight === null && Number(s.waveFront) >= 9.8 && s.waveLive === true) {
+    inFlight = s;
+    jambRing = j;
+    ringBuf = await shotBuf('48-blueprint-at-the-front.png');
+  }
+  if (!Number.isNaN(inkFront) && inFlight !== null) break;
+  if (s.waveLive !== true) break;
+}
+// The loop should always have caught the front mid-room; if it somehow did not, take the sample
+// anyway so the checks below fail on their own terms rather than on a null.
+if (inFlight === null) {
+  inFlight = await state();
+  jambRing = await probeRegion('jamb');
+  ringBuf = await shotBuf('48-blueprint-at-the-front.png');
+}
 console.log(
-  `  phase 1 @front=${Number(inFlight.waveFront).toFixed(2)} m: jamb ${jambRing.drawn}/${jambRing.dots} dots drawn, ` +
-    `${jambRing.edgesUnlocked} segments unlocked, ${jambRing.edgesInked} inked · ` +
-    `ripple max ${(Number(inFlight.structRippleMax) * 100).toFixed(1)} cm on ${inFlight.structRippling} dots`,
+  `  front=${Number(inFlight?.waveFront ?? 0).toFixed(2)} m: jamb ${jambRing?.drawn}/${jambRing?.dots} dots drawn, ` +
+    `${jambRing?.edgesUnlocked} segments unlocked, ${jambRing?.edgesInked} inked · ` +
+    `${inFlight?.structInkedEdges}/${inFlight?.structUnlockedEdges} inked room-wide, ` +
+    `${inFlight?.structPendingEdges} mid-stroke · ripple max ` +
+    `${(Number(inFlight?.structRippleMax ?? 0) * 100).toFixed(1)} cm on ${inFlight?.structRippling} dots`,
 );
 check(
-  'phase 1: the ring has reached the doorjamb and lit its lattice',
-  jambRing.drawn > 20 && jambRing.unlocked > 20,
-  `${jambRing.drawn} of ${jambRing.dots} dots drawn 8.7 m out, front at ${Number(inFlight.waveFront).toFixed(2)} m`,
-);
-check(
-  'phase 1: not one contour has inked where the ring is',
-  jambRing.edgesInked === 0 && jambRing.edgesUnlocked > 0,
-  `${jambRing.edgesUnlocked} segments unlocked in the ring zone, ${jambRing.edgesInked} inked ` +
-    `(phase delay ${bp0.structPhaseDelay} s)`,
+  'the ring has reached the doorjamb and lit its lattice',
+  jambRing !== null && jambRing.drawn > 20 && jambRing.unlocked > 20,
+  `${jambRing?.drawn} of ${jambRing?.dots} dots drawn at the jamb, front at ` +
+    `${Number(inFlight?.waveFront ?? 0).toFixed(2)} m`,
 );
 /*
- * The contour phase is behind the lattice phase everywhere at once, not only in the box above.
- * (Not asserted as "some contour has already inked": the nearest box edge to the spawn is metres
- * away, so at this instant the delay has not elapsed for a single one of them — which is the
- * lag being measured, seen from the other end.)
+ * The inversion. This assertion used to read "not one contour has inked where the ring is", and
+ * the number it printed was zero — the drawing did not start until `phaseDelay` (0.3 s, seven and
+ * a half metres of travel) after the ring had gone by. The lag is now one stroke.
  */
 check(
-  'phase 1: every contour the front has passed is still waiting out its delay',
-  Number(inFlight.structInkedEdges) < Number(inFlight.structUnlockedEdges) &&
-    Number(inFlight.structPendingEdges) > 0,
-  `${inFlight.structInkedEdges} inked of ${inFlight.structUnlockedEdges} unlocked, ` +
-    `${inFlight.structPendingEdges} still waiting out the delay`,
+  'contours ink as the front passes them, not a phase later',
+  Number.isFinite(inkFront) && Number.isFinite(dotFront) && inkFront - dotFront < 2.5,
+  `the jamb's lattice lit with the front at ${dotFront.toFixed(2)} m and its first contour was ` +
+    `whole at ${inkFront.toFixed(2)} m — ${(inkFront - dotFront).toFixed(2)} m of lag, against ` +
+    `${(Number(bp0.structInkSeconds) * 25).toFixed(2)} m for one ${bp0.structInkSeconds} s stroke ` +
+    `(the old confirm delay alone was 7.50 m)`,
 );
 check(
-  'phase 1: dots at the front are displaced by it, and the displacement is real',
+  'the drawing keeps up with the front room-wide',
+  Number(inFlight.structInkedEdges) > Number(inFlight.structUnlockedEdges) * 0.4,
+  `${inFlight.structInkedEdges} inked of ${inFlight.structUnlockedEdges} unlocked, ` +
+    `${inFlight.structPendingEdges} still mid-stroke`,
+);
+check(
+  'dots at the front are displaced by it, and the displacement is real',
   Number(inFlight.structRippling) > 0 && Number(inFlight.structRippleMax) > 0.03,
   `${inFlight.structRippling} dots riding the ring, peak offset ` +
     `${(Number(inFlight.structRippleMax) * 100).toFixed(1)} cm of an amplitude of ` +
@@ -1750,26 +2179,45 @@ check(
  * whose front has not arrived are not drawn at all.
  */
 check(
-  'phase 1: the far side of the room is unlocked but not yet drawn',
+  'the far side of the room is unlocked but not yet drawn',
   Number(inFlight.structDrawnDots) < Number(inFlight.structUnlockedDots),
   `${inFlight.structDrawnDots} drawn of ${inFlight.structUnlockedDots} unlocked`,
 );
 
-// Between the phases: the wave has stopped, and the ink is still catching up to it.
-const between = await poll(
-  (s) => s.waveLive === false && Number(s.structPendingEdges) > 0,
-  60000,
-);
-const betweenBuf = await shotBuf('49-blueprint-between.png');
+/*
+ * The moment the front stops. This used to be "the wave has stopped and the ink is still
+ * catching up", polled on there *being* a backlog; the backlog is now only the last stroke's
+ * worth, so what is asserted is its size rather than its existence. Anything left is a segment
+ * the front passed within the last `inkSeconds`.
+ */
+const between = await poll((s) => s.waveLive === false, 60000);
+const betweenBuf = await shotBuf('49-blueprint-front-stopped.png');
 check(
-  'phase 2 trails the front rather than riding it',
-  Number(between.structPendingEdges) > 0 && Number(between.structInkedEdges) > 0,
-  `front finished, ${between.structPendingEdges} segments still inking behind it, ` +
-    `${between.structInkedEdges} already drawn`,
+  'when the front stops, the drawing is all but finished with it',
+  Number(between.structInkedEdges) > Number(between.structUnlockedEdges) * 0.75,
+  `front finished with ${between.structInkedEdges} of ${between.structUnlockedEdges} segments ` +
+    `inked, ${between.structPendingEdges} still mid-stroke`,
+);
+/*
+ * And the removed mechanics are gone from the panel too, not merely defaulted to zero — the two
+ * rows that drove the second front no longer exist.
+ */
+const bpRows = await page.$$eval('.lil-name', (els) => els.map((e) => e.textContent));
+check(
+  'the second front is gone from the GUI as well as from the shader',
+  bpRows.length > 20 && !bpRows.some((n) => /confirm delay|probe wake/i.test(n ?? '')),
+  `${bpRows.length} controls, none of them a confirm delay or a probe wake`,
 );
 
-// Settled: everything the ping unlocked is drawn, and the ring has passed out of existence.
-const settledBp = await settleInk(60000);
+/*
+ * Settled: everything the ping unlocked is drawn, and the ring has passed out of existence. The
+ * two do not finish together — a stroke is `inkSeconds` and the ring's tail is a few tenths of a
+ * second of travel past that — so the ring is waited out explicitly rather than assumed. (At the
+ * x0.1 clock this section runs on, "a few tenths" is a few seconds of wall time, which is how
+ * this came to be a wait rather than an assumption.)
+ */
+const settledBp = await poll((s) => Number(s.structRippling) === 0, 60000);
+await settleInk(60000);
 await wait(250);
 const settledBuf = await shotBuf('50-blueprint-settled.png');
 const jambSettled = await probeRegion('jamb');
@@ -2049,7 +2497,43 @@ check(
 await shotBuf('56-blueprint-stress.png');
 
 /*
- * --- 34f switching looks -----------------------------------------------------
+ * --- 34f the spam frame, on the structured look ------------------------------
+ *
+ * The same acceptance test §32a runs on the sampling looks. The blueprint cannot double up on
+ * itself the way a blip cloud can — a dot is unlocked once and drawn once, however many times it
+ * is heard — so this is the cheapest of the three to keep quiet, and the number is here as the
+ * floor of the comparison rather than as a worry.
+ */
+await respawn();
+await clearPaint();
+await ping('q-ping');
+await settleInk(60000);
+const bpSingle = photo(await shotBuf('56a-spam-blueprint-single.png'));
+const bpSpamFrames = [];
+for (let i = 0; i < 5; i++) {
+  await poll((x) => Number(x.pingCooldown) === 0, 8000);
+  const before = Number((await state()).soundEvents);
+  await page.keyboard.press(i % 2 === 0 ? 'q' : 'e');
+  await poll((x) => Number(x.soundEvents) > before, 8000);
+  bpSpamFrames.push(photo(await page.screenshot()));
+}
+const bpSpam = photo(await shotBuf('56b-spam-blueprint.png'));
+const bpPeak = bpSpamFrames.reduce((a, b) => (b.mean > a.mean ? b : a), bpSpam);
+console.log(
+  `  Blueprint: one ping ${bpSingle.mean.toFixed(2)}/255 → five back to back ` +
+    `${bpSpamFrames.map((f) => f.mean.toFixed(1)).join(' ')} · near-white ${pct(bpPeak.hot)} ` +
+    `· clipped ${pct(bpPeak.sat)}`,
+);
+check(
+  'Blueprint: five pings back to back stay inside the band',
+  bpPeak.mean < 25 && bpPeak.hot < 0.03 && bpPeak.sat < 0.012,
+  `peak ${bpPeak.mean.toFixed(2)}/255 (cap 25) · near-white ${pct(bpPeak.hot)} (cap 3.00%) · ` +
+    `clipped ${pct(bpPeak.sat)} (cap 1.20%)`,
+);
+await settleInk(60000);
+
+/*
+ * --- 34g switching looks -----------------------------------------------------
  *
  * Two representations exist and only one may ever be live. Switching drops whatever the other
  * one knew, so a look change can neither leave a ghost of the previous look on screen nor paint

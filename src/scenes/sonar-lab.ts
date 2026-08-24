@@ -678,6 +678,9 @@ export class SonarLab implements LabScene {
    * Two of them — spacing and jitter — are *build* parameters: they change the lattice itself,
    * so they rebuild it and drop whatever was known, which is why they are on `onFinishChange`
    * (a rebuild per mouse-move would be a slideshow). Everything else is a uniform and is live.
+   *
+   * Batch 2.3 removed two rows: the confirmation delay and the probe wake. They were the second
+   * front, and the second front was the bug.
    */
   private buildBlueprintGui(): void {
     const folder = this.ctx.gui.addFolder('Blueprint (5)');
@@ -692,7 +695,6 @@ export class SonarLab implements LabScene {
     folder.add(s, 'segment', 0.1, 1, 0.05).name('contour piece (m)').onFinishChange(rebuild);
     folder.add(s, 'ripple', 0, 0.15, 0.005).name('ripple amplitude (m)').onChange(push);
     folder.add(s, 'ringWidth', 0.2, 4, 0.1).name('ring width (m)').onChange(push);
-    folder.add(s, 'phaseDelay', 0.05, 1.2, 0.01).name('confirm delay (s)').onChange(push);
     folder.add(s, 'inkSeconds', 0.01, 0.5, 0.01).name('ink-in (s)').onChange(push);
     folder.add(s, 'contourBright', 0, 3, 0.05).name('contour brightness').onChange(push);
     folder.add(s, 'dotBright', 0, 2, 0.02).name('lattice brightness').onChange(push);
@@ -700,7 +702,6 @@ export class SonarLab implements LabScene {
     folder.add(s, 'probeBright', 0, 6, 0.1).name('probe boost ×').onChange(push);
     folder.add(s, 'probeSize', 0, 5, 0.1).name('probe swell ×').onChange(push);
     folder.add(s, 'probeSoftness', 0, 1, 0.02).name('probe blur').onChange(push);
-    folder.add(s, 'probeWake', 0, 1, 0.02).name('probe wake').onChange(push);
     folder.add(s, 'dotSoftness', 0, 1, 0.02).name('lattice blur').onChange(push);
     folder.add(s, 'pixelCap', 2, 20, 0.5).name('dot px cap').onChange(push);
   }
@@ -716,6 +717,9 @@ export class SonarLab implements LabScene {
     folder.add(w, 'rimSeconds', 0.05, 1.5, 0.01).name('arrival flash (s)').onChange(push);
     folder.add(w, 'rimBoost', 0, 6, 0.1).name('arrival boost ×').onChange(push);
     folder.add(w, 'rimSize', 0, 4, 0.05).name('arrival swell ×').onChange(push);
+    folder.add(w, 'arriveSeconds', 0, 0.4, 0.01).name('arrival ramp (s)').onChange(push);
+    folder.add(w, 'refreshSeconds', 0.02, 1, 0.01).name('refresh ease (s)').onChange(push);
+    folder.add(w, 'stepRim', 0, 1, 0.05).name('step flash ×').onChange(push);
     folder.add(w, 'tracerSeconds', 0.05, 1, 0.01).name('tracer life (s)').onChange(push);
     folder.add(w, 'tracerStart', 0, 4, 0.05).name('tracer start (m)');
     folder.add(w, 'tracerLength', 1, 22, 0.5).name('tracer length (m)');
@@ -918,10 +922,26 @@ export class SonarLab implements LabScene {
       arrivedMax: diag.arrivedMax,
       pendingMin: Number.isFinite(diag.pendingMin) ? diag.pendingMin : -1,
       visiblePoints: diag.visible,
+      // Batch 2.3's two branches, counted: blips easing in for the first time, and known blips
+      // whose age is easing over after a silent refresh.
+      rampingPoints: diag.ramping,
+      refreshingPoints: diag.refreshing,
+      // The ground under the player's feet, under both age curves — the shipped eased one and
+      // the pre-2.3 stepped one. The pair is what makes the flicker fix measurable at frame rate.
+      nearBlips: diag.nearBlips,
+      nearAgeEased: diag.nearAgeEased,
+      nearAgeStep: diag.nearAgeStep,
       maxBlipPixels: diag.maxBlipPixels,
       maxBlipWant: diag.maxBlipWant,
       pixelCap: this.paint.tunables.pixelCap,
       dustLit: this.paint.dustLit,
+      // Batch 2.3: the front dust ships off. `dustEnabled` is the switch's own state, `dustLit`
+      // is whether the field is actually drawing this frame — off means it never draws.
+      dustEnabled: this.paint.wave.dust,
+      arriveSeconds: this.paint.wave.arriveSeconds,
+      refreshSeconds: this.paint.wave.refreshSeconds,
+      stepRim: this.paint.wave.stepRim,
+      coolRate: this.paint.profile.coolRate,
       tracerAlive: this.paint.tracerAlive,
       tracerAge: this.paint.tracerAge,
       // --- look readouts
@@ -963,7 +983,7 @@ export class SonarLab implements LabScene {
       structPendingEdges: d.pendingEdges,
       structRippling: d.rippling,
       structRippleMax: d.rippleMax,
-      structPhaseDelay: t.phaseDelay,
+      structInkSeconds: t.inkSeconds,
       structRipple: t.ripple,
       structRingWidth: t.ringWidth,
       structSpacing: t.spacing,

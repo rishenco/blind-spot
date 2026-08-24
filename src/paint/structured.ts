@@ -17,11 +17,14 @@
  *     another box, or that face out of the level entirely, are dropped at build time — the
  *     outside of the room shell is not a place sound can ever reach.
  *
- *  2. **The same wave, the same two stamps.** An unlock writes `birth = event.time + distance /
- *     waveSpeed` and keeps the previous arrival in `prior`, exactly as the blip system does, and
- *     the shaders gate on the same comparison. So a Blueprint reveal is a front sweeping across
- *     the room, a second ping over known ground never blinks it out, and the CPU work can be
- *     amortised over as many frames as it likes without anyone being able to tell.
+ *  2. **The same wave, the same two stamps, the same restamp policy.** An unlock writes
+ *     `birth = event.time + distance / waveSpeed` and keeps the previous arrival in `prior`,
+ *     exactly as the blip system does, and both shaders here branch on `prior` exactly as that
+ *     one does: virgin geometry gets the whole front, known geometry refreshes *silently* — it
+ *     does not ripple, does not re-ink, does not wait for the new front, it simply eases to its
+ *     new age over `refreshSeconds`. So a first reveal is a front sweeping across the room, a
+ *     second ping over ground you already have is a quiet brightening of it, and the CPU work
+ *     can be amortised over as many frames as it likes without anyone being able to tell.
  *
  *  3. **Objects surface whole; the shell surfaces where it is hit.** If any part of a prop is
  *     directly audible — one unoccluded probe inside the event's radius and cone — every face of
@@ -30,16 +33,15 @@
  *     room, so they unlock per dot behind a real occlusion test. That is what stops a ping in one
  *     room from painting the next one through a wall.
  *
- *  4. **Two phases: probed, then confirmed.** As the front passes, a dot is pushed *off* its true
- *     position — radially outward, on a damped ring profile a metre or so wide — and drawn hot,
- *     swollen and white. Contours are not drawn at all yet. The ring is a band of fixed
- *     *thickness*, so what the player sees is a bright edge travelling outward rather than the
- *     whole painted volume flashing at once; behind it the dot is already back exactly where it
- *     belongs, cooling into the dim cyan lattice, kept slightly warm (`probeWake`) to mark it as
- *     heard-but-not-yet-committed. Confirmation is a fixed delay behind arrival: at that moment
- *     the last of the warmth goes and the edge contours ink themselves in, segment by segment.
- *     The displacement is a *render-time* effect computed from the stored exact position: the
- *     data never lies (law 2), and once the transient has passed the picture is exact.
+ *  4. **One front, and the drawing happens at it.** As the front passes virgin lattice, a dot is
+ *     pushed *off* its true position — radially outward, on a damped ring profile a metre or so
+ *     wide — and drawn hot, swollen and white; a fifth of a ring width later it is already back
+ *     exactly where it belongs, cooling into the dim cyan lattice. The contours ink themselves in
+ *     segment by segment *at that same ring*, not behind it. Batch 2.2 ran the ink on a fixed
+ *     delay (`phaseDelay`) with a warm wake (`probeWake`) bridging the gap, which gave the room a
+ *     second, slower front chasing the first — read as a bug in playtest, and removed. The
+ *     displacement is a *render-time* effect computed from the stored exact position: the data
+ *     never lies (law 2), and once the ring has passed the picture is exact.
  *
  *  5. **Nothing is ever lost.** Both layers cool along the same age ramp as the blip cloud and
  *     settle at the skeleton alpha of §3.6. The map dims; it never dies.
@@ -65,13 +67,11 @@ export interface StructuredTunables {
   jitter: number;
   /** Length of one contour piece, metres — also the granularity of the ink-in. */
   segment: number;
-  /** Radial displacement at the peak of the ring, metres. 0 leaves a pure two-phase colour. */
+  /** Radial displacement at the peak of the ring, metres. 0 leaves the ring as pure colour. */
   ripple: number;
   /** Width of the displaced ring behind the front, metres. */
   ringWidth: number;
-  /** How long after arrival a dot settles and its contours ink in, seconds. */
-  phaseDelay: number;
-  /** How long one contour segment takes to draw itself once confirmed, seconds. */
+  /** How long one contour segment takes to draw itself as the front reaches it, seconds. */
   inkSeconds: number;
   /** Contour gain. */
   contourBright: number;
@@ -85,17 +85,7 @@ export interface StructuredTunables {
   probeSize: number;
   /** Splat softness of a probed dot — this is the "blurred" of "hot blurred white". */
   probeSoftness: number;
-  /**
-   * How much of the probed look survives *behind* the ring, until the contours ink.
-   *
-   * The ring is a band of fixed thickness travelling outward; the confirmation that follows it is
-   * a fixed number of seconds later, which at 25-45 m/s is a much deeper region. Without this the
-   * two would be the same band and the whole painted volume would flash white at once. At 0.25 the
-   * front reads as a bright edge dragging a dimmer wake — a pressure wave, not a camera flash.
-   * Zero makes the ring the only warm thing on screen.
-   */
-  probeWake: number;
-  /** Splat softness once confirmed. */
+  /** Splat softness behind the ring, where the lattice is exact. */
   dotSoftness: number;
   /** Screen-size ceiling for a lattice dot, drawing-buffer pixels. */
   pixelCap: number;
@@ -112,7 +102,6 @@ export function defaultStructuredTunables(): StructuredTunables {
     segment: 0.2,
     ripple: 0.07,
     ringWidth: 1.2,
-    phaseDelay: 0.3,
     inkSeconds: 0.06,
     contourBright: 1.25,
     dotBright: 0.46,
@@ -120,7 +109,6 @@ export function defaultStructuredTunables(): StructuredTunables {
     probeBright: 2.4,
     probeSize: 1.8,
     probeSoftness: 0.95,
-    probeWake: 0.25,
     dotSoftness: 0.35,
     pixelCap: 7,
     chunkItems: 4000,
@@ -248,12 +236,11 @@ const DOT_VERTEX = /* glsl */ `
   uniform float uMaxPixels;
   uniform float uRipple;
   uniform float uRingWidth;
-  uniform float uPhaseDelay;
+  uniform float uRefreshSeconds;
   uniform float uDotBright;
   uniform float uProbeBright;
   uniform float uProbeSize;
   uniform float uProbeSoft;
-  uniform float uProbeWake;
   uniform float uDotSoft;
   uniform float uSkeletonSize;
   uniform vec3  uListener;
@@ -299,41 +286,53 @@ const DOT_VERTEX = /* glsl */ `
     }
 
     vec3 p = position;
-    float age = uTime - aBirth;
+    float ageNew = uTime - aBirth;
+    float age;
     float hot = 0.0;
+    float appear = 1.0;
 
-    if (age < 0.0) {
-      // Ahead of the newest front: whatever was already known here stays up until it arrives.
-      age = uTime - aPrior;
-      if (aPrior <= -1.0e8 || age < 0.0) {
+    /*
+     * The restamp policy, identical to the blip cloud's (paintSystem.ts) because it is one
+     * policy and not two. No prior means nobody has ever heard this dot: it waits for the front,
+     * and the front visibly passes through it — displaced, hot, swollen. A prior means known
+     * ground, and a refresh over known ground is *silent*: no ring, no displacement, no gate, the
+     * age just eases to its new value. That is what stops a second ping from re-surveying a room
+     * the player has already bought.
+     */
+    if (aPrior <= -1.0e8) {
+      if (ageNew < 0.0) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         gl_PointSize = 0.0;
         return;
       }
-    } else {
+      age = ageNew;
       vec3 outward;
       float behind = behindFront(position, aWave, aBirth, uTime, outward);
       if (behind >= 0.0) {
-        // Phase 1: the surface is pushed off its true position while the pressure passes.
+        // The pressure pushes the surface off its true position as it goes by, and the dot is
+        // white and swollen for exactly as long as it is being pushed. One band, one front.
         float ringN = behind / max(0.05, uRingWidth);
         p += outward * uRipple * ringProfile(ringN);
-        /*
-         * ...and it *looks* probed for exactly as long as it is being pushed. The ring is a band
-         * of fixed thickness; confirmation comes a fixed number of seconds later, which at these
-         * wave speeds is several times deeper. Driving the white off the delay instead would make
-         * every ping one flash of the whole room, so the bright edge is the ring and the wake
-         * behind it stays only slightly warm until its contours ink.
-         */
-        hot = max(1.0 - smoothstep(0.0, 1.0, ringN),
-                  uProbeWake * (1.0 - smoothstep(0.0, max(0.01, uPhaseDelay), age)));
+        hot = 1.0 - smoothstep(0.0, 1.0, ringN);
+        // A soft leading edge on the ring, a third of a ring width deep — the distance analogue
+        // of the blip cloud's arrival ramp, and for the same reason: nothing pops on.
+        appear = smoothstep(0.0, 0.35, ringN);
       }
+    } else {
+      float ageOld = uTime - aPrior;
+      if (ageOld < 0.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+      }
+      age = mix(ageOld, ageNew, smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew));
     }
 
     vec3 col;
     float alpha;
     ageRamp(age, col, alpha);
     col = mix(col, uAccent, aAccent);
-    // Phase 1 is white and certain of nothing; phase 2 is cyan and exact.
+    // At the ring the dot is white and certain of nothing; behind it, cyan and exact.
     col = mix(col, vec3(1.0), hot * 0.92);
     alpha = mix(alpha, 1.0, hot);
 
@@ -348,7 +347,7 @@ const DOT_VERTEX = /* glsl */ `
     float coverage = min(1.0, (want * want) / (px * px));
 
     vColor = col * uDotBright * coverage * (1.0 + hot * uProbeBright)
-      * (0.88 + 0.24 * aSeed);
+      * (0.88 + 0.24 * aSeed) * appear;
     vAlpha = alpha;
     vSoft = mix(uDotSoft, uProbeSoft, hot);
     gl_PointSize = px;
@@ -375,7 +374,7 @@ const DOT_FRAGMENT = /* glsl */ `
 const EDGE_VERTEX = /* glsl */ `
   uniform float uTime;
   uniform float uWindowRadius;
-  uniform float uPhaseDelay;
+  uniform float uRefreshSeconds;
   uniform float uInkSeconds;
   uniform float uContourBright;
   uniform vec3  uListener;
@@ -410,20 +409,32 @@ const EDGE_VERTEX = /* glsl */ `
       return;
     }
 
-    // A contour exists only once its face has been *confirmed* — one phase delay behind the
-    // front. Before that the front has passed but the line has not been inked yet.
-    float since = uTime - aBirth - uPhaseDelay;
+    /*
+     * A line inks *at* the front, not behind it: the instant the wave reaches this piece it
+     * starts drawing itself from one end, and inkSeconds later it is whole. The same restamp
+     * policy as everywhere else decides which of those two things is happening — a line with a
+     * prior has already been drawn once and is simply refreshed, silently and already whole, so
+     * a second ping never re-inks a drawing the player owns.
+     */
+    float ageNew = uTime - aBirth;
     float age;
-    if (since >= 0.0) {
-      age = uTime - aBirth;
-      vInk = since / max(0.001, uInkSeconds);
-    } else {
-      float prior = uTime - aPrior - uPhaseDelay;
-      if (aPrior <= -1.0e8 || prior < 0.0) {
+    float flash = 0.0;
+    if (aPrior <= -1.0e8) {
+      if (ageNew < 0.0) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
       }
-      age = uTime - aPrior;
+      age = ageNew;
+      vInk = ageNew / max(0.001, uInkSeconds);
+      // The moment of inking is the brightest a line ever is.
+      flash = exp(-ageNew * 6.0);
+    } else {
+      float ageOld = uTime - aPrior;
+      if (ageOld < 0.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+      age = mix(ageOld, ageNew, smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew));
       vInk = 10.0;
     }
 
@@ -431,8 +442,6 @@ const EDGE_VERTEX = /* glsl */ `
     float alpha;
     ageRamp(age, col, alpha);
     col = mix(col, uAccent, aAccent);
-    // The moment of inking is the brightest a line ever is.
-    float flash = exp(-max(0.0, age - uPhaseDelay) * 6.0);
     vColor = col * uContourBright * (1.0 + 0.9 * flash);
     vAlpha = alpha;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
@@ -507,9 +516,9 @@ export interface StructuredStats {
 export interface StructuredDiagnostics {
   /** Lattice dots a viewer could see this instant. */
   drawnDots: number;
-  /** Contour segments that have inked in. */
+  /** Contour segments that have finished drawing themselves. */
   inkedEdges: number;
-  /** Segments whose front has passed but which have not been confirmed yet (phase 1). */
+  /** Segments unlocked by an event whose front has not finished inking them yet. */
   pendingEdges: number;
   /** Dots currently displaced by more than a millimetre. */
   rippling: number;
@@ -637,7 +646,9 @@ export class StructuredPaint {
       uTime: { value: 0 },
       uWindowRadius: { value: 45 },
       uListener: { value: new THREE.Vector3() },
-      uPhaseDelay: { value: this.tunables.phaseDelay },
+      // The silent-refresh ease, pushed in from the wave tunables by `applyLook`: one policy for
+      // both backends, owned by the wave, never duplicated here.
+      uRefreshSeconds: { value: 0.3 },
       uRampTimes: {
         value: new THREE.Vector3(ramp.freshSeconds, ramp.coolSeconds, ramp.coldSeconds),
       },
@@ -662,7 +673,6 @@ export class StructuredPaint {
         uProbeBright: { value: this.tunables.probeBright },
         uProbeSize: { value: this.tunables.probeSize },
         uProbeSoft: { value: this.tunables.probeSoftness },
-        uProbeWake: { value: this.tunables.probeWake },
         uDotSoft: { value: this.tunables.dotSoftness },
         uSkeletonSize: { value: ramp.skeletonSize },
         uWaveA: { value: waveA },
@@ -1077,8 +1087,12 @@ export class StructuredPaint {
 
   // ---- look ----------------------------------------------------------------
 
-  /** Pushes the tunables and the shared age ramp into both shaders. */
-  applyLook(windowRadius: number): void {
+  /**
+   * Pushes the tunables and the shared age ramp into both shaders. `refreshSeconds` comes from
+   * the wave tunables rather than from this module's own: the silent refresh is one policy
+   * across both paint backends, so it has exactly one number behind it.
+   */
+  applyLook(windowRadius: number, refreshSeconds: number): void {
     const t = this.tunables;
     const d = this.dotMaterial.uniforms;
     const e = this.edgeMaterial.uniforms;
@@ -1090,13 +1104,12 @@ export class StructuredPaint {
     d.uProbeBright!.value = t.probeBright;
     d.uProbeSize!.value = t.probeSize;
     d.uProbeSoft!.value = t.probeSoftness;
-    d.uProbeWake!.value = t.probeWake;
     d.uDotSoft!.value = t.dotSoftness;
     d.uSkeletonSize!.value = this.ramp.skeletonSize;
     e.uInkSeconds!.value = t.inkSeconds;
     e.uContourBright!.value = t.contourBright;
     for (const u of [d, e]) {
-      u.uPhaseDelay!.value = t.phaseDelay;
+      u.uRefreshSeconds!.value = refreshSeconds;
       u.uWindowRadius!.value = windowRadius;
       (u.uRampTimes!.value as THREE.Vector3).set(
         this.ramp.freshSeconds,
@@ -1626,41 +1639,47 @@ export class StructuredPaint {
     if (this.diagTime === this.time || !this.built) return d;
     this.diagTime = this.time;
     const now = this.time;
-    const delay = this.tunables.phaseDelay;
-    const ring = Math.max(0.05, this.tunables.ringWidth);
-    const amp = this.tunables.ripple;
+    const ink = Math.max(0.001, this.tunables.inkSeconds);
 
     let drawn = 0;
     let rippling = 0;
     let rippleMax = 0;
     for (let i = 0; i < this.dotBirth.length; i++) {
       const birth = this.dotBirth[i]!;
+      if (birth <= -1e8) continue;
+      const prior = this.dotPrior[i]!;
       const age = now - birth;
-      if (age < 0) {
-        const prior = this.dotPrior[i]!;
-        if (prior > -1e8 && now - prior >= 0) drawn++;
+      // Known ground refreshes silently: it is drawn whatever the new front is doing, and it
+      // never rides the ring. Only virgin lattice can be displaced.
+      if (prior > -1e8) {
+        drawn++;
         continue;
       }
-      if (birth <= -1e8) continue;
+      if (age < 0) continue;
       drawn++;
       const slot = this.dotWave[i]!;
       const speed = this.waveMeta[slot * 2]!;
       if (this.waveMeta[slot * 2 + 1]! < 0.5 || speed <= 0) continue;
-      const disp = Math.abs(amp * ringProfile((age * speed) / ring));
+      const disp = Math.abs(this.tunables.ripple * ringProfile((age * speed) / Math.max(0.05, this.tunables.ringWidth)));
       if (disp > 0.001) {
         rippling++;
         if (disp > rippleMax) rippleMax = disp;
       }
     }
 
+    /*
+     * A segment counts as inked once it has finished drawing itself — which now happens at the
+     * front, so "pending" means "unlocked, but its front has not finished passing", and it is
+     * the only wait left in the look. (Before batch 2.3 it also covered a fixed confirmation
+     * delay; there is no such delay any more.)
+     */
     let inked = 0;
     let pending = 0;
     for (let k = 0; k < this.pieces; k++) {
       const birth = this.edgeBirth[k * 2]!;
       if (birth <= -1e8) continue;
-      if (now - birth >= delay) inked++;
-      else if (now - birth >= 0) pending++;
-      else if (this.edgePrior[k * 2]! > -1e8 && now - this.edgePrior[k * 2]! >= delay) inked++;
+      if (this.edgePrior[k * 2]! > -1e8 || now - birth >= ink) inked++;
+      else pending++;
     }
 
     d.drawnDots = drawn;
@@ -1695,7 +1714,7 @@ export class StructuredPaint {
     };
     if (!this.built) return out;
     const now = this.time;
-    const delay = this.tunables.phaseDelay;
+    const ink = Math.max(0.001, this.tunables.inkSeconds);
     const ring = Math.max(0.05, this.tunables.ringWidth);
     const amp = this.tunables.ripple;
 
@@ -1709,16 +1728,19 @@ export class StructuredPaint {
       const birth = this.dotBirth[i]!;
       if (birth <= -1e8) continue;
       out.unlocked++;
+      // Same two cases as the shader: known ground is drawn and never rides the ring; virgin
+      // ground waits for its front and is displaced by it.
+      if (this.dotPrior[i]! > -1e8) {
+        out.drawn++;
+        continue;
+      }
       const age = now - birth;
-      if (age >= 0) {
-        out.drawn++;
-        const slot = this.dotWave[i]!;
-        const speed = this.waveMeta[slot * 2]!;
-        if (this.waveMeta[slot * 2 + 1]! >= 0.5 && speed > 0) {
-          if (Math.abs(amp * ringProfile((age * speed) / ring)) > 0.001) out.rippling++;
-        }
-      } else if (this.dotPrior[i]! > -1e8 && now - this.dotPrior[i]! >= 0) {
-        out.drawn++;
+      if (age < 0) continue;
+      out.drawn++;
+      const slot = this.dotWave[i]!;
+      const speed = this.waveMeta[slot * 2]!;
+      if (this.waveMeta[slot * 2 + 1]! >= 0.5 && speed > 0) {
+        if (Math.abs(amp * ringProfile((age * speed) / ring)) > 0.001) out.rippling++;
       }
     }
 
@@ -1732,10 +1754,7 @@ export class StructuredPaint {
       const birth = this.edgeBirth[k * 2]!;
       if (birth <= -1e8) continue;
       out.edgesUnlocked++;
-      if (now - birth >= delay) out.edgesInked++;
-      else if (this.edgePrior[k * 2]! > -1e8 && now - this.edgePrior[k * 2]! >= delay) {
-        out.edgesInked++;
-      }
+      if (this.edgePrior[k * 2]! > -1e8 || now - birth >= ink) out.edgesInked++;
     }
     return out;
   }

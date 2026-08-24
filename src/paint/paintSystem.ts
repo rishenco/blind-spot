@@ -42,7 +42,7 @@
  *     white mush, and it bounds the buffer by the surface area of the level rather than by how
  *     long the player has been walking around.
  *
- * ## The wave engine
+ * ## The wave engine, and the one rule that governs it
  *
  * Every blip carries *two* stamps instead of one.
  *
@@ -50,16 +50,29 @@
  *   `aPrior` — the arrival stamp this blip had *before* the new event restamped it, or -1e9 if
  *              this is the first time anything has ever painted here.
  *
- * The shader picks: past `aBirth` it runs the normal age ramp from `aBirth`; before `aBirth`
- * it falls back to `aPrior`, and if there is no prior it draws nothing at all. That one branch
- * buys three things at once — an expanding front on virgin geometry, no flicker when a second
- * ping sweeps a room you already know (the old paint simply stays up until the new front
- * overtakes it), and zero per-frame CPU, because the front is a comparison against a uniform
- * rather than a list the CPU has to walk.
+ * `aPrior` is therefore not only a fallback: it is the answer to "was this ground already
+ * known?", and that question decides everything about how the new event is allowed to look.
  *
- * At the instant of arrival a blip flashes ice-white and swells, then settles into the ramp
- * within a fraction of a second. That flash *is* the visible wavefront on surfaces; `waveFx.ts`
- * adds the part that happens in the air.
+ *  - **Virgin ground gets the wave.** Nothing is drawn here until the front physically arrives;
+ *    at arrival the blip eases up over ~120 ms, flashing ice-white and swelling, and settles into
+ *    the age ramp. That is the front made visible, and it is the whole of "sound paints the
+ *    world": the picture arrives at the speed of the thing that painted it.
+ *
+ *  - **Known ground refreshes silently.** No arrival flash, no wave gating, no re-sweep — the
+ *    blip simply grows younger, easing from the age it had to the age it now has over ~0.3 s.
+ *    Re-hearing a wall you already know is not news, and drawing it as news was the single worst
+ *    artefact this system has produced: a second front visibly re-scanning the room on every
+ *    ping, and the ground under a sprinting player strobing three times a second because each
+ *    footfall re-flashed the floor it had already painted. A refresh is information — the paint
+ *    gets younger, which is *exactly* what the age ramp is for — but it is quiet information.
+ *
+ * The two cases share one branch on `aPrior`, so the policy cannot drift between them, and both
+ * are free: the front is still a comparison against a uniform rather than a list the CPU walks.
+ *
+ * The arrival flash is scaled per event class (`rimScaleFor`). A ping is a deliberate question
+ * and answers at full brightness; footsteps, which fire three times a second, answer at a
+ * fraction of it. Sprinting into unpainted ground should read as headlights, never as a strobe.
+ * `waveFx.ts` adds the part of a front that happens in the air.
  *
  * The wave also pays for itself on the CPU. Because a blip's stamp is a function of the event's
  * own time and the distance to it — and of nothing about *when* it was sampled — the sampler is
@@ -137,6 +150,18 @@ export interface PaintProfile {
    * zero (§3.6: the map is never lost, only the fine read).
    */
   dissolve: number;
+  /**
+   * Multiplier on how fast this look walks the shared age ramp. 1 is the ramp as authored.
+   *
+   * A look parameter, not a law: §3.2 fixes that age is the axis, not how many seconds a stage
+   * takes. Look 4 turns it up because that is measurably what the reference does — its returns
+   * settle out of the hot phase on a ~1 s exponential and are down to a fifth of their return
+   * brightness inside ten seconds, where our authored ramp holds near-full brightness for
+   * twenty. A room that is *all* fresh is the brightest thing this renderer can produce, and
+   * spamming pings holds it there; cooling out of the fresh phase quickly is how the reference
+   * keeps that from being painful.
+   */
+  coolRate: number;
   /** Whether this look asks for the bloom pass by default. */
   bloom: boolean;
   /**
@@ -166,6 +191,7 @@ export function paintProfiles(): PaintProfile[] {
       brightness: 1.0,
       materialMix: 0,
       dissolve: 0,
+      coolRate: 1,
       bloom: false,
       structured: false,
     },
@@ -184,6 +210,7 @@ export function paintProfiles(): PaintProfile[] {
       brightness: 0.95,
       materialMix: 0,
       dissolve: 0,
+      coolRate: 1,
       bloom: false,
       structured: false,
     },
@@ -202,6 +229,7 @@ export function paintProfiles(): PaintProfile[] {
       brightness: 0.95,
       materialMix: 0,
       dissolve: 0,
+      coolRate: 1,
       bloom: false,
       structured: false,
     },
@@ -216,6 +244,15 @@ export function paintProfiles(): PaintProfile[] {
        * Density is up and cell size is down because the whole character depends on the grain
        * being finer than the eye can resolve individually at a distance — the reference runs a
        * ~6 cm near-field spacing, and 7.5 cm is what our budget buys over a whole room.
+       *
+       * Brightness and `coolRate` are the batch-2.3 fidelity pass, and both are measurements off
+       * the reference rather than taste. Its hot phase is an exponential with a ~1 s time
+       * constant (`exp(-age*0.95)` on the colour, `0.20 + 0.80*exp(-age*0.34)` on the strength),
+       * so a scanned surface is out of the white within a second and down to a fifth of its
+       * return brightness inside ten; ours held 90 % of full for twenty seconds, which is what
+       * made a spammed ping stack a whole room's worth of near-maximum paint on screen at once.
+       * 1.8× the ramp puts our fresh stage at ~1.1 s, and the gain comes down to match a look
+       * that no longer has an arrival flash multiplying it (see `MATTER_VERTEX`).
        */
       name: 'Afterimage',
       density: 1.6,
@@ -227,9 +264,10 @@ export function paintProfiles(): PaintProfile[] {
       softness: 0.4,
       sizeJitter: 0.14,
       brightJitter: 0.34,
-      brightness: 1.35,
+      brightness: 1.0,
       materialMix: 1,
       dissolve: 0.55,
+      coolRate: 1.8,
       bloom: true,
       structured: false,
     },
@@ -240,9 +278,9 @@ export function paintProfiles(): PaintProfile[] {
        * Nothing here is sampled: the level's geometry is known, so a sound *unlocks* the part of
        * it that the sound actually reached — a uniform lattice of dim dots across every revealed
        * face and a bright contour along every revealed edge. What the player reads is a CAD
-       * drawing being surveyed by ear, arriving as a two-phase pressure front (see
-       * `structured.ts`): probed and displaced at the front, exact and inked a fifth of a second
-       * behind it.
+       * drawing being surveyed by ear, arriving as a *single* pressure front (see
+       * `structured.ts`): the ring displaces and burns the lattice as it passes, and the contours
+       * ink themselves in at the ring, segment by segment, not behind it.
        *
        * The splat fields below are inert for this look — it never deposits a blip — and are kept
        * at look 1's values purely so the shared Paint folder has something sane to show.
@@ -260,6 +298,7 @@ export function paintProfiles(): PaintProfile[] {
       brightness: 1.0,
       materialMix: 0,
       dissolve: 0,
+      coolRate: 1,
       // Contours are thin bright lines on black, which is exactly what a mild bloom flatters:
       // the ink gains a halo and the lattice stays quiet. Vetoed automatically under software GL.
       bloom: true,
@@ -301,12 +340,47 @@ export function defaultAgeRamp(): AgeRamp {
  * a noise travels is a property of the noise, not of how we draw it.
  */
 export interface WaveTunables {
-  /** Extra brightness at the instant of arrival, on top of the ice-white flash. */
+  /**
+   * Brightness *added* at the instant of arrival, on top of the ice-white flash.
+   *
+   * Added, not multiplied, and that is the reference's mechanism rather than a detail: it drives
+   * its flash as `bright += flash * 2.1` over a return strength of order one. A multiplier gives
+   * the brightest returns — the near-field floor right under you — the biggest absolute flash,
+   * which is precisely the wrong place to put a strobe; an addend gives a dim distant return the
+   * same visible arrival as a hot near one, which is what makes a front read as a front all the
+   * way out.
+   */
   rimBoost: number;
   /** Time constant of that flash, seconds — the visible thickness of the front is speed × this. */
   rimSeconds: number;
   /** How much the splat swells at arrival (0 = none). */
   rimSize: number;
+  /**
+   * How long a *virgin* blip takes to ease up to full at arrival, seconds.
+   *
+   * Zero would be the old behaviour: a blip is nowhere, and one frame later it is at full flash.
+   * At a walking pace that is a pop under every footfall. A ramp this short is still an arrival —
+   * it is under two frames at 60 fps — but it is an arrival with an edge on it rather than a
+   * switch being thrown.
+   */
+  arriveSeconds: number;
+  /**
+   * How long a *known* blip takes to ease from its old age to its refreshed one, seconds.
+   *
+   * The whole of the silent refresh. The blip never dims, never flashes and never waits for the
+   * front to reach it — it just gets younger over this long, so re-hearing a place you know
+   * brightens it smoothly instead of re-scanning it.
+   */
+  refreshSeconds: number;
+  /**
+   * Arrival-flash scale for the footstep classes (pings and landings answer at 1).
+   *
+   * Steps fire three or four times a second, and at full rim scale that is the strobe the
+   * playtest complained about even on genuinely virgin ground. At 0.4 a sprint into unpainted
+   * space still lights the way — the paint is there, at full steady brightness — but the *edge*
+   * of it stops shouting.
+   */
+  stepRim: number;
   /** Lifetime of the E-ping's tracer streak, seconds (§brief: ≤0.3). */
   tracerSeconds: number;
   /** How far ahead of the rig the fan begins, metres. */
@@ -331,21 +405,44 @@ export interface WaveTunables {
 
 export function defaultWaveTunables(): WaveTunables {
   return {
-    // The reference's flash is exp(-age * 7); ours is exp(-age * 3 / rimSeconds), so 0.42 s
-    // reproduces it exactly and the default sits a little tighter than that.
+    // The reference's flash is exp(-age * 7) with an addend of 2.1; ours is
+    // exp(-age * 3 / rimSeconds), so 0.42 s reproduces its shape exactly and the default sits a
+    // little tighter than that. The addend is the reference's, unchanged.
     rimBoost: 2.1,
     rimSeconds: 0.28,
     rimSize: 1.35,
+    arriveSeconds: 0.12,
+    refreshSeconds: 0.3,
+    stepRim: 0.4,
     tracerSeconds: 0.25,
     tracerStart: 1.4,
     tracerLength: 3.2,
     tracerDrop: 0.05,
     tracerBrightness: 0.55,
-    dust: true,
+    /*
+     * Off by default (batch 2.3, playtest). The lit air is a real effect and a genuinely pretty
+     * one, but at 17 motes per m³ what it actually reads as in play is a shell of grain crossing
+     * the room *in front of* the answer — a second thing arriving, on every ping, competing with
+     * the geometry for the eye. The checkbox stays; the default is quiet. Off costs exactly
+     * nothing: the field's object is `visible = false` and never enters the draw list.
+     */
+    dust: false,
     dustGain: 1.7,
     dustSize: 0.02,
     dustShell: 2.0,
   };
+}
+
+/**
+ * How loud a class's arrival flash is allowed to be, 0-1.
+ *
+ * A ping is a deliberate question and gets the full answer; a landing is a flashbulb by design
+ * (§5: a hard landing pays in a loud paint flash); footsteps repeat several times a second and
+ * are scaled down, because the arrival edge of a footfall is the one thing in this system that a
+ * player sees hundreds of times a minute.
+ */
+function rimScaleFor(cls: SoundClass, wave: WaveTunables): number {
+  return cls === 'crouch-step' || cls === 'walk-step' || cls === 'sprint-step' ? wave.stepRim : 1;
 }
 
 /** Event-layer palette (§3.2): self is amber, and the pings are the same self, brighter. */
@@ -730,7 +827,10 @@ const MATTER_VERTEX = /* glsl */ `
   uniform float uRimK;
   uniform float uRimBoost;
   uniform float uRimSize;
+  uniform float uArriveSeconds;
+  uniform float uRefreshSeconds;
   uniform float uDissolve;
+  uniform float uCoolRate;
   uniform float uMaterialMix;
   uniform vec3  uListener;
   uniform vec3  uRampTimes;      // fresh, cool, cold
@@ -747,6 +847,7 @@ const MATTER_VERTEX = /* glsl */ `
   attribute float aIntensity;
   attribute float aSeed;
   attribute float aMat;
+  attribute float aRim;
 
   varying vec3  vColor;
   varying float vAlpha;
@@ -764,24 +865,45 @@ const MATTER_VERTEX = /* glsl */ `
       return;
     }
 
-    // The wave: nothing exists here until the front has arrived. Ahead of it, fall back to
-    // whatever was already known at this spot — and if that is nothing, draw nothing.
-    float age = uTime - aBirth;
+    /*
+     * The restamp policy, in eight lines (see the header).
+     *
+     * aPrior is the discriminator: no prior means nobody has ever painted this voxel, and the
+     * new event is *news*, so it gets the whole wave — invisible until the front arrives, then
+     * an eased arrival with a flash on it. A prior means this is known ground, and the refresh
+     * is silent: never gated, never flashed, the age simply eases from what it was to what it
+     * now is. Both branches are continuous at the arrival instant, which is the point — the old
+     * hard switch is what produced a travelling band on every re-ping.
+     */
+    float ageNew = uTime - aBirth;
+    float age;
     float flash = 0.0;
-    if (age < 0.0) {
-      age = uTime - aPrior;
-      if (aPrior <= -1.0e8 || age < 0.0) {
+    float appear = 1.0;
+    if (aPrior <= -1.0e8) {
+      if (ageNew < 0.0) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         gl_PointSize = 0.0;
         return;
       }
+      age = ageNew;
+      flash = exp(-ageNew * uRimK) * aRim;
+      appear = smoothstep(0.0, max(0.001, uArriveSeconds), ageNew);
     } else {
-      flash = exp(-age * uRimK);
+      float ageOld = uTime - aPrior;
+      if (ageOld < 0.0) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        return;
+      }
+      // Both ages advance at the same rate, so this is a smooth slide from one to the other:
+      // exactly the old age while the front is still coming, exactly the new one 0.3 s after it
+      // passed, and no discontinuity anywhere between.
+      age = mix(ageOld, ageNew, smoothstep(0.0, max(0.001, uRefreshSeconds), ageNew));
     }
 
     // Per-grain cooling spread: at uDissolve = 0 the surface cools as one sheet.
     float grain = 1.0 + uDissolve * (hash11(aSeed * 91.7) - 0.5) * 2.0;
-    float rampAge = age * max(0.08, grain);
+    float rampAge = age * max(0.08, grain) * uCoolRate;
 
     // Material voice. Looks 1-3 hold uMaterialMix at 0 and never leave the cyan band (§3.2).
     vec3 hot = uMatHot[0];
@@ -834,9 +956,10 @@ const MATTER_VERTEX = /* glsl */ `
     // difference in brightness so distant clouds fade out instead of aliasing into a bright wash.
     float coverage = min(1.0, (want * want) / (px * px));
 
-    float bright = uBrightness * aIntensity * coverage
-      * (1.0 + uBrightJitter * (fract(aSeed * 37.13) - 0.5) * 2.0)
-      * (1.0 + uRimBoost * flash);
+    // The flash is added to the return, not multiplied into it (see rimBoost), and the whole
+    // thing is scaled by the arrival ramp so a virgin blip rises rather than pops.
+    float bright = (aIntensity + uRimBoost * flash) * appear * uBrightness * coverage
+      * (1.0 + uBrightJitter * (fract(aSeed * 37.13) - 0.5) * 2.0);
 
     vColor = col * max(0.0, bright);
     vAlpha = alpha;
@@ -943,6 +1066,15 @@ export interface PaintStats {
 const FAR_RANGE = 20;
 
 /**
+ * How far out "under the player's feet" reaches, metres.
+ *
+ * A walk step paints a 4 m puddle (§3.3) and its front crosses this in under a tenth of a
+ * second, so a radius of three takes in the ground a moving player is actually looking at
+ * without dragging in the far wall's slower, calmer paint.
+ */
+const NEAR_RADIUS = 3;
+
+/**
  * A read-only snapshot of the wave in flight and of the splat sizes on screen. The screenshot
  * driver asserts against this: it is the only way to prove from outside that a front really is
  * a front and not a fade, and that the near-field cap is doing its job.
@@ -966,6 +1098,39 @@ export interface PaintDiagnostics {
   pendingMin: number;
   /** Blips currently drawable. */
   visible: number;
+  /**
+   * Virgin blips currently inside their arrival ramp — drawn, but not yet at full strength.
+   *
+   * This is the batch-2.3 fade-in, counted from the same stamps the shader eases on, so a
+   * non-zero count is the proof that new paint rises into view over a window of frames instead
+   * of popping. It is zero except while a front is crossing unpainted ground.
+   */
+  ramping: number;
+  /**
+   * Known blips currently inside their silent-refresh ease: restamped by the newest event, with
+   * their age gliding from what it was to zero. They are never gated and never flashed — the
+   * count exists so a test can prove a re-ping went through this branch rather than the other.
+   */
+  refreshing: number;
+  /** Drawable blips within `NEAR_RADIUS` of the listener — the ground under the player's feet. */
+  nearBlips: number;
+  /**
+   * Mean age of those blips under the shipped curve: eased across a restamp exactly as
+   * `MATTER_VERTEX` eases it.
+   *
+   * Age is what every visual property is a function of, so a jump here is a jump on screen. This
+   * is the number the flicker complaint is really about, and it is continuous by construction.
+   */
+  nearAgeEased: number;
+  /**
+   * The same mean under the *pre-2.3* curve: the restamped age taken the instant the new front
+   * lands, with no ease at all.
+   *
+   * It is computed for one reason — so a test can watch both curves on the same blips in the
+   * same frames and show that the old one steps and the new one does not. Nothing renders from
+   * it; delete it and the picture is unchanged.
+   */
+  nearAgeStep: number;
   /** Largest splat on screen, in drawing-buffer pixels. */
   maxBlipPixels: number;
   /** What that splat's size would have been without the near-field cap. */
@@ -990,6 +1155,14 @@ export class PaintSystem {
   private readonly intensities: Float32Array;
   private readonly seeds: Float32Array;
   private readonly mats: Float32Array;
+  /**
+   * Arrival-flash scale of the event that *first* painted this blip.
+   *
+   * Written once, on deposit, and never touched again: only a virgin blip ever flashes, so a
+   * restamp has no rim to record. That also keeps it out of the restamp upload range — it rides
+   * along with position, seed and material in the append range, which is the cheap one.
+   */
+  private readonly rims: Float32Array;
   /** Dedup cell key currently held by each slot, or -1. Lets a ring wrap unmap cleanly. */
   private readonly slotKeys: Float64Array;
   private readonly cells = new Map<number, number>();
@@ -1036,6 +1209,8 @@ export class PaintSystem {
   private emitZ = 0;
   private emitTime = 0;
   private emitInvSpeed = 0;
+  /** Arrival-flash scale of the event being sampled (§`rimScaleFor`). */
+  private emitRim = 1;
   private readonly candidates: Aabb[] = [];
   private readonly listener = new THREE.Vector3();
   private readonly viewportSize = new THREE.Vector2();
@@ -1098,6 +1273,11 @@ export class PaintSystem {
     arrivedMax: 0,
     pendingMin: Infinity,
     visible: 0,
+    ramping: 0,
+    refreshing: 0,
+    nearBlips: 0,
+    nearAgeEased: 0,
+    nearAgeStep: 0,
     maxBlipPixels: 0,
     maxBlipWant: 0,
   };
@@ -1130,6 +1310,7 @@ export class PaintSystem {
     this.intensities = new Float32Array(this.capacity);
     this.seeds = new Float32Array(this.capacity);
     this.mats = new Float32Array(this.capacity);
+    this.rims = new Float32Array(this.capacity);
     this.slotKeys = new Float64Array(this.capacity).fill(-1);
 
     this.geometry.setAttribute('position', new THREE.BufferAttribute(this.positions, 3));
@@ -1138,6 +1319,7 @@ export class PaintSystem {
     this.geometry.setAttribute('aIntensity', new THREE.BufferAttribute(this.intensities, 1));
     this.geometry.setAttribute('aSeed', new THREE.BufferAttribute(this.seeds, 1));
     this.geometry.setAttribute('aMat', new THREE.BufferAttribute(this.mats, 1));
+    this.geometry.setAttribute('aRim', new THREE.BufferAttribute(this.rims, 1));
     this.geometry.setDrawRange(0, 0);
 
     const p = this.profiles[0]!;
@@ -1172,7 +1354,10 @@ export class PaintSystem {
         uRimK: { value: 3 / this.wave.rimSeconds },
         uRimBoost: { value: this.wave.rimBoost },
         uRimSize: { value: this.wave.rimSize },
+        uArriveSeconds: { value: this.wave.arriveSeconds },
+        uRefreshSeconds: { value: this.wave.refreshSeconds },
         uDissolve: { value: p.dissolve },
+        uCoolRate: { value: p.coolRate },
         uMaterialMix: { value: p.materialMix },
         uFresh: { value: rawColor(MATTER_FRESH) },
         uMid: { value: rawColor(MATTER_MID) },
@@ -1236,7 +1421,7 @@ export class PaintSystem {
       this.dust.object,
       this.structured.object,
     );
-    this.structured.applyLook(this.tunables.windowRadius);
+    this.structured.applyLook(this.tunables.windowRadius, this.wave.refreshSeconds);
   }
 
   /** The object to add to the scene. */
@@ -1294,6 +1479,7 @@ export class PaintSystem {
     u.uBrightness!.value = p.brightness;
     u.uSoftness!.value = p.softness;
     u.uDissolve!.value = p.dissolve;
+    u.uCoolRate!.value = p.coolRate;
     u.uMaterialMix!.value = p.materialMix;
   }
 
@@ -1312,9 +1498,11 @@ export class PaintSystem {
     u.uRimK!.value = 3 / Math.max(0.02, this.wave.rimSeconds);
     u.uRimBoost!.value = this.wave.rimBoost;
     u.uRimSize!.value = this.wave.rimSize;
+    u.uArriveSeconds!.value = this.wave.arriveSeconds;
+    u.uRefreshSeconds!.value = this.wave.refreshSeconds;
     this.tracer.setLook(this.wave.tracerSeconds, this.wave.tracerBrightness);
     this.dust.setLook(this.wave.dustGain, this.wave.dustSize, this.wave.dustShell);
-    this.structured.applyLook(this.tunables.windowRadius);
+    this.structured.applyLook(this.tunables.windowRadius, this.wave.refreshSeconds);
   }
 
   /**
@@ -1697,6 +1885,7 @@ export class PaintSystem {
     this.emitZ = event.z;
     this.emitTime = event.time;
     this.emitInvSpeed = 1 / event.waveSpeed;
+    this.emitRim = rimScaleFor(event.class, this.wave);
     const feather = this.tunables.coneFeather;
     const blipCap =
       this.stats.lastDeposited + this.stats.lastRefreshed + this.tunables.chunkBlips;
@@ -1973,11 +2162,12 @@ export class PaintSystem {
         /*
          * Already known ground: restamp it rather than pile a second blip on the same voxel.
          *
-         * The prior stamp is what stops a second ping from *erasing* a room while its front
-         * crosses it. The blip keeps showing the arrival it already had until the new front
-         * overtakes that spot; only an arrival that has genuinely landed is allowed to become
-         * the fallback, so a point restamped twice in flight does not fall back to a stamp
-         * that never happened either.
+         * Recording the old arrival in `prior` does two jobs at once. It is what stops a second
+         * ping from *erasing* a room while its front crosses it — and it is the flag that says
+         * "this voxel was already known", which is what buys the silent refresh in the shader.
+         * Only an arrival that has genuinely landed may become that prior: a blip restamped
+         * twice in flight was never actually seen, so it stays virgin and still gets its
+         * arrival when a front finally reaches it.
          */
         const i3 = existing * 3;
         const arrival = this.arrivalAt(
@@ -2026,11 +2216,13 @@ export class PaintSystem {
     this.positions[i3 + 1] = y;
     this.positions[i3 + 2] = z;
     this.births[slot] = arrival;
-    // A brand-new blip has no history, so there is nothing to show ahead of the front.
+    // A brand-new blip has no history, so there is nothing to show ahead of the front — and
+    // NEVER is also what tells the shader this one is virgin and gets the arrival treatment.
     this.priors[slot] = NEVER;
     this.intensities[slot] = intensity;
     this.seeds[slot] = this.rng();
     this.mats[slot] = mat;
+    this.rims[slot] = this.emitRim;
     this.markAppended(slot, slot);
     this.markTouched(slot, slot);
     this.writeIndex++;
@@ -2058,6 +2250,7 @@ export class PaintSystem {
       this.uploadRange('position', start * 3, count * 3);
       this.uploadRange('aSeed', start, count);
       this.uploadRange('aMat', start, count);
+      this.uploadRange('aRim', start, count);
       this.appendMin = Infinity;
       this.appendMax = -Infinity;
     }
@@ -2132,6 +2325,14 @@ export class PaintSystem {
     let pendingMin = Infinity;
     let visible = 0;
     let minDepth = Infinity;
+    let ramping = 0;
+    let refreshing = 0;
+    let nearBlips = 0;
+    let nearEased = 0;
+    let nearStep = 0;
+    const arriveWindow = this.wave.arriveSeconds;
+    const refreshWindow = this.wave.refreshSeconds;
+    const nearR2 = NEAR_RADIUS * NEAR_RADIUS;
 
     for (let i = 0; i < drawn; i++) {
       const i3 = i * 3;
@@ -2141,7 +2342,8 @@ export class PaintSystem {
       const wx = px - lx;
       const wy = py - ly;
       const wz = pz - lz;
-      if (wx * wx + wy * wy + wz * wz > window * window) continue;
+      const listenerD2 = wx * wx + wy * wy + wz * wz;
+      if (listenerD2 > window * window) continue;
 
       const birth = this.births[i]!;
       const prior = this.priors[i]!;
@@ -2157,6 +2359,31 @@ export class PaintSystem {
       }
       if (!shown) continue;
       visible++;
+      // The two halves of the restamp policy, counted rather than inferred: a virgin blip that
+      // has just arrived is easing *in*, a known one that has just been restamped is easing its
+      // *age* over. Same stamps the shader branches on, so the counts cannot disagree with it.
+      const since = now - birth;
+      if (since >= 0) {
+        if (prior <= -1e8) {
+          if (since < arriveWindow) ramping++;
+        } else if (since < refreshWindow) refreshing++;
+      }
+      /*
+       * The two age curves, on the blips close enough to the player to be the ones under their
+       * feet. `nearAgeEased` is what the shader draws; `nearAgeStep` is what it drew before this
+       * batch. Both are means over the same set in the same frame, which is what makes the pair
+       * evidence rather than two unrelated numbers.
+       */
+      if (listenerD2 <= nearR2) {
+        nearBlips++;
+        nearStep += since >= 0 ? since : now - prior;
+        if (prior <= -1e8) nearEased += since;
+        else {
+          const ageOld = now - prior;
+          const t = Math.min(1, Math.max(0, since / Math.max(0.001, refreshWindow)));
+          nearEased += ageOld + (since - ageOld) * t * t * (3 - 2 * t);
+        }
+      }
       const depth = (px - cx) * dxv + (py - cy) * dyv + (pz - cz) * dzv;
       if (depth > 0.05 && depth < minDepth) minDepth = depth;
     }
@@ -2164,6 +2391,11 @@ export class PaintSystem {
     d.arrivedMax = arrivedMax;
     d.pendingMin = pendingMin;
     d.visible = visible;
+    d.ramping = ramping;
+    d.refreshing = refreshing;
+    d.nearBlips = nearBlips;
+    d.nearAgeEased = nearBlips > 0 ? nearEased / nearBlips : 0;
+    d.nearAgeStep = nearBlips > 0 ? nearStep / nearBlips : 0;
 
     /*
      * The largest splat on screen. Bounded rather than measured per point: the size formula is
