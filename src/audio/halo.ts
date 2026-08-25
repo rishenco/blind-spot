@@ -67,7 +67,24 @@ const PARTIALS: readonly (readonly [number, number])[] = [
   [2.5, 0.12],
 ];
 
-/** Cutoff of the lowpass the bank passes through, Hz — takes the edge off the 2.5× partial. */
+/**
+ * Cutoff of the lowpass the bank passes through, Hz — takes the edge off the 2.5× partial.
+ *
+ * **Averaged over the readout's whole range it is very nearly nothing, and that is measured
+ * rather than guessed.** On the swept render `tests/audio/haloHum.test.ts` builds (2 → 11 → 24 →
+ * 2 m), moving the cutoff to 20 kHz — the filter out of the way in all but name — takes the
+ * sweep's spectral centroid from 155.5 Hz to 152.8 and its RMS down by 0.39 dB; raising `Q` to 4
+ * takes them to 162.8 Hz and up by 0.24 dB. Recorded as a dated, falsifiable number (2026-08-25)
+ * so the line above stops implying a filter that is doing more than that.
+ *
+ * It is not nothing where it matters, which is why it stays and why nothing asserts on it. Its
+ * work is at the loud end, on the one partial that does not sit on the fundamental: with the
+ * filter in place, moving the 2.5× partial to 5× *lowers* the sprint plateau's centroid, 251.4 →
+ * 242.6 Hz, because 5 × 220 Hz lands past the cutoff; with the cutoff at 20 kHz the same change
+ * raises it to 312.3. So the filter is what stops a partial's ratio from opening up the top of
+ * the range, and the quiet end — where §3.8 asks the tone to be "felt more than heard" — is where
+ * such a change shows instead. That end is bounded: `HALO_CROUCH_CENTROID_MAX_HZ`.
+ */
 const TONE_LP_HZ = 520;
 const TONE_LP_Q = 0.6;
 
@@ -78,6 +95,14 @@ const TONE_LP_Q = 0.6;
  * readouts share it. This is one frame's worth of smoothing on top, so that pushing a value in
  * once per frame is a continuous sweep rather than a 60 Hz staircase. Long enough to remove the
  * step, far shorter than the glide it is carrying, so it cannot be mistaken for tuning.
+ *
+ * It is also, unavoidably, how far the hum runs *behind* the ring: the ring is drawn from
+ * `Halo.radius` on the frame it is read, and the pitch that reports the same reading does not
+ * arrive until this much later. §3.8's argument is that the two faces of the readout cannot
+ * disagree, and a lag is a disagreement the value checks cannot see — so the lag is measured as a
+ * time, in `tests/audio/haloHum.test.ts`, against `HALO_TRACK_MAX_LAG_SEC`. Growing this number
+ * is therefore not free the way it looks: at 0.1 s the ear is 650 cents behind the ring at the
+ * start of a crouch→walk glide.
  */
 const TRACK_SEC = 0.02;
 

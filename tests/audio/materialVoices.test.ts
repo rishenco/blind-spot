@@ -55,6 +55,7 @@ import {
 } from '../support/audioMetrics';
 import {
   ATTACK_LEVEL_SAMPLE,
+  ATTACK_WINDOW_BOUNDS,
   BODY_WINDOW,
   BRIGHT_LEAK_MAX_DB,
   CENTROID_SPLIT_HZ,
@@ -407,6 +408,42 @@ describe('the two axes together are the fingerprint', () => {
 // ---------------------------------------------------------------------------
 
 describe("§3.9's loudness law: the multiplier is the whole of the difference", () => {
+  /**
+   * Before the invariant, the window it is stated over.
+   *
+   * `ATTACK_WINDOW_SEC` is the only number in the chain below that the game does not read. It
+   * lives in `src/audio/voices.ts` because the four `attackNorm` values were fitted against it
+   * and a number belongs beside the numbers it explains — but nothing under `src/` consults it,
+   * so moving it changes no graph, makes no sound, and changes only what this block measures.
+   * That is the one lever a *failing* fit could be rescued with: widen the window and metal, whose
+   * modes are still ringing at 0.15 s where concrete's longest is gone by 0.09, keeps adding
+   * energy where concrete has none left to add. Every residual below moves, and no voice has.
+   *
+   * The sensitivity is one-sided and was measured: narrowing this to 0.02 s fails five of the
+   * assertions in this file, widening it to 0.15 s failed none, and 0.35 s — longer than metal's
+   * entire ring — failed none either. So the ceiling is the end that needed saying, and it is
+   * not a number of its own: see `ATTACK_WINDOW_BOUNDS`.
+   */
+  it('measures the attack over a window that is the attack, not the ring', () => {
+    expect(
+      ATTACK_WINDOW_SEC,
+      'the window no longer contains the whole of the dust exciter',
+    ).toBeGreaterThanOrEqual(ATTACK_WINDOW_BOUNDS.minSec);
+    // The ceiling, stated as the window's *end* against the ring tail's own start rather than as
+    // a width copied into `audioSpec` — a copy is a second pin that can disagree with the first,
+    // and `0.2 - 0.05` is 0.15000000000000002, which is enough float to let the boundary case
+    // through. On the render this file measures, the two windows must not touch.
+    expect(
+      STRIKE_AT + ATTACK_WINDOW_SEC,
+      'the attack window reaches into the ring tail, which §3.9 leaves untouched',
+    ).toBeLessThan(RING_TAIL_WINDOW.fromSec);
+    // A second ceiling, from the other direction and for an unrelated reason: the sample packs
+    // one strike every `spacingSec`, so a window longer than that would measure the *next*
+    // strike as well as this one. It is the wider of the two bounds and it is here so the
+    // narrower one cannot be relaxed into it unnoticed.
+    expect(ATTACK_WINDOW_SEC).toBeLessThan(ATTACK_LEVEL_SAMPLE.spacingSec);
+  });
+
   /**
    * The trap this block is built around, demonstrated instead of described.
    *

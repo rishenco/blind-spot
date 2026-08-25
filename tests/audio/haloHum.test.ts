@@ -22,14 +22,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { estimateF0, hasNaN, maxStep, peakInfo, rmsDb } from '../support/audioMetrics';
+import { centroidHz, estimateF0, hasNaN, maxStep, peakInfo, rmsDb } from '../support/audioMetrics';
 import {
   HALO_BEAT_MAX_DEPTH_DB,
+  HALO_CROUCH_CENTROID_MAX_HZ,
   HALO_DUCK,
   HALO_LEVEL_SPREAD_MAX_DB,
   HALO_PEAK_DBFS,
   HALO_PITCH_POINTS,
   HALO_PITCH_TOLERANCE_CENTS,
+  HALO_TRACK_MAX_LAG_SEC,
   MAX_PEAK_DBFS,
 } from '../support/audioSpec';
 import { renderOffline } from '../support/audioRender';
@@ -73,6 +75,66 @@ function driveSweep(ctx: BaseAudioContext, out: AudioNode): void {
     halo.advance(targetAt(t), FRAME);
     hum.setRadius(halo.radius, t);
   }
+}
+
+/**
+ * The same sweep with the audio taken out — the reading the *ring* is drawn from, frame by frame.
+ *
+ * `Halo` owns the quantity and both readouts are functions of it (`paint/halo.ts`), so replaying
+ * the identical drive loop without a context reconstructs exactly what the ring showed on every
+ * frame of the render above. That is what makes a lag measurable at all: without it there is
+ * nothing to be late *against*, only the hum compared to itself.
+ */
+const GLIDED: readonly number[] = (() => {
+  const halo = new Halo();
+  halo.reset(TARGETS[0]!.radiusM);
+  const out = [halo.radius];
+  for (let i = 1; i * FRAME < SWEPT_SEC; i++) {
+    halo.advance(targetAt(i * FRAME), FRAME);
+    out.push(halo.radius);
+  }
+  return out;
+})();
+
+/** What the ring was showing at `t`, interpolated between the frames it was pushed on. */
+function ringRadiusAt(t: number): number {
+  const x = t / FRAME;
+  const lo = Math.max(0, Math.min(GLIDED.length - 2, Math.floor(x)));
+  return GLIDED[lo]! + (x - lo) * (GLIDED[lo + 1]! - GLIDED[lo]!);
+}
+
+/**
+ * When a pitch track first crosses `hz`, in seconds — linearly between the two samples either
+ * side of it.
+ *
+ * Takes the track as a function so the same search reads the render and the model, which is the
+ * point: two crossings measured the same way subtract into a time, and a time is the unit §3.8's
+ * "the two must never disagree" is actually being tested in. `NaN` for an unpitched sample breaks
+ * the bracket rather than poisoning it — `estimateF0` answers 0 where there is no pitch to read,
+ * and a window straddling a fast glide is one of the places it does.
+ */
+function crossing(
+  track: (t: number) => number,
+  hz: number,
+  fromSec: number,
+  toSec: number,
+  step: number,
+): number {
+  let prevT = NaN;
+  let prev = NaN;
+  for (let t = fromSec; t <= toSec; t += step) {
+    const now = track(t);
+    if (!(now > 0)) {
+      prev = NaN;
+      continue;
+    }
+    if (Number.isFinite(prev) && (prev - hz) * (now - hz) <= 0 && prev !== now) {
+      return prevT + (t - prevT) * ((hz - prev) / (now - prev));
+    }
+    prev = now;
+    prevT = t;
+  }
+  return NaN;
 }
 
 /** A hum held at one radius, driven at the same frame rate. Used by the ducking block. */
@@ -241,6 +303,78 @@ describe('the hum is the pitch map, made audible (§3.8)', () => {
     expect(early).toBeGreaterThan(0);
     expect(late).toBeGreaterThan(0);
     expect(Math.abs(centsBetween(late, early))).toBeLessThan(HALO_PITCH_TOLERANCE_CENTS / 2);
+  });
+
+  /**
+   * The quiet end is *felt more than heard* — where the energy is, not which note it is.
+   *
+   * §3.8 fixes the crouch reading's character as well as its pitch: "a crouch-step on concrete
+   * carries 2 m and sits at 63 Hz, felt more than heard". Nothing else in this file can see that.
+   * Every assertion above reads the fundamental, and a partial's ratio does not move the
+   * fundamental — `estimateF0` and the ear both track it, which is exactly what `PARTIALS` claims
+   * about the 2.5× partial. Every assertion in the next block reads level, which a quiet partial
+   * an octave up barely moves. So the tone can be given a bright upper partial, keep every pitch
+   * and level pin green, and stop being felt at all.
+   *
+   * Measured over this window: 76.1 Hz, 1.20× the note it is reporting. Take `PARTIALS`' third
+   * entry from 2.5× to 5× — 5 × 63.5 Hz of audible energy under a 63 Hz fundamental — and it
+   * reads 100.9 with nothing else in the suite moving. `HALO_CROUCH_CENTROID_MAX_HZ` carries why
+   * the bound sits between them, and why the crouch plateau is the only place the question can be
+   * asked at all: the 520 Hz lowpass hides the same change at the sprint end.
+   */
+  it('keeps the quiet end felt rather than heard', () => {
+    const [from, to] = HALO_PITCH_POINTS[0].windowSec;
+    const centroid = centroidHz(swept, from, to);
+    expect(
+      centroid,
+      `the crouch reading's energy has moved to ${centroid.toFixed(1)} Hz, over a ${HALO_PITCH_POINTS[0].hz} Hz note`,
+    ).toBeLessThan(HALO_CROUCH_CENTROID_MAX_HZ);
+    // And it is still a bass reading rather than a dead one: a centroid *below* the fundamental
+    // would mean the tone had lost the partials that make it a tone.
+    expect(centroid).toBeGreaterThan(HALO_PITCH_POINTS[0].hz);
+  });
+
+  /**
+   * The hum and the ring agree about *when*, not only about what.
+   *
+   * `tests/halo.test.ts` proves the two readouts are one affine image of each other, and the
+   * pitch pins above prove the rendered notes are right — but both are value claims, read at
+   * plateaus, where a hum that is late has nothing to show. The lag was therefore unowned:
+   * `TRACK_SEC` could be moved from 0.02 to 0.06 or to 0.1 and the whole suite stayed green,
+   * while at 0.1 the ear is 650 cents behind the ring at the start of this very transition.
+   *
+   * Measured as a time. Track the rendered F0 across the crouch → walk glide, find when it
+   * crosses the geometric midpoint of the two plateaus, and subtract when the glide the ring is
+   * drawn from crossed the same point. The midpoint rather than an endpoint because that is where
+   * the sweep is steep enough to time precisely and shallow enough that a 60 ms window is still
+   * reading one pitch: it recovers `TRACK_SEC` to a millisecond, and does so at every window from
+   * 60 to 120 ms and on the falling transition too.
+   */
+  it('runs no further behind the ring than the ring can forgive', () => {
+    const midHz = Math.sqrt(humPitch(TARGETS[0]!.radiusM) * humPitch(TARGETS[1]!.radiusM));
+    const window = 0.06;
+    const heard = crossing(
+      (t) => estimateF0(swept, t - window / 2, t + window / 2),
+      midHz,
+      TARGETS[1]!.atSec - 0.02,
+      TARGETS[1]!.atSec + 0.8,
+      0.0025,
+    );
+    const shown = crossing(
+      (t) => humPitch(ringRadiusAt(t)),
+      midHz,
+      TARGETS[1]!.atSec - 0.02,
+      TARGETS[1]!.atSec + 0.8,
+      0.0005,
+    );
+    // Both have to exist before their difference means anything: a hum that never reached the
+    // midpoint at all would otherwise subtract to `NaN` and slip through the comparison below.
+    expect(Number.isFinite(shown), 'the ring never crossed the midpoint of the transition').toBe(true);
+    expect(Number.isFinite(heard), 'the hum never crossed the midpoint of the transition').toBe(true);
+    expect(
+      Math.abs(heard - shown),
+      `hum crossed ${midHz.toFixed(1)} Hz at ${heard.toFixed(4)} s, ring at ${shown.toFixed(4)} s`,
+    ).toBeLessThan(HALO_TRACK_MAX_LAG_SEC);
   });
 
   /**

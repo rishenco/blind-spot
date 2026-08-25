@@ -27,7 +27,7 @@ import {
 } from '../support/audioMetrics';
 import { MAX_PEAK_DBFS } from '../support/audioSpec';
 import { renderOffline } from '../support/audioRender';
-import { contactVoice, pingVoice, playVoice } from '../../src/audio/voices';
+import { NOISE_SLOTS, contactVoice, pingVoice, playVoice } from '../../src/audio/voices';
 import { AudioDirector, type ListenerState, type VoiceSpec } from '../../src/audio/director';
 import { MAT_CONCRETE, MAT_DUST, MAT_METAL, MAT_STONE } from '../../src/paint/materials';
 import {
@@ -158,6 +158,58 @@ describe('every voice the game can make', () => {
     // Not "some samples differ" — most of them do. A one-sample difference would pass a
     // `toBeGreaterThan(0)` while the two footsteps were audibly identical.
     expect(differing / da.length).toBeGreaterThan(0.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * The noise bank's slot count — a stated property that nothing used to check.
+ *
+ * `NOISE_SLOTS`'s comment has always said "prime, so seeds do not wrap onto a short cycle", and
+ * until this block that sentence was the only thing holding the number: replacing 997 with 512
+ * passed the entire suite. 512 is the worst available substitute rather than a neutral one, and
+ * this is the *why* made checkable, in arithmetic instead of in a render.
+ *
+ * The mechanism is the one the test above cares about. `noiseOffset` reads slot
+ * `seed % NOISE_SLOTS` and the seed is the bus's sequence number, so any subsequence of events
+ * taken at a fixed stride walks the bank at that stride — and a fixed stride is what a gait is:
+ * one foot of two, a landing every fourth stride, one player of four sharing a bus. A stride `s`
+ * visits `NOISE_SLOTS / gcd(s, NOISE_SLOTS)` slots before repeating, which is the whole bank for
+ * every stride exactly when the count is prime. At 512, half the strides below it fold onto a
+ * short orbit and a stride of 8 hears the same 64 slices for the rest of the run — the machine-gun
+ * sprint the noise bank exists to prevent, reached by a door nobody was watching, and inaudible
+ * to "two consecutive footfalls differ" because consecutive is the one stride that still works.
+ */
+describe('the noise bank is cut into a prime number of slots', () => {
+  it('is a whole number of them', () => {
+    // `noiseOffset` divides by this after taking a remainder against it. A fraction makes the
+    // slots unequal and the stated count a fiction; anything below 2 makes every strike identical.
+    expect(Number.isInteger(NOISE_SLOTS)).toBe(true);
+    expect(NOISE_SLOTS).toBeGreaterThan(1);
+  });
+
+  it('has no divisor but itself, by trial division', () => {
+    const divisors: number[] = [];
+    for (let d = 2; d * d <= NOISE_SLOTS; d++) if (NOISE_SLOTS % d === 0) divisors.push(d);
+    expect(divisors, `${NOISE_SLOTS} is not prime`).toEqual([]);
+  });
+
+  /**
+   * The same fact stated as the property the game depends on, because that is the one worth
+   * failing on: a future slot count is wrong *because* some cadence of footfalls repeats itself,
+   * not because a number failed a number-theory quiz.
+   */
+  it('leaves no emission cadence a short orbit to fall into', () => {
+    const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+    const short: number[] = [];
+    for (let stride = 1; stride < NOISE_SLOTS; stride++) {
+      if (NOISE_SLOTS / gcd(stride, NOISE_SLOTS) !== NOISE_SLOTS) short.push(stride);
+    }
+    expect(
+      short.length,
+      `strides that repeat before visiting the whole bank: ${short.slice(0, 8).join(', ')}`,
+    ).toBe(0);
   });
 });
 

@@ -353,6 +353,46 @@ export const ATTACK_LEVEL_SAMPLE = Object.freeze({
 });
 
 /**
+ * How far `ATTACK_WINDOW_SEC` may travel — the window §3.9's invariant is *defined over*.
+ *
+ * The constant lives in `src/audio/voices.ts`, next to the four `attackNorm` values that were
+ * fitted against it, and that is where it belongs: a window owned by this file would leave the
+ * synthesis normalizing against a definition it does not hold. The consequence is that no code
+ * under `src/` reads it. Moving it changes no graph and makes no sound — it changes only the
+ * measurement the law is judged by, which makes it the one number in the material system that a
+ * *failing fit* can be rescued with. Widen the window and metal, whose modes are still ringing at
+ * 0.15 s where concrete's longest is gone by 0.09, keeps adding energy to a measurement concrete
+ * has stopped contributing to; the residuals walk and no voice has moved.
+ *
+ * Measured, and the sensitivity is one-sided: narrowing it to 0.02 s fails five assertions in
+ * `materialVoices.test.ts`, and widening it to 0.15 s — or to 0.35 s, longer than metal's entire
+ * 0.38 s ring — failed none. So the ceiling is the end that needed saying.
+ *
+ * **Only the floor is a number here, and the ceiling deliberately is not.** The ceiling is where
+ * `RING_TAIL_WINDOW` begins: an attack window that reached it would be measuring the half of the
+ * voice §3.9 reserves — "timbre and decay are untouched" — and the half `ringTailDb` already owns,
+ * so one render would be answering two questions with one window. `materialVoices.test.ts`
+ * therefore asserts against `RING_TAIL_WINDOW.fromSec` itself rather than against a copy of it
+ * written down here, for the same reason `keeps every centroid tolerance on its own side of the
+ * split` exists: two pins that can disagree about the same render are one pin too many. That
+ * boundary is also exactly metal's shortest resonant mode, `{ f: 5170, t60: 0.15 }` — the fastest
+ * thing in the material table that is still a ring, and a 0.15 s "attack" contains the whole of
+ * its 60 dB decay.
+ */
+export const ATTACK_WINDOW_BOUNDS = Object.freeze({
+  /**
+   * The shortest window that still contains the attack, seconds.
+   *
+   * Dust's exciter: `exciterTau` 0.012 through the six time constants `fallTo` gives it, so the
+   * burst is still falling until 0.072 s after the strike. Dust is nearly all exciter — one short
+   * mode and `scuff` 0.9 — so a window below this fits the normalization to a fraction of the
+   * very thing being normalized, on the material with the widest strike-to-strike spread in the
+   * table. The shipped 0.085 clears it by 18 %.
+   */
+  minSec: 0.072,
+});
+
+/**
  * §3.9's loudness law, in the form a test can enforce.
  *
  * The law: a material's multiplier is the *whole* of the level difference it makes. Stated as an
@@ -464,6 +504,71 @@ export const HALO_PITCH_POINTS = Object.freeze([
  * the whole plateau, because the next ramp then interpolates from the far side of it.
  */
 export const HALO_PITCH_TOLERANCE_CENTS = 25;
+
+/**
+ * How high the crouch plateau's spectral centroid may sit, Hz — §3.8's "felt more than heard".
+ *
+ * §3.8 fixes the quiet end as a character and not only as a note: "a crouch-step on concrete
+ * carries 2 m and sits at 63 Hz, **felt more than heard**". That is a claim about where the
+ * tone's energy is, and until this number existed nothing in the suite could see it. Every pitch
+ * assertion reads the *fundamental*, which a partial's ratio leaves alone — `estimateF0` and the
+ * ear both track the fundamental, which is exactly what `PARTIALS` says about it. Every level
+ * assertion reads amplitude, which a quiet partial an octave up barely moves. So the tone can be
+ * handed a bright upper partial, keep `HALO_PITCH_POINTS`, `HALO_PEAK_DBFS`,
+ * `HALO_LEVEL_SPREAD_MAX_DB` and `HALO_BEAT_MAX_DEPTH_DB` all green, and stop being felt at all.
+ *
+ * Measured over `HALO_PITCH_POINTS[0]`'s window on the swept render: **76.1 Hz**, which is 1.20×
+ * the 63.5 Hz fundamental it reports — the reading is its own bass note plus a little. Move
+ * `PARTIALS`' third entry from 2.5× to 5× and the same window reads 100.9 Hz, +33 %, with nothing
+ * else in the suite moving. 90 sits between them on purpose: 18 % above the measurement, 11 %
+ * below the mutant, and far below the 148.9 Hz fundamental of the tier above — so a crouch's
+ * whole spectrum stays under the note a walk plays, which is the readable version of the claim.
+ *
+ * **The crouch plateau, and not the sweep.** The 520 Hz lowpass (`TONE_LP_HZ`) hides that same
+ * mutation at the loud end, where 5 × 220 Hz is past the cutoff: the sprint plateau's centroid
+ * actually *falls*, 251.4 → 242.6 Hz. The quiet end is the only place the change is visible, and
+ * it is also the only place §3.8 makes a claim about the tone's character.
+ */
+export const HALO_CROUCH_CENTROID_MAX_HZ = 90;
+
+/**
+ * How far apart in *time* the hum and the ring may drift, seconds.
+ *
+ * §3.8's whole argument for the Halo is that the ring and the hum are two readouts of one
+ * quantity and must never disagree, and `paint/halo.ts` makes it structurally impossible for them
+ * to disagree about *value*: `haloBrightness` is an affine image of `humPitch`, proved with no
+ * audio anywhere in the claim (`tests/halo.test.ts`). They can still disagree about *when*. The
+ * ring is drawn from `Halo.radius` on the frame it is read; the hum's pitch is a ramp scheduled
+ * to land `TRACK_SEC` later. Nothing bounded that: `haloHum.test.ts` reads pitch at plateaus,
+ * where a lag has nothing to show, so `TRACK_SEC` could be moved to 0.06 or 0.1 and the whole
+ * suite stayed green. A tenth of a second at the start of a crouch→walk glide is 650 cents — the
+ * ring showing one stance while the ear plays another, in the readout §3.8 calls non-negotiable.
+ *
+ * Measured as a time rather than as a pitch error, so it reads in the unit the claim is made in:
+ * track the rendered F0 across the 2 m → 11 m transition, find when it crosses the geometric
+ * midpoint of the two plateaus, and subtract when the glide the *ring* is drawn from crosses the
+ * same point. Baseline reads **0.0199 s** against a `TRACK_SEC` of 0.02 — the estimator recovers
+ * the constant to a millisecond, and does so at every analysis width from 60 to 120 ms and on the
+ * falling transition too, which is why one width and one transition is enough to assert on.
+ *
+ * 0.033 s is **two frames** at the 60 Hz `Game.update` pushes at, which is the ceiling
+ * `TRACK_SEC`'s own docstring claims for itself — "one frame's worth of smoothing on top". The
+ * bound is that sentence, held to. It leaves 13 ms over the measured 0.0199, against a
+ * measurement that reproduces to a millisecond across analysis widths and across both
+ * transitions, so the slack is a wide margin rather than a fudge.
+ *
+ * Bounded on both sides, because a hum that *led* the ring is the same disagreement mirrored, and
+ * §3.7's rule that a readout never predicts applies to the ear exactly as it does to the
+ * renderer. A `TRACK_SEC` of 0 therefore passes: no lead, no lag, no disagreement.
+ *
+ * One honest note about what this adds. At HEAD the silence gate's fade is scheduled through the
+ * same `TRACK_SEC`, so `leaves when the body stops` already fails somewhere around 0.037 — a
+ * lag this size is not currently invisible. But that coverage is incidental and it is mute: it
+ * reports a tone still audible during a pause, which points a reader at the gate, and it would
+ * evaporate the moment the pitch lead and the gate's lead became two constants. This one fails
+ * saying the hum is late, in seconds, which is the defect.
+ */
+export const HALO_TRACK_MAX_LAG_SEC = 0.033;
 
 /**
  * The hum's peak level, dBFS.

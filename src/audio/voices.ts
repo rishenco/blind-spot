@@ -31,6 +31,22 @@ import type { VoiceSpec } from './director';
  *
  * Exported because the assertion that enforces the law measures exactly this window, and a test
  * that chose its own would be checking a different claim than the one the code implements.
+ *
+ * **Nothing under `src/` reads it, and that is the hazard rather than an oversight.** The four
+ * `attackNorm` values below were *fitted* against this window, so what it names is the definition
+ * §3.9's invariant is stated over — not a parameter the synthesis obeys. Move it and no graph
+ * changes; what changes is the judgement. Widen it and metal, whose modes are still ringing at
+ * 0.15 s where concrete's longest is gone by 0.09, keeps adding energy to a measurement concrete
+ * has stopped contributing to, and the measured residuals walk without a single voice having
+ * moved. That is a working way to make a failing fit go green, and it is one-sided: narrowing
+ * this to 0.02 fails five assertions, widening it to 0.15 — or to 0.35, longer than metal's whole
+ * 0.38 s ring — used to fail none.
+ *
+ * So it is bounded from the side that judges by it. `tests/audio/materialVoices.test.ts` pins how
+ * far it may travel, against `ATTACK_WINDOW_BOUNDS`, whose ceiling is the ring-tail window that
+ * §3.9's "timbre and decay are untouched" reserves. It stays here, next to the numbers it
+ * explains, because a window owned by the test suite would leave this file normalizing against a
+ * definition it does not hold.
  */
 export const ATTACK_WINDOW_SEC = 0.085;
 
@@ -155,8 +171,21 @@ const qOf = (f: number, t60: number): number => Math.max(0.7, 0.4545 * f * t60);
 const NOISE_SECONDS = 2;
 
 /**
- * How many distinct start offsets the bank is divided into. Prime, so seeds do not wrap onto a
- * short cycle.
+ * How many distinct start offsets the bank is divided into.
+ *
+ * **Prime, and the primality is the whole of the choice.** `noiseOffset` reads slot
+ * `seed % NOISE_SLOTS`, and the seed is the bus's sequence number — so any *subsequence* of
+ * events taken at a fixed stride walks the bank at that stride, and subsequences at a fixed
+ * stride are what a gait is: one foot of two, a landing every fourth stride, one player of four
+ * sharing a bus. A stride `s` visits `NOISE_SLOTS / gcd(s, NOISE_SLOTS)` slots before it repeats,
+ * which is the whole bank for *every* stride exactly when this number is prime.
+ *
+ * A round number is the worst available and looks harmless. At 512, half the strides below it
+ * fold onto a short orbit and a stride of 8 hears the same 64 slices for the rest of the run —
+ * which is the machine-gun sprint the noise bank exists to prevent, arriving through a door
+ * nobody was watching. `tests/audio/voices.test.ts` asserts the primality rather than trusting
+ * this sentence, and asserts the orbit property it buys alongside it, because the second is what
+ * the game actually depends on.
  *
  * Exported because the level law of §3.9 is a claim about the *expected* loudness of a contact,
  * and one render cannot measure an expectation: a single strike's attack level varies by 2–6 dB
