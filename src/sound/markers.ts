@@ -73,7 +73,7 @@ const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number; kind: numb
   'player-land': { color: 0xff7a28, gain: 1.1, kind: KIND_SELF },
   'prop-impact': { color: 0xffc46a, gain: 1, kind: KIND_WORLD },
   gunshot: { color: 0xfff0c0, gain: 1.15, kind: KIND_SELF },
-  'bullet-hit': { color: 0xffd890, gain: 1, kind: KIND_WORLD },
+  'bullet-hit': { color: 0xffd890, gain: 1.3, kind: KIND_WORLD },
   spider: { color: 0xff9ec0, gain: 1, kind: KIND_ALIEN },
 };
 
@@ -205,12 +205,19 @@ export function defaultMarkerTunables(): MarkerTunables {
    * If he wants it louder, the knob to reach for is `brightness`, not `scale`: past ~170 the
    * marks stop being events and start being a floodlight, which is the one thing law 2 forbids.
    */
+  /*
+   * `minRadius` is the floor for far and quiet events, and it is set by the bullet impacts. A
+   * round landing 50 m away is the second honest use of shooting — "очередь в темноту рисует
+   * россыпь меток там, куда попала" — and at the old floor of 12 reference px that scatter came
+   * out as a handful of dots on the edge of noticeability. 22 keeps them small next to anything
+   * nearby, but they read as marks rather than as speckle.
+   */
   return {
     life: 7,
     scale: 130,
     loudRef: 9,
     loudPower: 0.9,
-    minRadius: 12,
+    minRadius: 22,
     maxRadius: 240,
     spread: 110,
     softness: 1.5,
@@ -245,6 +252,7 @@ const VERTEX = /* glsl */ `
   varying float vHeat;
   varying float vAge;
   varying float vKind;
+  varying float vBurn;
   varying vec2  vQuad;
 
   void main() {
@@ -290,11 +298,21 @@ const VERTEX = /* glsl */ `
      * китайский новый год должен начаться".
      */
     float loudGain = clamp(pow(norm, 0.7), 0.26, 1.6) * aGain;
+    /*
+     * The top of the loudness scale burns out. A rifle is 90 m of notice against 34 for the
+     * loudest thing a prop can do and 16 for a sprinting footstep, and a burst puts five to eight
+     * of those marks almost on top of each other; added together they clip to a flat white disc
+     * with a yellow rim and say nothing except "you fired". vBurn is how far into that top end
+     * an event is: nothing below ~3x the reference loudness is touched (a sprint step is 0, the
+     * loudest prop impact barely 0.2), a gunshot is all the way at 1.
+     */
+    vBurn = smoothstep(2.6, 7.0, norm);
     // Some anti-glare is still wanted: a mark that covers a third of the screen would otherwise
     // wash the frame out. It bites only well past the size of an ordinary mark, is measured in
     // the same reference pixels as the radius, and is capped so even a crater keeps half its
-    // punch.
-    vFade = decay * loudGain * clamp(uSpread / radius, 0.5, 1.0);
+    // punch — except for the burning end of the scale, which is allowed to be pulled down harder
+    // because it is the one that clips.
+    vFade = decay * loudGain * clamp(uSpread / radius, mix(0.5, 0.24, vBurn), 1.0);
     vColor = aTint;
     vSeed = aSeed;
     vAge = age;
@@ -328,6 +346,7 @@ const FRAGMENT = /* glsl */ `
   varying float vHeat;
   varying float vAge;
   varying float vKind;
+  varying float vBurn;
   varying vec2  vQuad;
 
   /** The isotherm ramp: violet embers, red, orange, yellow, white. Temperature is loudness. */
@@ -439,6 +458,16 @@ const FRAGMENT = /* glsl */ `
       c = mix(deep, mid, smoothstep(0.0, 0.5, body));
       c = mix(c, hot, core * vHeat);
     }
+
+    /*
+     * Very loud does not mean "more fill". Past the top of the scale the interior of the mark is
+     * dimmed on a long gradient, so the peak sits in a broad shoulder and the centre stays below
+     * clipping:
+     * a burst of near-coincident gunshot marks then sums into overlapping rings — an event with
+     * structure you can read — instead of one saturated hole in the frame. Below that end of the
+     * scale (vBurn == 0.0) this line does nothing at all.
+     */
+    a *= mix(1.0, 0.45 + 0.55 * smoothstep(0.0, 0.78, r), vBurn);
 
     a *= vFade * uBright;
     if (a <= 0.002) discard;

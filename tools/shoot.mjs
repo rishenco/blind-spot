@@ -797,7 +797,7 @@ check('one frame holds both ends of the scale', scale.n > 20 && scale.max > scal
   `${scale.n} marks alive, ${scale.min.toFixed(1)} m of notice at the quiet end, ${scale.max.toFixed(1)} m at the loud end`);
 notes.push(
   `sound scale: the marker radius is a power law over loudness (scale 130 reference px at loudRef 9 m, ` +
-    `loudPower 0.9, clamped 12..240), so ${scale.min.toFixed(1)} m and ${scale.max.toFixed(1)} m ` +
+    `loudPower 0.9, clamped 22..240), so ${scale.min.toFixed(1)} m and ${scale.max.toFixed(1)} m ` +
     `of notice differ by roughly ${(((scale.max / 9) ** 0.9) / ((scale.min / 9) ** 0.9)).toFixed(0)}x in on-screen radius. ` +
     `"Reference px" means px on a 720-tall drawing buffer: the shader scales by the real buffer height, which is ` +
     `what frame 20b checks.`,
