@@ -315,6 +315,20 @@ export class Game {
      */
     this.audio.setHaloRadius(this.sim.halo.radius, this.sim.halo.silent);
     this.ctx.hud.setHalo(this.sim.halo.brightness);
+
+    /*
+     * The rack row, on the same per-frame line and for the same reason: it is triggered by an
+     * *edge* — the count changing, the arm starting to wind, a refusal — and an edge sampled on
+     * the HUD's tenth-of-a-second timer below is an edge that can be missed entirely. A tap of F
+     * on an empty rack lives for one tick; at 10 Hz the refusal would flash on some presses and
+     * not others, which is a readout that teaches the player nothing except not to trust it.
+     *
+     * `Throwables` is handed over whole rather than copied into a literal: it already reads as a
+     * `RackSample` structurally, so this is one call and no allocation on a path that runs 120
+     * times a second.
+     */
+    this.ctx.hud.setRack(this.sim.throwables, dt);
+
     this.handReadout.cans = this.sim.throwables.carried;
     this.handReadout.charge = this.sim.throwables.charge;
 
