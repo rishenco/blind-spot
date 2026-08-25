@@ -176,7 +176,11 @@ function pixelDiff(a, b, rect = FRAME) {
   let worst = 0;
   for (let row = rect.y; row < rect.y + rect.h; row++) {
     for (let col = rect.x; col < rect.x + rect.w; col++) {
-      const i = (row * x.width + col) * 4;
+      // `channels`, not 4 — see `luminanceAt` below for the full version of this note. Read at a
+      // stride of four, this loop was silently comparing pixels 4/3 of the way along the buffer
+      // from the ones the rectangle names: it reported the hand beacon, which sits two hundred
+      // columns to the left of FRAME, as a disagreement *inside* FRAME.
+      const i = (row * x.width + col) * x.channels;
       let d = 0;
       for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(x.data[i + c] - y.data[i + c]));
       if (d > 0) pixels++;
@@ -1721,6 +1725,233 @@ check(
     `beam — ${pct2(thrownLanding.mean, beamLanding.mean)} of the beam's reading, for a sphere ` +
     `and nothing off the reactor; the two sounds' own near ground reads ` +
     `${thrownOwn.mean.toFixed(2)}/255 against ${beamOwn.mean.toFixed(2)}, which settles nothing`,
+);
+
+// ===========================================================================
+//  09b  the throw you can see: a beacon in the hand, a bead line, and a light in flight
+//
+//  §09 photographs where the *sound* went. This section photographs the throw itself, and it
+//  exists because the version before it was measured and never looked at: every number above
+//  passed while pressing F produced six hundred milliseconds of black screen and then a boom
+//  somewhere. The verb was correct and invisible. So the claim here is the plainest one in the
+//  file — at every instant between the press and the boom there is something on the screen that
+//  says a throw is happening — and it is asserted instant by instant rather than in aggregate,
+//  because a chain is only as visible as its darkest link.
+//
+//  **Why there is anything to photograph at all**, given law 3. A sphere is rig-own equipment
+//  and the rig is allowed to know where its own parts are — the same exception `rigMarker` has
+//  always had, argued at length in `game/sphereView.ts`. The rule that keeps it from becoming a
+//  hole in the laws is that a rig-own instrument reports only itself: the beacon discloses one
+//  sphere's position, the preview discloses one parabola through empty space, and neither can be
+//  pointed at a wall to learn anything about the wall. Nothing below asks the world a question,
+//  which is why none of it has a price.
+//
+//  Three windows, and each one is proved empty before it is believed. `ARC_BOX` is the lower
+//  middle of the frame, where a level wind-up puts its beads; it is read on the arm-down frame
+//  first, which proves in one number both that the room is black and that the window is not
+//  looking at a piece of the HUD. `HAND_BOX` and the flight window are aimed in world
+//  coordinates through `project`, at the hand the rig publishes and at the sphere the simulation
+//  publishes, so they follow the thing they are about instead of being eyeballed off one
+//  screenshot.
+//
+//  **The centre is the one place the preview may not go.** `ui/hud.ts` keeps a 40 px box around
+//  the reticle for the Halo ring and the rack row, and every photometric golden above is a
+//  reading of the frame *minus* that box (`FRAME_HOLES`) — so a bead inside it would not be a
+//  cosmetic problem, it would silently move a dozen assertions at once. The clearance is read
+//  the same way `rowInk` reads §10's: everything lit within `CENTRE_CHROME_PX` of the centre is
+//  the HUD's own, and the arm-down frame is what proves that radius is the whole of it.
+//
+//  **The beacon readings below are floors and not goldens, because the beacon breathes.** It
+//  pulses at 3 Hz off the fixed step (`game/sphereView.ts`), and where in that cycle a frame
+//  lands depends on how many ticks everything above this section happened to spend — so the same
+//  picture reads anywhere between its trough and its peak, measured at 20/255 and 38/255 for the
+//  hand across two runs of the same script. The bars are set under the trough on purpose. What
+//  they are asserting is the difference between a lit beacon and an unlit one, which is the whole
+//  of the complaint this section answers; the arc's own numbers, which do not pulse, carry the
+//  comparisons that need to be tight.
+// ===========================================================================
+/** Where the rig is holding the next sphere, from the render layer's own publication. */
+const handAt = (s) => ({ x: Number(s.handX), y: Number(s.handY), z: Number(s.handZ) });
+/** Where the simulation says the first sphere in the air is. */
+const flyingAt = (s) => {
+  const p = s.spherePoses[0];
+  return { x: Number(p.x), y: Number(p.y), z: Number(p.z) };
+};
+/**
+ * The lit pixels of a window: how many, how high up the screen they reach, and how far they get
+ * from a given point.
+ *
+ * Three numbers because "the arc got longer" has three honest readings and they do not agree.
+ * More beads is the count; higher up the screen is the flattening of the trajectory; further
+ * from the hand is the literal one — and the literal one is the weakest, because perspective
+ * converges every ballistic arc on the same vanishing point and a 2.6 m stub runs four fifths as
+ * far across the glass as a 15 m throw. All three are reported; the first two carry the check.
+ */
+function arcInk(buf, rect, from) {
+  const img = decodePng(buf);
+  let lit = 0;
+  let top = -1;
+  let reach = 0;
+  for (let row = rect.y; row < rect.y + rect.h; row++) {
+    for (let col = rect.x; col < rect.x + rect.w; col++) {
+      if (luminanceAt(img, col, row) < 8) continue;
+      lit++;
+      if (top < 0) top = row;
+      reach = Math.max(reach, Math.hypot(col - from.x, row - from.y));
+    }
+  }
+  return { lit, top, reach };
+}
+/**
+ * How close anything that is not chrome gets to the reticle.
+ *
+ * Read over a 160 px square rather than over the 40 px hole, for `rowInk`'s reason: a bead that
+ * had escaped the hole should be *seen* escaping rather than cropped to the edge of the window
+ * looking for it. The room is black and wiped for these frames, so the only tenants are the
+ * reticle disc, the Halo ring and the rack row — all of them inside `CENTRE_CHROME_PX`, which
+ * the arm-down frame below asserts rather than assumes.
+ */
+const CENTRE_CHROME_PX = 17;
+/** How the reading above prints when a frame has nothing outside the chrome radius at all. */
+const nearestPx = (c) =>
+  c.nearest === Infinity ? 'nowhere in that window' : `${c.nearest.toFixed(1)} px out`;
+function centreClearance(buf) {
+  const img = decodePng(buf);
+  let chrome = 0;
+  let nearest = Infinity;
+  for (let row = 280; row < 440; row++) {
+    for (let col = 560; col < 720; col++) {
+      if (luminanceAt(img, col, row) < 8) continue;
+      const r = Math.hypot(col - 640, row - 360);
+      if (r <= CENTRE_CHROME_PX) chrome = Math.max(chrome, r);
+      else nearest = Math.min(nearest, r);
+    }
+  }
+  return { chrome, nearest };
+}
+/**
+ * The window a level wind-up draws its beads into.
+ *
+ * It starts at column 286 and not at the hand, deliberately: the beacon is a 26 px sprite
+ * centred on column 266 and its last lit pixel is at 280, so the box begins six pixels past it.
+ * The preview and the thing holding it are separate claims and are measured separately — a box
+ * containing the beacon would read "the rig is carrying something" as "the arc is drawn", which
+ * is the exact confusion this section was written to rule out.
+ */
+const ARC_BOX = { x: 286, y: 395, w: 374, h: 180 };
+
+await respawn();
+await pitchBy(0 - Number((await state()).pitchDeg), sens);
+await clearMap();
+await settleInk();
+const idleState = await state();
+const handPixel = project(idleState, handAt(idleState));
+const HAND_BOX = windowAt(handPixel, 26);
+const idleFrameBuf = await frame();
+const handIdle = photo(idleFrameBuf, HAND_BOX, []);
+const armDownArc = arcInk(idleFrameBuf, ARC_BOX, handPixel);
+const idleCentre = centreClearance(idleFrameBuf);
+
+// The press, and then the wind. Both pictures are taken from the same hold: the first is the
+// preview a release *right now* would honour, the second the one a full 0.9 s of tension buys,
+// and taking them from one press is what makes them the same throw at two charges rather than
+// two throws that might have differed in some other way.
+await page.keyboard.down('f');
+const tapState = await stepUntil((s) => s.charging === true, 30, 1);
+const tapBuf = await shot('15b-throw-arc-tapped.png');
+await step(ticksFor(1200)); // past SPHERE_CHARGE_SECONDS, so: the cap
+const woundState = await state();
+const woundBuf = await shot('15c-throw-arc-wound.png');
+const tapArc = arcInk(tapBuf, ARC_BOX, handPixel);
+const woundArc = arcInk(woundBuf, ARC_BOX, handPixel);
+const woundCentre = centreClearance(woundBuf);
+
+// Let go, and catch the sphere in the air. The instant is chosen by where the sphere *is* rather
+// than by a tick count: the window has to clear the reticle's own band (`DOM_FREE_ROWS`), and at
+// a level aim the sphere spends its first fifth of a second crossing it.
+const spentBefore = Number(woundState.spheresThrown);
+await page.keyboard.up('f');
+await stepUntil((s) => Number(s.spheresThrown) > spentBefore, 30, 1);
+const cutBuf = await frame();
+const cutArc = arcInk(cutBuf, ARC_BOX, handPixel);
+const flying = await stepUntil(
+  (s) => Number(s.worldSpheres) > 0 && project(s, flyingAt(s)).y >= 396,
+  ticksFor(2000),
+  1,
+);
+const flightBuf = await shot('15d-throw-in-flight.png');
+const FLIGHT_BOX = windowAt(project(flying, flyingAt(flying)), 26);
+const flightDark = photo(idleFrameBuf, FLIGHT_BOX, []);
+const flightLit = photo(flightBuf, FLIGHT_BOX, []);
+
+// And the boom, read through the window §09 built for it — the last link of the chain, and the
+// only one that is a sound rather than a beacon.
+await stepUntil((s) => Number(s.worldSpheres) === 0, ticksFor(4000), 1);
+await settleInk();
+const boomBuf = await frame();
+const boomLanding = photo(boomBuf, LANDING, []);
+
+console.log(
+  `  hand beacon at ${HAND_BOX.x},${HAND_BOX.y} ${HAND_BOX.w}px: ` +
+    `${handIdle.mean.toFixed(1)}/255, ${pct(handIdle.lit)} of the window lit\n` +
+    `  arc box ${ARC_BOX.x},${ARC_BOX.y} ${ARC_BOX.w}×${ARC_BOX.h}: ` +
+    `${armDownArc.lit} lit px arm down → ${tapArc.lit} tapped ` +
+    `(${Number(tapState.arcReach).toFixed(1)} m of preview) → ${woundArc.lit} wound ` +
+    `(${Number(woundState.arcReach).toFixed(1)} m) → ${cutArc.lit} the tick it let go\n` +
+    `  and reaches row ${tapArc.top} tapped against ${woundArc.top} wound, ` +
+    `${tapArc.reach.toFixed(0)} px from the hand against ${woundArc.reach.toFixed(0)} px\n` +
+    `  in flight ${FLIGHT_BOX.x},${FLIGHT_BOX.y}: ${flightDark.mean.toFixed(3)}/255 before → ` +
+    `${flightLit.mean.toFixed(1)}/255 with the sphere in it, ${pct(flightLit.lit)} lit\n` +
+    `  centre clearance: chrome out to ${idleCentre.chrome.toFixed(1)} px arm down, ` +
+    `nearest bead ${nearestPx(woundCentre)} from the reticle against the hole's 20`,
+);
+check(
+  'a sphere in the air is a light in the air, where the frame was black before',
+  domFree(FLIGHT_BOX) && flightDark.mean < 0.05 && flightLit.mean > 4 && flightLit.lit > 0.1,
+  `${flightDark.mean.toFixed(3)}/255 black → ${flightLit.mean.toFixed(1)}/255 and ` +
+    `${pct(flightLit.lit)} of a ${FLIGHT_BOX.w} px window lit, aimed at the sphere's own pose ` +
+    `${project(flying, flyingAt(flying)).depth.toFixed(1)} m down the aim`,
+);
+check(
+  'the arc box is black before the arm moves, and is not looking at the HUD',
+  armDownArc.lit === 0 && handIdle.mean > 3,
+  `${armDownArc.lit} lit px in ${ARC_BOX.w}×${ARC_BOX.h} of screen, beside a hand beacon ` +
+    `reading ${handIdle.mean.toFixed(1)}/255 — the rack is visible, the preview is not`,
+);
+check(
+  'the preview grows with the charge, and is cut the moment the sphere leaves',
+  tapArc.lit > 0 &&
+    woundArc.lit > tapArc.lit * 1.15 &&
+    woundArc.top < tapArc.top - 15 &&
+    Number(woundState.arcReach) > Number(tapState.arcReach) * 3 &&
+    cutArc.lit === 0,
+  `${tapArc.lit} lit px at a tap against ${woundArc.lit} at full tension ` +
+    `(${times(woundArc.lit, tapArc.lit)}), topping out ${tapArc.top - woundArc.top} px higher ` +
+    `up the screen, for ${Number(tapState.arcReach).toFixed(1)} m of preview against ` +
+    `${Number(woundState.arcReach).toFixed(1)} m — and ${cutArc.lit} lit px left the tick after ` +
+    `the release, because a preview that outlived the throw would point at a place the sphere ` +
+    `had already left`,
+);
+check(
+  'and no part of it enters the 40 px box the rest of this file measures around',
+  idleCentre.nearest === Infinity &&
+    idleCentre.chrome <= CENTRE_CHROME_PX &&
+    woundCentre.nearest > 20,
+  `arm down, everything lit within 160 px of the reticle is chrome and stops at ` +
+    `${idleCentre.chrome.toFixed(1)} px; wound, the nearest bead is ${nearestPx(woundCentre)}`,
+);
+check(
+  'and the screen is never black between the press and the boom',
+  [
+    ['arm down', handIdle.mean],
+    ['pressed', tapArc.lit],
+    ['fully wound', woundArc.lit],
+    ['in flight', flightLit.mean],
+    ['at the boom', boomLanding.mean],
+  ].every(([, v]) => v > 0),
+  `hand ${handIdle.mean.toFixed(1)}/255 · pressed ${tapArc.lit} px · wound ${woundArc.lit} px · ` +
+    `in flight ${flightLit.mean.toFixed(1)}/255 · boom ${boomLanding.mean.toFixed(1)}/255 — ` +
+    `the failure this replaces read 0 at every link but the last`,
 );
 
 // ===========================================================================

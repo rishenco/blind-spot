@@ -23,6 +23,7 @@ import { PLAYER_EMITTER_ID } from '../paint/soundEvents';
 import type { ListenerState } from '../audio/director';
 import { GameSim, Q_PING_HEIGHT } from './sim';
 import { SPHERE_CHARGE_SECONDS, SPHERE_COUNT } from './spheres';
+import { SphereView } from './sphereView';
 
 /**
  * The one line of text on screen, and the whole of the game's discoverability.
@@ -90,6 +91,15 @@ export class Game {
   private readonly rigGeometry: THREE.SphereGeometry;
   private readonly rigMaterial: THREE.MeshBasicMaterial;
 
+  /**
+   * The other thing drawn that sound did not reveal: the rig's own spheres, and the arc while
+   * the arm is wound. Its own file argues for the exception; what it needs from here is a pose
+   * and a projection scale, once a frame.
+   */
+  private readonly sphereView = new SphereView();
+  /** Scratch for the drawing-buffer size, so `render` allocates nothing. */
+  private readonly viewportSize = new THREE.Vector2();
+
   private readonly bloomTunables = defaultBloomTunables();
   private bloomChain: BloomChain | null = null;
   /** Public because the dev panel binds directly to it; B toggles the same flag. */
@@ -144,6 +154,7 @@ export class Game {
     this.rigMarker = new THREE.Mesh(this.rigGeometry, this.rigMaterial);
     this.rigMarker.visible = false;
     ctx.scene.add(this.rigMarker);
+    ctx.scene.add(this.sphereView.object);
 
     this.buildGui();
     ctx.hud.setTitle(this.title);
@@ -344,6 +355,10 @@ export class Game {
     this.handReadout.spheres = this.sim.spheres.carried;
     this.handReadout.charge = this.sim.spheres.charge;
 
+    // The beacon's pulse runs off the fixed step, not off the wall clock and not off the paint
+    // clock: see `SphereView.clock` for why both of those are wrong.
+    this.sphereView.advance(dt);
+
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) {
       this.hudTimer = 0.1;
@@ -400,6 +415,31 @@ export class Game {
     // are one fact. Two copies of it would let the drawn rig drift off its own sonar.
     this.rigMarker.position.set(p.x, p.y + Q_PING_HEIGHT, p.z);
     this.rigMarker.visible = this.sim.player.viewBlend > 0.05;
+
+    /*
+     * The hand, posed off the camera the frame was actually built with.
+     *
+     * Same world-units-to-pixels factor the paint system just recomputed, worked out again here
+     * rather than reached for through it: `PaintSystem` keeps that number private and a beacon
+     * that borrowed it would be a second class holding the first one's internals to get a size
+     * right. It is two multiplies off the projection matrix.
+     */
+    const camera = this.ctx.camera;
+    this.ctx.renderer.getDrawingBufferSize(this.viewportSize);
+    const projScale = (camera.projectionMatrix.elements[5] ?? 1) * this.viewportSize.y * 0.5;
+    this.sphereView.setProjScale(projScale);
+    const hand = this.sim.spheres;
+    this.sphereView.draw({
+      eye: camera.position,
+      yaw: this.sim.player.yaw,
+      pitch: this.sim.player.pitch,
+      live: hand.spheresSnapshot(),
+      carried: hand.carried,
+      charging: hand.charging,
+      speed: hand.pendingSpeed,
+      chargeFraction: hand.chargeFraction,
+      firstPerson: this.sim.player.viewBlend <= 0.05,
+    });
   }
 
   /**
@@ -437,6 +477,13 @@ export class Game {
       camY: cam.position.y,
       camZ: cam.position.z,
       camRoll: (cam.rotation.z * 180) / Math.PI,
+      // --- the hand as it is *drawn*. `spherePoses` (the sim's) says where a sphere is; these
+      // say where the rig is holding the next one and how far down the aim the preview reaches,
+      // which is what lets the browser suite aim a window at a beacon and photograph it.
+      handX: this.sphereView.hand.x,
+      handY: this.sphereView.hand.y,
+      handZ: this.sphereView.hand.z,
+      arcReach: this.sphereView.reach,
       // --- view state
       reveal: this.revealOn,
       bloom: this.bloomOn,
@@ -456,6 +503,8 @@ export class Game {
     this.ctx.scene.remove(this.sim.paint.object);
     this.ctx.scene.remove(this.sim.room.reveal);
     this.ctx.scene.remove(this.rigMarker);
+    this.ctx.scene.remove(this.sphereView.object);
+    this.sphereView.dispose();
     this.sim.dispose();
     this.rigGeometry.dispose();
     this.rigMaterial.dispose();
