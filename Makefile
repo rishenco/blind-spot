@@ -9,7 +9,7 @@ HOST_GID ?= $(shell sh -c '[ "$$(uname -s)" = Linux ] && id -g || echo 0')
 
 DC := PORT=$(PORT) HOST_UID=$(HOST_UID) HOST_GID=$(HOST_GID) docker compose
 
-.PHONY: up up3d down logs build test batch shots shots-handball sh reset
+.PHONY: up up3d down logs build test batch deception honesty tune shots shots-handball sh reset
 
 ## up: start the dev server in docker and open the 2D debug playground
 up:
@@ -42,6 +42,18 @@ test:
 ## batch: headless strategy tournament, e.g. make batch ARGS="--a striker --b goalie --seeds 1-50"
 batch:
 	$(DC) run --rm --build --user $(HOST_UID):$(HOST_GID) -e HOME=/tmp dev npm run batch -- $(ARGS)
+
+## deception: the bot's deceivability suite, as numbers
+deception:
+	$(DC) run --rm --build --user $(HOST_UID):$(HOST_GID) -e HOME=/tmp dev npm run deception -- $(ARGS)
+
+## honesty: the ball-hum honesty hole and the difficulty-knob sweep
+honesty:
+	$(DC) run --rm --build --user $(HOST_UID):$(HOST_GID) -e HOME=/tmp dev npm run honesty -- $(ARGS)
+
+## tune: deterministic grid search over the bot's utility weights
+tune:
+	$(DC) run --rm --build --user $(HOST_UID):$(HOST_GID) -e HOME=/tmp dev npm run tune -- $(ARGS)
 
 ## shots-handball: keyframes for the 2D game -> out/handball/
 shots-handball:

@@ -231,6 +231,111 @@ check(
   JSON.stringify(silence.state.perceived.recent),
 );
 
+// ===========================================================================
+// The bot. Everything below this line is about the AI: what it believes, what it
+// believes the opposition believes about it, and what it decided.
+// ===========================================================================
+
+/**
+ * An AI pair. Unlike `pair`, the blind pane is EXPECTED to be busy — it now carries the belief
+ * grids on top of the sound marks — so the "overwhelmingly unknown" check does not apply. What
+ * is checked instead is the thing that matters: the distance between what the bot believes and
+ * what is true, read out of `hb.ai()`.
+ */
+async function aiPair(index, name, tick, truthNote, eyesNote, beliefs = 'opponents') {
+  await call('scenario', name);
+  if (tick) await call('scrubTo', tick);
+  await call('beliefs', 'none');
+  await call('layout', 'truth');
+  const truth = await shot(`${index}-${name}-truth.png`, truthNote, 'truth');
+  await call('beliefs', beliefs);
+  await call('layout', 'eyes');
+  const eyes = await shot(`${index}-${name}-eyes.png`, eyesNote, 'eyes');
+  const ai = await call('ai');
+  const state = await call('state');
+  check(`${name}: the bot published a belief overlay`, ai !== null && ai.beliefs.length > 0, JSON.stringify(ai?.label));
+  return { ai, state, truth, eyes };
+}
+
+const errorOf = (ai, about) => ai.beliefs.find((b) => b.about === about)?.error ?? null;
+
+// --- 20/21 the doughnut ----------------------------------------------------
+const doughnut = await aiPair(
+  '20',
+  'ai-doughnut',
+  // 5.7 s: four seconds of total silence after the last running step, which is long enough for
+  // the ring to open and short enough that the belief has not yet flattened into the pitch.
+  340,
+  'the shape of silence, truth: P2 (orange) ran towards the bot, was heard doing it, and has stood perfectly still for four seconds since. P1 (cyan, left) is the bot; it has heard nothing at all in that time',
+  'and this is what P1 believes about him, and only about him, four seconds after the last sound he made. Note the flat near edge: the cloud stops about three metres short of the bot — the walking radius — because a body that close could not have moved without being heard. Silence does not delete belief, it freezes it, so the cloud grows outwards and not inwards. This asymmetry is the single most game-specific thing the belief layer does',
+  'opp P2',
+);
+check(
+  'doughnut: the belief has spread well beyond a point',
+  doughnut.ai.beliefs[0].cells > 40,
+  `cells ${doughnut.ai.beliefs[0].cells}`,
+);
+
+// --- 22/23 the feint -------------------------------------------------------
+const feintAi = await aiPair(
+  '22',
+  'ai-feint',
+  // 4.6 s: five metres of quiet walking after the braking sound, and one second before he
+  // crosses the three-metre step radius and gives himself away again.
+  276,
+  'the feint, truth: P2 (orange) ran in, broke right, stopped hard — and then walked quietly back the other way. He is now on the left',
+  'and the bot is still looking right. Only P1’s belief about the feinter is drawn: it sits where the braking sound was, because that was the last honest thing it heard. The man himself is metres away from the bot, walking below the three-metre step radius. The bot has been lied to, fairly',
+  'opp P2',
+);
+const feintErr = errorOf(feintAi.ai, 'opp P2');
+check(
+  'feint: the bot ended up believing the wrong place',
+  feintErr !== null && feintErr > 4,
+  `belief error ${feintErr === null ? 'n/a' : feintErr.toFixed(2)} m`,
+);
+
+// --- 24/25 the lying ping --------------------------------------------------
+const liarAi = await aiPair(
+  '24',
+  'ai-false-ping',
+  264,
+  'the lying ping, truth: P2 pinged from down there four seconds ago and has been walking away in silence ever since',
+  'the belief the ping bought: pinned where the ping was fired, and rotting outwards. A ping tells the whole pitch precisely where you WERE — which is exactly why it can be used to lie',
+  'opp P2',
+);
+const liarErr = errorOf(liarAi.ai, 'opp P2');
+check(
+  'false ping: the exact fix has gone stale and the bot knows it is old',
+  liarErr !== null && liarErr > 3,
+  `belief error ${liarErr === null ? 'n/a' : liarErr.toFixed(2)} m`,
+);
+
+// --- 26/27 the mirror ------------------------------------------------------
+const mirror = await aiPair(
+  '26',
+  'ai-shadow',
+  130,
+  'the mirror, truth: P2 has just pinged. The ping is the loudest sound in the game and it sees the whole pitch, so the bot has certainly been seen',
+  'the second belief, in violet: not where the opposition IS, but where the bot thinks they think IT is. It is tight, because the ping just landed. It is the only reason the bot can put a price on silence, on a feint, or on a ping of its own',
+  'mirror',
+);
+check(
+  'mirror: the bot knows it has just been seen',
+  Number(mirror.ai.readouts.known) > 0.4,
+  `known ${mirror.ai.readouts.known}`,
+);
+
+// --- 28/29 a real match ----------------------------------------------------
+const live = await aiPair(
+  '28',
+  'bot-match',
+  300,
+  'a real match, truth: two bots against two strikers',
+  'the bot’s own pane during play: sound marks, the humming ball, both opponent beliefs (pink/orange grids with their age in seconds), the mirror (violet), the chosen move and the intercept point. The card below lists the top four options with their scores',
+  'all',
+);
+check('match: the bot is deciding something', live.ai.scores.length >= 3, JSON.stringify(live.ai.scores?.[0]));
+
 // --- contact sheet ---------------------------------------------------------
 const html = `<!doctype html><meta charset="utf-8"><title>BLIND HANDBALL — keyframes</title>
 <style>body{background:#0a0d10;color:#cfdbe4;font:13px/1.5 ui-monospace,monospace;margin:24px}

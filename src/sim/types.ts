@@ -319,6 +319,14 @@ export interface BeliefCloud {
   age: number;
   /** 0..1 summary confidence, used for the overlay's opacity scale. */
   confidence: number;
+  /**
+   * Cell edge in metres, when the cloud is a grid rather than a scatter of guesses. The overlay
+   * draws squares of this size, so a coarse belief looks coarse instead of looking sparse —
+   * which is the difference between "he could be anywhere in there" and "he is at these dots".
+   */
+  cell?: number;
+  /** CSS colour; the playground has a default per cloud index. */
+  color?: string;
   points: { pos: Vec2; weight: number }[];
 }
 

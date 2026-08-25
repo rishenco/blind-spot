@@ -8,8 +8,10 @@
  */
 import type { ControllerFactory } from '../match';
 import { idleIntent, type Controller, type ControllerContext } from '../types';
+import { Bot } from '../ai/bot';
 import { BallChaser, Goalie, RandomWalker, Statue, Striker } from './dummies';
 
+export { Bot } from '../ai/bot';
 export { BallChaser, Goalie, RandomWalker, Statue, Striker } from './dummies';
 export { Scripted, scripted, type ScriptAction } from './scripted';
 
@@ -19,6 +21,11 @@ export const CONTROLLERS: Record<string, ControllerFactory> = {
   goalie: (ctx: ControllerContext): Controller => new Goalie(ctx),
   randomwalker: (ctx: ControllerContext): Controller => new RandomWalker(ctx),
   striker: (ctx: ControllerContext): Controller => new Striker(ctx),
+  /**
+   * The real thing: occupancy-grid belief (plus a mirror belief of what the opposition knows
+   * about it) feeding a utility chooser. Everything it knows came through `PerceptionFrame`.
+   */
+  bot: (ctx: ControllerContext): Controller => new Bot(ctx),
   /**
    * The slot a human drives. It stands still until something calls `Match.setExternalIntent`
    * for it, which is exactly what the playground does — and what a replay does when it plays

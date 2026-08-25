@@ -53,13 +53,14 @@ export interface MatchConfig {
   kickoffTeam: 'fixed' | 'alternate';
   /**
    * Passivity rule: a carrier that holds the ball longer than this loses it to the nearest
-   * opponent. 0 turns it off, which is the concept as written.
+   * opponent. 0 turns it off.
    *
-   * It is off by default because it is an invention, but it exists because there is currently
-   * no way to take the ball off a body — no contact, no tackle — so a strategy that simply
-   * stands still holding the ball cannot be punished. `striker` versus `statue` is decided by
-   * one goal and then stands still for 170 seconds, which makes that pairing useless as a
-   * measurement. Turn it on when you want a benchmark rather than a faithful match.
+   * It is ON by default because the concept asks for it in so many words ("держать мяч дольше
+   * 5 с нельзя" — real handball's three-second rule, stretched). It was previously off, and
+   * with no contact and no tackle in v1 that left a hole big enough to drive a strategy
+   * through: a carrier could simply stand still forever and no opponent had any way to object.
+   * The rule is what turns this into a game of passing rather than a game of walking the ball
+   * in, which is the point the concept makes about it.
    */
   carryTimeoutSec: number;
 }
@@ -72,7 +73,15 @@ export interface PlayerConfig {
   walkSpeed: number;
   /** Metres of travel between footstep sounds. */
   strideLength: number;
-  /** A speed drop bigger than this within `brakeWindowSec` counts as an audible stop. */
+  /**
+   * A speed drop bigger than this within `brakeWindowSec` counts as an audible stop.
+   *
+   * It has to sit above the walking speed and above the run→walk difference, or "walk quietly
+   * into position and stand still" — the concept's central tactical resource — emits an 11 m
+   * brake every single time it is used, and silence becomes unreachable for anybody who ever
+   * moved. See the AI report; this was 2.5 (exactly `walkSpeed`) and nothing could ever arrive
+   * anywhere quietly.
+   */
   brakeSpeedDrop: number;
   brakeWindowSec: number;
   /** cos of the turn angle that counts as an audible direction change (0 = 90°). */
@@ -232,7 +241,18 @@ export interface AiConfig {
    * close on its own (the correlated error above closes most of it, this bounds the rest).
    */
   observationMemory: number;
-  /** Free-form room for whatever the belief layer turns out to need. */
+  /**
+   * Free-form room for the rest. Everything the bot reads goes through here, which is what lets
+   * a tournament sweep it (`npm run tune`) and a replay carry it. The keys in use today:
+   *
+   *   belief    `beliefCell` `mirrorCell` `beliefHz` `beliefFloor` `wStand` `wWalk` `wRun`
+   *             `pDetectSonar` `sonarShrink` `pDetectHear` `dirHintLife`
+   *   policy    `posMul` `safeMul` `quietMul` `infoMul` `deceiveMul` `positionDiscount`
+   *             `shotRangeSpan`
+   *
+   * Their defaults live next to the code that reads them (`ai/belief.ts`, `ai/policy.ts`), so an
+   * absent key always means "the default", never "zero".
+   */
   [key: string]: number | boolean | string;
 }
 
@@ -323,7 +343,7 @@ export function defaultConfig(): SimConfig {
       restartDelaySec: 1.2,
       spawnJitter: 0.75,
       kickoffTeam: 'fixed',
-      carryTimeoutSec: 0,
+      carryTimeoutSec: 5,
     },
     player: {
       radius: 0.35,
@@ -331,7 +351,7 @@ export function defaultConfig(): SimConfig {
       runSpeed: 5.5,
       walkSpeed: 2.5,
       strideLength: 1.5,
-      brakeSpeedDrop: 2.5,
+      brakeSpeedDrop: 3.2,
       brakeWindowSec: 0.2,
       brakeTurnCos: 0.1,
       brakeCooldownSec: 0.5,
@@ -445,12 +465,25 @@ export const PRESETS: Record<string, () => SimConfig> = {
     return c;
   },
 
+  /**
+   * A bot that values information far above its price.
+   *
+   * Not a balance setting — a demonstration one. At the tuned defaults the bot pings roughly
+   * once a match, because in v1 there is no tackle and no steal, so knowing where an opponent is
+   * buys almost nothing you can act on (see the AI report). This preset forces the question to
+   * be asked so the mechanic can be watched in the playground.
+   */
+  curious: () => {
+    const c = defaultConfig();
+    c.ai.infoMul = 40;
+    return c;
+  },
+
   /** Short matches for batch runs — same physics, less waiting. */
   sprint: () => {
     const c = defaultConfig();
     c.match.durationSec = 60;
     c.match.goalsToWin = 3;
-    c.match.carryTimeoutSec = 8;
     return c;
   },
 };

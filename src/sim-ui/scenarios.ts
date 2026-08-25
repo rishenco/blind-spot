@@ -10,6 +10,7 @@
  * That is only affordable because the match is deterministic and a full 2×2 match re-simulates
  * in tens of milliseconds — the same property that makes the scrubber possible.
  */
+import { AI_SCENARIOS } from '../sim/ai/scenarios';
 import { configFromPreset, type SimConfig } from '../sim/config';
 import { makeController, scripted } from '../sim/controllers';
 import type { ControllerFactory, TimelineEntry } from '../sim/match';
@@ -198,7 +199,36 @@ export const SCENARIOS: Scenario[] = [
       return { config, seed: 2, controllers: pair('striker', 'statue', config.teamSize), eyes: 0 };
     },
   },
+  {
+    name: 'bot-match',
+    note: 'a real match: two bots (cyan) against two strikers, with P0’s belief drawn over its own blind pane',
+    ticks: 480,
+    make: () => {
+      const config = configFromPreset('default');
+      return { config, seed: 4, controllers: pair('bot', 'striker', config.teamSize), eyes: 0 };
+    },
+  },
 ];
+
+/**
+ * The AI suite, adapted into playground scenarios.
+ *
+ * They are defined once, in `sim/ai/scenarios.ts`, because the same setups have to serve three
+ * consumers that must not be allowed to drift apart: the numbers (`npm run deception`), the
+ * pictures (`npm run shots:handball`) and the hands (the dropdown in the playground). A trick
+ * whose number and whose keyframe came from two different scripts proves nothing.
+ */
+for (const s of AI_SCENARIOS) {
+  SCENARIOS.push({
+    name: s.name,
+    note: s.note,
+    ticks: s.ticks,
+    make: () => {
+      const built = s.build();
+      return { config: built.config, seed: s.seed, controllers: built.controllers, eyes: s.eyes };
+    },
+  });
+}
 
 export function findScenario(name: string): Scenario {
   const s = SCENARIOS.find((x) => x.name === name);

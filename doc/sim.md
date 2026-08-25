@@ -15,6 +15,7 @@
 | `src/sim/match.ts` | сборка: симуляция + перцепторы + контроллеры + статистика + таймлайн |
 | `src/sim/replay.ts` | запись = сид + конфиг + имена контроллеров + внешние интенты |
 | `src/sim/controllers/` | дамми-стратегии и `scripted` (сценарии-таймлайны) |
+| `src/sim/ai/` | бот: убеждение, признаки, полезности (`doc/ai/architecture.md`) |
 | `src/sim/cli/batch.ts` | headless-турнир и совместный свип поля/громкостей |
 | `src/sim-ui/` | дебаг-полигон (canvas 2D), `handball.html` |
 | `tools/handball-shots.mjs` | генератор ключевых кадров с фотометрическими проверками |
@@ -120,7 +121,9 @@ interface Intent {
 
 `ControllerDebug` рисуется полигоном как есть: `label`, `readouts`, `markers` (точка/линия/круг),
 `scores` (топ вариантов) и **`beliefs: BeliefCloud[]`** — облака взвешенных точек с возрастом и
-уверенностью. Слот пустой и ждёт сетку занятости.
+уверенностью. У `BeliefCloud` есть необязательные `cell` (рисовать квадратами реального размера
+ячейки, а не точками) и `color`. Бот кладёт туда сетки соперников и зеркальные сетки; выпадашка
+**belief overlay** в полигоне выбирает, какой слой рисовать.
 
 Регистрируй свой контроллер в `src/sim/controllers/index.ts` — и он сразу доступен полигону
 (выпадашка), батч-раннеру (`--a mybot`) и сценариям кадров.
@@ -139,8 +142,9 @@ interface Intent {
 | `emitterNoiseSmoothing` | 0.97 | корреляция ошибки по мячу во времени |
 | `exactKinds` | sonar, whistle | что слышно без ошибки |
 
-`config.ai` — мешок для твоих ручек (`beliefDecay`, `decisionQuality`, `observationMemory`);
-симуляция его не читает, но он ездит вместе с конфигом в реплеях и в батче.
+`config.ai` — мешок ручек бота (`beliefCell`, `beliefHz`, `decisionQuality`, `observationMemory`,
+веса полезности…); симуляция его не читает, но он ездит вместе с конфигом в реплеях и в батче.
+Список ключей — в `doc/ai/architecture.md` и в комментарии к `AiConfig`.
 
 ## Детерминизм
 
@@ -158,8 +162,13 @@ interface Intent {
 
 ```
 make up                 # полигон в браузере (dev-сервер в докере)
-npm test                # детерминизм + правила + контракт восприятия (29 тестов)
-npm run batch -- --a striker --b goalie --seeds 1-50
+npm test                # детерминизм + правила + контракт восприятия + бот (41 тест)
+npm run batch -- --a bot --b striker --seeds 1-50
 npm run batch -- --a striker --b goalie --seeds 1-10 --sweep 24x14@1,20x12@0.8
+npm run deception       # сценарии обманываемости бота, числами
+npm run honesty         # дыра с мячом + шкала сложности по ручкам честности
+npm run tune            # grid search по весам полезности бота
 npm run shots:handball  # ключевые кадры -> out/handball/
 ```
+
+Бот и его слои описаны в `doc/ai/architecture.md`.

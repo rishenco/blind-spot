@@ -11,7 +11,7 @@
  * where the instrument returns (sonar, geometry) are cold. Matter is dots, sound is blobs — you
  * never have to work out which layer you are looking at.
  */
-import type { SoundKind, Vec2 } from '../sim/types';
+import type { BeliefCloud, SoundKind, Vec2 } from '../sim/types';
 import type { PlayerState, WorldState } from '../sim/sim';
 import type { FieldInfo } from '../sim/types';
 import type { PerceivedModel } from './perceived';
@@ -250,6 +250,48 @@ export function drawTruth(ctx: CanvasRenderingContext2D, cam: Camera, o: TruthOp
   if (o.showVectors) arrow(ctx, cam, b.pos, b.vel, BALL_COLOR, 0.12);
 }
 
+/**
+ * One belief grid, drawn as the grid it is.
+ *
+ * Squares of the real cell size, not dots: a coarse belief has to *look* coarse, or the reader
+ * mistakes "he could be anywhere in this block" for "he is at these points". Age is written on
+ * the heaviest cell in seconds, because "where does it think he is" and "how old is that
+ * thought" are two different questions and the second one is the one that explains the bot's
+ * mistakes.
+ */
+function drawBeliefGrid(ctx: CanvasRenderingContext2D, cam: Camera, cloud: BeliefCloud, mirror: boolean): void {
+  const cell = (cloud.cell ?? 0.5) * cam.scale;
+  const color = cloud.color ?? (mirror ? '#9d7bff' : '#ff5c8a');
+  ctx.save();
+  for (const pt of cloud.points) {
+    const a = Math.max(0, Math.min(1, pt.weight));
+    // Alpha rises as sqrt of the weight, not linearly: a normalised belief spread over a hundred
+    // cells has a peak weight of one and a tail of hundredths, and a linear ramp draws the tail
+    // as nothing at all — which is exactly the part a reader needs to see.
+    ctx.globalAlpha = (mirror ? 0.4 : 0.6) * Math.sqrt(a);
+    ctx.fillStyle = color;
+    ctx.fillRect(sx(cam, pt.pos) - cell / 2, sy(cam, pt.pos) - cell / 2, cell, cell);
+  }
+  ctx.globalAlpha = 1;
+  const peak = cloud.points[0];
+  if (peak) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash(mirror ? [2, 3] : []);
+    ctx.strokeRect(sx(cam, peak.pos) - cell / 2, sy(cam, peak.pos) - cell / 2, cell, cell);
+    ctx.setLineDash([]);
+    label(
+      ctx,
+      `${cloud.about} ${cloud.age.toFixed(1)}s`,
+      sx(cam, peak.pos) + cell,
+      sy(cam, peak.pos) - 4,
+      color,
+      9,
+    );
+  }
+  ctx.restore();
+}
+
 function drawBody(ctx: CanvasRenderingContext2D, cam: Camera, p: PlayerState, o: TruthOptions): void {
   const color = TEAM_COLOR[p.team];
   // The halo: how far this body can be heard right now — the concept's non-negotiable readout.
@@ -281,6 +323,14 @@ export interface PerceivedOptions {
   showRadii: boolean;
   showVectors: boolean;
   playerRadius: number;
+  /**
+   * Which belief clouds to draw. Four grids on one pane is soup, so this is a filter and not a
+   * checkbox: 'opponents' is where the bot thinks they are, 'mirror' is where it thinks they
+   * think it is, and reading one against the other is the whole point of the tool. Any other
+   * string is matched against the cloud's name, which is how a keyframe isolates the one belief
+   * its caption is making a claim about.
+   */
+  beliefFilter?: string;
 }
 
 /**
@@ -389,14 +439,16 @@ export function drawPerceived(ctx: CanvasRenderingContext2D, cam: Camera, o: Per
 export function drawControllerDebug(ctx: CanvasRenderingContext2D, cam: Camera, o: PerceivedOptions): void {
   const debug = o.model.controllerDebug;
   if (!debug) return;
-  for (const cloud of debug.beliefs ?? []) {
-    const alpha = Math.max(0.05, Math.min(1, cloud.confidence));
-    for (const pt of cloud.points) {
-      ctx.globalAlpha = alpha * Math.max(0.05, Math.min(1, pt.weight));
-      ctx.fillStyle = '#ff5c8a';
-      ctx.fillRect(sx(cam, pt.pos) - 1.5, sy(cam, pt.pos) - 1.5, 3, 3);
+  const filter = o.beliefFilter ?? 'all';
+  if (filter !== 'none') {
+    for (const cloud of debug.beliefs ?? []) {
+      const about = String(cloud.about);
+      const mirror = about.startsWith('mirror');
+      if (filter === 'opponents' && mirror) continue;
+      else if (filter === 'mirror' && !mirror) continue;
+      else if (filter !== 'all' && filter !== 'opponents' && filter !== 'mirror' && !about.includes(filter)) continue;
+      drawBeliefGrid(ctx, cam, cloud, mirror);
     }
-    ctx.globalAlpha = 1;
   }
   for (const marker of debug.markers ?? []) {
     const color = marker.color ?? '#9d7bff';

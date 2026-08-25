@@ -12,7 +12,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "batch": "tsx src/sim/cli/batch.ts",
-    "shots:handball": "npm run build && node tools/handball-shots.mjs"
+    "shots:handball": "npm run build && node tools/handball-shots.mjs",
+    "deception": "tsx src/sim/cli/deception.ts",
+    "tune": "tsx src/sim/cli/tune.ts",
+    "honesty": "tsx src/sim/cli/honesty.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",

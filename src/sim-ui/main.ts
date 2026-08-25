@@ -74,6 +74,7 @@ const params = {
   scenario: 'none',
   showRadii: true,
   showVectors: true,
+  beliefs: 'all' as string,
   paused: false,
   speed: 1,
 };
@@ -266,6 +267,7 @@ function render(): void {
     showRadii: params.showRadii,
     showVectors: params.showVectors,
     playerRadius: setup.config.player.radius,
+    beliefFilter: params.beliefs,
   });
 
   el('eyes-title').textContent = `as P${eyes} hears${replay ? ' (replay)' : ''}`;
@@ -317,6 +319,10 @@ function renderPanels(session: Session, eyes: EntityId): void {
         `<span class="k">heard</span> ${heard ? `${heard.kind} @${heard.distance.toFixed(1)}m ${heard.sourceId === null ? '(?)' : `P${heard.sourceId}`}` : '—'}<br>` +
         `<span class="k">ai</span> ${debug?.label ?? '—'} ` +
         `${debug?.readouts ? Object.entries(debug.readouts).map(([k, v]) => `<span class="k">${k}</span>=${v}`).join(' ') : ''}<br>` +
+        // The "why", not just the "what": the chooser's top options with their scores. Without
+        // this the overlay shows a decision and hides the decision-making.
+        `${debug?.scores?.length ? `<span class="k">opts</span> ${debug.scores.slice(0, 4).map((sc, i) => `${i === 0 ? '<b>' : ''}${sc.action} ${sc.score.toFixed(2)}${i === 0 ? '</b>' : ''}`).join(' · ')}<br>` : ''}` +
+        `${debug?.beliefs?.length ? `<span class="k">belief</span> ${debug.beliefs.map((b) => `${b.about} ${b.age.toFixed(1)}s`).join(' · ')}<br>` : ''}` +
         `<span class="k">goals</span> ${stats.goals} <span class="k">int</span> ${stats.interceptions} ` +
         `<span class="k">fum</span> ${stats.fumbles} <span class="k">png</span> ${stats.pings}` +
         `</div>`,
@@ -471,6 +477,10 @@ perceptionFolder
 const viewFolder = gui.addFolder('view');
 viewFolder.add(params, 'showRadii').name('hearing radii');
 viewFolder.add(params, 'showVectors').name('motion vectors');
+viewFolder
+  .add(params, 'beliefs', ['all', 'opponents', 'mirror', 'none'])
+  .name('belief overlay')
+  .onChange(() => render());
 
 // -- boot -----------------------------------------------------------------
 
@@ -516,6 +526,11 @@ const hb = {
     el<HTMLSelectElement>('eyes').value = String(id);
     render();
   },
+  /** Which belief clouds the blind pane draws — the keyframes want one layer at a time. */
+  beliefs(mode: string) {
+    params.beliefs = mode;
+    render();
+  },
   layout(mode: 'both' | 'truth' | 'eyes') {
     layout = mode;
     applyLayout();
@@ -536,6 +551,42 @@ const hb = {
   },
   stats() {
     return live.match.stats;
+  },
+  /**
+   * What the watched controller believes, in numbers.
+   *
+   * The keyframe generator needs this to make claims it can check: "the bot's belief peak is
+   * seven metres from where the man actually is, on the side he feinted towards" is a statement
+   * about two numbers, and a picture of a pink blob is not.
+   */
+  ai() {
+    const session = current();
+    const eyes = clampEyes(setup.eyes);
+    const debug = session.models[eyes]!.controllerDebug;
+    if (!debug) return null;
+    const truth = session.match.sim.state.players;
+    return {
+      eyes,
+      label: debug.label ?? null,
+      readouts: debug.readouts ?? {},
+      scores: (debug.scores ?? []).slice(0, 4),
+      beliefs: (debug.beliefs ?? []).map((b) => {
+        const peak = b.points[0]?.pos ?? null;
+        const about = String(b.about);
+        const id = Number(about.replace(/[^0-9]/g, ''));
+        const real = truth[id];
+        return {
+          about,
+          age: b.age,
+          confidence: b.confidence,
+          cells: b.points.length,
+          peak,
+          // Distance from what the bot thinks to what is true. Computed here, in the harness,
+          // where the truth is allowed to live — never inside the bot.
+          error: peak && real ? Math.hypot(peak.x - real.pos.x, peak.y - real.pos.y) : null,
+        };
+      }),
+    };
   },
   /** A small, JSON-safe summary — everything a keyframe check might want to assert on. */
   state() {

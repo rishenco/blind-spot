@@ -1,0 +1,319 @@
+/**
+ * The bot.
+ *
+ * Wiring only: perception in, belief updated, a decision taken ten times a second, and steering
+ * produced sixty times a second. All three layers live in separate files because the interesting
+ * failure mode of this whole project is layer 2 quietly reading something layer 1 never heard —
+ * and the way to make that impossible is for the decision code to have nothing else in scope.
+ *
+ * The 10 Hz / 60 Hz split is not an optimisation. It gives the bot a human-shaped reaction time
+ * for free (0–100 ms of quantisation on top of the one-tick delay the contract already imposes,
+ * plus whatever `reactionLatencySec` adds), and it stops the chooser from re-deciding on every
+ * frame, which is what actually reads as "stupid bot" when two options are nearly tied.
+ */
+import { clamp, dist2, len2, norm2, sub2, timeOfClosestApproach } from '../math';
+import {
+  idleIntent,
+  type BeliefCloud,
+  type Controller,
+  type ControllerContext,
+  type ControllerDebug,
+  type Intent,
+  type PerceptionFrame,
+  type Vec2,
+} from '../types';
+import { Belief } from './belief';
+import { deriveFeatures, type Features } from './features';
+import { aimFor, choose, type Action, type ScoredAction } from './policy';
+
+interface Chosen {
+  action: Action;
+  /** Sim time the action was picked, for the minimum-hold rule. */
+  at: number;
+  /** Phase inside a macro. */
+  phase: number;
+  phaseT: number;
+}
+
+export class Bot implements Controller {
+  readonly name: string;
+  private ctx: ControllerContext;
+  private belief: Belief;
+  private frame: PerceptionFrame | null = null;
+  private features: Features | null = null;
+  private chosen: Chosen | null = null;
+  private ranked: ScoredAction[] = [];
+  private sinceDecision = 0;
+  private catchLock = 0;
+  private pingLock = 0;
+  private diveLock = 0;
+  private lastPossession = 'unknown';
+
+  constructor(ctx: ControllerContext, name = 'bot') {
+    this.name = name;
+    this.ctx = ctx;
+    this.belief = new Belief(ctx);
+  }
+
+  reset(ctx: ControllerContext): void {
+    this.ctx = ctx;
+    this.belief = new Belief(ctx);
+    this.frame = null;
+    this.features = null;
+    this.chosen = null;
+    this.ranked = [];
+    this.sinceDecision = 0;
+  }
+
+  onPerceive(frame: PerceptionFrame): void {
+    this.frame = frame;
+    this.belief.update(frame);
+  }
+
+  decide(dt: number): Intent {
+    const frame = this.frame;
+    const intent = idleIntent();
+    if (!frame) return intent;
+    this.catchLock = Math.max(0, this.catchLock - dt);
+    this.pingLock = Math.max(0, this.pingLock - dt);
+    this.diveLock = Math.max(0, this.diveLock - dt);
+    if (frame.match.phase !== 'play') {
+      this.chosen = null;
+      this.sinceDecision = 99;
+      return intent;
+    }
+
+    const cfg = this.ctx.config;
+    this.sinceDecision += dt;
+    const period = 1 / Math.max(1, this.belief.knobs.stepHz);
+    // Re-decide on the clock, but also the moment the world changes shape under us: possession
+    // flipping or the ball arriving are not things to notice 100 ms late.
+    const ball = this.belief.ball;
+    const urgent =
+      this.belief.possession !== this.lastPossession ||
+      (ball !== null && dist2(frame.self.pos, ball.pos) < 2.5) ||
+      this.chosen === null ||
+      this.features === null;
+    const minHold = 0.3;
+    if (this.sinceDecision >= period && (urgent || this.now() - (this.chosen?.at ?? -99) >= minHold)) {
+      // Features are derived here and nowhere else. They cost roughly what one decision costs —
+      // stratified samples of two grids, the effective areas, an interception scan — and deriving
+      // them sixty times a second to use them ten times a second was most of the bot's CPU.
+      this.features = deriveFeatures(
+        this.belief,
+        frame.self.pos,
+        frame.self.speed,
+        frame.self.hasBall,
+        this.ctx.team,
+        this.ctx.self,
+        frame.field,
+        cfg,
+      );
+      this.pick();
+      this.sinceDecision = 0;
+    }
+    this.lastPossession = this.belief.possession;
+    const f = this.features;
+    if (!f) return intent;
+    // Between decisions the plan stands, but the body and the ball have moved: steering and the
+    // catch reflex run at 60 Hz off these three fields and nothing else.
+    f.me = frame.self.pos;
+    f.mySpeed = frame.self.speed;
+    f.ball = ball;
+    f.ballPos = ball ? ball.pos : null;
+
+    const chosen = this.chosen;
+    if (!chosen) return intent;
+    chosen.phaseT += dt;
+    this.execute(chosen, frame, intent, f);
+    this.catchReflex(frame, intent, f);
+    return intent;
+  }
+
+  private now(): number {
+    return this.belief.now;
+  }
+
+  private pick(): void {
+    const f = this.features!;
+    const frame = this.frame!;
+    const ai = this.ctx.config.ai as Record<string, unknown>;
+    const quality = typeof ai.decisionQuality === 'number' ? ai.decisionQuality : 1;
+    this.ranked = choose({
+      features: f,
+      belief: this.belief,
+      cfg: this.ctx.config,
+      pingCooldown: frame.self.pingCooldown,
+      lastTag: this.chosen?.action.tag ?? null,
+      decisionQuality: quality,
+    });
+    const best = this.ranked[0];
+    if (!best) return;
+    if (this.chosen && this.chosen.action.tag === best.action.tag) {
+      // Same idea, refreshed target — keep the macro's phase running.
+      this.chosen.action = best.action;
+      return;
+    }
+    this.chosen = { action: best.action, at: this.now(), phase: 0, phaseT: 0 };
+  }
+
+  // -- execution -----------------------------------------------------------
+
+  private execute(chosen: Chosen, frame: PerceptionFrame, intent: Intent, f: Features): void {
+    const cfg = this.ctx.config;
+    const a = chosen.action;
+    intent.aim = aimFor(a, f);
+
+    switch (a.kind) {
+      case 'hold':
+        break;
+      case 'move':
+        this.steer(intent, f.me, a.to!, a.mode ?? 'walk');
+        break;
+      case 'ping':
+        if (this.pingLock <= 0 && frame.self.pingCooldown <= 1e-6) {
+          intent.ping = true;
+          this.pingLock = 0.25;
+        }
+        break;
+      case 'shoot':
+      case 'pass': {
+        if (!frame.self.hasBall) {
+          this.chosen = null;
+          break;
+        }
+        const want = clamp(a.charge ?? cfg.throwing.maxCharge, 0, cfg.throwing.maxCharge);
+        // The wind-up is read back from the body, never from a private timer: a whistle or a
+        // restart can end a charge without the controller's consent (the dummies tripped on
+        // exactly this).
+        intent.charge = frame.self.chargeT < want;
+        break;
+      }
+      case 'feint': {
+        // Leg one is loud and goes the wrong way; leg two is quiet and goes the right way. The
+        // whole point is that the noise and the body end up in different places.
+        if (chosen.phase === 0) {
+          this.steer(intent, f.me, a.via!, 'run');
+          if (chosen.phaseT > 0.45 || dist2(f.me, a.via!) < 0.6) {
+            chosen.phase = 1;
+            chosen.phaseT = 0;
+          }
+        } else {
+          this.steer(intent, f.me, a.to!, 'walk');
+          if (dist2(f.me, a.to!) < 0.4) this.chosen = null;
+        }
+        break;
+      }
+      case 'dive':
+        if (this.diveLock <= 0 && !frame.self.diving && !frame.self.recovering) {
+          intent.dive = true;
+          intent.move = a.dir!;
+          this.diveLock = cfg.dive.cooldownSec;
+        }
+        break;
+    }
+  }
+
+  /**
+   * Steering, with one rule that matters more than the rest: slow down before you arrive.
+   *
+   * Braking hard is the loudest ordinary sound a body makes (11 m against a run's 9), so a bot
+   * that sprints to its spot and stops dead has announced the spot to the whole pitch. Dropping
+   * to a walk for the last stride keeps every speed change below the threshold, and the arrival
+   * is silent.
+   */
+  private steer(intent: Intent, from: Vec2, to: Vec2, mode: 'walk' | 'run'): void {
+    const d = sub2(to, from);
+    const gap = len2(d);
+    if (gap < 0.25) return;
+    intent.move = norm2(d, { x: 0, y: 0 });
+    intent.moveMode = mode === 'run' && gap > 1.6 ? 'run' : 'walk';
+  }
+
+  /**
+   * Catching is a reflex, not a plan: whatever the chooser decided, a ball inside reach has to
+   * be dealt with this tick or it becomes a fumble — the loudest mistake in the game.
+   */
+  private catchReflex(frame: PerceptionFrame, intent: Intent, f: Features): void {
+    if (frame.self.hasBall || this.catchLock > 0 || !f.ball) return;
+    const cfg = this.ctx.config.catching;
+    const rel = sub2(f.ball.pos, f.me);
+    const d = len2(rel);
+    if (d > cfg.radius * 0.85) return;
+    const relVel = sub2(f.ball.vel, frame.self.vel);
+    const relSpeed = len2(relVel);
+    if (relSpeed < cfg.slowBallSpeed) {
+      intent.catch = true;
+      this.catchLock = 0.25;
+      return;
+    }
+    const tca = timeOfClosestApproach(rel, relVel);
+    if (Math.abs(tca) <= cfg.windowSec * 0.75) {
+      intent.catch = true;
+      this.catchLock = 0.25;
+    }
+  }
+
+  // -- the overlay ---------------------------------------------------------
+
+  debugSnapshot(): ControllerDebug | null {
+    const f = this.features;
+    if (!f) return { label: 'waiting' };
+    const beliefs: BeliefCloud[] = [];
+    for (let i = 0; i < this.belief.opponents.length; i++) {
+      const t = this.belief.opponents[i]!;
+      beliefs.push({
+        about: `opp P${t.id}`,
+        age: clamp(this.belief.now - t.lastSeenT, 0, 99),
+        confidence: clamp(1 - f.oppArea[i]! / (f.field.width * f.field.height * 0.5), 0.05, 1),
+        cell: t.grid.spec.cell,
+        color: i === 0 ? '#ff5c8a' : '#ff9d5c',
+        points: t.grid.debugPoints(420),
+      });
+    }
+    for (const m of this.belief.mirrors) {
+      beliefs.push({
+        about: `mirror of P${m.opponent}`,
+        age: clamp(this.belief.now - m.lastFixT, 0, 99),
+        confidence: clamp(f.mirrorKnown, 0.05, 1),
+        cell: m.grid.spec.cell,
+        color: '#9d7bff',
+        points: m.grid.debugPoints(200),
+      });
+    }
+    const markers = [];
+    if (f.intercept) {
+      markers.push({ kind: 'circle' as const, pos: f.intercept.point, r: 0.5, label: 'intercept', color: '#7dffa8' });
+    }
+    const chosen = this.chosen?.action;
+    if (chosen?.to) markers.push({ kind: 'line' as const, pos: f.me, to: chosen.to, label: chosen.tag, color: '#ffd166' });
+    if (chosen?.via) markers.push({ kind: 'point' as const, pos: chosen.via, label: 'feint', color: '#ff7a5c' });
+    if (chosen?.target) markers.push({ kind: 'line' as const, pos: f.me, to: chosen.target, label: 'throw', color: '#ff8fab' });
+    markers.push({ kind: 'point' as const, pos: f.mirrorCentre, label: 'they think I am', color: '#9d7bff' });
+
+    const top = this.ranked.slice(0, 4);
+    return {
+      label: `${f.role}${f.primary ? '' : '·2'} — ${chosen?.tag ?? '—'}`,
+      readouts: {
+        ball: this.belief.possession,
+        unseen: f.secondsUnseen.toFixed(1),
+        known: f.mirrorKnown.toFixed(2),
+        'opp m²': f.oppArea.map((a) => a.toFixed(0)).join('/'),
+        age: f.oppAge.map((a) => a.toFixed(1)).join('/'),
+        axes: top[0] ? Object.entries(top[0].axes).map(([k, v]) => `${k[0]}${v.toFixed(2)}`).join(' ') : '—',
+      },
+      beliefs,
+      markers,
+      scores: top.map((s) => ({ action: s.action.tag, score: s.score })),
+    };
+  }
+
+  /** Test and measurement hook. Not used by the game, and never a way back into the world. */
+  get beliefState(): Belief {
+    return this.belief;
+  }
+
+  get featureState(): Features | null {
+    return this.features;
+  }
+}
