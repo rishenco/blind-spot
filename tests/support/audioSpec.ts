@@ -355,33 +355,46 @@ export const BRIGHT_LEAK_MAX_DB = 0.35;
  * The Halo's radius → pitch calibration: audible radius in metres against the hum's fundamental.
  *
  * §3.8 is non-negotiable about the player always knowing how loud they are, and pitch is the
- * readout. These three rows are the three movement tiers of §3.3 read through
- * `haloProbe.humPitch`: crouch (2 m), walk (11 m), sprint (24 m).
+ * readout. These three rows are the three movement tiers of §3.3 read through `paint/halo`'s
+ * `humPitch`: crouch (2 m), walk (11 m), sprint (24 m) — the **hearing** radii of §3.3's
+ * right-hand column on concrete, which is what the Halo reports.
+ *
+ * `windowSec` is where each tier sits in `haloHum.test.ts`'s timeline, and it moved when the
+ * fixture went: the hum is now driven the way the game drives it, one `setRadius` per 60 Hz
+ * frame through §3.8's real glide, so a plateau needs ~1.2 s (about seven glide constants) to
+ * have settled before the pitch means anything. The windows also dodge the near-unison's beat
+ * nulls, which are 2.25 s apart at the crouch end and where `estimateF0` correctly answers "no
+ * pitch here" rather than guessing.
  */
 export const HALO_PITCH_POINTS = Object.freeze([
-  { radiusM: 2, hz: 63.51, windowSec: [0.6, 1.4] },
-  { radiusM: 11, hz: 148.94, windowSec: [2.7, 3.4] },
-  { radiusM: 24, hz: 220.0, windowSec: [4.7, 5.4] },
+  { radiusM: 2, hz: 63.51, windowSec: [0.6, 1.5] },
+  { radiusM: 11, hz: 148.94, windowSec: [3.2, 4.1] },
+  { radiusM: 24, hz: 220.0, windowSec: [5.8, 6.7] },
 ] as const);
 
 /**
  * How far a measured hum pitch may sit from `humPitch`, in cents.
  *
- * Measured error is +1 to +5 cents, and it is *not* estimator error — `estimateF0` reads a pure
- * sine to within 0.1 cents. It is the hum's own 0.7 % detuned second oscillator pulling the
+ * Measured error is +2.7 to +5.8 cents, and it is *not* estimator error — `estimateF0` reads a
+ * pure sine to within 0.1 cents. It is the hum's own 0.7 % detuned second oscillator pulling the
  * composite period sharp by roughly its share of the mix. 25 cents is an eighth of a semitone:
  * far tighter than anything audible as a wrong reading, far looser than the beat.
+ *
+ * It is also the tolerance the plateau assertion uses at half width, and that one has teeth: a
+ * hum that stopped scheduling a ramp while the radius held still reads **169 cents sharp** for
+ * the whole plateau, because the next ramp then interpolates from the far side of it.
  */
 export const HALO_PITCH_TOLERANCE_CENTS = 25;
 
 /**
  * The hum's peak level, dBFS.
  *
- * §3.8 now states this as law — "level stays low and near-constant (≈ −21 dBFS) and ducks under
+ * §3.8 states this as law — "level stays low and near-constant (≈ −21 dBFS) and ducks under
  * events, so the information rides on pitch and the tone can sit under everything without
- * fatiguing" — so it is a design quantity and not an accident of the fixture's gain. The render
- * peaks at −21.01. RMS at the plateaus runs 6–13 dB below that, since a 63 Hz fundamental and a
- * 220 Hz one meet the 520 Hz lowpass differently.
+ * fatiguing" — so it is a design quantity, and `HALO_LEVEL` in `src/audio/halo.ts` is set to land
+ * on it rather than the other way round. The swept render peaks at −21.01. RMS at the plateaus
+ * runs 6–13 dB below that, since a 63 Hz fundamental and a 220 Hz one meet the 520 Hz lowpass
+ * differently.
  */
 export const HALO_PEAK_DBFS = Object.freeze({
   value: -21.0,
@@ -395,10 +408,35 @@ export const HALO_PEAK_DBFS = Object.freeze({
  *
  * If level tracked radius too, a player could not hear their own Halo over their own footsteps
  * at the sprint end, which is exactly the tier where the reading matters most. Measured spread
- * across the three plateaus is ~7 dB and most of that is the lowpass at 520 Hz attenuating the
- * quiet end's 63 Hz fundamental less than its partials.
+ * across the three plateaus is 5.8 dB and none of it is intended: it is the 520 Hz lowpass
+ * meeting a 63 Hz fundamental differently from a 220 Hz one. 10 dB leaves room for a filter
+ * retune and still fails a hum whose level followed its pitch.
  */
 export const HALO_LEVEL_SPREAD_MAX_DB = 10;
+
+/**
+ * How the hum gets out of the way of an event — §3.8's "ducks under events".
+ *
+ * The reason the duck exists is masking: the hum is the only continuous tone in the game, and
+ * what it would sit on top of is footfalls, which are the player's primary source of geometry
+ * (§3.3: "moving fast **is** scanning"). A readout that costs you the thing it is reporting on
+ * is a bad trade, so it steps aside for every voice the mixer builds.
+ *
+ * Measured, at the hum's own gain: −9.1 dB at the floor, recovered to within 0.01 dB by 0.9 s,
+ * and 0.03 dB of effect on anything else sharing the master. `bleedMaxDb` is the one with teeth
+ * — a duck automated on the master bus instead of on the hum would attenuate the very event it
+ * was making room for, by about 10 dB.
+ */
+export const HALO_DUCK = Object.freeze({
+  /** Least dip the hum must show while an event is landing, dB. Measured 9.1. */
+  minDepthDb: 6,
+  /** By when the hum must be back, seconds after the event. Measured: 0.01 dB out at 0.9 s. */
+  recoveredBySec: 0.9,
+  /** How close to undisturbed "back" means, dB. */
+  recoveredWithinDb: 0.5,
+  /** How much the duck may move anything else in the mix, dB. Measured 0.03. */
+  bleedMaxDb: 0.2,
+});
 
 // ---------------------------------------------------------------------------
 // Mix hygiene

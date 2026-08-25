@@ -280,6 +280,12 @@ export class Game {
 
     this.sim.tick(dt, this.input);
 
+    // §3.8's hum, after the tick that moved the readout — one radius, straight from the number
+    // the ring is drawn from, so the two faces cannot report different frames. Every frame and
+    // not on the HUD's tenth-of-a-second timer: a readout the ear can hear stepping is a readout
+    // §3.8 explicitly rules out.
+    this.audio.setHaloRadius(this.sim.halo.radius);
+
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) {
       this.hudTimer = 0.1;
