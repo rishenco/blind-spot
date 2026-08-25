@@ -21,7 +21,7 @@
 
 import { chromium } from 'playwright';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { decodePng, meanLuminance, litFraction, hueFamilies } from './png.mjs';
@@ -34,6 +34,49 @@ const outDir = resolve(process.argv[3] ?? DEFAULT_OUT);
 
 if (!existsSync(htmlPath)) {
   console.error(`[shoot] build not found: ${htmlPath} (run \`npm run build\` first)`);
+  process.exit(2);
+}
+
+/*
+ * Refuse to photograph a build that is older than the code it claims to be.
+ *
+ * This suite tests `dist/`, and `npm run shoot` does not build. So a failed build leaves the
+ * *previous* bundle sitting there and every assertion below goes on passing — against code
+ * nobody is running any more. That is the one failure mode a gate must not have: not a red run
+ * that turns out to be fine, but a green run that means nothing. It has already happened here
+ * once, while checking a mutation by hand: the mutant was reverted in `src/` and the mutant's
+ * bundle was still the thing being photographed.
+ *
+ * Mtime rather than a hash because it answers the question actually being asked — "was this
+ * built after the code was last touched" — with no bookkeeping to keep in sync, and because
+ * being wrong in the safe direction (a rebuild that changed nothing still refreshes the mtime)
+ * costs a rebuild and nothing else.
+ */
+function newestMtimeMs(dir) {
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    newest = Math.max(newest, entry.isDirectory() ? newestMtimeMs(full) : statSync(full).mtimeMs);
+  }
+  return newest;
+}
+
+const builtAtMs = statSync(htmlPath).mtimeMs;
+const sourceAtMs = Math.max(
+  ...['src', 'index.html', 'vite.config.ts', 'tsconfig.json']
+    .filter((p) => existsSync(resolve(p)))
+    .map((p) => {
+      const full = resolve(p);
+      return statSync(full).isDirectory() ? newestMtimeMs(full) : statSync(full).mtimeMs;
+    }),
+);
+if (sourceAtMs > builtAtMs) {
+  const behind = ((sourceAtMs - builtAtMs) / 1000).toFixed(0);
+  console.error(
+    `[shoot] stale build: ${htmlPath} is ${behind}s older than the newest source file.\n` +
+      '[shoot] this suite photographs dist/, so it would be testing code you have since changed.\n' +
+      '[shoot] run `npm run build` first (`npm run check` builds too).',
+  );
   process.exit(2);
 }
 await mkdir(outDir, { recursive: true });
