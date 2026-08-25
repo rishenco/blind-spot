@@ -494,8 +494,20 @@ const f13 = await shot('13-marks-are-not-light.png', 'the same shove with the ma
 const dark13 = await stats();
 const pileWindow = [pile.x - 3, -0.1, pile.z - 3, pile.x + 3, 3, pile.z + 3];
 const around = await call('region', pileWindow);
-check('the marks are the only thing on screen', dark13.marks.alive > 6 && litFraction(f13) < 0.02,
-  `${dark13.marks.alive} markers, lit=${litFraction(f13).toFixed(4)}`);
+// This used to assert `litFraction(f13) < 0.02`, which was a bad proxy dressed up as a law: it
+// says "the screen is mostly black", so making the marks bigger — the entire point of this pass —
+// breaks it, and the only way to keep it green is to keep the sound layer small. The law being
+// tested is "nothing but the sound layer is drawn here", so test that directly: turn the sound
+// layer off on the very same frame, and the picture has to go completely black.
+await call('markers', false);
+await advance(0.02, 1);
+const withoutMarks = decodePng(await page.screenshot());
+await call('markers', true);
+await advance(0.02, 1);
+check('the marks are the only thing on screen',
+  dark13.marks.alive > 6 && litFraction(f13) > 0.005 && litFraction(withoutMarks) === 0,
+  `${dark13.marks.alive} markers cover lit=${litFraction(f13).toFixed(4)} of the frame; with the sound layer ` +
+    `switched off the identical frame is lit=${litFraction(withoutMarks).toFixed(4)} — the marks are lighting nothing`);
 check('a marker lights nothing around it', around.unlocked === 0 && dark13.paint.unlockedDots === 0,
   `0 of ${around.dots} mask points revealed in the 6x6 m the marks are sounding in`);
 check('and it reveals no prop either', dark13.dyn.revealed === 0,
@@ -754,7 +766,8 @@ await call('lights', false);
 await call('touch', false);
 await call('markers', true);
 await call('radii', false);
-await call('markerStyle', 'iso');
+// The human's hand-tuned baseline, so 19 and 20 show what he actually plays with.
+await call('markerStyle', 'bloom');
 
 // --- 19 the scale: one shove, the whole scale ------------------------------
 // The point of the whole pass is that you can tell a tick from a catastrophe at a glance,
@@ -783,45 +796,124 @@ const scale = await page.evaluate(() => {
 check('one frame holds both ends of the scale', scale.n > 20 && scale.max > scale.min * 4,
   `${scale.n} marks alive, ${scale.min.toFixed(1)} m of notice at the quiet end, ${scale.max.toFixed(1)} m at the loud end`);
 notes.push(
-  `sound scale: the marker radius is now a power law over loudness (scale 210 px at the reference, ` +
-    `loudRef 9 m, loudPower 1.25, clamped 7..460 px), so ${scale.min.toFixed(1)} m and ${scale.max.toFixed(1)} m ` +
-    `of notice differ by roughly ${(((scale.max / 9) ** 1.25) / ((scale.min / 9) ** 1.25)).toFixed(0)}x in on-screen radius instead of the old ~2x.`,
+  `sound scale: the marker radius is a power law over loudness (scale 130 reference px at loudRef 9 m, ` +
+    `loudPower 0.9, clamped 12..240), so ${scale.min.toFixed(1)} m and ${scale.max.toFixed(1)} m ` +
+    `of notice differ by roughly ${(((scale.max / 9) ** 0.9) / ((scale.min / 9) ** 0.9)).toFixed(0)}x in on-screen radius. ` +
+    `"Reference px" means px on a 720-tall drawing buffer: the shader scales by the real buffer height, which is ` +
+    `what frame 20b checks.`,
 );
 
 // --- 20 the meteorite trail ------------------------------------------------
-// "I sprint like a madman, I turn round, and there is a trickle of ten pixels behind me." There
-// is a real bug under that complaint (see the report), but the frame is the proof: a sprint is
-// the loudest thing in the hall before the rifle, and it has to look like it.
-await call('clear');
-await call('touch', true);
-await call('pose', 0, 0, 0);
-await call('aim', 0, 0);
-await advance(0.2, 2);
-const beforeSprint = (await stats()).sound.bySource['player-step'] ?? 0;
-const sprintStats = await page.evaluate(() => {
-  const bs = window.bs;
-  const dt = 1 / 120;
-  bs.keys(['KeyW', 'ShiftLeft'], []);
-  for (let i = 0; i < 180; i++) {
-    bs.step(dt);
-    if (i % 4 === 0) bs.draw();
-  }
-  bs.keys([], ['KeyW', 'ShiftLeft']);
-  for (let i = 0; i < 24; i++) { bs.step(dt); bs.draw(); }
-  return bs.stats();
-});
-await call('aim', 180, -20);
-await advance(0.05, 2);
+// "I sprint like a madman, I turn round, and there is a trickle of ten pixels behind me." The
+// frame is the proof: a sprint is the loudest thing in the hall before the rifle, and it has to
+// look like it.
+//
+// This scenario is also the one that was caught lying. It used to be shot only at 1280x720 with
+// devicePixelRatio 1, and the marker radius was in *device* pixels, so the same code drew a
+// meteorite here and little puffs on the human's own screen. The scenario is now a function, and
+// frame 20b runs the identical function on a devicePixelRatio-2 page — if the two frames ever
+// stop agreeing, the layer has gone resolution-dependent again and this frame is lying again.
+//
+// Nothing about how the player is driven is staged: keys go down, the body runs for a second and
+// a half, the keys come up, and he turns round over a third of a second, the way a person turns.
+const sprintScenario = async (pg) => {
+  const one = (fn, ...args) =>
+    pg.evaluate(([f, a]) => {
+      const r = window.bs[f](...a);
+      return r === undefined ? null : r;
+    }, [fn, args]);
+  await one('hud', false);
+  await one('audio', false);
+  await one('view', 'player');
+  await one('lights', false);
+  await one('markers', true);
+  await one('radii', false);
+  await one('clear');
+  await one('touch', true);
+  // Pinned, not inherited: frame 19 leaves the page on a different look, and frame 20b runs this
+  // same function on a brand-new page. If the style were inherited the two frames would be
+  // comparing different shaders and the resolution check below would be meaningless.
+  await one('markerStyle', 'bloom');
+  await one('pose', 0, 0, 0);
+  await one('aim', 0, 0);
+  return pg.evaluate(() => {
+    const bs = window.bs;
+    const dt = 1 / 120;
+    const run = (n, every) => {
+      for (let i = 0; i < n; i++) {
+        bs.step(dt);
+        if (i % every === 0) bs.draw();
+      }
+    };
+    run(24, 4);
+    const before = bs.stats().sound.bySource['player-step'] ?? 0;
+    bs.keys(['KeyW', 'ShiftLeft'], []);
+    run(180, 4);
+    bs.keys([], ['KeyW', 'ShiftLeft']);
+    run(24, 2);
+    // The turn is not a teleport: a person swings round over about a third of a second, and the
+    // marks keep ageing while he does it.
+    for (let i = 0; i < 42; i++) {
+      bs.aim(180 * (i + 1) / 42, -20 * (i + 1) / 42);
+      bs.step(dt);
+      if (i % 3 === 0) bs.draw();
+    }
+    bs.draw();
+    const s = bs.stats();
+    return { steps: (s.sound.bySource['player-step'] ?? 0) - before, marks: bs.markList().length };
+  });
+};
+
+const sprintStats = await sprintScenario(page);
 const f20 = await shot('20-sprint-trail.png', 'the runner looks back: every footfall and every thing his knees clipped on the way is still burning behind him, in a line pointing straight at where he is standing. It tells him nothing he did not know — that is the joke — and it is exactly what the spiders will be walking up in M4');
-const sprintSteps = ((await stats()).sound.bySource['player-step'] ?? 0) - beforeSprint;
+const sprintSteps = sprintStats.steps;
 // The trail runs away down the middle; the hall on either side of it was never scanned.
 const TRAIL_MID = { x: 400, y: 200, w: 480, h: 460 };
 const TRAIL_SIDE = { x: 0, y: 200, w: 260, h: 460 };
 check('a sprint leaves a trail, not a trickle', sprintSteps > 3 && litIn(f20, TRAIL_MID) > 0.25,
-  `${sprintSteps} footfalls, ${(litIn(f20, TRAIL_MID) * 100).toFixed(1)}% of the trail window is burning (was a few tenths of a percent before this pass)`);
+  `${sprintSteps} footfalls, ${(litIn(f20, TRAIL_MID) * 100).toFixed(1)}% of the trail window is burning`);
 check('and the trail is a trail, not a glow over the whole hall',
   litIn(f20, TRAIL_MID) > litIn(f20, TRAIL_SIDE) * 2,
   `middle ${litIn(f20, TRAIL_MID).toFixed(3)} vs the unscanned hall beside it ${litIn(f20, TRAIL_SIDE).toFixed(3)}`);
+
+// --- 20b the same sprint on a high-DPI screen ------------------------------
+// The honesty check for the frame above, and the one measurement in the set that exists because
+// the generator was caught disagreeing with the game. Same build, same seed, same scenario, same
+// field of view — the only difference is a drawing buffer four times the area. What the eye sees
+// has to be the same picture; if the numbers below drift apart, the human's screen is being lied
+// to again.
+const hidpi = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 2 });
+hidpi.on('pageerror', (e) => consoleErrors.push(`pageerror(hidpi): ${e.message}`));
+await hidpi.goto(url);
+await hidpi.waitForFunction(() => window.bs !== undefined, null, { timeout: 20000 });
+await hidpi.evaluate(() => {
+  for (let i = 0; i < 12; i++) {
+    window.bs.step(0.25);
+    window.bs.draw();
+  }
+});
+const hidpiStats = await sprintScenario(hidpi);
+const hidpiBuf = join(outDir, '20b-sprint-trail-hidpi.png');
+const hidpiImg = decodePng(await hidpi.screenshot({ path: hidpiBuf, timeout: 180000 }));
+shots.push({
+  name: '20b-sprint-trail-hidpi.png',
+  note: 'the identical sprint, identical seed and identical field of view, drawn into a buffer four times the area (devicePixelRatio 2). It is the same picture — which is the whole point of the frame. Before this pass the marker radius was in device pixels, so this shot showed the "little puffs" the human was complaining about while frame 20 showed a meteorite, and there was no way to tell from the keyframes that anything was wrong',
+  lit: litFraction(hidpiImg),
+  mean: meanLuminance(hidpiImg),
+});
+console.log(`[shoot] shot 20b-sprint-trail-hidpi.png  lit=${litFraction(hidpiImg).toFixed(4)} mean=${meanLuminance(hidpiImg).toFixed(2)}`);
+const TRAIL_MID_2X = { x: 800, y: 400, w: 960, h: 920 };
+const ratio = litIn(hidpiImg, TRAIL_MID_2X) / Math.max(1e-6, litIn(f20, TRAIL_MID));
+check('the sound layer looks the same on a high-DPI screen as in the keyframe',
+  hidpiStats.steps === sprintSteps && ratio > 0.8 && ratio < 1.25,
+  `${sprintSteps} vs ${hidpiStats.steps} footfalls; trail window burning ${(litIn(f20, TRAIL_MID) * 100).toFixed(1)}% at 1280x720 ` +
+    `vs ${(litIn(hidpiImg, TRAIL_MID_2X) * 100).toFixed(1)}% at 2560x1440 (ratio ${ratio.toFixed(2)}; it was 0.45 before this pass)`);
+notes.push(
+  `resolution honesty: frames 20 and 20b are the same scenario at 1280x720 and at 2560x1440. Trail coverage ` +
+    `${(litIn(f20, TRAIL_MID) * 100).toFixed(1)}% vs ${(litIn(hidpiImg, TRAIL_MID_2X) * 100).toFixed(1)}%. Marker radii are quoted in ` +
+    `pixels of a 720-tall buffer and scaled by the real one, so the channel means the same thing on every screen.`,
+);
+await hidpi.close();
 
 // --- 21/22 the floor under the hand ---------------------------------------
 // "Is touch off by default? The floor should light up too — that is how the player reads how far
@@ -848,52 +940,65 @@ check('the felt floor is a disc around the player, not a smear', litFraction(f22
   `lit=${litFraction(f22).toFixed(4)} from 2 m overhead`);
 await call('view', 'player');
 
-// --- 23..26 four answers to the colour question ---------------------------
-// "The colour is not great. I do not know what exactly is wrong — maybe the epicentre is too
-// small and the halo too big." So: four different looks over one identical moment, switchable
-// live (GUI -> sound marks -> style, or bs.markerStyle). The frames exist to be chosen between
-// by hand, not to prove anything.
+// --- 23.. answers to the colour question ---------------------------------
+// Round one offered four looks and the human turned down all four: "I cannot say I actually like
+// any of them — maybe think about it some more, look at games that had the same problem, smart
+// people have thought about this." So this round adds three that come from somewhere rather than
+// from the colour picker (Dark Echo, Alien: Isolation, Perception — see the header of
+// src/sound/markers.ts), and keeps the original four beside them for comparison. One identical
+// moment, one identical camera, switchable live: GUI -> sound markers -> style, or
+// bs.markerStyle(name). The frames exist to be chosen between by hand, not to prove anything.
 await call('clear');
 await call('touch', false);
 await call('markers', true);
 // Close in and caught early: the question being answered is what a *crowd* of marks looks like,
 // so the frame has to hold a dozen of them while they are still hot. Shot from 2.6 m, 0.35 s
 // after the shove — half a second later the same shove is four dying embers and tells you
-// nothing about how the four looks handle overlap.
+// nothing about how the looks handle overlap.
 await call('pose', pile.x - 2.6, pile.z - 2.6, PILE_AIM);
 await call('aim', PILE_AIM, -10);
 await advance(0.2, 2);
 await call('disturb', pile.x, pile.y + 0.35, pile.z, 3.0, 9);
 await advance(0.35, 4);
 const styleNotes = {
-  ember: 'ember — white-hot pinpoint, amber body, deep-red rim. The original language, recalibrated. Hue says who made the noise; brightness says how loud',
-  iso: 'iso — a thermal camera’s isotherms. Colour *is* loudness: violet, red, orange, yellow, white, clipped at what the event is hot enough to reach. A quiet noise cannot go yellow, a barrel cannot help going white — and overlapping marks stay countable, because their rings do not add up into one milky field',
-  coal: 'coal — the human’s own hypothesis taken at its word: nearly all epicentre, almost no aura. Reads as area rather than glow, and is the first look to merge into a single mass when a dozen events land together',
-  bloom: 'bloom — the far pole: no epicentre at all, one soft coreless haze. Furthest from the point geometry of any of the four, and the one that loses individual events fastest',
+  echo: 'echo — Dark Echo\u2019s rule: hue is identity, not quantity. One bone-white for everything the world does, red reserved for something alive that is not you (nothing in M2 emits it yet — the spiders will). Loudness is carried entirely by size and burn, so a crowd of marks stays one legible field instead of five hues fighting',
+  pulse: 'pulse — the mark as an instrument reading, after Alien: Isolation\u2019s motion tracker: a soft shell leaves the epicentre, reaches the edge of the mark in about a third of a second and dies, leaving a low core. A lamp cannot do this; only a report of an event can. It also puts a crowd of marks in time order — the newest one is the one still ringing',
+  bruise: 'bruise — the cold side of the wheel, after Perception and Stifled, which keep echolocation cold precisely so it never reads as fire. The muzzle flash is amber and the lidar is cyan; indigo-to-magenta is the one part of the spectrum nothing in the hall can emit, so it can only be read as an instrument',
+  ember: 'ember — round one: white-hot pinpoint, amber body, deep-red rim. Hue says who made the noise, brightness says how loud',
+  iso: 'iso — round one: a thermal camera\u2019s isotherms, violet to white by loudness. The most information per blob, and the reason the human kept saying none of them were right: it is a second rainbow point-cloud on a screen that already has one (the lidar)',
+  coal: 'coal — round one: nearly all epicentre, almost no aura. Reads as area rather than glow, and is the first look to merge into one mass when a dozen events land together',
+  bloom: 'bloom — round one: no epicentre at all, one coreless haze, and the look the human himself settled on while tuning by hand. It is therefore the default until he says otherwise',
 };
 const styleShots = {};
-for (const style of ['ember', 'iso', 'coal', 'bloom']) {
+const STYLE_ORDER = await call('markerStyles');
+for (const style of STYLE_ORDER) {
   await call('markerStyle', style);
   await advance(0.02, 1);
-  const idx = 23 + ['ember', 'iso', 'coal', 'bloom'].indexOf(style);
-  styleShots[style] = await shot(`${idx}-style-${style}.png`, `${styleNotes[style]} — same shove, same instant, same camera as the other three`);
+  const idx = 23 + STYLE_ORDER.indexOf(style);
+  styleShots[style] = await shot(`${idx}-style-${style}.png`, `${styleNotes[style]} — same shove, same instant, same camera as the others`);
 }
-check('the four looks are actually four different looks',
+check('the looks are actually different looks',
   Math.max(...Object.values(styleShots).map(meanLuminance)) >
     Math.min(...Object.values(styleShots).map(meanLuminance)) * 1.3,
   Object.entries(styleShots).map(([k, v]) => `${k} ${meanLuminance(v).toFixed(2)}`).join(' · '));
 notes.push(
-  'colour: four switchable looks over one shove (frames 23-26). Recommended: iso — it is the only one of the four whose overlapping marks stay countable, and the one where loudness is legible from colour alone rather than from size alone.',
+  'colour: seven switchable looks over one shove (frames 23-29). The three new ones are borrowed rather than invented — ' +
+    'echo from Dark Echo (hue = identity, size = loudness), pulse from Alien: Isolation (the mark behaves like a reading, not a light), ' +
+    'bruise from Perception/Stifled (keep the channel cold so it never competes with the muzzle flash). Recommended: echo, with pulse ' +
+    'as the more theatrical alternative. The default stays bloom, which is what the human picked by hand.',
 );
-await call('markerStyle', 'iso');
+await call('markerStyle', 'bloom');
+
+void beforeShot;
+void preBurstSound;
 
 // --- contact sheet ---------------------------------------------------------
-const html = `<!doctype html><meta charset="utf-8"><title>BLIND SPOT M2 — keyframes</title>
+const html = `<!doctype html><meta charset="utf-8"><title>BLIND SPOT M2/M3 — keyframes</title>
 <style>body{background:#0a0d10;color:#cfdbe4;font:13px/1.5 ui-monospace,monospace;margin:24px}
 h1{font-size:14px;letter-spacing:.2em;text-transform:uppercase;color:#6fd3e0}
 figure{margin:0 0 28px}img{width:100%;max-width:1280px;border:1px solid #223}
 figcaption{padding:6px 2px;color:#8fa2b0}</style>
-<h1>BLIND SPOT — M2 keyframes</h1>
+<h1>BLIND SPOT — M2 / M3 keyframes</h1>
 <p>${notes.map((n) => `${n}<br>`).join('')}</p>
 ${shots
   .map(
