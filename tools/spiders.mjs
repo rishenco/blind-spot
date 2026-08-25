@@ -239,6 +239,11 @@ const standStill = (sec, hx, hz) =>
             if (o.i === e.i) continue;
             // One standing on a rack above another is not crowding it, it is climbing over it.
             if (Math.abs(o.sp.y - e.sp.y) > 0.3) continue;
+            // M6b: and one in mid-leap is not standing anywhere at all. Since the gait became
+            // jumps, two spiders can cross within a body's width of each other for a fraction of
+            // a second — that is a leap over a neighbour, not a huddle, and the huddle test is
+            // about bodies parked inside each other.
+            if (o.sp.phase === 'air' || e.sp.phase === 'air') continue;
             best = Math.min(best, Math.hypot(e.sp.x - o.sp.x, e.sp.z - o.sp.z));
           }
           return best;
@@ -554,11 +559,11 @@ await playerCam(90, 0);
 await advance(0.02, 1);
 const dark1 = await shot(
   '02-circling-player.png',
-  'the identical moment as the player experiences it: a black hall with a scatter of soft marks in it. That is a stalking pack. A calm spider does chatter — a couple of clicks a second across the whole pack — but a footfall carries only a metre and a half and a stalking click is a lone soft blob, so what reaches you is a hint of company and no idea where. The contrast with the next frame is the information',
+  'the identical moment as the player experiences it: a black hall with almost nothing in it. That is a stalking pack, and since M6b a stalking pack is SILENT — a spider only speaks while it is frozen between leaps, and one that is crossing the floor towards you says nothing at all. What little is here is a lone click from one that has stopped to listen. The contrast with the next frame is the whole information channel',
 );
 check(
-  'a stalking pack is quiet, but it is not silent',
-  litFraction(dark1) < 0.06 && circling.chatter > 0,
+  'a stalking pack is silent — the marks on screen are lone clicks, not a chorus',
+  litFraction(dark1) < 0.06 && circling.chatter <= 4,
   `lit=${litFraction(dark1).toFixed(4)} of the frame, chatter ${circling.chatter.toFixed(1)} clicks/s from ${circling.count} spiders`,
 );
 const quietChatter = circling.chatter;
@@ -589,10 +594,10 @@ const rallyDark = await shot(
 const rallyChatter = (await spiderStats()).chatter;
 check(
   'a rally is loud, a stalk is not',
-  rallyChatter > quietChatter * 2.5,
-  `${quietChatter.toFixed(1)} clicks/s circling vs ${rallyChatter.toFixed(1)} clicks/s rallying ` +
-    `(x${(rallyChatter / Math.max(0.1, quietChatter)).toFixed(1)}) — calm chatter is deliberately audible now, ` +
-    `so silence means "nothing is out there" instead of "nothing is implemented"`,
+  rallyChatter >= 8 && rallyChatter > quietChatter * 3,
+  `${quietChatter.toFixed(1)} clicks/s circling vs ${rallyChatter.toFixed(1)} clicks/s rallying — ` +
+    `M6b turned the stalk right down to silence, so this is no longer a ratio between two audible ` +
+    `things: it is the difference between nothing and a wall of noise`,
 );
 check(
   'and it shows on the player’s screen',
@@ -918,6 +923,12 @@ check(
   `bystander ${Math.hypot(bystander.x - HOME.x, bystander.z - HOME.z).toFixed(0)} m away: ` +
     `state ${bystander.state} before, ${bystanderAfter.state} after`,
 );
+// Re-aimed, not repeated. Before M6b a wounded spider walked, so the second round could be fired
+// down the first one's line a twentieth of a second later and still find it; a panicking spider
+// now leaps, and a leap covers a couple of metres. The shot has to be aimed at where it is.
+const fleeing = (await spiderList())[0];
+const chase = aimAt(eye, fleeing.x, fleeing.y + 0.18, fleeing.z);
+await call('aim', chase.yaw, chase.pitch);
 await call('shoot');
 await advance(0.05, 1);
 const afterKill = await spiderStats();
@@ -1309,10 +1320,14 @@ check(
   `${quietAfter.filter((s) => s.belief.confidence > 0.1).length}/${quietIds.length} of the other companies picked up any belief`,
 );
 check(
+  // 1.5 m, not the old 0.5: an idle spider does not shuffle any more, it either sits still or
+  // takes exactly one idle hop, and one idle hop is a metre. The point of the check is that the
+  // untouched companies never *went* anywhere — they did not turn and walk towards the alarm —
+  // and a single one-metre hop in place is a long way from that.
   'and they never moved',
   quietAfter.every((s) => {
     const before = quietBeforeById.get(s.id);
-    return Math.hypot(s.x - before.x, s.z - before.z) < 0.5;
+    return Math.hypot(s.x - before.x, s.z - before.z) < 1.5;
   }),
   `largest displacement among the ${quietIds.length} untouched spiders: ${Math.max(
     ...quietAfter.map((s) => {
@@ -1323,6 +1338,508 @@ check(
 );
 notes.push(
   `groups: ${groupIds.length} companies (tunables.groups = 3), crossGroupChatter = 0 — company chatter never crosses a groupId boundary. Company ${alarmGroup} (${alarmIds.length} spiders) went fully hunting from a point-blank sprint while the other ${quietIds.length} spiders, in the far corner, stayed idle and did not move.`,
+);
+
+// ===========================================================================
+// 4b. M6b — the nose, the gait, and the two moments they are audible.
+// ===========================================================================
+
+/**
+ * The player stands perfectly still and one spider is put down at `dist` metres. Nothing is ever
+ * emitted on the bus by the player — no keys, no shot, no footfall. So whatever happens is the
+ * nose (or the absence of it) and nothing else.
+ */
+const noseTest = (dist, sec, hx, hz) =>
+  page.evaluate(
+    ([d, s, x, z]) => {
+      const bs = window.bs;
+      const before = bs.spiders.stats().strikes;
+      // Everyone else is parked in the far corner: this scenario is about one animal.
+      const n = bs.spiders.list().length;
+      for (let i = 1; i < n; i++) bs.spiders.place(i, -30 + (i % 4) * 1.4, -20 + Math.floor(i / 4) * 1.4);
+      bs.spiders.place(0, x + d, z);
+      let minD = Infinity;
+      let committed = 0;
+      const states = new Set();
+      const ticks = Math.round(s * 120);
+      for (let i = 0; i < ticks; i++) {
+        bs.step(1 / 120);
+        if (i % 24 === 0) bs.draw();
+        const sp = bs.spiders.list()[0];
+        minD = Math.min(minD, Math.hypot(sp.x - x, sp.z - z));
+        states.add(sp.state);
+        if (sp.state === 'commit') committed++;
+      }
+      bs.draw();
+      const sp = bs.spiders.list()[0];
+      return {
+        minD,
+        committedSeconds: committed / 120,
+        states: [...states],
+        state: sp.state,
+        heard: sp.heard,
+        endD: Math.hypot(sp.x - x, sp.z - z),
+        strikes: bs.spiders.stats().strikes - before,
+      };
+    },
+    [dist, sec, hx, hz],
+  );
+
+const NOSE = { x: -14, z: 10 };
+await call('spiders.spawn', 14);
+await call('pose', NOSE.x, NOSE.z, 90);
+// Patch him up first. The scenarios above let the pack chew on him for half a minute, and a
+// dead player is not smelled, not touched and not chased — every one of these frames would be
+// photographing a corpse.
+await call('vitals.reset');
+await advance(0.4, 4);
+const smelt = await noseTest(1.4, 5, NOSE.x, NOSE.z);
+await truthCam(NOSE.x, NOSE.z, 9);
+await advance(0.02, 1);
+await shot(
+  '21-nose-attack.png',
+  `the complaint, fixed: «можно стоять и они мимо ходят». The player has not moved, not fired and ` +
+    `not made a single sound — the bus is empty. A spider was put down 1.4 m away, inside the ` +
+    `2 m nose, and it went straight to COMMIT (${smelt.committedSeconds.toFixed(1)} s of it) and ` +
+    `bit him ${smelt.strikes} time(s). Its label reads «heard smell», not a noise: nothing was heard`,
+);
+check(
+  'a spider that has come close smells a motionless player and attacks',
+  smelt.states.includes('commit') && smelt.strikes > 0,
+  `no sound on the bus at all: state ${smelt.state}, heard "${smelt.heard}", ` +
+    `${smelt.committedSeconds.toFixed(1)} s committed, ${smelt.strikes} bites, closest ${smelt.minD.toFixed(2)} m`,
+);
+
+// A fresh pack, not the one that has just eaten. The control is only a control if the animal in
+// it has never had a reason to believe anything: leave the previous spider in place and it walks
+// in on the belief it earned by biting him a second ago, which proves nothing about the nose.
+await call('spiders.spawn', 14);
+await call('vitals.reset');
+await advance(0.3, 4);
+const missed = await noseTest(9, 12, NOSE.x, NOSE.z);
+await truthCam(NOSE.x, NOSE.z, 18);
+await advance(0.02, 1);
+check(
+  'but a distant one walks past — the nose is not a second pair of ears',
+  missed.strikes === 0 && !missed.states.includes('commit'),
+  `9 m out and silent: states seen ${missed.states.join('/')}, closest approach ${missed.minD.toFixed(1)} m, ${missed.strikes} bites`,
+);
+
+// --- the gait: freeze, leap, freeze -----------------------------------------
+/** One spider, sampled every tick: where it is, and which half of the hop cycle it is in. */
+const hopTrack = (sec) =>
+  page.evaluate(
+    ([s]) => {
+      const bs = window.bs;
+      const ticks = Math.round(s * 120);
+      const hops = [];
+      let prev = bs.spiders.list()[0];
+      let phase = prev.phase;
+      let phaseStart = 0;
+      let stillTicks = 0;
+      let travelled = 0;
+      const path = [];
+      for (let i = 0; i < ticks; i++) {
+        bs.step(1 / 120);
+        if (i % 12 === 0) bs.draw();
+        const sp = bs.spiders.list()[0];
+        const step = Math.hypot(sp.x - prev.x, sp.z - prev.z);
+        travelled += step;
+        if (step < 1e-4) stillTicks++;
+        if (i % 6 === 0) path.push([+sp.x.toFixed(2), +sp.z.toFixed(2), sp.phase]);
+        if (sp.phase !== phase) {
+          hops.push({ phase, seconds: (i - phaseStart) / 120 });
+          phase = sp.phase;
+          phaseStart = i;
+        }
+        prev = sp;
+      }
+      bs.draw();
+      const air = hops.filter((h) => h.phase === 'air');
+      const rest = hops.filter((h) => h.phase === 'rest');
+      const mean = (a) => (a.length === 0 ? 0 : a.reduce((x, h) => x + h.seconds, 0) / a.length);
+      return {
+        leaps: air.length,
+        meanAir: mean(air),
+        meanRest: mean(rest),
+        stillFraction: stillTicks / ticks,
+        travelled,
+        path,
+        stats: bs.spiders.stats(),
+      };
+    },
+    [sec],
+  );
+
+const TRAIL = { x: 10, z: -14 };
+await call('spiders.spawn', 14);
+await call('pose', TRAIL.x, TRAIL.z, 90);
+await call('vitals.reset');
+await ring(TRAIL.x + 40, TRAIL.z + 40, 2); // everyone else out of the picture
+await call('spiders.place', 0, TRAIL.x + 9, TRAIL.z);
+await advance(0.3, 4);
+// One noise to give it somewhere to be, then silence: the walk in is the thing being photographed.
+await call('aim', 90, 0);
+await call('shoot');
+await call('markers', true);
+await call('clear');
+const gait = await hopTrack(7);
+// The trail, as the marks it left: every leap puts one event at the push-off and one at the
+// landing, so the path reads as pairs of blobs with a gap between them.
+await call('spiders.overlay', false);
+await call('hud', false);
+await call('lights', false);
+await call('view', 'top');
+await call('topFocus', TRAIL.x + 5, TRAIL.z);
+await call('topHeight', 14);
+await advance(0.02, 1);
+await shot(
+  '23-hop-trail.png',
+  `the trail of one spider crossing seven seconds of hall, overhead, with only the sound layer ` +
+    `drawn — no lights, no geometry. Every blob is a real bus event at the point it happened, and ` +
+    `they come in pairs: push-off, silence, landing. ${gait.leaps} leaps, mean ` +
+    `${gait.meanAir.toFixed(2)} s in the air and ${gait.meanRest.toFixed(2)} s frozen between them; ` +
+    `it was standing perfectly still for ${(gait.stillFraction * 100).toFixed(0)}% of the ticks`,
+);
+await truthCam(TRAIL.x + 4, TRAIL.z, 14);
+await advance(0.02, 1);
+console.log(
+  `[spiders] gait: ${gait.leaps} leaps · air ${gait.meanAir.toFixed(2)} s · freeze ${gait.meanRest.toFixed(2)} s · ` +
+    `still ${(gait.stillFraction * 100).toFixed(0)}% of ticks · ${gait.travelled.toFixed(1)} m`,
+);
+check(
+  'they do not walk, they jump — freeze, leap, freeze',
+  gait.leaps >= 4 && gait.meanRest > 0.05 && gait.stillFraction > 0.35,
+  `${gait.leaps} leaps in 7 s, ${gait.meanAir.toFixed(2)} s airborne / ${gait.meanRest.toFixed(2)} s frozen each, ` +
+    `motionless for ${(gait.stillFraction * 100).toFixed(0)}% of the ticks`,
+);
+notes.push(
+  `the gait is kinematic: a leap is a parabola between two chosen spots, so it cannot fall short, ` +
+    `cannot be deflected by clutter, and always ends on top of a surface. Average speed is ` +
+    `preserved — one cycle is distance/speed, the freeze takes up to 70% of it — so every ` +
+    `speed tunable still means what it did when they walked. Measured: ${gait.leaps} leaps in 7 s, ` +
+    `${gait.meanAir.toFixed(2)} s in the air against ${gait.meanRest.toFixed(2)} s frozen.`,
+);
+
+// --- 3b: when they are heard ------------------------------------------------
+/** Clicks per second, and whether any of them came from a spider that was not standing still. */
+const listenTrack = (sec, stopWithin = 0) =>
+  page.evaluate(
+    ([s, stop]) => {
+      const bs = window.bs;
+      const eye = bs.stats().eye;
+      const nearest = () => {
+        let best = Infinity;
+        for (const sp of bs.spiders.list()) {
+          if (!sp.alive) continue;
+          best = Math.min(best, Math.hypot(sp.x - eye[0], sp.z - eye[2]));
+        }
+        return best;
+      };
+      const ticks = Math.round(s * 120);
+      const startNearest = nearest();
+      let last = bs.spiders.stats().clicks;
+      let clicks = 0;
+      let whileAllAirborne = 0;
+      let air = 0;
+      let ran = 0;
+      for (let i = 0; i < ticks; i++) {
+        // A window that ends when the pack arrives, not when a stopwatch says so. Timing this by
+        // the clock is what made this check flap: shift one random draw upstream and the four
+        // seconds of "crossing" start including the seconds where they are already on top of him.
+        if (stop > 0 && nearest() < stop) break;
+        ran++;
+        bs.step(1 / 120);
+        if (i % 24 === 0) bs.draw();
+        const st = bs.spiders.stats();
+        const d = st.clicks - last;
+        last = st.clicks;
+        air += st.airborne / Math.max(1, st.count);
+        const hot = st.byState.rally + st.byState.commit + st.byState.recoil + st.byState.panic;
+        if (d > 0) {
+          clicks += d;
+          // Nobody frozen, nobody hot, and yet a click happened: that would break the rule.
+          if (hot === 0 && st.airborne >= st.count) whileAllAirborne += d;
+        }
+      }
+      bs.draw();
+      const st = bs.spiders.stats();
+      const seconds = Math.max(1 / 120, ran / 120);
+      return {
+        perSecond: clicks / seconds,
+        seconds,
+        startNearest,
+        clicks,
+        whileAllAirborne,
+        meanAir: air / Math.max(1, ran),
+        nearest: nearest(),
+        byState: st.byState,
+      };
+    },
+    [sec, stopWithin],
+  );
+
+// Well inside the hall: a ring of sixteen metres round a point near the wall puts half the pack
+// outside the building, `place` refuses those, and they silently stay wherever they last were —
+// which is how this window once opened with a spider already 3.7 m away.
+const EAR = { x: -2, z: 2 };
+await call('spiders.spawn', 14);
+await call('pose', EAR.x, EAR.z, 90);
+await call('vitals.reset');
+const eared = await ring(EAR.x, EAR.z, 15);
+check(
+  'the pack really did start a long way off',
+  eared >= 12,
+  `${eared} of 14 placed on a 15 m ring around the listener`,
+);
+await advance(0.4, 4);
+// Nothing has happened: fourteen idle spiders, standing about and listening.
+const idleEar = await listenTrack(6);
+// Now give them a reason to cross the floor towards him, and listen to the crossing itself.
+await call('aim', 90, 0);
+await call('shoot');
+// The crossing: everything from the bang until the first of them is within eight metres of him.
+const crossingEar = await listenTrack(14, 8);
+// And the last few metres.
+const closingEar = await listenTrack(8);
+console.log(
+  `[spiders] audibility — idle/listening ${idleEar.perSecond.toFixed(1)} clicks/s · ` +
+    `crossing ${crossingEar.perSecond.toFixed(1)} over ${crossingEar.seconds.toFixed(1)} s ` +
+    `from ${crossingEar.startNearest.toFixed(1)} m in · ` +
+    `closing in ${closingEar.perSecond.toFixed(1)}`,
+);
+await playerCam(90, 0);
+await advance(0.02, 1);
+await shot(
+  '25-when-they-are-heard.png',
+  `the last seconds of the same approach, from inside his head: ${closingEar.perSecond.toFixed(0)} ` +
+    `clicks a second, close and all round him. Before this the pack crossed sixteen metres of floor ` +
+    `at ${crossingEar.perSecond.toFixed(1)} clicks/s — effectively silence — and before that, ` +
+    `standing about listening, it managed ${idleEar.perSecond.toFixed(1)}/s of lone widely spaced ` +
+    `clicks. Three readable states of the world, on the ear alone`,
+);
+check(
+  'silence while they cross, a lone click while they listen, a wall of it when they close',
+  // A window that lasted no time at all measures nothing — fail rather than pass vacuously.
+  crossingEar.seconds > 2 &&
+  crossingEar.perSecond < idleEar.perSecond * 1.5 + 1 &&
+    closingEar.perSecond > Math.max(4, crossingEar.perSecond * 3) &&
+    idleEar.whileAllAirborne === 0 &&
+    crossingEar.whileAllAirborne === 0,
+  `idle/listening ${idleEar.perSecond.toFixed(1)}/s · crossing ${crossingEar.perSecond.toFixed(1)}/s ` +
+    `over ${crossingEar.seconds.toFixed(1)} s from ${crossingEar.startNearest.toFixed(1)} m in ` +
+    `(mean ${(crossingEar.meanAir * 100).toFixed(0)}% of the pack in the air) · closing ` +
+    `${closingEar.perSecond.toFixed(1)}/s; clicks from a pack with nobody frozen and nobody hot: ` +
+    `${idleEar.whileAllAirborne + crossingEar.whileAllAirborne}`,
+);
+notes.push(
+  `when they are heard (M6b 3b): a spider clicks only while frozen between leaps (gap ` +
+    `clickSlow = 7 s) or once it is rushing (clickFast = 0.32 s); mid-leap and while fleeing it is ` +
+    `silent. Measured across one approach: ${idleEar.perSecond.toFixed(1)} clicks/s standing and ` +
+    `listening, ${crossingEar.perSecond.toFixed(1)}/s while crossing the floor, ` +
+    `${closingEar.perSecond.toFixed(1)}/s in the last metres.`,
+);
+
+// --- the cupboard is not a refuge -------------------------------------------
+const solids = await call('solids');
+// Something with a real top to stand on, in the open, and not so tall the player cannot be put
+// on it: a stack or a cupboard, 1.4-2.4 m.
+const boxes = solids.map(([minX, minY, minZ, maxX, maxY, maxZ]) => ({ minX, minY, minZ, maxX, maxY, maxZ }));
+// Headroom matters as much as the top does: half the tops in this hall are the middle shelf of a
+// rack, with the next shelf 60 cm above them. A player put there is standing inside the geometry
+// and gets squeezed out onto the floor, which photographs as «the spider never came up» when in
+// fact the player was never up.
+const headroom = (b) =>
+  !boxes.some(
+    (o) =>
+      o !== b &&
+      o.minY < b.maxY + 2.2 &&
+      o.maxY > b.maxY + 0.05 &&
+      o.minX < b.maxX &&
+      o.maxX > b.minX &&
+      o.minZ < b.maxZ &&
+      o.maxZ > b.minZ,
+  );
+const perch = boxes
+  .filter(
+    (b) =>
+      b.maxY >= 1.4 &&
+      b.maxY <= 2.4 &&
+      b.maxX - b.minX > 0.9 &&
+      b.maxZ - b.minZ > 0.9 &&
+      Math.abs((b.minX + b.maxX) / 2) < 26 &&
+      Math.abs((b.minZ + b.maxZ) / 2) < 18 &&
+      headroom(b),
+  )
+  .sort((a, b) => (b.maxX - b.minX) * (b.maxZ - b.minZ) - (a.maxX - a.minX) * (a.maxZ - a.minZ))[0];
+check(
+  'the hall has a cupboard worth hiding on top of',
+  perch !== undefined,
+  perch ? `top at ${perch.maxY.toFixed(1)} m, ${(perch.maxX - perch.minX).toFixed(1)}x${(perch.maxZ - perch.minZ).toFixed(1)} m` : '',
+);
+if (perch !== undefined) {
+  const PX = (perch.minX + perch.maxX) / 2;
+  const PZ = (perch.minZ + perch.maxZ) / 2;
+  await call('spiders.spawn', 14);
+  // Up on top, where the human said the player should not be safe any more.
+  await call('pose', PX, PZ, 90, perch.maxY + 0.05);
+  await call('vitals.reset');
+  await ring(PX + 40, PZ + 40, 2);
+  // Four of them round the foot of it, not one: whether any single animal takes the lid inside
+  // fifteen seconds is a coin toss, and a coin toss is not a check. Four is also what the frame
+  // is actually about — the stack does not save you from the *pack*.
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2 + 0.4;
+    await call('spiders.place', i, PX + Math.cos(a) * 5, PZ + Math.sin(a) * 5);
+  }
+  await advance(0.5, 4);
+  // He gives himself away once, from up there — the loudest event in the game, fired from a
+  // rooftop. That is the whole setup: the noise says «he is over there», and the question the
+  // frame answers is whether being two and a half metres up is an answer to it.
+  await call('aim', 90, 0);
+  await call('shoot');
+  await advance(0.3, 4);
+  const climb = await page.evaluate(
+    ([px, pz, top]) => {
+      const bs = window.bs;
+      const before = bs.spiders.stats().strikes;
+      let highest = -Infinity;
+      let onTop = 0;
+      let visitors = 0;
+      const been = new Set();
+      for (let i = 0; i < 120 * 16; i++) {
+        bs.step(1 / 120);
+        if (i % 24 === 0) bs.draw();
+        let up = 0;
+        const all = bs.spiders.list();
+        for (let k = 0; k < all.length; k++) {
+          const sp = all[k];
+          if (!sp.alive) continue;
+          highest = Math.max(highest, sp.y);
+          if (sp.y > top - 0.4 && Math.hypot(sp.x - px, sp.z - pz) < 3) {
+            up++;
+            been.add(k);
+          }
+        }
+        if (up > 0) onTop++;
+      }
+      bs.draw();
+      visitors = been.size;
+      const on = bs.spiders.list().filter((sp) => sp.alive && sp.y > top - 0.4);
+      return {
+        highest,
+        onTopSeconds: onTop / 120,
+        visitors,
+        stillUp: on.length,
+        strikes: bs.spiders.stats().strikes - before,
+        eye: bs.stats().eye,
+      };
+    },
+    [PX, PZ, perch.maxY],
+  );
+  await truthCam(PX, PZ, 10);
+  await advance(0.02, 1);
+  await shot(
+    '26-onto-the-cupboard.png',
+    `«сейчас можно взобраться на шкаф — это плохо». Nobody forbade it: the player is standing on ` +
+      `top of a ${perch.maxY.toFixed(1)} m stack, and the spider simply jumped up after him — ` +
+      `highest anything reached ${climb.highest.toFixed(1)} m, ${climb.visitors} of them stood on ` +
+      `the lid beside him for ${climb.onTopSeconds.toFixed(1)} s in total, ${climb.strikes} bites. Height stopped being a refuge without a single rule ` +
+      `being added against the player`,
+  );
+  await playerCam(90, -20);
+  await advance(0.02, 1);
+  check(
+    'a cupboard is no refuge: the spider jumps up to the player',
+    // The bite is the real proof — it can only be landed from up there — and the height reached
+    // is the proof of how it got there. The seconds spent on the lid are supporting evidence:
+    // a spider that lands, strikes and drops off again has still taken the refuge away.
+    climb.highest > perch.maxY - 0.2 && climb.visitors > 0 && (climb.strikes > 0 || climb.onTopSeconds > 0.5),
+    `player on a ${perch.maxY.toFixed(1)} m top; the pack reached ${climb.highest.toFixed(1)} m, ` +
+      `${climb.visitors} different spiders stood on the lid beside him for ` +
+      `${climb.onTopSeconds.toFixed(1)} s in total, ${climb.strikes} bites`,
+  );
+}
+
+// --- and they do not move in on an old noise --------------------------------
+/**
+ * A pile that will not shut up. `disturb` is the real thing the B key does — an impulse into the
+ * clutter — so every jolt makes real contacts and real `prop-impact` events at the same spot,
+ * which is exactly «они и так иногда сами опрокинут что-то и потом тусят там».
+ */
+// The pile has to be a real one: `disturb` is an impulse into whatever bodies are within its
+// radius, so an empty patch of floor rattles nothing and emits nothing. So pick an actual prop
+// out of the world and shake that.
+const clutter = await call('propList');
+const RP = clutter.filter((c) => Math.abs(c[1]) < 25 && Math.abs(c[3]) < 18)[
+  Math.floor(clutter.filter((c) => Math.abs(c[1]) < 25 && Math.abs(c[3]) < 18).length / 3)
+];
+const RATTLE = { x: RP[1], z: RP[3] };
+await call('spiders.spawn', 10);
+await call('pose', -30, -20, 90); // the player is nowhere near this, and never makes a sound
+await call('vitals.reset');
+await ring(RATTLE.x, RATTLE.z, 9);
+await advance(0.5, 4);
+const rattle = await page.evaluate(
+  ([x, z]) => {
+    const bs = window.bs;
+    const track = [];
+    let shaken = 0;
+    for (let t = 0; t < 30; t++) {
+      for (let i = 0; i < 120; i++) {
+        // Roughly every 1.5 s the pile shifts again — the object that never stops making noise.
+        if ((t * 120 + i) % 180 === 0) shaken += bs.disturb(x, 0.4, z, 1.6, 1.6);
+        bs.step(1 / 120);
+        if (i % 24 === 0) bs.draw();
+      }
+      const live = bs.spiders.list().filter((s) => s.alive);
+      const ds = live.map((s) => Math.hypot(s.x - x, s.z - z)).sort((a, b) => a - b);
+      track.push({
+        t: t + 1,
+        near: ds[0],
+        mean: ds.reduce((a, b) => a + b, 0) / ds.length,
+        within3: ds.filter((d) => d < 3).length,
+        ignored: live.filter((s) => s.heard.includes('checked')).length,
+      });
+    }
+    bs.draw();
+    return { track, shaken, list: bs.spiders.list() };
+  },
+  [RATTLE.x, RATTLE.z],
+);
+check(
+  'the pile being shaken is a real one and it really does make noise',
+  rattle.shaken > 0,
+  `${rattle.shaken} prop impulses over the run at ${RATTLE.x.toFixed(1)}, ${RATTLE.z.toFixed(1)} (a ${RP[0]})`,
+);
+const rt = rattle.track;
+const arrived = rt.slice(0, 12).reduce((best, r) => (r.mean < best.mean ? r : best), rt[0]);
+const ended = rt[rt.length - 1];
+await truthCam(RATTLE.x, RATTLE.z, 24);
+await advance(0.02, 1);
+console.log('[spiders] old-noise track — a pile that keeps rattling:');
+for (const r of rt) {
+  if (r.t % 3 !== 0) continue;
+  console.log(
+    `[spiders]   t=${String(r.t).padStart(2)}s  near ${r.near.toFixed(1).padStart(5)}  mean ${r.mean.toFixed(1).padStart(5)}` +
+      `  within 3 m ${r.within3}  writing it off ${r.ignored}`,
+  );
+}
+check(
+  'a spider that checked an old noise and found nobody leaves, and does not come back to it',
+  ended.mean > arrived.mean * 1.4 && ended.within3 <= 1 && arrived.mean < rt[0].mean * 0.7,
+  `mean distance to the rattling pile: ${rt[0].mean.toFixed(1)} m at t=1, ${arrived.mean.toFixed(1)} m at its ` +
+    `closest (t=${arrived.t}), ${ended.mean.toFixed(1)} m at t=30 — and ${ended.within3} of ${rattle.list.length} ` +
+    `still within 3 m of it, with ${Math.max(...rt.map((r) => r.ignored))} of them at some point ` +
+    `explicitly refusing the noise as already checked`,
+);
+notes.push(
+  `an old noise is written off, not lived at: arriving at a belief and finding nobody marks the ` +
+    `spot (a ring of three marks, merged within pinnedRadius), and further prop noise from a ` +
+    `marked spot is refused outright — and refreshes the mark, so a pile that rattles for thirty ` +
+    `seconds stays written off for all of them. Only a player-made noise clears a mark. Measured: ` +
+    `mean distance to a continuously rattling pile went ${arrived.mean.toFixed(1)} m → ` +
+    `${ended.mean.toFixed(1)} m over the run.`,
 );
 
 // ===========================================================================

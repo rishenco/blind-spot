@@ -269,7 +269,10 @@ export class SpiderOverlay {
       const dz = s.goalZ - s.z;
       const heading = compass(dx, dz);
       const text =
-        `<b>#${s.id} g${s.groupId} ${s.state.toUpperCase()}</b> ${s.stateFor.toFixed(1)}s\n` +
+        `<b>#${s.id} g${s.groupId} ${s.state.toUpperCase()}</b> ${s.stateFor.toFixed(1)}s ` +
+        // The gait, M6b: which half of the freeze-leap-freeze cycle this one is in. Without it a
+        // still frame of a jumping pack is unreadable — everything looks like it is standing.
+        `${s.phase === 'air' ? '↗air' : '·still'} ${s.phaseFor.toFixed(2)}s\n` +
         `<i>go</i> ${heading} ${Math.hypot(dx, dz).toFixed(1)}m  <i>c</i>${s.courage.toFixed(2)}` +
         `${s.hp < 2 ? `  <i>hp</i>${s.hp}` : ''}\n` +
         `<i>bel</i> ${s.toBelief.toFixed(1)}m p${s.belief.confidence.toFixed(2)}` +
@@ -402,6 +405,7 @@ export class SpiderOverlay {
       `${counts || 'none'}\n` +
       `courage ${stats.meanCourage.toFixed(2)} · ready ${stats.ready} · groups ${groups}\n` +
       `chatter ${stats.chatter.toFixed(1)}/s · ${stats.strikes} bites · ` +
+      `air ${stats.airborne}/${stats.count} · ${stats.hops} hops · ` +
       `ai ${stats.updateMs.toFixed(2)} ms`;
 
     const alive = list.filter((s) => s.alive);

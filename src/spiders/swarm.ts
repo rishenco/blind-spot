@@ -13,9 +13,9 @@
  *
  * 1. **They are blind and they are deaf to the lidar.** The only channel in is `SoundBus`, and
  *    the lidar is deliberately not on it. Everything a spider believes came from an event that
- *    physics actually raised. The one exception is documented at `FEEL_RANGE`: at arm's length
- *    a spider feels the player directly, because a creature standing *on* you is not reasoning
- *    about footsteps any more.
+ *    physics actually raised. The one exception is the nose (M6b, `smellRange`): inside two
+ *    metres a spider simply knows, because a blind predator standing next to you does not need
+ *    to reason about footsteps — and because standing still must not make you furniture.
  *
  * 2. **Belief, not knowledge.** Each spider carries one point and one confidence. Confidence
  *    decays; a noise refreshes it; nothing else does. Two spiders can believe different things,
@@ -23,10 +23,10 @@
  *    following a waypoint.
  *
  * 3. **Chatter is the pack's state, made audible.** A click is a real bus event with a real
- *    loudness, so it draws a mark on the player's HUD like anything else. The click rate is a
- *    direct function of arousal, so a silent pack is nearly invisible and a pack about to
- *    commit lights up the room. That is the tell the player has to learn to read, and it is why
- *    clicks are not flavour.
+ *    loudness, so it draws a mark on the player's HUD like anything else. Since M6b a spider
+ *    speaks in exactly two situations — frozen and listening (rare, one at a time) or committed
+ *    and on top of you (dense) — and is silent in between; see `voice`. That is the tell the
+ *    player has to learn to read, and it is why clicks are not flavour.
  *
  * 4. **Courage is social and fragile.** It grows from neighbours, from confidence, and from the
  *    player standing still; a loud event burns it to nothing and scatters whoever heard it. One
@@ -61,7 +61,7 @@
  */
 import * as THREE from 'three';
 
-import { StaticWorld, canOccupy, moveBody, type Aabb, type BodyShape } from '../core/collision';
+import { StaticWorld, canOccupy, highestTopUnder, type Aabb, type BodyShape } from '../core/collision';
 import { makeRng, range, type Rng } from '../core/rng';
 import type { SoundBus, SoundEvent } from '../events/bus';
 
@@ -128,6 +128,22 @@ export interface SpiderTunables {
   speedFlee: number;
   /** How fast the body can change the direction it is pushing, m/s². */
   accel: number;
+
+  // --- smell (M6b) --------------------------------------------------------
+  /**
+   * The one non-acoustic sense, and it is deliberately tiny: «паукам дать обоняние, чтобы вблизи
+   * они меня чуяли и нападали. а то можно стоять и они мимо ходят».
+   *
+   * Inside this radius a spider knows where the player is without a single sound, and — this is
+   * the half that matters — it *attacks* rather than walking past. Standing perfectly still still
+   * saves you from the hall; it stops saving you the moment one of them is at your feet.
+   *
+   * It must never grow into a second, bigger sense of hearing: two metres is one body length plus
+   * a jump, and the whole value of silence rests on this number staying that small.
+   */
+  smellRange: number;
+  /** Metres of height difference the nose still works across — a floor away is not "вблизи". */
+  smellRise: number;
 
   // --- hearing and belief -------------------------------------------------
   /**
@@ -311,21 +327,61 @@ export interface SpiderTunables {
   /** Loudness of the strike screech. */
   strikeLoudness: number;
 
+  // --- the jump (M6b) -----------------------------------------------------
+  /**
+   * Metres of one hop at stalking pace; a faster state leaps proportionally further. The whole
+   * gait is this: crouch, leap, land, freeze. «Прыжок сам по себе даёт то, за чем мы гонимся, —
+   * замер, рывок, замер, — без всякой имитации рваной скорости.»
+   */
+  hopDistance: number;
+  /** Metres it can crest in one leap — how high a shelf or cupboard top it always reaches. */
+  hopRise: number;
+  /** Metres it will drop off in one leap. Falling further is not refused, it is just not aimed at. */
+  hopFall: number;
+  /** Apex of the arc above the higher of the two ends, metres. This is what clears the clutter. */
+  hopArc: number;
+  /** Floor on the airborne time, seconds — a hop shorter than this reads as a twitch, not a leap. */
+  hopMinAir: number;
+  /** Seconds of freeze between hops: calm (stalking, searching) and hot (rushing, fleeing). */
+  restCalm: number;
+  restHot: number;
+  /** Fraction of a hop cycle the freeze is allowed to eat. Above this the pack stops arriving. */
+  restShare: number;
+  /**
+   * Metres from the player a flying spider will brush the clutter it passes through, and the
+   * impulse it puts in. «Мусор на траекторию НЕ влияет — задевание нужно только как подсказка
+   * игроку, что мимо него что-то пролетело.» So it is a cue, not physics: it never deflects the
+   * jump and it only happens near enough to the player to be one.
+   */
+  hopBrushRange: number;
+  hopBrushImpulse: number;
+
   // --- noise --------------------------------------------------------------
-  /** Metres walked between footfalls. */
-  /** Metres per second up a wall face, once it has decided to climb one. */
-  climbSpeed: number;
-  /** It will not climb higher than this: a spider hanging under the roof is a bug, not a wolf. */
-  climbCeiling: number;
-  stride: number;
   /** Loudness of a footfall on concrete, and on anything the spider is standing on top of. */
   stepLoudnessFloor: number;
   stepLoudnessMetal: number;
   /** Loudness of one click. This is the number that makes the pack findable. */
   clickLoudness: number;
-  /** Seconds between clicks at zero and at full arousal. */
+  /**
+   * Seconds between clicks while frozen and listening, and while rushing.
+   *
+   * M6b, and this is the rule the milestone would sacrifice anything else for: a spider clicks
+   * *only* when it is standing still between hops (rare, one at a time) or when it has committed
+   * (dense, panicked, and by then it is next to you). While it is crossing the floor it is
+   * silent. Three readable states of the world, on the ear alone: silence means they are moving,
+   * a lone click means one is stopped and listening, a rash of them means it is too late.
+   */
   clickSlow: number;
   clickFast: number;
+  /**
+   * Metres from the spot it is charging at, inside which a hot spider is allowed to be loud.
+   * «Пошёл в атаку ВБЛИЗИ — плотно, паника, красное рядом.» A pack that has been called and is
+   * still crossing the floor is a pack in rally, and rally used to chatter the whole way across
+   * the hall — which turned the crossing, the one thing that has to be silent, into the loudest
+   * moment in the game. So the dense voice is bought with proximity to its own target, not with
+   * the state alone.
+   */
+  clickCloseRange: number;
   /** Seconds between panic smashes, and the impulse each one puts into the clutter. */
   smashSeconds: number;
   smashImpulse: number;
@@ -346,10 +402,13 @@ export function defaultSpiderTunables(): SpiderTunables {
     speedFlee: 6.0,
     accel: 14,
 
+    smellRange: 2,
+    smellRise: 2,
+
     hearing: 1,
     // Walk is 9 m of loudness in main.ts, sprint is 16 — on their own that is a 1.8x spread,
     // which the playtest correctly called "not on 20%". Capping a walk's reach at 2.5 m (inside
-    // FEEL_RANGE plus a stride) while leaving a sprint's 16 m untouched makes it a ~6.4x spread:
+    // the nose plus a hop) while leaving a sprint's 16 m untouched makes it a ~6.4x spread:
     // only spiders already close hear you walk, and running lights up most of a room.
     stepQuietLoudness: 10,
     stepQuietReach: 2.5,
@@ -412,14 +471,27 @@ export function defaultSpiderTunables(): SpiderTunables {
     strikeRange: 0.85,
     strikeLoudness: 24,
 
-    climbSpeed: 1.5,
-    climbCeiling: 3,
-    stride: 0.85,
+    hopDistance: 2,
+    // A cupboard is about 2 m and a shelf deck about 1.8: «всегда попадает на верх поверхности»
+    // means this has to clear the tallest thing a player can get on top of, with margin.
+    hopRise: 2.6,
+    hopFall: 3.2,
+    hopArc: 0.85,
+    hopMinAir: 0.16,
+    restCalm: 0.55,
+    restHot: 0.1,
+    restShare: 0.7,
+    hopBrushRange: 3.5,
+    hopBrushImpulse: 0.9,
+
     stepLoudnessFloor: 1.6,
     stepLoudnessMetal: 3.6,
     clickLoudness: 12,
-    clickSlow: 4.5,
-    clickFast: 0.55,
+    // A frozen spider speaks about once every seven seconds, and a committed one three times a
+    // second. That is the whole dynamic range of the pack, and it is deliberately enormous.
+    clickSlow: 7,
+    clickFast: 0.32,
+    clickCloseRange: 6,
     smashSeconds: 0.7,
     smashImpulse: 4.5,
   };
@@ -460,9 +532,19 @@ export interface SpiderSnapshot {
   heardAgo: number;
   /** True while the body is standing on something that is not the concrete. */
   elevated: boolean;
+  /** Where the spider is in its hop cycle — 'air' is mid-leap, 'rest' is the freeze. */
+  phase: HopPhase;
+  /** Seconds it has been in that phase. A long 'rest' is a spider standing and listening. */
+  phaseFor: number;
   alive: boolean;
   hp: number;
 }
+
+/**
+ * Where a spider is in one jump. There is no walking any more: a spider is either in the air or
+ * frozen on a surface, and the freeze is the only time a calm one makes a sound.
+ */
+export type HopPhase = 'rest' | 'air';
 
 export interface SwarmStats {
   count: number;
@@ -481,6 +563,9 @@ export interface SwarmStats {
   /** Clicks per second across the whole pack, sampled over the last second. */
   chatter: number;
   clicks: number;
+  /** M6b debug: how many of the pack are in the air right now, and hops taken since the spawn. */
+  airborne: number;
+  hops: number;
   steps: number;
   strikes: number;
   /** Spiders shot dead since the swarm was spawned. */
@@ -537,10 +622,27 @@ interface Spider {
   /** Horizontal velocity the last steering decision asked for, before personal space is added. */
   steerX: number;
   steerZ: number;
-  /** Metres walked since the last footfall. */
-  sinceStep: number;
-  /** Simulation time until which the body is clinging to a wall and going up it. */
-  climbUntil: number;
+  /** The hop cycle — see `HopPhase`. `hopT` runs from 0 to `hopDur` inside the current phase. */
+  hopPhase: HopPhase;
+  hopT: number;
+  hopDur: number;
+  /** The two ends of the current leap and the height of its arc above them. */
+  fromX: number;
+  fromY: number;
+  fromZ: number;
+  toX: number;
+  toY: number;
+  toZ: number;
+  arc: number;
+  /** One clutter brush per hop, so a leap past the player's face is a single cue and not a rake. */
+  brushed: boolean;
+  /**
+   * The gait's own silence timer. A leap is silent; so is the short pause between two leaps of a
+   * crossing. Only a *listening* pause — one the spider spends deliberately, every few hops —
+   * carries a click. `listenIn` counts the hops left until the next one.
+   */
+  listen: boolean;
+  listenIn: number;
   /** Seconds until the next click. */
   clickIn: number;
   /** Seconds until the next panic smash. */
@@ -553,13 +655,25 @@ interface Spider {
   scareX: number;
   scareZ: number;
   /** Tick offset, so the pack's steering is spread across frames. */
-  phase: number;
+  slice: number;
+  /**
+   * This spider's own random stream.
+   *
+   * It used to draw from one swarm-wide generator, which meant the order in which fourteen
+   * spiders happened to consume it decided what every one of them rolled: adding a scenario, or
+   * a single extra tick, reshuffled idle wander for the whole pack downstream and broke checks
+   * in unrelated sections of the keyframe run. Per-spider streams make a spider's own behaviour
+   * depend on its own history and the seed, and nothing else.
+   */
+  rng: Rng;
   /** Simulation time it last had a belief worth walking to — the clock the search runs on. */
   ledAt: number;
-  /** The last place it walked to and found empty, and when. Rumours about it are ignored. */
-  checkedX: number;
-  checkedZ: number;
-  checkedAt: number;
+  /**
+   * Places this spider has been to and found empty. «Проверил точку, никого нет — пометил её как
+   * пустую и ушёл, и на этот же самый старый звук больше не возвращается.» A short ring, because
+   * the point is to forget an exhausted lead, not to build a map.
+   */
+  checked: { x: number; z: number; at: number }[];
   /** Sweep angle of the search pattern, radians. */
   sweep: number;
   /** Simulation time it died, or Infinity. A corpse is furniture: it stops moving and stays. */
@@ -567,23 +681,31 @@ interface Spider {
 }
 
 const UP_EPS = 0.05;
-/**
- * The one non-acoustic sense in the file, and it is deliberate: inside this radius a spider is
- * close enough to feel the player through the floor and the air, so belief snaps to the truth.
- * Without it a blind pack that has physically surrounded you still gropes past your feet, which
- * reads as broken rather than as blind. It is short enough that it can never *find* anybody —
- * it only stops a spider losing someone it is already touching.
- */
-const FEEL_RANGE = 1.6;
 
-/** Candidate headings for the whisker steering, in degrees off the desired direction. */
-const FAN = [0, 18, -18, 38, -38, 62, -62, 88, -88, 120, -120, 165];
+/**
+ * The states in which a spider is loud. Everything else is silent while it is moving and rare
+ * while it is frozen — see `SpiderTunables.clickSlow`.
+ */
+const HOT_STATES = new Set<SpiderState>(['rally', 'commit', 'recoil', 'panic']);
+
+/** The states that stop to listen, and so are allowed the occasional lone click. */
+const LISTENING_STATES = new Set<SpiderState>(['idle', 'search', 'stalk', 'creep']);
+
+/** Landing spots are looked for along these bearings, in degrees off the way it wants to go. */
+const HOP_FAN = [0, 20, -20, 42, -42, 68, -68, 96, -96, 130, -130, 168];
+
+/** ...and at these fractions of the full hop length, nearest-first for the same bearing. */
+const HOP_REACH = [1, 0.66, 0.38];
+
+/** Points along the parabola the clearance test samples. Cheap, and enough to keep walls solid. */
+const ARC_SAMPLES = [0.25, 0.5, 0.75];
 
 export class Swarm {
   readonly tunables: SpiderTunables;
   private readonly spiders: Spider[] = [];
   private readonly rng: Rng;
   private readonly shape: BodyShape;
+  private readonly seed: number;
   private readonly unsubscribe: () => void;
   private props: Smashable | null = null;
   private readonly strikeListeners = new Set<StrikeListener>();
@@ -606,6 +728,8 @@ export class Swarm {
     byGroup: [],
     chatter: 0,
     clicks: 0,
+    airborne: 0,
+    hops: 0,
     steps: 0,
     strikes: 0,
     kills: 0,
@@ -615,7 +739,6 @@ export class Swarm {
   private clickWindow: number[] = [];
 
   private readonly scratchBoxes: Aabb[] = [];
-  private readonly scratchVel = new THREE.Vector3();
 
   constructor(
     private readonly world: StaticWorld,
@@ -624,6 +747,7 @@ export class Swarm {
     tunables: SpiderTunables = defaultSpiderTunables(),
   ) {
     this.tunables = tunables;
+    this.seed = seed | 0;
     this.rng = makeRng(seed ^ 0x5eed_a1);
     this.shape = {
       radius: tunables.radius,
@@ -722,6 +846,17 @@ export class Swarm {
         s.vel.set(0, 0, 0);
         s.steerX = 0;
         s.steerZ = 0;
+        // A parked spider is parked, not still mid-leap towards wherever it was going.
+        s.hopPhase = 'rest';
+        s.hopT = 0;
+        s.hopDur = range(s.rng, 0.05, this.tunables.restCalm);
+        s.fromX = px;
+        s.fromY = y;
+        s.fromZ = pz;
+        s.toX = px;
+        s.toY = y;
+        s.toZ = pz;
+        s.brushed = true;
         return true;
       }
     }
@@ -749,26 +884,36 @@ export class Swarm {
       headZ: Math.sin(angle),
       steerX: 0,
       steerZ: 0,
-      sinceStep: range(this.rng, 0, this.tunables.stride),
-      climbUntil: 0,
-      clickIn: range(this.rng, 0.5, 4),
+      hopPhase: 'rest',
+      hopT: 0,
+      hopDur: range(this.rng, 0.1, this.tunables.restCalm),
+      fromX: x,
+      fromY: 0.02,
+      fromZ: z,
+      toX: x,
+      toY: 0.02,
+      toZ: z,
+      arc: 0,
+      brushed: true,
+      listen: true,
+      listenIn: Math.round(range(this.rng, 1, 5)),
+      clickIn: range(this.rng, 0.5, 6),
       smashIn: 0,
       heard: '-',
       heardAt: -99,
       scaredUntil: 0,
       scareX: x,
       scareZ: z,
-      phase: id,
+      slice: id,
+      rng: makeRng((this.seed ^ 0x51de_1000) + id * 0x9e37_79b1),
       ledAt: -99,
-      checkedX: 0,
-      checkedZ: 0,
-      checkedAt: -99,
+      checked: [],
       sweep: angle,
       deadAt: Infinity,
     };
   }
 
-  /** The player's body, in world space. Used for contact and for `FEEL_RANGE` only. */
+  /** The player's body, in world space. Used for contact and for the nose only. */
   setPlayer(x: number, y: number, z: number): void {
     this.player.set(x, y, z);
   }
@@ -823,10 +968,27 @@ export class Swarm {
         continue;
       }
 
-      // A real noise from a place this spider had written off is new evidence, and beats the
-      // old conclusion: the mark is cleared before the belief is written.
-      if (Math.hypot(event.x - s.checkedX, event.z - s.checkedZ) < t.pinnedRadius) {
-        s.checkedAt = -99;
+      /*
+       * M6b #4 — «паук приходит на звук, ничего не находит и остаётся там жить».
+       *
+       * A place this spider has already been to and found empty is not evidence any more, and
+       * the thing that keeps dragging it back is precisely the noise that is still coming from
+       * there: a barrel it knocked over itself and that is still rocking, a crate it keeps
+       * bumping. So a *world* noise (clutter, another spider) from a checked spot is refused,
+       * and refusing it keeps the mark alive — a prop that rattles for a minute stays written
+       * off for that minute instead of re-founding the club every two seconds.
+       *
+       * A noise the *player* made is different: he was not there, and now something over there
+       * is his. That clears the mark outright — new evidence beats an old conclusion.
+       */
+      if (event.source === 'prop-impact') {
+        if (this.isChecked(s, event.x, event.z, true)) {
+          s.heard = `${event.source} (checked, ignored)`;
+          s.heardAt = this.time;
+          continue;
+        }
+      } else {
+        this.clearChecked(s, event.x, event.z);
       }
       this.updateBelief(s, event.x, event.z, quality * weight);
       s.heard = `${event.source} ${event.loudness.toFixed(0)}m @${d.toFixed(0)}m`;
@@ -850,7 +1012,13 @@ export class Swarm {
         );
         s.scareX = event.x;
         s.scareZ = event.z;
-        this.enter(s, event.source === 'bullet-hit' && d < 1.2 ? 'panic' : 'flee');
+        // A spider already in panic is not talked down by a noise. Being shot puts it in panic;
+        // the bullet's own impact, going off against the wall a few metres behind it, used to
+        // arrive a tick later and demote it to a merely frightened FLEE — the wound's reaction
+        // undone by the wound's own sound.
+        if (s.state !== 'panic') {
+          this.enter(s, event.source === 'bullet-hit' && d < 1.2 ? 'panic' : 'flee');
+        }
       }
     }
   }
@@ -867,12 +1035,7 @@ export class Swarm {
     const b = s.belief;
     if (rumour) {
       // "I have just been there. There is nothing there. Stop telling me about it."
-      if (
-        this.time - s.checkedAt < t.checkedSeconds &&
-        Math.hypot(x - s.checkedX, z - s.checkedZ) < t.pinnedRadius
-      ) {
-        return;
-      }
+      if (this.isChecked(s, x, z, false)) return;
       if (b.confidence >= t.rumourCap) return;
       quality = Math.min(quality, t.rumourCap - b.confidence * 0.5);
       if (quality <= 0) return;
@@ -911,13 +1074,11 @@ export class Swarm {
       if (!s.alive) continue;
       this.decay(s, dt);
       // Steering — the only part that costs anything — is sliced across ticks by index.
-      if ((this.tick + s.phase) % every === 0) {
+      if ((this.tick + s.slice) % every === 0) {
         this.decide(s, dt * every);
         this.stats.decisions++;
       }
-      this.separate(s);
-      this.integrate(s, dt);
-      this.deoverlap(s);
+      this.hop(s, dt);
       this.voice(s, dt);
       this.contact(s);
     }
@@ -946,14 +1107,16 @@ export class Swarm {
     if (b.confidence > 0.1) s.ledAt = this.time;
     b.pinnedFor = b.confidence > 0.1 ? b.pinnedFor + dt : 0;
 
-    // Arm's length: a spider that is standing on you does not need to work it out.
-    const d = Math.hypot(s.pos.x - this.player.x, s.pos.z - this.player.z);
-    if (this.playerAlive && d < FEEL_RANGE) {
+    // The nose (M6b). «Слепой хищник вблизи чует» — inside `smellRange` the spider simply
+    // knows where he is, with no sound involved at all, which is what stops a motionless player
+    // being invisible to something that has walked up to him. It is deliberately *not* a second
+    // hearing: two metres, and it needs the player to be at roughly the spider's own level.
+    if (this.smells(s)) {
       b.x = this.player.x;
       b.z = this.player.z;
       b.confidence = 1;
       b.at = this.time;
-      s.heard = 'touch';
+      s.heard = 'smell';
       s.heardAt = this.time;
     }
 
@@ -1041,14 +1204,51 @@ export class Swarm {
    * spider starts combing outwards instead of standing on the spot it was wrong about.
    */
   private giveUp(s: Spider): void {
-    s.checkedX = s.belief.x;
-    s.checkedZ = s.belief.z;
-    s.checkedAt = this.time;
+    this.markChecked(s, s.belief.x, s.belief.z);
     s.belief.confidence = 0;
     s.belief.pinnedFor = 0;
     s.ledAt = this.time;
     s.sweep += 1.3;
     this.enter(s, 'search');
+  }
+
+  /** Writes a place down as empty. The ring is short on purpose: this is forgetting, not mapping. */
+  private markChecked(s: Spider, x: number, z: number): void {
+    const t = this.tunables;
+    for (const c of s.checked) {
+      if (Math.hypot(c.x - x, c.z - z) < t.pinnedRadius) {
+        c.x = x;
+        c.z = z;
+        c.at = this.time;
+        return;
+      }
+    }
+    s.checked.push({ x, z, at: this.time });
+    if (s.checked.length > 3) s.checked.shift();
+  }
+
+  /**
+   * Has this spider written this place off? `refresh` keeps the mark alive for as long as the
+   * same dead noise keeps arriving from it, which is what stops a still-rattling prop from
+   * re-founding the club around itself the moment `checkedSeconds` runs out.
+   */
+  private isChecked(s: Spider, x: number, z: number, refresh: boolean): boolean {
+    const t = this.tunables;
+    for (const c of s.checked) {
+      if (this.time - c.at >= t.checkedSeconds) continue;
+      if (Math.hypot(c.x - x, c.z - z) >= t.pinnedRadius) continue;
+      if (refresh) c.at = this.time;
+      return true;
+    }
+    return false;
+  }
+
+  /** New evidence from a written-off place: the conclusion is dropped. */
+  private clearChecked(s: Spider, x: number, z: number): void {
+    const t = this.tunables;
+    for (let i = s.checked.length - 1; i >= 0; i--) {
+      if (Math.hypot(s.checked[i]!.x - x, s.checked[i]!.z - z) < t.pinnedRadius) s.checked.splice(i, 1);
+    }
   }
 
   private enter(s: Spider, state: SpiderState): void {
@@ -1069,11 +1269,16 @@ export class Swarm {
       if (this.time - s.stateAt > t.recoilSeconds) this.enter(s, 'stalk');
     } else if (this.time < s.scaredUntil) {
       this.enter(s, 'flee');
+    } else if (this.smells(s)) {
+      // Inside the nose there is no deliberation and no quorum: «внутри этого радиуса — атака,
+      // а не „прошёл мимо“». It sits below the fright branches on purpose — a spider that has
+      // just been shot at still runs, however close the player is.
+      this.enter(s, 'commit');
     } else if (b.confidence < 0.1) {
       // Out of belief, but not necessarily out of the hunt: a spider that had a lead recently
       // combs the place it lost it instead of standing in the dark. This is the last stretch of
       // "выдал себя, стою — и они пришли": one noise gets them into the room, the search walks
-      // them onto him, and `FEEL_RANGE` closes it.
+      // them onto him, and the nose closes it.
       this.enter(s, this.time - s.ledAt < t.searchSeconds ? 'search' : 'idle');
     } else if (this.packMode === 'commit' && s.courage > t.readyCourage * 0.6) {
       this.enter(s, 'commit');
@@ -1197,91 +1402,25 @@ export class Swarm {
     dx /= len;
     dz /= len;
 
-    // Up, before around. A spider that has walked into the side of a crate or into a shelf
-    // upright would rather go over it than take the long way — that is what makes a warehouse
-    // full of racks *their* terrain and not the player's. `climbable` refuses anything whose
-    // top it cannot find below the ceiling limit, so the hall's outer walls are still walls.
-    const face = this.climbable(s, dx, dz);
-    if (face > 0) {
-      s.climbUntil = this.time + 0.45;
-      s.headX = dx;
-      s.headZ = dz;
-      s.steerX = dx * speed * 0.6;
-      s.steerZ = dz * speed * 0.6;
-      return;
-    }
-
-    const chosen = this.whisker(s, dx, dz);
-    s.headX = chosen.x;
-    s.headZ = chosen.z;
-    s.steerX = chosen.x * speed;
-    s.steerZ = chosen.z * speed;
+    // Where it *wants* to go, and how fast on average. Nothing here avoids anything: obstacles
+    // are the jump's problem now, because the jump is what picks the spot it lands on.
+    s.headX = dx;
+    s.headZ = dz;
+    s.steerX = dx * speed;
+    s.steerZ = dz * speed;
   }
 
   /**
-   * Is the thing straight ahead something this spider can get on top of?
-   *
-   * Returns the height it would crest at, or 0 for "go round". The test is deliberately crude —
-   * blocked at foot level, free at some height below `climbCeiling` — because that is exactly
-   * what a blind animal can find out by feeling: my feet are against something, and higher up
-   * there is nothing.
+   * The nose. Two metres, and roughly level — a player on top of a cupboard is not smelled from
+   * the floor, he is jumped up to.
    */
-  private climbable(s: Spider, dx: number, dz: number): number {
+  private smells(s: Spider): boolean {
+    if (!this.playerAlive || !s.alive) return false;
     const t = this.tunables;
-    const px = s.pos.x + dx * 0.45;
-    const pz = s.pos.z + dz * 0.45;
-    if (this.free(px, s.pos.y + t.stepHeight * 0.9, pz)) return 0;
-    for (let h = s.pos.y + 0.75; h <= t.climbCeiling; h += 0.55) {
-      if (this.free(px, h, pz)) return h;
-    }
-    return 0;
-  }
-
-  private readonly headScratch = { x: 0, z: 0 };
-
-  /**
-   * Obstacle avoidance without a pathfinder: probe a fan of headings and take the best
-   * compromise between "where I want to go" and "where I can actually get".
-   *
-   * A pathfinder would be the wrong tool anyway. A spider does not know the room — it knows a
-   * direction and what its feet run into, and a blind creature bouncing off a rack is the
-   * correct behaviour, not a failure of navigation. The probe is done at the stepped-up height,
-   * so a shelf deck or a crate reads as walkable rather than as a wall, which is where "лазают
-   * по стеллажам" comes from.
-   */
-  private whisker(s: Spider, dx: number, dz: number): { x: number; z: number } {
-    const t = this.tunables;
-    const probe = s.state === 'commit' || s.state === 'flee' ? 1.6 : 1.1;
-    const base = Math.atan2(dz, dx);
-    let bestX = dx;
-    let bestZ = dz;
-    let best = -Infinity;
-    for (const off of FAN) {
-      const a = base + (off * Math.PI) / 180;
-      const cx = Math.cos(a);
-      const cz = Math.sin(a);
-      const px = s.pos.x + cx * probe;
-      const pz = s.pos.z + cz * probe;
-      const clear = this.free(px, s.pos.y + t.stepHeight * 0.9, pz) ? 1 : 0;
-      // Half-step too, so a spider does not walk into a corner it can enter but not leave.
-      const half = this.free(
-        s.pos.x + cx * probe * 0.5,
-        s.pos.y + t.stepHeight * 0.9,
-        s.pos.z + cz * probe * 0.5,
-      )
-        ? 1
-        : 0;
-      const align = cx * dx + cz * dz;
-      const score = clear * 2 + half * 0.6 + align;
-      if (score > best) {
-        best = score;
-        bestX = cx;
-        bestZ = cz;
-      }
-    }
-    this.headScratch.x = bestX;
-    this.headScratch.z = bestZ;
-    return this.headScratch;
+    const dx = s.pos.x - this.player.x;
+    const dz = s.pos.z - this.player.z;
+    if (dx * dx + dz * dz > t.smellRange * t.smellRange) return false;
+    return Math.abs(s.pos.y - this.player.y) <= t.smellRise;
   }
 
   private free(x: number, feetY: number, z: number): boolean {
@@ -1296,42 +1435,6 @@ export class Swarm {
       this.scratchBoxes,
     );
     return canOccupy(boxes, x, feetY, z, t.radius, t.height);
-  }
-
-  /**
-   * Personal space, as a continuous force on the velocity, every tick.
-   *
-   * It used to be a kick added to the steering direction on the decision slice, with a hard
-   * cutoff at 1.5 m: inside the ring a spider was shoved out at full strength, one frame later
-   * it was outside and walked straight back in, and at fifteen decisions a second that reads as
-   * a knot of spiders vibrating. A smooth falloff applied every tick cannot oscillate — the
-   * push fades to nothing exactly where it stops applying — and it costs a handful of flops.
-   */
-  private separate(s: Spider): void {
-    const t = this.tunables;
-    const r = t.separation;
-    // The steering decision is the baseline every tick; the push is added on top of it and never
-    // to itself, or eight ticks between decisions would compound into a launch.
-    s.vel.x = s.steerX;
-    s.vel.z = s.steerZ;
-    let px = 0;
-    let pz = 0;
-    for (const o of this.spiders) {
-      if (o === s || !o.alive) continue;
-      const dx = s.pos.x - o.pos.x;
-      const dz = s.pos.z - o.pos.z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 > r * r || d2 < 1e-8) continue;
-      const d = Math.sqrt(d2);
-      const w = 1 - d / r;
-      px += (dx / d) * w * w;
-      pz += (dz / d) * w * w;
-    }
-    if (px === 0 && pz === 0) return;
-    const len = Math.hypot(px, pz);
-    const push = Math.min(1, len) * t.separationPush;
-    s.vel.x = s.steerX + (px / len) * push;
-    s.vel.z = s.steerZ + (pz / len) * push;
   }
 
   /**
@@ -1363,110 +1466,267 @@ export class Swarm {
     }
   }
 
-  /** Gravity, collide-and-slide, and the ledge climbing that comes with it for free. */
-  private integrate(s: Spider, dt: number): void {
-    const t = this.tunables;
-    const v = this.scratchVel;
-    v.copy(s.vel);
-    // «Ползают, лазают по предметам и стеллажам»: a shelf upright is not an obstacle to a
-    // spider, it is a road. While the body is pressed against something it wants to get past,
-    // gravity is replaced by a climb — which is also why a rack ends up full of them.
-    const climbing = this.time < s.climbUntil && s.pos.y < t.climbCeiling;
-    v.y = climbing ? t.climbSpeed : s.vel.y - 9.81 * dt;
-    const bx = s.pos.x;
-    const by = s.pos.y;
-    const bz = s.pos.z;
-    const res = moveBody(this.world, s.pos, v, dt, this.shape, s.grounded && !climbing);
-    s.vel.y = climbing ? 0 : v.y;
-    s.grounded = res.grounded;
-    if (res.grounded && !climbing) s.vel.y = 0;
+  // ---- the gait -----------------------------------------------------------
 
-    const moved = Math.hypot(s.pos.x - bx, s.pos.z - bz);
-    const wanted = Math.hypot(s.vel.x, s.vel.z) * dt;
-    if (res.hitWall && wanted > 1e-4 && moved < wanted * 0.5 && s.pos.y < t.climbCeiling) {
-      // Blocked and still pushing. Keep the cling alive for a moment past the last contact, so
-      // cresting the lip does not drop it back down the face it just came up.
-      s.climbUntil = this.time + 0.35;
-    } else if (climbing && !res.hitWall) {
-      s.climbUntil = 0;
+  /**
+   * They do not walk. They jump — «как клещи»: freeze, leap, freeze.
+   *
+   * The whole gait is one kinematic parabola between two chosen spots, with a freeze at each
+   * end. That is a cheat and a deliberate one (the human asked for it): there is no gravity
+   * integration here, so a jump cannot be short, cannot be nudged by a crate it clips, and
+   * always ends exactly on top of something the spider can stand on. The clutter it flies
+   * through is not simulated against the body — it is only *brushed*, near the player, as a cue
+   * that something went past.
+   *
+   * The average speed is preserved, so every `speed*` tunable still means what it meant when
+   * they walked: one cycle takes `distance / speed`, the freeze eats up to `restShare` of it and
+   * the leap gets the rest. A stalking spider therefore covers the hall at stalking pace, in
+   * jerks; a committing one crosses the last few metres in two long leaps.
+   */
+  private hop(s: Spider, dt: number): void {
+    if (s.hopPhase === 'air') {
+      s.hopT += dt;
+      const u = s.hopDur > 1e-5 ? Math.min(1, s.hopT / s.hopDur) : 1;
+      s.pos.x = s.fromX + (s.toX - s.fromX) * u;
+      s.pos.z = s.fromZ + (s.toZ - s.fromZ) * u;
+      s.pos.y = s.fromY + (s.toY - s.fromY) * u + s.arc * 4 * u * (1 - u);
+      s.grounded = false;
+      // Reported velocity is the honest average of the leap: the renderer's yaw and anything
+      // else reading `vel` sees a creature travelling, which it is.
+      s.vel.set((s.toX - s.fromX) / Math.max(1e-4, s.hopDur), 0, (s.toZ - s.fromZ) / Math.max(1e-4, s.hopDur));
+      if (!s.brushed && u > 0.4) this.brush(s);
+      if (u >= 1) {
+        s.pos.set(s.toX, s.toY, s.toZ);
+        s.vel.set(0, 0, 0);
+        s.grounded = true;
+        s.hopPhase = 'rest';
+        s.hopT = 0;
+        s.hopDur = this.restFor(s);
+        // Every few hops it stops to listen properly instead of merely gathering itself for the
+        // next leap, and that longer pause is the only quiet moment it will speak in.
+        s.listen = --s.listenIn <= 0;
+        if (s.listen) {
+          s.listenIn = Math.round(range(s.rng, 3, 7));
+          s.hopDur = Math.max(s.hopDur, this.tunables.restCalm * range(s.rng, 0.8, 1.5));
+        }
+        this.stats.hops++;
+        // The second of the two thumps. «Толчок и приземление — ДВА отдельных звуковых события»:
+        // between them the spider makes no sound at all, and the ear builds the arc from the pair.
+        this.thump(s);
+      }
+      return;
     }
-    // Vertical travel counts as walking: going up a steel upright is exactly the noisy part.
-    s.sinceStep += moved + Math.abs(s.pos.y - by) * 0.8;
+
+    // Frozen. This is the only moment a spider is jostled, clicks, or can be shoved out of a
+    // neighbour's body — mid-air it is committed to its parabola and nothing touches it.
+    s.vel.set(0, 0, 0);
+    s.grounded = true;
+    this.deoverlap(s);
+    this.settle(s);
+    s.hopT += dt;
+    if (s.hopT < s.hopDur) return;
+    this.launch(s);
+  }
+
+  /** A parked or shoved spider drops onto whatever is actually under it. No free-fall needed. */
+  private settle(s: Spider): void {
+    const top = this.topUnder(s.pos.x, s.pos.z, s.pos.y + 0.35);
+    if (top === -Infinity) return;
+    if (Math.abs(s.pos.y - top) > 0.01) s.pos.y = top;
+  }
+
+  /** Highest surface top under (x,z) at or below `ceilY`, or -Infinity if there is none. */
+  private topUnder(x: number, z: number, ceilY: number): number {
+    const t = this.tunables;
+    const boxes = this.world.query(x - t.radius, -2, z - t.radius, x + t.radius, ceilY, z + t.radius, this.scratchBoxes);
+    return highestTopUnder(boxes, x, z, t.radius, -2, ceilY);
+  }
+
+  /** Seconds of freeze after the hop just landed — capped so the pack still arrives on time. */
+  private restFor(s: Spider): number {
+    const t = this.tunables;
+    const base = HOT_STATES.has(s.state) ? t.restHot : t.restCalm;
+    const dist = Math.hypot(s.toX - s.fromX, s.toZ - s.fromZ);
+    const speed = Math.hypot(s.steerX, s.steerZ);
+    const rest = dist < 0.05 || speed < 0.05 ? base : Math.min(base, (dist / speed) * t.restShare);
+    return Math.max(0.05, rest * range(s.rng, 0.7, 1.35));
+  }
+
+  /**
+   * Choose a landing spot and leave the ground.
+   *
+   * The search is a fan of bearings around where the spider wants to go, nearest-aligned first,
+   * and for each bearing the longest reach that works. "Works" is three tests: there is a
+   * surface top under the spot within `hopRise` above and `hopFall` below, the body fits
+   * standing on it, and the arc between here and there is not driven straight through a wall.
+   * That last test is the only thing the cheat is not allowed to skip — a spider that can leap
+   * through the hall's outer wall is not a predator, it is a bug.
+   */
+  private launch(s: Spider): void {
+    const t = this.tunables;
+    const speed = Math.hypot(s.steerX, s.steerZ);
+    if (speed < 0.05) {
+      // Nowhere to be. Keep freezing, and keep listening — this is the state the rare single
+      // click comes from.
+      s.hopT = 0;
+      s.hopDur = t.restCalm * range(s.rng, 0.7, 1.6);
+      s.listen = true;
+      return;
+    }
+    const dirX = s.steerX / speed;
+    const dirZ = s.steerZ / speed;
+    const base = Math.atan2(dirZ, dirX);
+    const full = t.hopDistance * clamp(speed / Math.max(0.1, t.speedStalk), 0.5, 1.7);
+
+    let toX = 0;
+    let toZ = 0;
+    let toY = 0;
+    let found = false;
+    for (const off of HOP_FAN) {
+      const a = base + (off * Math.PI) / 180;
+      const cx = Math.cos(a);
+      const cz = Math.sin(a);
+      for (const reach of HOP_REACH) {
+        const d = full * reach;
+        const px = clamp(s.pos.x + cx * d, -33, 33);
+        const pz = clamp(s.pos.z + cz * d, -23, 23);
+        const top = this.topUnder(px, pz, s.pos.y + t.hopRise);
+        if (top === -Infinity || top < s.pos.y - t.hopFall) continue;
+        if (!this.free(px, top + 0.02, pz)) continue;
+        if (!this.arcClear(s.pos.x, s.pos.y, s.pos.z, px, top, pz)) continue;
+        toX = px;
+        toZ = pz;
+        toY = top + 0.02;
+        found = true;
+        break;
+      }
+      if (found) break;
+    }
+    if (!found) {
+      // Boxed in. Freeze a beat and try a different heading next time rather than grinding.
+      s.hopT = 0;
+      s.hopDur = t.restCalm * range(s.rng, 0.4, 0.9);
+      s.listen = true;
+      s.orbitDir = -s.orbitDir;
+      return;
+    }
+
+    const dist = Math.hypot(toX - s.pos.x, toZ - s.pos.z);
+    const cycle = dist / speed;
+    const rest = Math.min(HOT_STATES.has(s.state) ? t.restHot : t.restCalm, cycle * t.restShare);
+    s.fromX = s.pos.x;
+    s.fromY = s.pos.y;
+    s.fromZ = s.pos.z;
+    s.toX = toX;
+    s.toY = toY;
+    s.toZ = toZ;
+    // The apex clears the higher end, which is what lets it crest a rack lip from below.
+    s.arc = t.hopArc + Math.max(0, toY - s.pos.y) * 0.35;
+    s.hopPhase = 'air';
+    s.listen = false;
+    s.hopT = 0;
+    s.hopDur = Math.max(t.hopMinAir, cycle - rest);
+    s.brushed = false;
+    // The first of the two thumps: the push-off, from where it stood.
+    this.thump(s);
+  }
+
+  /** Is the parabola between these two points free of solid geometry at its sampled points? */
+  private arcClear(ax: number, ay: number, az: number, bx: number, by: number, bz: number): boolean {
+    const arc = this.tunables.hopArc;
+    for (const u of ARC_SAMPLES) {
+      const x = ax + (bx - ax) * u;
+      const z = az + (bz - az) * u;
+      const y = ay + (by - ay) * u + arc * 4 * u * (1 - u);
+      if (!this.free(x, y, z)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * «Задевание мусора нужно только как подсказка игроку, что мимо него что-то пролетело.»
+   * So it is a one-shot nudge into the clutter, once per hop, and only close enough to the
+   * player to be a cue. It never touches the trajectory.
+   */
+  private brush(s: Spider): void {
+    s.brushed = true;
+    const t = this.tunables;
+    if (this.props === null) return;
+    const dx = s.pos.x - this.player.x;
+    const dz = s.pos.z - this.player.z;
+    if (dx * dx + dz * dz > t.hopBrushRange * t.hopBrushRange) return;
+    this.props.disturb(s.pos.x, s.pos.y - 0.15, s.pos.z, 0.6, t.hopBrushImpulse);
+  }
+
+  /** One end of a leap, as a bus event. «По железному стеллажу громче, чем по бетону.» */
+  private thump(s: Spider): void {
+    const t = this.tunables;
+    const elevated = s.pos.y > UP_EPS;
+    this.bus.emit({
+      source: 'spider',
+      x: s.pos.x,
+      y: s.pos.y + 0.08,
+      z: s.pos.z,
+      loudness: elevated ? t.stepLoudnessMetal : t.stepLoudnessFloor,
+      material: elevated ? 'steel' : undefined,
+      kind: 'step',
+    });
+    this.stats.steps++;
   }
 
   // ---- the voice ----------------------------------------------------------
 
   /**
-   * Footfalls and clicks.
+   * When they are heard. This is the most important rule in M6b and everything else bends to it.
    *
-   * Both are real bus events with real loudness, so they draw marks and can be heard by other
-   * spiders exactly like anything else. The click rate is the whole tell: a `clickSlow` of
-   * seven seconds means an idle pack is essentially silent, and `clickFast` of half a second
-   * during a rally means the room fills with marks a beat before the rush.
+   * A spider makes a sound in exactly two situations:
+   *
+   * - **frozen and listening** — one click, rarely, `clickSlow` apart. It only ticks while the
+   *   spider is at rest between hops, so a pack crossing the floor cannot produce it;
+   * - **committed, next to you** — `clickFast` apart, which is a rash of marks, and by then it
+   *   is already inside biting distance.
+   *
+   * Between those two: silence. That gives the player three readable states of the world with no
+   * numbers on screen — silence means they are moving, a lone click means one is stopped and
+   * listening (do not move), a solid wash of red means it is too late. Fleeing is silent too: a
+   * scattering pack is running, not talking.
+   *
+   * The two thumps of each leap are emitted by `hop`, not here, and they are quiet enough to be
+   * a near-contact cue rather than a tracking channel.
    */
   private voice(s: Spider, dt: number): void {
     const t = this.tunables;
-
-    if (s.sinceStep >= t.stride) {
-      s.sinceStep = 0;
-      // «По железному стеллажу громче, чем по бетону» — standing on anything at all means the
-      // spider is on steel shelving or a crate lid, and it rings.
-      const elevated = s.pos.y > UP_EPS;
-      this.bus.emit({
-        source: 'spider',
-        x: s.pos.x,
-        y: s.pos.y + 0.08,
-        z: s.pos.z,
-        loudness: elevated ? t.stepLoudnessMetal : t.stepLoudnessFloor,
-        material: elevated ? 'steel' : undefined,
-        kind: 'step',
-      });
-      this.stats.steps++;
-    }
-
-    // The gap is recomputed every tick from the *current* mood, not from the mood the spider was
-    // in when it last spoke. Without the clamp a spider that fell quiet while stalking sits on a
-    // ten-second timer straight through the rally it is supposed to be shouting during — which is
-    // exactly the bug that made a rally sound like a stalk.
-    const gap = t.clickSlow + (t.clickFast - t.clickSlow) * this.arousal(s);
-    if (s.clickIn > gap * 1.5) s.clickIn = gap * range(this.rng, 0.6, 1.5);
-    s.clickIn -= dt;
-    if (s.clickIn <= 0) {
-      this.click(s);
-      s.clickIn = gap * range(this.rng, 0.6, 1.5);
-    }
-
+    // A panicking spider wrecks whatever it is standing in whether or not it is within earshot
+    // of anything — that is a body thrashing, not a voice, so it sits above the silence rule.
     if (s.state === 'panic') {
       s.smashIn -= dt;
       if (s.smashIn <= 0 && this.props !== null) {
         // «Подстреленный или напуганный паук в панике крушит пропы — и этим освещает ползала.»
         // Nothing is faked: the impulse goes into Rapier and the marks come from the contacts.
         this.props.disturb(s.pos.x, s.pos.y + 0.3, s.pos.z, 1.8, t.smashImpulse);
-        s.smashIn = t.smashSeconds * range(this.rng, 0.7, 1.4);
+        s.smashIn = t.smashSeconds * range(s.rng, 0.7, 1.4);
       }
     }
-  }
-
-  /** 0..1 — how wound up this spider is. Drives the click rate and nothing else. */
-  private arousal(s: Spider): number {
-    if (s.state === 'rally') return 1;
-    if (s.state === 'commit') return 0.9;
-    if (s.state === 'panic') return 0.85;
-    if (s.state === 'flee' || s.state === 'recoil') return 0.45;
-    // «чтобы переговоры были слышны не только у взвинченной стаи, а в целом»: even a pack with
-    // nothing to say checks in with itself. The contrast with a rally is still an order of
-    // magnitude, which is the part that has to survive.
-    if (s.state === 'idle') return 0.18;
-    // A searching pack talks: it has lost him and is asking the others where he went. It is also
-    // the player's cue that his one noise is still being worked on.
-    if (s.state === 'search') return 0.45;
-    // Stalking and creeping: the more it believes and the braver it is, the more it talks.
-    // Deliberately low: a stalking pack has to be *almost* silent, or the rally has nothing
-    // to contrast with and the player cannot read "now it starts" off the click density.
-    return (
-      0.14 +
-      clamp01(s.belief.confidence * 0.5 + s.courage * 0.5) * (s.state === 'creep' ? 0.3 : 0.45)
-    );
+    // Hot, and close enough to what it is charging at for the excitement to be about *this*
+    // moment. A rally still crossing the hall is hot and silent; the same spider three metres
+    // from where it thinks he is, is a wall of noise.
+    const hot =
+      HOT_STATES.has(s.state) &&
+      Math.hypot(s.pos.x - s.belief.x, s.pos.z - s.belief.z) < t.clickCloseRange;
+    const listening = LISTENING_STATES.has(s.state) && s.hopPhase === 'rest' && s.listen;
+    if (!hot && !listening) {
+      // Moving, or fleeing. Say nothing — and do not bank up the timer while silent, or the
+      // first freeze after a long run would fire a click instantly.
+      if (s.clickIn < 0.15) s.clickIn = 0.15;
+      return;
+    }
+    const gap = hot ? t.clickFast : t.clickSlow;
+    if (s.clickIn > gap * 1.6) s.clickIn = gap * range(s.rng, 0.6, 1.5);
+    s.clickIn -= dt;
+    if (s.clickIn <= 0) {
+      this.click(s);
+      s.clickIn = gap * range(s.rng, 0.6, 1.5);
+    }
   }
 
   private click(s: Spider): void {
@@ -1730,9 +1990,11 @@ export class Swarm {
     let alive = 0;
     let mode: SpiderState = 'idle';
     let modeN = -1;
+    let airborne = 0;
     for (const s of this.spiders) {
       if (!s.alive) continue;
       alive++;
+      if (s.hopPhase === 'air') airborne++;
       by[s.state]++;
       courage += s.courage;
       byGroup[s.groupId] = (byGroup[s.groupId] ?? 0) + 1;
@@ -1751,6 +2013,7 @@ export class Swarm {
     this.stats.mode = mode;
     this.stats.meanCourage = alive === 0 ? 0 : courage / alive;
     this.stats.chatter = this.clickWindow.length;
+    this.stats.airborne = airborne;
   }
 
   getStats(): SwarmStats {
@@ -1779,6 +2042,8 @@ export class Swarm {
       heard: s.heard,
       heardAgo: this.time - s.heardAt,
       elevated: s.pos.y > UP_EPS,
+      phase: s.hopPhase,
+      phaseFor: s.hopT,
       alive: s.alive,
       hp: s.hp,
     }));
