@@ -240,6 +240,8 @@ export class GameSim {
       // scales every radius the event carries"). A 14 m/s landing on steel is 14 x 1.5 = 21 m —
       // louder than a Q-ping, which is what makes dropping onto a steel floor a decision.
       paintRadius: radius,
+      // Nothing reads this yet (see `SoundEvent.intensity`), and when something does, this line
+      // is wrong as written: `radius` here is pre-material, so §3.9's voice never reaches it.
       intensity: 0.95 + 0.35 * ((radius - 8) / 6),
       mat: event.mat,
     });

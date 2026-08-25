@@ -175,9 +175,11 @@ const CLASS_VOICES: Readonly<Record<SoundClass, ClassVoice>> = Object.freeze({
  * abrupt — at exactly `hearingRadius` every event, of every class, on every material, arrives at
  * `EDGE_GAIN`, so the gate closes on a whisper instead of on a click.
  *
- * The class profile's `intensity` is deliberately *not* a factor. It scales how much an event
- * reveals — paint density — and using it for level too would be a second loudness knob for one
- * question, which is the arrangement §3.9 spent a commit ruling against.
+ * The class profile's `intensity` is deliberately *not* a factor. §3.1 gives it to the eye —
+ * "blip density scales with intensity" — and using it for level too would be a second loudness
+ * knob for one question, which is the arrangement §3.9 spent a commit ruling against. (It is
+ * inert on the eye as well today; see `SoundEvent.intensity`. That does not change the argument
+ * for keeping it out of here — it changes who owes the wiring.)
  */
 export function gainFor(event: SoundEvent, distance: number): number {
   return (EDGE_GAIN * event.hearingRadius) / Math.max(distance, NEAR_FIELD_M);

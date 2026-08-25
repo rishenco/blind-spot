@@ -141,7 +141,7 @@ export interface SoundClassProfile {
   hearingRadius: number;
   /** Full apex angle of the emission cone in degrees; 360 means omnidirectional. */
   coneAngleDeg: number;
-  /** Loudness multiplier applied when the emitter does not name one. */
+  /** Loudness multiplier applied when the emitter does not name one. Inert — see `SoundEvent`. */
   intensity: number;
   /** Which entry of `WAVE_SPEEDS` this class's front travels at. */
   readonly wave: WaveGroup;
@@ -309,7 +309,28 @@ export interface SoundEvent {
   readonly mat: number | null;
   readonly paintRadius: number;
   readonly hearingRadius: number;
-  /** Loudness, ~1 = the class's nominal value. Scales how much the event reveals. */
+  /**
+   * Loudness, ~1 = the class's nominal value.
+   *
+   * **Inert in the shipped configuration, and this comment is the only thing standing between
+   * that and an afternoon of tuning with no effect.** §3.1 specifies it — "blip density scales
+   * with intensity; falloff is quadratic" — but `structured.ts`, which is what actually unlocks
+   * dots and edges, never reads it: a reveal is uniform inside its radius and stops dead at the
+   * edge. The one consumer is `waveFx.ts`'s suspended-dust shader, and `WaveTunables.dust`
+   * defaults to `false`, so on a default run the field is not even in the draw list.
+   *
+   * Kept rather than deleted because the doc asks for it and the shape it asks for is worth
+   * having — a reveal that fades out toward its edge reads as a sound rather than as a stencil,
+   * and puts the brightest blips at the origin where the information is. Wiring it in changes
+   * every dot in every golden fixture, which is a change that deserves its own commit and its
+   * own screenshots rather than a corner of an audio milestone.
+   *
+   * Whoever does that: `sim.ts`'s landing emitter derives its intensity from a radius that has
+   * **not** been through §3.9's material voice yet, so a landing on steel would light the room
+   * as though it had landed on concrete. One knob per question — the multiplier already scales
+   * both radii, and it would have to scale this too, or this would have to stop being derived
+   * from a radius at all.
+   */
   readonly intensity: number;
   /** Unit aim vector; (0, 0, 0) for an omnidirectional event. */
   readonly dirX: number;
