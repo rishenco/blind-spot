@@ -436,9 +436,13 @@ export const BRIGHT_LEAK_MAX_DB = 0.35;
  * `windowSec` is where each tier sits in `haloHum.test.ts`'s timeline, and it moved when the
  * fixture went: the hum is now driven the way the game drives it, one `setRadius` per 60 Hz
  * frame through §3.8's real glide, so a plateau needs ~1.2 s (about seven glide constants) to
- * have settled before the pitch means anything. The windows also dodge the near-unison's beat
- * nulls, which are 2.25 s apart at the crouch end and where `estimateF0` correctly answers "no
- * pitch here" rather than guessing.
+ * have settled before the pitch means anything.
+ *
+ * These windows used to have a second job — dodging the near-unison's beat nulls, 2.25 s apart at
+ * the crouch end, where `estimateF0` correctly answered "no pitch here" rather than guessing. They
+ * do not any more: shrinking the near-unison closed the nulls, and the pitch now reads
+ * continuously across every plateau (see `HALO_BEAT_MAX_DEPTH_DB`). A test suite steering around
+ * a hole in the readout was the clue that the hole should not have been there.
  */
 export const HALO_PITCH_POINTS = Object.freeze([
   { radiusM: 2, hz: 63.51, windowSec: [0.6, 1.5] },
@@ -449,10 +453,11 @@ export const HALO_PITCH_POINTS = Object.freeze([
 /**
  * How far a measured hum pitch may sit from `humPitch`, in cents.
  *
- * Measured error is +2.7 to +5.8 cents, and it is *not* estimator error — `estimateF0` reads a
+ * Measured error is −3.2 to +1.3 cents, and it is *not* estimator error — `estimateF0` reads a
  * pure sine to within 0.1 cents. It is the hum's own 0.7 % detuned second oscillator pulling the
- * composite period sharp by roughly its share of the mix. 25 cents is an eighth of a semitone:
- * far tighter than anything audible as a wrong reading, far looser than the beat.
+ * composite period around by roughly its share of the mix; it was +2.7 to +5.8 while that partial
+ * ran at 0.8. 25 cents is an eighth of a semitone: far tighter than anything audible as a wrong
+ * reading, far looser than the beat.
  *
  * It is also the tolerance the plateau assertion uses at half width, and that one has teeth: a
  * hum that stopped scheduling a ramp while the radius held still reads **169 cents sharp** for
@@ -466,8 +471,8 @@ export const HALO_PITCH_TOLERANCE_CENTS = 25;
  * §3.8 states this as law — "level stays low and near-constant (≈ −21 dBFS) and ducks under
  * events, so the information rides on pitch and the tone can sit under everything without
  * fatiguing" — so it is a design quantity, and `HALO_LEVEL` in `src/audio/halo.ts` is set to land
- * on it rather than the other way round. The swept render peaks at −21.01. RMS at the plateaus
- * runs 6–13 dB below that, since a 63 Hz fundamental and a 220 Hz one meet the 520 Hz lowpass
+ * on it rather than the other way round. The swept render peaks at −21.06. RMS at the plateaus
+ * runs 6–9 dB below that, since a 63 Hz fundamental and a 220 Hz one meet the 520 Hz lowpass
  * differently.
  */
 export const HALO_PEAK_DBFS = Object.freeze({
@@ -482,11 +487,32 @@ export const HALO_PEAK_DBFS = Object.freeze({
  *
  * If level tracked radius too, a player could not hear their own Halo over their own footsteps
  * at the sprint end, which is exactly the tier where the reading matters most. Measured spread
- * across the three plateaus is 5.8 dB and none of it is intended: it is the 520 Hz lowpass
+ * across the three plateaus is 3.1 dB and none of it is intended: it is the 520 Hz lowpass
  * meeting a 63 Hz fundamental differently from a 220 Hz one. 10 dB leaves room for a filter
  * retune and still fails a hum whose level followed its pitch.
  */
 export const HALO_LEVEL_SPREAD_MAX_DB = 10;
+
+/**
+ * How far the hum's own tremolo may swing, dB — the readout must never go away by itself.
+ *
+ * The tone is a near-unison (`PARTIALS` in `src/audio/halo.ts`), and a near-unison beats: two
+ * partials at gains `a` and `b` swing between `a + b` and `|a - b|` once per `Δratio × f` seconds.
+ * That is deliberate — it is what makes the tone read as a machine idling rather than as a test
+ * tone — but the *depth* was never chosen, and at the original 0.8 against 1.0 it was 16-18 dB.
+ * A tone that nearly vanishes once a second is a problem twice over: §3.8 asks the level to stay
+ * "near-constant" so the reading rides on pitch, and the silence gate spends the tone's absence
+ * to mean "you are making no noise at all" — a meaning it cannot hold if the tone leaves on its
+ * own. The nulls were load-bearing in this very file, too: `HALO_PITCH_POINTS` says its windows
+ * "dodge the near-unison's beat nulls ... where `estimateF0` correctly answers 'no pitch here'".
+ * A readout §3.8 calls non-negotiable, with a hole in it, and a test suite steering around the
+ * hole.
+ *
+ * At 0.35 the measured swing is 6.1-6.5 dB across the whole radius range and `estimateF0` reads
+ * the pitch continuously. 9 dB leaves room to retune the partial and still fails the 0.8 that
+ * made the nulls.
+ */
+export const HALO_BEAT_MAX_DEPTH_DB = 9;
 
 /**
  * How the hum gets out of the way of an event — §3.8's "ducks under events".

@@ -289,7 +289,7 @@ export class Game {
      * a hum that glides at 60 is exactly the disagreement the doc rules out — visible on the one
      * as a staircase the other does not have.
      */
-    this.audio.setHaloRadius(this.sim.halo.radius);
+    this.audio.setHaloRadius(this.sim.halo.radius, this.sim.halo.silent);
     this.ctx.hud.setHalo(this.sim.halo.brightness);
 
     this.hudTimer -= dt;

@@ -29,11 +29,15 @@ import { humPitch } from '../paint/halo';
 /**
  * The hum's output level, pre-master.
  *
- * §3.8 fixes the result rather than this number — "≈ −21 dBFS" — and 0.05 is what lands there
+ * §3.8 fixes the result rather than this number — "≈ −21 dBFS" — and 0.065 is what lands there
  * through the 0.85 master. It is low on purpose: a readout the player mutes is a readout the
  * player does not have, and §3.8's playtest gate is about whether testers keep it on.
+ *
+ * It was 0.05 while the near-unison ran at 0.8. Shrinking that partial to 0.35 to close the beat
+ * nulls (see `PARTIALS`) took 2.3 dB of peak with it, and this puts it back: the tone is the same
+ * level it always was, it just no longer gets there by briefly stacking two partials in phase.
  */
-export const HALO_LEVEL = 0.05;
+export const HALO_LEVEL = 0.065;
 
 /**
  * The partials, as [frequency ratio, gain] against the fundamental.
@@ -43,10 +47,23 @@ export const HALO_LEVEL = 0.05;
  * below 80 Hz — which is most of them, and the bottom of this range is 55 Hz. Neither changes
  * the pitch the player reads: `estimateF0` and the ear both track the fundamental, and the
  * detune's whole contribution is the few cents of sharpness `HALO_PITCH_TOLERANCE_CENTS` allows.
+ *
+ * **The near-unison's gain is the beat's depth, and it is the number that matters here.** Two
+ * partials at gains `a` and `b` swing between `a + b` and `|a - b|`, so the original 0.8 against
+ * 1.0 beat through 16-18 dB — not a shimmer but a gate, closing once per beat. That collided
+ * with two things at once. §3.8 asks the level to stay "near-constant" so the reading rides on
+ * pitch; and the silence gate below reserves *the absence of the tone* to mean "you are making
+ * no noise at all", which a tone that nearly vanishes on its own once a second quietly spends.
+ * The nulls were load-bearing in the tests, too: `HALO_PITCH_POINTS` picked its measurement
+ * windows to dodge them, because at a null there is no pitch to read — a readout §3.8 calls
+ * non-negotiable, with holes in it.
+ *
+ * 0.35 puts the swing at 6.2 dB across the whole range: still plainly a slow pulse, never
+ * mistakable for the tone leaving. The cost is 1.6 dB of level, paid back in `HALO_LEVEL`.
  */
 const PARTIALS: readonly (readonly [number, number])[] = [
   [1, 1],
-  [1.007, 0.8],
+  [1.007, 0.35],
   [2.5, 0.12],
 ];
 
@@ -79,6 +96,22 @@ const DUCK_RELEASE_SEC = 0.12;
 
 /** How long the level takes to reach zero when the hum is stopped, seconds. */
 const STOP_FADE_SEC = 0.02;
+
+/**
+ * How fast the hum leaves and returns when the body falls silent, seconds.
+ *
+ * Slow enough not to click, fast enough that stopping dead reads as an event. The tone going
+ * away *is* the message — §3.8's readout floors at 55 Hz and zero brightness for everything
+ * below the reference radius, so a standstill and a crouch on dust are the same pixel and the
+ * same note. They are not the same situation: one is inaudible to the whole world, the other is
+ * audible to anything within arm's reach, and the dust apron of §3.9 exists so that difference
+ * is worth routing for. Silence is carried as the absence of the tone because that is the only
+ * part of the readout with room left in it.
+ *
+ * A **time constant**, not a duration — the gate eases one frame at a time (see `setSilent`), so
+ * the tone is 95 % gone by 0.18 s and lands on exact zero at about 0.42 s.
+ */
+const SILENCE_FADE_SEC = 0.06;
 
 /**
  * One `setTargetAtTime` segment, remembered so the next one can start where this one got to.
@@ -139,6 +172,11 @@ export class HaloHum {
   private stopped = false;
   private duckDown: Segment | null = null;
   private duckUp: Segment | null = null;
+  private readonly silenceGain: GainNode;
+  /** Where the gate's own easing has got to, and how far its automation is scheduled. */
+  private silenceValue = 1;
+  private silenceLastAt = 0;
+  private silenceScheduledAt = 0;
 
   constructor(ctx: BaseAudioContext, out: AudioNode, options: HaloHumOptions = {}) {
     const startAt = options.startAt ?? ctx.currentTime;
@@ -156,9 +194,20 @@ export class HaloHum {
     this.duckGain.gain.value = 1;
     this.levelGain = ctx.createGain();
     this.levelGain.gain.value = options.level ?? HALO_LEVEL;
+    // A third gain, for the same reason there are already two: this one answers "is the body
+    // making any noise at all", which is a different question from "how loud" and from "get out
+    // of that footstep's way". Sharing a lane would let a duck cancel a silence, or a silence
+    // strand a duck at 0.32 forever.
+    this.silenceGain = ctx.createGain();
+    this.silenceGain.gain.value = 1;
+    // Anchored so the gate's first ramp has a defined point to interpolate *from*, which is the
+    // same reason the oscillators just below are anchored. Without it the first frame's ramp
+    // reaches back to whenever the param last happened to be written.
+    this.silenceGain.gain.setValueAtTime(1, startAt);
 
     lp.connect(this.duckGain);
-    this.duckGain.connect(this.levelGain);
+    this.duckGain.connect(this.silenceGain);
+    this.silenceGain.connect(this.levelGain);
     this.levelGain.connect(out);
 
     for (const [ratio, gain] of PARTIALS) {
@@ -204,6 +253,50 @@ export class HaloHum {
       this.oscillators[i]!.frequency.exponentialRampToValueAtTime(hz * ratio, at);
     }
     this.scheduledAt = at;
+  }
+
+  /**
+   * Whether the body is emitting nothing at all — the hum's on/off, §3.8.
+   *
+   * Driven one short ramp per frame, exactly like `setRadius` above, and the reason is that this
+   * gate has to be able to turn round *mid-fade*. Between two footfalls of a walk the body is
+   * emitting nothing for a moment every stride, and a player edging round a corner taps movement
+   * on and off continuously — an interrupted 60 ms fade is the normal case here, not the edge one.
+   *
+   * The obvious shape — two events per transition, `cancel` then one long ramp — cannot do that
+   * on this backend. A ramp is *timed at its end*, so any cancel at the turnaround removes the
+   * whole in-flight fade rather than truncating it, and the gain steps from where the fade started
+   * to where the new one begins. Measured, that tick is 10-12x the largest step in the steady tone
+   * and about a fifth of the hum's peak. `cancelAndHoldAtTime` is the method the spec added for
+   * precisely this and it does not help here: it removes the future events without inserting the
+   * holding one, so the next ramp interpolates from whatever came *before* the fade — the gate
+   * then spends over a second sliding instead of 60 ms, which the silence tests catch outright.
+   *
+   * A one-frame horizon has no in-flight ramp to truncate. Reversing is just a different target
+   * next frame, continuity comes free, and the easing is done in JS where it is arithmetic rather
+   * than a scheduling contract. `SILENCE_FADE_SEC` is therefore a time constant, not a duration.
+   *
+   * Calls that do not advance the timeline are dropped, for the same reason `setRadius` drops
+   * them: a `when` behind the ramp already in flight would schedule automation into the past.
+   */
+  setSilent(silent: boolean, when: number): void {
+    if (this.stopped) return;
+    const at = when + TRACK_SEC;
+    if (at <= this.silenceScheduledAt) return;
+    const dt = when > this.silenceLastAt ? when - this.silenceLastAt : 0;
+    this.silenceLastAt = when;
+    const target = silent ? 0 : 1;
+    if (dt > 0) {
+      this.silenceValue += (target - this.silenceValue) * (1 - Math.exp(-dt / SILENCE_FADE_SEC));
+    }
+    // Land on the target rather than approaching it forever. Not an audibility fix — the residual
+    // an unsnapped exponential leaves is around −114 dBFS by the time anyone could listen for it,
+    // which is inaudible by any definition — but "silent" is a state this readout asserts, and a
+    // state asserted as `1e-5` is one nothing downstream can test for. It is also the difference
+    // between a render that measures as digital silence and one that measures as very quiet.
+    if (Math.abs(this.silenceValue - target) < 1e-3) this.silenceValue = target;
+    this.silenceGain.gain.linearRampToValueAtTime(this.silenceValue, at);
+    this.silenceScheduledAt = at;
   }
 
   /**

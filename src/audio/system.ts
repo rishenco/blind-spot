@@ -232,13 +232,14 @@ export class AudioSystem {
    * Silently does nothing while audio is not live — the ring is still showing the same number,
    * which is precisely why §3.8 calls the ring the guaranteed readout.
    */
-  setHaloRadius(radiusM: number): void {
+  setHaloRadius(radiusM: number, silent = false): void {
     const ctx = this.ctx;
     const master = this.master;
     if (ctx === null || master === null || ctx.state !== 'running') return;
     if (this.hum === null) {
       try {
         this.hum = new HaloHum(ctx, master, { radiusM });
+        this.hum.setSilent(silent, ctx.currentTime);
         return;
       } catch (error) {
         // Same rule as `play`: a graph that will not build is recorded, never logged, and never
@@ -248,6 +249,7 @@ export class AudioSystem {
       }
     }
     this.hum.setRadius(radiusM, ctx.currentTime);
+    this.hum.setSilent(silent, ctx.currentTime);
   }
 
   /** Whether §3.8's hum has been built and is still running. */

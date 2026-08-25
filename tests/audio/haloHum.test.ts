@@ -22,8 +22,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { estimateF0, hasNaN, peakInfo, rmsDb } from '../support/audioMetrics';
+import { estimateF0, hasNaN, maxStep, peakInfo, rmsDb } from '../support/audioMetrics';
 import {
+  HALO_BEAT_MAX_DEPTH_DB,
   HALO_DUCK,
   HALO_LEVEL_SPREAD_MAX_DB,
   HALO_PEAK_DBFS,
@@ -109,6 +110,74 @@ const CLUSTER_LAST = 0.5 + 7 * 0.03;
 const cluster = await renderOffline(DUCK_SEC, (ctx, master) => {
   const hum = driveSteady(ctx, master, DUCK_SEC, DUCK_HELD_M);
   for (let i = 0; i < 8; i++) hum.duck(0.5 + i * 0.03);
+});
+
+/**
+ * One undisturbed hum per tier, long enough to contain a whole beat cycle at that tier.
+ *
+ * The beat rate is `Δratio × f`, so it *scales with the reading*: 0.44 Hz at a crouch, 1.54 Hz
+ * at a sprint. 3.5 s covers a cycle and a half at the slowest end, which is the shortest render
+ * in which "how deep does it swing" is a question about the tone rather than about the window.
+ */
+const BEAT_SEC = 3.5;
+const BEAT_TIERS = [2, 11, 24] as const;
+const beatRenders = await Promise.all(
+  BEAT_TIERS.map(async (radiusM) => ({
+    radiusM,
+    buffer: await renderOffline(BEAT_SEC, (ctx, master) => {
+      driveSteady(ctx, master, BEAT_SEC, radiusM);
+    }),
+  })),
+);
+
+/**
+ * Silence, and coming back from it.
+ *
+ * The body is an 11 m walk, stops dead to listen, then walks again — the commonest shape in the
+ * game: move, hold still, move.
+ *
+ * **The segments are 1.8 s and not 0.6 s, and the reason is the beat.** The hum's near-unison
+ * (`PARTIALS`) puts a slow tremolo on the tone — 0.96 s per cycle at this radius — so any window
+ * shorter than one beat measures where in the beat it landed as much as it measures the level.
+ * A "comes back at the level it left" claim read from two 80 ms windows is a claim about beat
+ * phase; read across a beat and a quarter it is a claim about level. This is the same fact that
+ * `HALO_PITCH_POINTS` used to dodge and that shrinking the near-unison to 0.35 made survivable:
+ * the swing is now 6.2 dB rather than 16, so a window that covers one cycle averages it out
+ * instead of merely diluting it.
+ */
+const SILENCE_SEC = 5.0;
+/** When the body stops, and when it starts again. */
+const STOPS_AT = 1.8;
+const MOVES_AT = 3.2;
+const silenced = await renderOffline(SILENCE_SEC, (ctx, master) => {
+  const hum = new HaloHum(ctx, master, { startAt: 0, radiusM: DUCK_HELD_M });
+  for (let i = 1; i * FRAME < SILENCE_SEC; i++) {
+    const t = i * FRAME;
+    const quiet = t >= STOPS_AT && t < MOVES_AT;
+    hum.setRadius(quiet ? 0 : DUCK_HELD_M, t);
+    hum.setSilent(quiet, t);
+  }
+});
+
+/**
+ * A tap: the body stops and moves again 30 ms later, inside the gate's own 60 ms fade.
+ *
+ * Not a contrived case. The gate's input is "is the body emitting anything at all", and between
+ * two footfalls of a walk it is false for a moment every stride; a player edging round a corner
+ * produces this shape continuously. Whatever the gate does when a fade is interrupted, it does
+ * several times a second.
+ */
+const TAP_SEC = 3.0;
+const TAP_STOPS_AT = 1.5;
+const TAP_MOVES_AT = 1.53;
+const tapped = await renderOffline(TAP_SEC, (ctx, master) => {
+  const hum = new HaloHum(ctx, master, { startAt: 0, radiusM: DUCK_HELD_M });
+  for (let i = 1; i * FRAME < TAP_SEC; i++) {
+    const t = i * FRAME;
+    const quiet = t >= TAP_STOPS_AT && t < TAP_MOVES_AT;
+    hum.setRadius(DUCK_HELD_M, t);
+    hum.setSilent(quiet, t);
+  }
 });
 
 /** Cents between two frequencies — the unit a pitch error is actually legible in. */
@@ -227,6 +296,37 @@ describe('the level is not the readout (§3.8)', () => {
     // treating a 63 Hz fundamental differently from a 220 Hz one, not the hum getting louder.
     const sprintLevel = levels[levels.length - 1]!;
     expect(sprintLevel).toBeLessThan(Math.max(...levels) + 0.01);
+  });
+
+  /**
+   * The tone never goes away on its own.
+   *
+   * "Near-constant" has to hold *within* a tier as well as across them, and the thing that
+   * threatens it is not the radius — it is the hum's own near-unison. See
+   * `HALO_BEAT_MAX_DEPTH_DB` for why that number exists and what it used to be. The short
+   * version: the absence of this tone is spoken for. It means the body is making no noise at
+   * all, and a tremolo deep enough to read as absence would be the hum lying about that once a
+   * second, in the one register §3.8 calls non-negotiable.
+   *
+   * Measured as the swing of a sliding 80 ms window — the shortest window that is still a
+   * loudness reading at 55 Hz, and about as long as a listener integrates over.
+   */
+  it('never beats deep enough to read as the tone leaving', () => {
+    for (const { radiusM, buffer } of beatRenders) {
+      let quietest = Infinity;
+      let loudest = -Infinity;
+      // From 0.4 s, so the oscillators' shared start phase has drifted apart into the steady
+      // state the player actually hears; to 0.1 s short of the end, so every window is full.
+      for (let t = 0.4; t < BEAT_SEC - 0.18; t += 0.01) {
+        const level = rmsDb(buffer, undefined, t, t + 0.08);
+        if (level < quietest) quietest = level;
+        if (level > loudest) loudest = level;
+      }
+      expect(loudest - quietest, `${radiusM} m`).toBeLessThan(HALO_BEAT_MAX_DEPTH_DB);
+      // And it does still beat — a partial silently dropped to zero would pass the line above
+      // by being a dead sine, which is the tone §3.8 does not want.
+      expect(loudest - quietest, `${radiusM} m`).toBeGreaterThan(1);
+    }
   });
 });
 
@@ -350,5 +450,93 @@ describe('it gets out of the way of events (§3.8)', () => {
     const running = rmsDb(stopped, undefined, 0.3, 0.9);
     expect(rmsDb(stopped, undefined, 1.1, 1.2) - running).toBeLessThan(-30);
     expect(rmsDb(stopped, undefined, 1.5, 2)).toBeLessThan(-120);
+  });
+});
+
+/**
+ * §3.8's readout floors: everything below the reference radius reads 55 Hz and zero brightness.
+ * That makes the bottom of the dial ambiguous in a way that matters — a standstill and a crouch
+ * on dust (1.2 m) are the same note and the same pixel, and they are not the same situation.
+ * One is inaudible to the whole world; the other is a noise anything beside you hears, and
+ * §3.9's dust apron exists so that choosing it is worth something.
+ *
+ * The distinction is carried where there is room for it: the tone goes away. These measure that
+ * it actually does, and that it comes back — a readout that latched off after the first pause
+ * would be worse than one that never stopped.
+ */
+describe('silence is the absence of the tone (§3.8)', () => {
+  const level = (from: number, to: number): number => rmsDb(silenced, undefined, from, to);
+  /** A beat and a quarter, on each side of the pause — see the fixture for why not less. */
+  const BEFORE: readonly [number, number] = [0.55, 1.75];
+  const AFTER: readonly [number, number] = [3.75, 4.95];
+  /** Well past the 0.06 s fade and well short of the return. */
+  const STILL: readonly [number, number] = [2.4, 3.15];
+
+  it('is audible while the body is moving', () => {
+    expect(level(...BEFORE)).toBeGreaterThan(-60);
+  });
+
+  it('leaves when the body stops, and is gone well before the pause is over', () => {
+    expect(level(...STILL)).toBeLessThan(-80);
+    // And it is a fade, not a cut: 30 ms in, the tone is on its way down rather than already
+    // gone. A cut would be a click, which is a sound the body did not make.
+    const midFade = level(STOPS_AT + 0.02, STOPS_AT + 0.05);
+    expect(midFade).toBeGreaterThan(level(...STILL));
+    expect(midFade).toBeLessThan(level(...BEFORE));
+  });
+
+  it('comes back when the body moves again, at the level it left', () => {
+    expect(level(...AFTER)).toBeGreaterThan(-60);
+    /*
+     * Against `plain` — the same hum, same radius, same frame rate, never silenced — and not
+     * only against its own earlier self, because the two windows below share a scale factor. A
+     * gate that returns to half level drops `BEFORE` and `AFTER` together by 6 dB each and their
+     * difference not at all: the mutation survives a self-comparison and dies against a hum that
+     * never had a gate on it. `plain` runs 2.5 s, so it is compared over the *before* window,
+     * which is the one both renders share a beat phase with.
+     */
+    const undisturbed = rmsDb(plain, undefined, ...BEFORE);
+    expect(Math.abs(level(...BEFORE) - undisturbed)).toBeLessThan(0.5);
+    // 1.5 dB is far tighter than anything the gate could plausibly get wrong — a gain stranded
+    // part-way back reads 6 dB or more out — and far looser than the beat's residual across
+    // these windows, measured at 0.5 dB. The still window itself renders as exact digital silence, so
+    // the gap below has 170 dB of margin on a 40 dB claim.
+    expect(Math.abs(level(...AFTER) - level(...BEFORE))).toBeLessThan(1.5);
+  });
+
+  it('drops far enough to read as silence, not as quiet', () => {
+    // The gap between moving and still has to be unmistakable — this is the one distinction the
+    // pitch map cannot make, so it is the one the level has to make decisively. §3.8's readout
+    // floors at 55 Hz for everything below the reference radius, so a standstill and a crouch on
+    // dust are the same note; only the tone's presence tells them apart.
+    expect(level(...BEFORE) - level(...STILL)).toBeGreaterThan(40);
+  });
+
+  it('never produces a NaN sample on the way in or out', () => {
+    expect(hasNaN(silenced)).toBe(false);
+  });
+
+  /**
+   * Interrupting the fade does not click.
+   *
+   * Law 2 is that the system never lies — "every blip and sound has a real physical source" — and
+   * a tick the body did not make is that law broken in the smallest available unit. It is also
+   * the single most likely defect in a gate like this, and invisible to every other metric here:
+   * one bad sample moves no RMS, no peak and no spectrum worth measuring.
+   *
+   * The ruler is the same render's own steady tone. See `maxStep` for why an absolute threshold
+   * would be meaningless. The two ways to get this wrong both failed here before they were fixed:
+   * `cancelScheduledValues` deletes the in-flight ramp and snaps the gain back to the anchor
+   * (measured 12x the steady step, 21 % of the hum's peak), and starting the return from the
+   * ramp's *target* rather than its current value steps by however far the fade had got.
+   */
+  it('does not click when the fade is interrupted', () => {
+    expect(hasNaN(tapped)).toBe(false);
+    const steady = maxStep(tapped, 0.6, 1.4);
+    const turnaround = maxStep(tapped, TAP_STOPS_AT - 0.01, TAP_MOVES_AT + 0.09);
+    expect(turnaround).toBeLessThan(steady * 3);
+    // And the tone really did dip — otherwise the line above passes on a gate that did nothing.
+    expect(rmsDb(tapped, undefined, TAP_STOPS_AT, TAP_MOVES_AT + 0.03))
+      .toBeLessThan(rmsDb(tapped, undefined, 0.6, 1.4) - 3);
   });
 });

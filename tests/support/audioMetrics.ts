@@ -269,6 +269,36 @@ export function hasNaN(buffer: AudioBufferLike): boolean {
   return false;
 }
 
+/**
+ * The largest step between two consecutive samples in a window — a click detector.
+ *
+ * **Measures:** discontinuity. A click is a signal that changes faster than the waveform it is
+ * carrying can account for, and that is exactly a large first difference. Every gain automation
+ * mistake in the book ends here: a `cancelScheduledValues` that deletes an in-flight ramp and
+ * snaps the param back to its last anchor, a `setValueAtTime` used where a ramp belonged, a voice
+ * stopped without a release. None of them change a level, a spectrum or a peak enough to fail the
+ * other metrics in this file — a one-sample tick is invisible to RMS — and all of them are
+ * plainly audible.
+ *
+ * **Does not measure:** a click's audibility. Compare it against the same buffer's own steady
+ * state rather than against an absolute: how big a step is "too big" depends entirely on the
+ * amplitude and the frequency of what is playing, and a 220 Hz tone legitimately steps ten times
+ * further per sample than a 22 Hz one. `maxStep(quiet window)` is the ruler; the click is
+ * whatever will not fit next to it.
+ */
+export function maxStep(buffer: AudioBufferLike, fromSec = 0, toSec = Infinity): number {
+  const [start, end] = range(buffer, fromSec, toSec);
+  let worst = 0;
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const data = buffer.getChannelData(c);
+    for (let i = Math.max(start, 1); i < end; i++) {
+      const step = Math.abs(data[i]! - data[i - 1]!);
+      if (step > worst) worst = step;
+    }
+  }
+  return worst;
+}
+
 // ---------------------------------------------------------------------------
 // spectrum
 
