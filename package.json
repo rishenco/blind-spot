@@ -7,7 +7,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "shots": "npm run build && node tools/shoot.mjs"
+    "shots": "npm run build && node tools/shoot.mjs",
+    "quiet": "npm run build && node tools/quiet.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",
