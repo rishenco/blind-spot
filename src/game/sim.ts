@@ -313,6 +313,11 @@ export class GameSim {
       landDipPeak: this.player.landDipPeakOffset,
       // --- sound
       soundEvents: this.bus.emitted,
+      // Emission rate, as observability rather than as a limit — the bus never drops anything,
+      // so a flood is an emitter bug and these are what make it loud. One player emits at most a
+      // couple a tick; M2's throwables and M4's spiders are the ones worth watching.
+      soundEmittedThisTick: this.bus.emittedThisTick,
+      soundMaxEmittedPerTick: this.bus.maxEmittedPerTick,
       lastEvent: last?.class ?? null,
       lastEventSeq: last?.seq ?? -1,
       lastEventTime: last?.time ?? -1,

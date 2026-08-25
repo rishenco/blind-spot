@@ -177,9 +177,21 @@ describe('a ping, headless', () => {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * The busiest tick of `scriptedRun`, measured — see the characterization test below.
+ *
+ * One, today, because the only emitter is one player and the script never lines a ping up with
+ * the footfall of the same tick. It is not a ceiling: a ping fires at the top of `GameSim.tick`
+ * and a footstep at the bottom of `player.update`, so two in a tick is already reachable, and a
+ * landing plus a footstep makes three.
+ */
+const PEAK_PER_TICK = 1;
+
 interface Run {
   trace: number[];
   sounds: string[];
+  /** The worst single tick's emission count over the whole script. */
+  peakPerTick: number;
 }
 
 /**
@@ -212,9 +224,45 @@ function scriptedRun(seed: number): Run {
     game.step();
     trace.push(p.x, p.y, p.z);
   }
+  const peakPerTick = Number(game.sim.debugState().soundMaxEmittedPerTick);
   game.sim.dispose();
-  return { trace, sounds };
+  return { trace, sounds, peakPerTick };
 }
+
+describe('how much the bus is asked to carry', () => {
+  /**
+   * A characterization number, not a budget — the bus gates nothing, and it must not: a dropped
+   * event is a sound that painted nothing, which design law 2 forbids outright. What this pins
+   * is the *shape* of today's traffic, so that when M2's twenty throwables or M4's spiders
+   * arrive, the difference between "more emitters" and "an emitter that fires every tick instead
+   * of every contact" is a number in a diff rather than a frame-rate mystery.
+   */
+  it('pins the scripted run\'s worst tick', () => {
+    const run = scriptedRun(1234);
+    console.log(`[headless] peak sound events in one tick: ${run.peakPerTick}`);
+    expect(run.peakPerTick).toBe(PEAK_PER_TICK);
+    // The run really did make noise, so the peak is a measurement and not an empty bus.
+    expect(run.sounds.length).toBeGreaterThan(10);
+  });
+
+  it('reports the counters through debugState, live', () => {
+    const game = createHeadlessGame();
+    expect(game.sim.debugState().soundMaxEmittedPerTick).toBe(0);
+    game.input.tapKey('KeyQ');
+    game.step();
+    const s = game.sim.debugState();
+    // A ping fires inside the tick that read the key, so both counters see it immediately.
+    expect(s.soundEmittedThisTick).toBe(1);
+    expect(s.soundMaxEmittedPerTick).toBe(1);
+
+    // The per-tick count resets at the next tick's `bus.setTime`; the peak does not.
+    game.step();
+    const later = game.sim.debugState();
+    expect(later.soundEmittedThisTick).toBe(0);
+    expect(later.soundMaxEmittedPerTick).toBe(1);
+    game.sim.dispose();
+  });
+});
 
 describe('determinism of the assembled game', () => {
   it('two runs with the same seed and the same script are identical', () => {

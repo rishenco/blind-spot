@@ -15,7 +15,19 @@
  *                     column). Nothing consumes it yet; the robo-dogs will.
  *
  * The bus itself is inert: it stamps, validates and fans out. All interpretation belongs to
- * subscribers.
+ * subscribers. Two rules make that fan-out something a growing cast of emitters can rely on:
+ *
+ *  - **A listener must not emit.** Doing so throws. A sound is made by the simulation, never by
+ *    another sound's delivery; anything that answers what it hears answers in its own tick phase,
+ *    at most one tick (8 ms) later. See `emit`.
+ *  - **An event's listeners are the ones that existed when it was emitted.** Fan-out walks a
+ *    snapshot, so subscribing mid-delivery means "from the next event" and unsubscribing
+ *    mid-delivery still receives this one — neither depends on registration order.
+ *
+ * Neither is a limit on how *much* can be emitted. The bus never drops, throttles or defers
+ * anything: a sound the world made and did not paint is precisely what law 2 forbids. It only
+ * counts (`emittedThisTick`, `maxEmittedPerTick`), so that an emitter firing per tick instead of
+ * per contact shows up as a number rather than as a mystery.
  */
 
 /**
@@ -174,6 +186,22 @@ export interface SoundEmitSpec {
 
 export type SoundListener = (event: SoundEvent) => void;
 
+/**
+ * The fan-out buffer, and the flag that makes one buffer enough.
+ *
+ * Both are module-level and they are a pair — the same scope on purpose. `src/core/collision.ts`
+ * documents the convention: a module-level scratch is correct exactly as long as calls happen
+ * sequentially on one thread, and the one thing that breaks it is reentrancy. Collision can rely
+ * on that for free because nothing there takes a callback. A bus is nothing *but* callbacks, so
+ * it has to enforce the property instead of assuming it, and `fanningOut` is that enforcement.
+ *
+ * Which is why the flag cannot be per-instance while the buffer is shared: bus A mid-fan-out
+ * while a listener emits on bus B would leave B's copy sitting in the array A is still walking.
+ * One flag over one buffer means the only way to reach the buffer twice at once now throws.
+ */
+const fanoutScratch: SoundListener[] = [];
+let fanningOut = false;
+
 export class SoundBus {
   /**
    * This bus's sound table. Owned by whoever constructed it (the simulation), never shared with
@@ -185,14 +213,20 @@ export class SoundBus {
   private seq = 0;
   private now = 0;
   private last: SoundEvent | null = null;
+  private tickCount = 0;
+  private tickPeak = 0;
 
   constructor(tunables: SoundTunables = defaultSoundTunables()) {
     this.tunables = tunables;
   }
 
-  /** Scene clock, in seconds. Set once per tick before anything emits. */
+  /**
+   * Scene clock, in seconds. Set once per tick before anything emits — which is what makes it
+   * the tick boundary, and therefore the place the per-tick emission counter resets.
+   */
   setTime(seconds: number): void {
     this.now = seconds;
+    this.tickCount = 0;
   }
 
   get time(): number {
@@ -209,6 +243,25 @@ export class SoundBus {
     return this.seq;
   }
 
+  /**
+   * Events emitted since the last `setTime` — this tick's total.
+   *
+   * Observability, never a gate. The bus does not drop, throttle or defer anything however high
+   * this climbs: a dropped event is a sound with no paint, which is the one thing design law 2
+   * forbids the system to produce. A flood is a bug in whatever is emitting, and the only useful
+   * thing the bus can do about it is make the number impossible to miss. Today one player emits
+   * at most a handful a tick; M2 adds twenty throwables and M4 adds spiders, and the day one of
+   * them emits per-tick instead of per-contact this is what says so.
+   */
+  get emittedThisTick(): number {
+    return this.tickCount;
+  }
+
+  /** The worst tick so far, by `emittedThisTick`. Never reset; a high-water mark. */
+  get maxEmittedPerTick(): number {
+    return this.tickPeak;
+  }
+
   subscribe(listener: SoundListener): () => void {
     this.listeners.add(listener);
     return () => {
@@ -217,6 +270,26 @@ export class SoundBus {
   }
 
   emit(spec: SoundEmitSpec): SoundEvent {
+    /*
+     * A sound is made by the simulation, never by another sound's delivery.
+     *
+     * Something that reacts audibly to what it hears — a spider that skitters when a ping lands,
+     * a prop that rattles when something loud goes past — emits in its *own* tick phase, one tick
+     * later at most: 8 ms at 120 Hz, which no player can perceive. Queuing the reentrant emit
+     * instead would work, and that is the problem: it would bury a real ordering decision inside
+     * the bus, where nobody making a game-design choice would ever look for it. Whether the
+     * spider's answer is heard before or after the rest of this tick's sounds would then depend
+     * on which listener happened to be registered first, which is exactly the "who heard what
+     * first" ambiguity determinism exists to kill.
+     *
+     * Thrown before the sequence number is taken, so a rejected emit leaves no trace on the bus.
+     */
+    if (fanningOut) {
+      throw new Error(
+        `SoundBus.emit('${spec.class}') was called from inside another event's fan-out. ` +
+          'A listener must not emit: emit from the emitter\'s own tick phase instead.',
+      );
+    }
     const profile = this.tunables.classes[spec.class];
     let dx = spec.dirX ?? 0;
     let dy = spec.dirY ?? 0;
@@ -250,7 +323,31 @@ export class SoundBus {
       seq: this.seq++,
     };
     this.last = event;
-    for (const listener of this.listeners) listener(event);
+    this.tickCount++;
+    if (this.tickCount > this.tickPeak) this.tickPeak = this.tickCount;
+
+    /*
+     * Fan out over a snapshot, not over the live set.
+     *
+     * A JS `Set` iterated with for-of visits entries added *during* the iteration, so a listener
+     * that subscribes while an event is being delivered would receive that same event — and one
+     * that unsubscribes would or would not, depending on where in the set it sat. Both make
+     * delivery depend on registration order rather than on subscription time. The snapshot fixes
+     * the answer in one direction for both: the set of listeners for an event is the set that
+     * existed when it was emitted. Subscribing during fan-out means "from the next event";
+     * unsubscribing during fan-out still receives this one.
+     */
+    fanoutScratch.length = 0;
+    for (const listener of this.listeners) fanoutScratch.push(listener);
+    fanningOut = true;
+    try {
+      for (let i = 0; i < fanoutScratch.length; i++) fanoutScratch[i]!(event);
+    } finally {
+      // `finally`, so a listener that throws does not wedge the bus shut for the rest of the
+      // run. The throw itself still propagates — the bus does not swallow other people's errors.
+      fanningOut = false;
+      fanoutScratch.length = 0;
+    }
     return event;
   }
 

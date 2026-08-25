@@ -260,6 +260,92 @@ describe('SoundBus.subscribe', () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
+  it('a listener that emits throws, rather than quietly reordering the tick', () => {
+    // A sound is made by the simulation, never by another sound's delivery. The alternative —
+    // queuing the reentrant emit — would decide "who heard what first" inside the bus, where no
+    // one making that call would think to look, and would make it depend on registration order.
+    const bus = new SoundBus();
+    const stop = bus.subscribe(() => {
+      bus.emit({ class: 'q-ping', x: 0, y: 0, z: 0 });
+    });
+    expect(() => bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 })).toThrow(/fan-out/);
+    stop();
+
+    // The refusal leaves no trace: the rejected emit took no sequence number, moved no counter,
+    // and did not wedge the bus shut behind it.
+    expect(bus.emitted).toBe(1);
+    expect(bus.emittedThisTick).toBe(1);
+    const after = bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    expect(after.seq).toBe(1);
+  });
+
+  it('and the refusal is the module, not the instance — A fanning out blocks B too', () => {
+    // The fan-out buffer is shared between every bus in the process, so a listener on A emitting
+    // on B would overwrite the array A is still walking. One flag over one buffer is what makes
+    // the single buffer safe; a per-instance flag would leave exactly that hole open.
+    const a = new SoundBus();
+    const b = new SoundBus();
+    const stop = a.subscribe(() => {
+      b.emit({ class: 'q-ping', x: 0, y: 0, z: 0 });
+    });
+    expect(() => a.emit({ class: 'walk-step', x: 0, y: 0, z: 0 })).toThrow(/fan-out/);
+    stop();
+    // Sequentially, of course, they are completely independent.
+    a.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    b.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    expect([a.emitted, b.emitted]).toEqual([2, 1]);
+  });
+
+  it('a listener that throws does not wedge the bus shut', () => {
+    const bus = new SoundBus();
+    const stop = bus.subscribe(() => {
+      throw new Error('listener exploded');
+    });
+    const after = vi.fn();
+    bus.subscribe(after);
+    expect(() => bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 })).toThrow('listener exploded');
+    stop();
+    // The fan-out flag was cleared on the way out, so the next emit is not refused as reentrant.
+    expect(() => bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 })).not.toThrow();
+    expect(after).toHaveBeenCalledTimes(1);
+  });
+
+  it('subscribing during a fan-out starts at the NEXT event, not this one', () => {
+    // `Set` iteration visits entries added while it is running, so without the snapshot the new
+    // listener would receive the very event that added it.
+    const bus = new SoundBus();
+    const late = vi.fn();
+    let added = false;
+    bus.subscribe(() => {
+      if (added) return;
+      added = true;
+      bus.subscribe(late);
+    });
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    expect(late).not.toHaveBeenCalled();
+
+    const second = bus.emit({ class: 'q-ping', x: 0, y: 0, z: 0 });
+    expect(late).toHaveBeenCalledTimes(1);
+    expect(late.mock.calls[0]![0]).toBe(second);
+  });
+
+  it('unsubscribing during a fan-out still delivers the event it was unsubscribed in', () => {
+    // The other half of the same rule, and the half a live `Set` gets wrong in the opposite
+    // direction: an entry deleted before the iterator reaches it is never visited. The snapshot
+    // says instead that an event's listeners are the ones that existed when it was emitted.
+    const bus = new SoundBus();
+    const victim = vi.fn();
+    let stopVictim = (): void => {};
+    bus.subscribe(() => stopVictim());
+    stopVictim = bus.subscribe(victim);
+
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    expect(victim).toHaveBeenCalledTimes(1);
+    // ...and it really is gone for everything after it.
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    expect(victim).toHaveBeenCalledTimes(1);
+  });
+
   it('dispose drops every listener but keeps the clock and the counter', () => {
     const bus = new SoundBus();
     const fn = vi.fn();
@@ -272,6 +358,49 @@ describe('SoundBus.subscribe', () => {
     expect(after.seq).toBe(1);
     expect(after.time).toBe(7);
     expect(bus.emitted).toBe(2);
+  });
+});
+
+describe('the per-tick emission counters', () => {
+  it('count this tick, remember the worst tick, and reset on setTime', () => {
+    const bus = new SoundBus();
+    expect([bus.emittedThisTick, bus.maxEmittedPerTick]).toEqual([0, 0]);
+
+    bus.setTime(1);
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    bus.emit({ class: 'q-ping', x: 0, y: 0, z: 0 });
+    expect([bus.emittedThisTick, bus.maxEmittedPerTick]).toEqual([2, 2]);
+
+    // `setTime` is the tick boundary — `GameSim.tick` stamps the clock once, at the top, before
+    // anything is allowed to emit — so it is where the per-tick count resets.
+    bus.setTime(2);
+    expect([bus.emittedThisTick, bus.maxEmittedPerTick]).toEqual([0, 2]);
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    expect([bus.emittedThisTick, bus.maxEmittedPerTick]).toEqual([1, 2]);
+
+    // The peak is a high-water mark: it only ever climbs.
+    bus.setTime(3);
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0 });
+    expect([bus.emittedThisTick, bus.maxEmittedPerTick]).toEqual([3, 3]);
+    expect(bus.emitted).toBe(6);
+  });
+
+  it('observe without gating: a flood is counted, and every event of it is delivered', () => {
+    // The counters exist so an emitter bug is loud, never so the bus can protect itself by
+    // dropping. A dropped event is a sound that made no paint, which is the one thing design
+    // law 2 forbids the system to produce — so however high this climbs, all of it goes out.
+    const bus = new SoundBus();
+    const heard: number[] = [];
+    bus.subscribe((e) => heard.push(e.seq));
+    bus.setTime(1);
+    for (let i = 0; i < 500; i++) bus.emit({ class: 'walk-step', x: i, y: 0, z: 0 });
+    expect(bus.emittedThisTick).toBe(500);
+    expect(bus.maxEmittedPerTick).toBe(500);
+    expect(heard).toHaveLength(500);
+    expect(heard[0]).toBe(0);
+    expect(heard[499]).toBe(499);
   });
 });
 
