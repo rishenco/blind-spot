@@ -184,6 +184,55 @@ export const VARIANTS: RuleVariant[] = [
       c.contest.steal.graceSec = 1.5;
     },
   },
+  // --- the ping economy: is a rarer, stronger question a better one? ------------------------
+  {
+    name: 'ping-3s',
+    note: 'a 3 s cooldown instead of 1.5: half as many questions, so each one has to be a decision',
+    apply: (c) => {
+      c.ping.cooldownSec = 3;
+    },
+  },
+  {
+    name: 'ping-4s-far',
+    note: '4 s cooldown, and a ping that sees the whole pitch and lasts twice as long',
+    apply: (c) => {
+      c.ping.cooldownSec = 4;
+      c.ping.range = 24;
+      c.ping.lifeSec = 2;
+    },
+  },
+  {
+    name: 'ping-3s-far',
+    note: '3 s cooldown with the longer, brighter snapshot',
+    apply: (c) => {
+      c.ping.cooldownSec = 3;
+      c.ping.range = 24;
+      c.ping.lifeSec = 2;
+    },
+  },
+  {
+    name: 'ping-cone',
+    note: 'a 120° cone instead of 360°: a question you have to point',
+    apply: (c) => {
+      c.ping.cooldownSec = 2.5;
+      c.ping.coneDeg = 120;
+      c.ping.range = 24;
+    },
+  },
+  {
+    name: 'ball-hum-14',
+    note: 'a LOOSE ball that only carries 14 m instead of the whole pitch — the last free fact, priced',
+    apply: (c) => {
+      c.loudness['ball-hum'] = 14;
+    },
+  },
+  {
+    name: 'ball-hum-9',
+    note: 'a loose ball audible at 9 m: finding it becomes a search of its own',
+    apply: (c) => {
+      c.loudness['ball-hum'] = 9;
+    },
+  },
   {
     name: 'all-fastthrow',
     note: 'everything on, but back to the old 22 m/s release and 3 m goal',

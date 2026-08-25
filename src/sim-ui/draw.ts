@@ -46,6 +46,10 @@ export const SOUND_COLOR: Partial<Record<SoundKind, string>> = {
   // Two rows added with the fight for the ball: a ball whistling past a body that did not react,
   // and the scuffle of the ball changing hands.
   'ball-near': '#c7b48a',
+  // The carried ball's beep: the same warm yellow as the ball itself, because that is what it is.
+  'ball-carry': '#ffd166',
+  // A shout: the one noise a player makes on purpose, so it gets its own colour.
+  call: '#6fd3e0',
   steal: '#5cffd0',
   sonar: '#ffffff',
   whistle: '#ff7ae0',
@@ -355,7 +359,20 @@ function drawBody(ctx: CanvasRenderingContext2D, cam: Camera, p: PlayerState, o:
   ctx.lineTo(sx(cam, tip), sy(cam, tip));
   ctx.stroke();
   if (o.showVectors) arrow(ctx, cam, p.pos, p.vel, '#ffffff');
-  label(ctx, `P${p.id}${p.hasBall ? '●' : ''}`, sx(cam, p.pos) + 8, sy(cam, p.pos) - 8, color, 11);
+  // The gloves. One body per team may stand inside its own arc, and which body it is changes
+  // during play — so in the truth view it has to be visible at a glance, or half of what the
+  // defence is doing is unreadable.
+  if (p.keeper) {
+    circle(ctx, cam, p.pos, o.playerRadius * 2.1, '#ffffff', 0.5);
+  }
+  label(
+    ctx,
+    `P${p.id}${p.hasBall ? '●' : ''}${p.keeper ? ' GK' : ''}`,
+    sx(cam, p.pos) + 8,
+    sy(cam, p.pos) - 8,
+    color,
+    11,
+  );
   if (p.charging) circle(ctx, cam, p.pos, 0.8 + p.chargeT, '#ffb703', 0.8);
   if (p.diveT > 0) circle(ctx, cam, p.pos, 0.9, '#ff9d5c', 0.9);
 }

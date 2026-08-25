@@ -46,6 +46,8 @@ export interface ScriptAction {
   charge?: boolean;
   catch?: boolean;
   dive?: boolean;
+  /** Shout for the ball. */
+  call?: boolean;
   /** Shown in the debug panel while this action runs. */
   label?: string;
 }
@@ -93,6 +95,7 @@ export class Scripted implements Controller {
     intent.charge = action.charge === true;
     intent.catch = action.catch === true;
     intent.dive = action.dive === true;
+    intent.call = action.call === true;
 
     this.elapsed += dt;
     if (this.elapsed >= (action.for ?? 0)) {

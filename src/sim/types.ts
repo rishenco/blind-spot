@@ -46,6 +46,15 @@ export type SoundKind =
    * is now worth making.
    */
   | 'ball-carry'
+  /**
+   * A shout: "I am here, throw it". The only thing in the game a player says on purpose.
+   *
+   * It exists because of law 4 read forwards instead of backwards. A pass has to be thrown at a
+   * man nobody can hear, so somebody has to break the silence for it to happen at all — and the
+   * shout is the honest way to do that: it tells your team-mate where you are and it tells
+   * everybody else exactly the same thing, at the same moment, with no error.
+   */
+  | 'call'
   /** A ball that went past a body nobody had timed: quiet, but never nothing. */
   | 'ball-near'
   /** The ball changing hands in a scuffle. Every change of possession has to be audible. */
@@ -223,6 +232,8 @@ export interface SelfState {
   down: boolean;
   /** > 0 while the hands are open: the catch button was pressed and the reach has not lapsed. */
   reaching: boolean;
+  /** Seconds before this body can shout for the ball again. */
+  callCooldown: number;
   /**
    * This body wears the gloves: it may stand inside its own crease, and nothing else may.
    *
@@ -326,6 +337,8 @@ export interface Intent {
   charge: boolean;
   catch: boolean;
   dive: boolean;
+  /** Shout for the ball. Rising edge, on its own cooldown. */
+  call: boolean;
 }
 
 export function idleIntent(): Intent {
@@ -337,6 +350,7 @@ export function idleIntent(): Intent {
     charge: false,
     catch: false,
     dive: false,
+    call: false,
   };
 }
 

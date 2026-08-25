@@ -279,14 +279,13 @@ const HAND_SCENARIOS: Scenario[] = [
   },
   {
     name: 'hands-catch-early',
-    note: 'the same pass, pressed three metres too soon: a fumble, and a read-out that says why',
+    note: 'the same pass, taken at a full sprint: it bounces off, and the read-out says why',
     ticks: 240,
     playerSlot: 2,
     hands: [
       { slot: 0, script: new ThrowHand(0.45, 'passer', RECEIVER, PASS_DELAY) },
-      // Six metres, not three: the reach lasts 0.22 s and a pass covers three metres in less
-      // than that, so what used to be "far too early" is now a comfortable catch.
-      { slot: 2, script: new CatchHand('early', 6.5, 'receiver', RECEIVER) },
+      // The only way left to drop a pass: run at it. Catching itself needs no button.
+      { slot: 2, script: new CatchHand('charge', 6.5, 'receiver', RECEIVER) },
     ],
     make: () => ({
       config: handsConfig(),

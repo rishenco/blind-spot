@@ -16,6 +16,9 @@
 import { clamp, dist2, len2 } from '../math';
 import type { FieldInfo, ObservedEmitter, Vec2 } from '../types';
 
+/** After this much silence the fit is thrown away rather than stretched across the gap. */
+const SILENCE_RESET_SEC = 4;
+
 export interface BallEstimate {
   pos: Vec2;
   vel: Vec2;
@@ -57,10 +60,18 @@ export class BallTracker {
     this.lastT = -1;
   }
 
-  /** Feeds one tick's observation. A gap in the hum (out of range) clears the history. */
+  /**
+   * Feeds one tick's observation, or `null` for a tick in which the ball said nothing.
+   *
+   * Silence is no longer an anomaly: a carried ball only beeps, so most ticks of most possessions
+   * have nothing in them. The history is kept and simply ages — a bot that has not heard the ball
+   * for a second believes it is where it last heard it, which is exactly what a blind player
+   * believes. Only a long silence (the ball is somewhere it has not been for seconds) throws the
+   * fit away, because a straight line through samples that far apart is a fiction.
+   */
   observe(em: ObservedEmitter | null, t: number): void {
     if (!em) {
-      this.reset();
+      if (this.lastT >= 0 && t - this.lastT > SILENCE_RESET_SEC) this.reset();
       return;
     }
     // A discontinuity (a catch, a throw, a wall bounce) invalidates the old samples: fitting a

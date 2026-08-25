@@ -166,8 +166,11 @@ const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0
  * wrong, not the bot being clever.
  */
 function panel(script: { name: string; make: ControllerFactory }, size: number): { name: string; make: ControllerFactory }[] {
+  // The observer may not ping. Every scenario in this suite is about what a bot believes from
+  // what it *heard*, and a ping that sees the whole pitch answers the question the experiment is
+  // asking — the observer would simply look, and the belief being measured would never form.
   const out: { name: string; make: ControllerFactory }[] = [makeController('statue')];
-  for (let i = 1; i < size; i++) out.push(makeController('bot'));
+  for (let i = 1; i < size; i++) out.push(makeController('bot-mute'));
   out.push(script);
   for (let i = 1; i < size; i++) out.push(makeController('statue'));
   return out;
@@ -393,6 +396,13 @@ function riggedConfig(only: 'steal' | 'tackle' | 'collision' | 'block'): SimConf
   c.contest.tackle.enabled = only === 'tackle';
   c.contest.collision.enabled = only === 'collision';
   c.contest.block.mode = only === 'block' ? 'speed' : 'always';
+  if (only === 'block') {
+    // A tighter reach for this scenario only. With catching automatic, the band in which a ball
+    // touches a body and is still uncatchable is what "the block is not a wall" now means — and
+    // at the default span that band is a hand's width. Widening it here makes the frame legible
+    // without changing what the rule says.
+    c.catching.catchSpeedSpan = 14;
+  }
   return c;
 }
 
@@ -444,7 +454,7 @@ MECHANIC_SCENARIOS.push(
     name: 'mech-tackle',
     suite: 'mechanic',
     note: 'the dive tackle: a body thrown at where the carrier is going to be, not where he is',
-    expect: 'one tackle; the victim is on the floor and the ball is loose',
+    expect: 'one tackle; the victim is on the floor and the ball is off him',
     seed: 102,
     ticks: 200,
     eyes: 3,
@@ -465,7 +475,9 @@ MECHANIC_SCENARIOS.push(
       tackles: contestCount(m, 'tackles'),
       down: m.sim.state.players.filter((p) => p.downT > 0).length,
       fumbles: m.stats.players.reduce((a, p) => a + p.fumbles, 0),
-      ballLoose: m.sim.state.ball.carrier === null ? 1 : 0,
+      // Loose *from the carrier's point of view*: with catching automatic, whoever is standing
+      // over the spilled ball picks it up within a tick or two, which is the mechanic working.
+      carrierLostIt: m.sim.state.ball.carrier === 0 ? 0 : 1,
     }),
   },
   {
@@ -528,7 +540,9 @@ MECHANIC_SCENARIOS.push(
       const config = riggedConfig('block');
       const shooter = scripted(
         [
-          { for: 0.7, charge: true, aim: [1, 0], label: 'wind-up' },
+          // Fired past his shoulder rather than into his chest: at 16 m/s a body catches only
+          // what hits its hands, so a ball aimed dead centre is simply caught and proves nothing.
+          { for: 0.7, charge: true, aim: [1, 0.04], label: 'wind-up' },
           { for: 5, label: 'released' },
         ],
         'shooter',
@@ -538,6 +552,128 @@ MECHANIC_SCENARIOS.push(
     measure: (m) => ({
       ballsThrough: m.stats.players.reduce((a, p) => a + p.ballsThrough, 0),
       fumbles: m.stats.players.reduce((a, p) => a + p.fumbles, 0),
+    }),
+  },
+);
+
+// ===========================================================================
+// The three mechanics added on 2026-08-25: the keeper, the ball's own voice, and a pass thrown
+// into the dark at a man nobody can hear. Each one is a rule the человек asked for, so each one
+// arrives with a measurement and a pair of keyframes rather than with a promise.
+// ===========================================================================
+
+MECHANIC_SCENARIOS.push(
+  {
+    name: 'mech-keeper',
+    suite: 'mechanic',
+    note: 'the keeper: the one body allowed inside its own crease, saving a shot it can only hear',
+    expect: 'one save; the shot does not go in',
+    seed: 111,
+    ticks: 200,
+    eyes: 2,
+    build: () => {
+      const config = configFromPreset('default');
+      config.match.spawnJitter = 0;
+      config.match.kickoffTeam = 'fixed';
+      // The shooter walks into range and fires at the near half of the mouth. He is aiming at a
+      // goal he cannot see, at a keeper he cannot hear — which is the whole situation.
+      const shooter = scripted(
+        [
+          { for: 1.9, run: [1, 0.62], aim: [1, 0], label: 'closing in' },
+          { for: 0.5, charge: true, aim: [1, -0.06], label: 'wind-up' },
+          { for: 4, label: 'released' },
+        ],
+        'shooter',
+      );
+      // The keeper walks back onto his line and stands. He may be in there; nobody else may.
+      const keeper = scripted(
+        [
+          { for: 1.6, run: [1, 0.66], aim: [-1, 0], label: 'back to the line' },
+          { for: 6, stand: true, aim: [-1, 0], label: 'on the line, listening' },
+        ],
+        'keeper',
+      );
+      return { config, controllers: duel({ name: 'shooter', make: shooter }, { name: 'keeper', make: keeper }) };
+    },
+    measure: (m) => ({
+      saves: m.timeline.filter((e) => e.kind === 'contest' && e.label.includes('saves')).length,
+      goals: m.stats.score[0],
+      keeperInCrease: m.sim.state.players.filter((p) => p.keeper).length,
+    }),
+  },
+  {
+    name: 'mech-ball-voice',
+    suite: 'mechanic',
+    note: 'the ball in the hands: silent for a moment after a catch, then beeping louder and faster',
+    expect: 'nothing audible in the first second, and a rising trail of beeps after it',
+    seed: 112,
+    ticks: 400,
+    // Watched from an opponent standing perfectly still eleven metres away: what he hears IS the
+    // mechanic. Early on, nothing. Later, a bright line of beeps walking across his screen.
+    eyes: 2,
+    build: () => {
+      const config = configFromPreset('default');
+      config.match.spawnJitter = 0;
+      config.match.kickoffTeam = 'fixed';
+      config.match.carryTimeoutSec = 0;
+      const carrier = scripted([{ for: 9, walk: [1, 0.35], aim: [1, 0], label: 'walking it up' }], 'carrier');
+      return { config, controllers: duel({ name: 'carrier', make: carrier }, makeController('statue')) };
+    },
+    measure: (m) => ({
+      beeps: m.log.filter((e) => e.kind === 'ball-carry').length,
+      firstBeepAt: +(m.log.find((e) => e.kind === 'ball-carry')?.t ?? -1).toFixed(2),
+      firstLoudness: +(m.log.find((e) => e.kind === 'ball-carry')?.intensity ?? 0).toFixed(1),
+      lastLoudness: +(m.log.filter((e) => e.kind === 'ball-carry').pop()?.intensity ?? 0).toFixed(1),
+    }),
+  },
+  {
+    name: 'mech-pass-dark',
+    suite: 'mechanic',
+    note: 'a pass into the dark: a silent man shouts once, and the bot throws at the shout',
+    expect: 'the shout is heard and the pass is completed',
+    seed: 113,
+    ticks: 900,
+    eyes: 0,
+    build: () => {
+      const config = configFromPreset('default');
+      config.match.spawnJitter = 0;
+      config.match.kickoffTeam = 'fixed';
+      // P1 is a stand-in for a person: he walks quietly into space, stands, and shouts once.
+      // Nothing else about him is audible, which is exactly the problem the shout exists for —
+      // a bot cannot throw the ball at a body it has no way to place.
+      const human = scripted(
+        [
+          { for: 1.2, walk: [1, -0.5], aim: [1, 0], label: 'quietly into space' },
+          { for: 0.4, stand: true, label: 'and silent' },
+          { call: true, label: 'HERE' },
+          { for: 2.5, stand: true, label: 'waiting for it' },
+          { call: true, label: 'HERE' },
+          { for: 2.5, stand: true, label: 'still waiting' },
+          { call: true, label: 'HERE' },
+          { for: 2.5, stand: true, label: 'still waiting' },
+          { call: true, label: 'HERE' },
+          { for: 2.5, stand: true, label: 'still waiting' },
+          { call: true, label: 'HERE' },
+          { for: 6, stand: true, label: 'waiting for it' },
+        ],
+        'human',
+      );
+      // A live defence, because the question only exists when there is one: with an empty net
+      // the man with the ball shoots and no pass is ever worth making.
+      return {
+        config,
+        controllers: [
+          makeController('bot'),
+          { name: 'human', make: human },
+          makeController('bot'),
+          makeController('bot'),
+        ],
+      };
+    },
+    measure: (m) => ({
+      calls: m.log.filter((e) => e.kind === 'call').length,
+      passesToHim: m.timeline.filter((e) => e.kind === 'catch' && e.label.includes('P1 takes the pass')).length,
+      passes: m.stats.shape.passes,
     }),
   },
 );

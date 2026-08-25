@@ -412,12 +412,12 @@ check(
 
 // --- 52 the catch, timed ---------------------------------------------------
 const caught = await storyboard('52', 'hands-catch', 2.2, [
-  { tick: 200, name: 'incoming', note: 'a pass arriving: the dashed leash points at the ball, the dotted ring is the reach the arms have, and the green arc is the countdown to the moment it lands' },
-  { tick: 210, name: 'window', note: 'a fifth of a second out: the reach ring has gone solid green — this is the window, drawn before the fact rather than explained after it' },
-  { tick: 218, name: 'caught', note: 'pressed and caught. CAUGHT under the nose, a slap the other team can hear, and the ball is now this player’s problem: it sings from their hands for at most five seconds' },
-  { tick: 234, name: 'carrying', note: 'carrying: the loudness meter is pinned, because a carrier is audible from anywhere on the pitch. The bargain of the whole game — you have the ball, and everyone knows exactly where you are' },
+  { tick: 200, name: 'incoming', note: 'a pass arriving: the dashed leash points at the ball, and the dotted ring is the reach — which is not a constant any more. It shrinks as the ball speeds up, and that is the whole rule of catching now that there is no button' },
+  { tick: 214, name: 'window', note: 'the last tenth of a second: the ball is inside the reach and the ring has gone solid green. Nobody presses anything — being in the right place IS the catch' },
+  { tick: 222, name: 'caught', note: 'caught, automatically. CAUGHT under the nose, a slap the other team can hear, and the ball is now this player’s problem' },
+  { tick: 238, name: 'carrying', note: 'carrying, and this is the new bargain: the ball is SILENT in fresh hands and starts beeping about a second in, louder and faster the longer it is kept. The meter under the nose is that price, rising' },
 ]);
-check('catch: the pass was taken', caught[2].feel.stats.catches === 1, JSON.stringify(caught[2].feel.stats));
+check('catch: the pass was taken, with no button pressed', caught[2].feel.stats.catches === 1, JSON.stringify(caught[2].feel.stats));
 check(
   'catch: the read-out said so',
   caught[2].feel.readout === 'CAUGHT',
@@ -426,13 +426,13 @@ check(
 
 // --- 54 the catch, missed --------------------------------------------------
 const missedCatch = await storyboard('54', 'hands-catch-early', 2.2, [
-  { tick: 196, name: 'grabbing', note: 'the same pass, and a nervous player who grabs at it six metres out' },
-  { tick: 206, name: 'verdict', note: 'the read-out: TOO SOON — it was still 5.9 m out. The verdict comes from the simulation itself now (`SelfState.lastCatchFail`), not from a guess made out here: the failure has a number and a reason, so the player knows what to change instead of concluding that the game is arbitrary' },
-  { tick: 224, name: 'gone', note: 'and the ball has gone past. The hands closed before it arrived, nothing was caught, and the chance is spent' },
+  { tick: 200, name: 'grabbing', note: 'the same pass, and a player who sprints at it. Running at a hard ball is the one way left to drop one — catching is otherwise automatic' },
+  { tick: 218, name: 'verdict', note: 'the read-out: TOO FAST · slow down to take it. The verdict comes from the simulation itself (`SelfState.lastCatchFail`), so the failure has a cause and a cure rather than reading as an arbitrary game' },
+  { tick: 232, name: 'gone', note: 'and the ball has bounced off him, loudly. A fumble carries 14 m: the whole pitch heard the mistake' },
 ]);
 check(
-  'missed catch: the player is told why, in metres',
-  typeof missedCatch[1].feel.readout === 'string' && missedCatch[1].feel.readout.startsWith('TOO SOON'),
+  'missed catch: the player is told why he dropped it',
+  typeof missedCatch[1].feel.readout === 'string' && missedCatch[1].feel.readout.startsWith('TOO FAST'),
   String(missedCatch[1].feel.readout),
 );
 check('missed catch: nothing was caught', missedCatch[1].feel.stats.catches === 0, JSON.stringify(missedCatch[1].feel.stats));
@@ -463,7 +463,10 @@ check('ping: it was fired', scream[3].feel.stats.pings === 1, JSON.stringify(scr
 // The strongest claim in the project, made photometrically rather than in prose: the cockpit is
 // drawn from the player's own perception and proprioception and from nothing else. So point at
 // where each opponent actually is, and measure that the player's own pane is black there.
-await call('scenario', 'hands-catch', 206);
+// The scenario is the wind-up, not the catch: the player's own side has the ball, so both
+// opponents are statues that have made no sound at all. Pointing at a man who is legitimately
+// audible — a carrier whose ball has started beeping — would prove nothing about leakage.
+await call('scenario', 'hands-throw', 30);
 await call('mode', 'play');
 // Whole-pitch zoom for this pair only: at a playing zoom the opponents are simply off-screen,
 // and "you cannot see him because he is outside the viewport" would prove nothing at all.
@@ -471,7 +474,7 @@ await call('zoom', 1);
 await call('layout', 'truth');
 const proofTruth = await shot(
   '60-cockpit-truth.png',
-  'the truth at the moment of a catch: four bodies, the ball and the hearing rings. P0 (cyan, bottom left) threw the pass; P1 (cyan, top left) has not moved or made a sound in seconds',
+  'the truth a moment before a throw: four bodies, the ball and the hearing rings. Both orange bodies have not moved or made a sound since the whistle',
   'truth',
 );
 await call('layout', 'eyes');
@@ -550,7 +553,11 @@ const tackle = await mechPair(
   'the dive tackle, truth: the defender bet his body on where the carrier would be, not on where he was. The carrier is flat on the floor and the ball is loose',
   'the same moment from the far side of the pitch: the thud and the fumble are both loud, so a tackle is one of the few things in this game that everybody hears',
 );
-check('tackle: the ball came loose', tackle.state.ball.carrier === null);
+check(
+  'tackle: the carrier lost the ball',
+  tackle.state.ball.carrier !== 0,
+  `carrier ${tackle.state.ball.carrier}`,
+);
 
 // --- 34/35 the tackle that missed -------------------------------------------
 const missed = await mechPair(
@@ -588,6 +595,69 @@ check(
   'block: the ball is past the defender and still loose',
   block.state.ball.carrier === null && block.state.ball.x > 4.2,
   `ball x ${block.state.ball.x.toFixed(2)} carrier ${block.state.ball.carrier}`,
+);
+
+// --- 42/43 the keeper -------------------------------------------------------
+const keeper = await mechPair(
+  '42',
+  'mech-keeper',
+  178,
+  'the keeper, truth: the one body in the game allowed inside its own arc. The shot was fired at the near half of a 3.2 m mouth from eight metres, and it died on him. Nobody else on either team may stand where he is standing',
+  'and this is everything he had to work with: the crack of the release, and the ball. He cannot know the corner — nothing he can hear says which one — so he stands where the angle is narrowest and spends his reach on the half he guessed',
+);
+check(
+  'keeper: the shot was saved rather than scored',
+  keeper.state.score[0] === 0,
+  `score ${keeper.state.score.join(':')}`,
+);
+
+// --- 44/45 the ball's own voice ---------------------------------------------
+// Two moments of ONE possession, both through the ears of a man standing still eleven metres
+// away. This is the pair that shows the biggest rule change in the project: a ball that used to
+// hum across the whole pitch for ever now goes quiet in fresh hands and gets louder the longer
+// they keep it.
+await call('scenario', 'mech-ball-voice');
+await call('scrubTo', 55);
+await call('layout', 'truth');
+const voiceEarly = await shot(
+  '44-ball-voice-truth.png',
+  'the ball a second after it was taken, truth: the carrier (cyan) is walking it up, and the listener (orange, right) has not moved since the whistle',
+  'truth',
+);
+await call('layout', 'eyes');
+const voiceQuiet = await shot(
+  '45-ball-voice-quiet.png',
+  'the same instant through the listener: NOTHING. A ball in fresh hands is silent, so the man carrying it is as invisible as anybody else — this second is what a pass buys, and it is the whole reason to make one',
+  'eyes',
+);
+await call('scrubTo', 330);
+const voiceLoud = await shot(
+  '46-ball-voice-loud.png',
+  'the same possession four seconds later: the ball is beeping every third of a second and carrying 22 m, and the trail of marks IS the carrier walking. He did nothing wrong — he simply kept it, and the price of keeping it is being audible',
+  'eyes',
+);
+check(
+  'ball voice: a fresh ball is silent and a held one is not',
+  voiceQuiet.content < voiceLoud.content,
+  `quiet ${voiceQuiet.content.toFixed(4)} vs loud ${voiceLoud.content.toFixed(4)}`,
+);
+check('ball voice: the truth pane still shows the carrier', voiceEarly.content > voiceQuiet.content);
+
+// --- 47/48 a pass into the dark ---------------------------------------------
+// Beliefs off: this pair is about perception, and the bot's grids would fill the pane with
+// things that are guesses rather than things that were heard.
+await call('beliefs', 'none');
+const passDark = await mechPair(
+  '47',
+  'mech-pass-dark',
+  594,
+  'the pass into the dark, truth: P1 (cyan, right) walked quietly into space, stood still, and shouted once. The bot threw the ball at the shout and it arrived',
+  'the same throw from the bot that made it: a call mark where its team-mate said he was, the ball leaving its hands, and no other information of any kind. This is the one thing a human can do to make a bot play with them — and the shout told the defence exactly the same thing at the same moment',
+);
+check(
+  'pass into the dark: the silent man got the ball',
+  passDark.state.ball.carrier === 1,
+  `carrier ${passDark.state.ball.carrier}`,
 );
 
 // --- 40/41 a match under the winning rules ----------------------------------

@@ -19,7 +19,7 @@
  *   - a point track of the team-mate, who is identified when he makes noise;
  *   - a guess at who is holding the ball, inferred from catches, throws and the way the hum moves.
  */
-import { clamp, dist2, len2, norm2 } from '../math';
+import { clamp, dist2, norm2 } from '../math';
 import type { SimConfigView } from '../types';
 import type {
   ControllerContext,
@@ -137,8 +137,6 @@ export interface MateTrack {
 }
 
 /** Baseline over which the hum's movement is judged, and the speed that counts as carried. */
-const BALL_BASELINE_SEC = 1.2;
-const BALL_CARRY_MIN_SPEED = 0.8;
 
 /** Seconds over which "he already heard me from there" stops being a reason not to worry. */
 const MIRROR_CREDIT_TAU = 2.2;
@@ -152,6 +150,12 @@ const DISCRETE_BODY_KINDS: SoundKind[] = [
   'fumble',
   'throw',
   'sonar',
+  // The carried ball's beep is a body sound like any other: it is emitted at the ball, and the
+  // ball is in somebody's hands. It is now the main way a carrier is located at all.
+  'ball-carry',
+  // And the shout. From a team-mate it is a name and a place; from an opponent it is a place,
+  // which is why shouting for the ball is a real decision and not a free button.
+  'call',
 ];
 
 export class Belief {
@@ -169,9 +173,10 @@ export class Belief {
   private heardRun = false;
   private heardWalk = false;
   private lastPhase = 'play';
+  /** When a throw was last heard — a ball in flight is nobody's for a moment. */
   private lastThrowT = -10;
-  private ballStillSince = -1;
-  private ballMovingSince = -1;
+  /** When the team-mate last shouted for the ball, and from where. */
+  mateCallT = -99;
   /**
    * A ring of ball estimates on a long baseline, purely to answer "is the hum actually moving".
    *
@@ -182,7 +187,6 @@ export class Belief {
    * carried, which is what made the bot invent an opponent carrier in every quiet scenario. Over
    * a 1.2 s baseline the noise decorrelates and a walking carrier has moved three metres.
    */
-  private readonly ballTrail: { t: number; x: number; y: number }[] = [];
 
   private readonly ctx: ControllerContext;
   private readonly cfg: SimConfigView;
@@ -280,21 +284,18 @@ export class Belief {
     this.lastPhase = frame.match.phase;
 
     this.absorbEvents(frame);
+    // A beep is an observation of the ball as well as of the man holding it, and it arrives as a
+    // discrete event rather than through the emitter channel — so the estimate is refreshed
+    // after the events, not before them.
+    this.ball = this.tracker.estimate();
     this.absorbSonar(frame);
     this.updatePossession(frame);
 
-    // Carrying the ball is a continuous confession. The hum is not a discrete event, so it
-    // never reaches `onOwnSound` — but it is audible across the whole pitch, so a carrier is
-    // located by everyone, always. Without this the bot thinks it is sneaking around with a
-    // siren in its hands, and every price it puts on noise is wrong.
-    if (frame.self.hasBall) {
-      for (const m of this.mirrors) {
-        m.grid.setPoint(frame.self.pos, this.knobs.mirrorCell * 0.9);
-        m.lastFixT = this.now;
-        m.credit = 1;
-        m.creditT = this.now;
-      }
-    }
+    // Carrying the ball used to be a continuous confession, and the mirror was pinned every tick
+    // because of it. It is not any more: a carried ball is silent for a moment and then beeps,
+    // and each beep reaches `onOwnSound` like any other noise this body makes. So the price of
+    // carrying is now paid where it is actually incurred, and a man who has just taken a pass is
+    // genuinely invisible for a second or two.
 
     this.sinceStep += dt;
     const stepDt = 1 / Math.max(1, this.knobs.stepHz);
@@ -315,6 +316,20 @@ export class Belief {
         this.onOwnSound(ev, frame);
         continue;
       }
+      if (ev.kind === 'ball-carry') {
+        this.tracker.observe(
+          {
+            id: null,
+            kind: 'ball',
+            pos: { x: ev.pos.x, y: ev.pos.y },
+            sigma: ev.sigma,
+            sigmaBearing: ev.sigmaBearing,
+            bearing: ev.bearing,
+            distance: ev.distance,
+          },
+          this.now,
+        );
+      }
       if (ev.kind === 'ball-hum' || ev.kind === 'ball-wall' || ev.kind === 'whistle') continue;
       if (ev.sourceId !== null) {
         // Named: a team-mate. Free position, and honest — voices are not anonymous.
@@ -322,6 +337,7 @@ export class Belief {
           this.mate.pos = { x: ev.pos.x, y: ev.pos.y };
           this.mate.t = this.now;
           this.mate.fresh = true;
+          if (ev.kind === 'call') this.mateCallT = this.now;
           continue;
         }
         // A NAMED OPPONENT. Only ever happens with `perception.anonymousSources` off, which is a
@@ -555,9 +571,16 @@ export class Belief {
   // -- possession ----------------------------------------------------------
 
   /**
-   * Who has the ball, worked out the way a blind player works it out: from the slap of a catch,
-   * the crack of a throw, and from the way the hum moves. A hum that walks across the pitch at
-   * three metres a second and does not slow down is in somebody's hands.
+   * Who has the ball, worked out the way a blind player works it out.
+   *
+   * The question got much easier and much more useful on the day the ball stopped humming in
+   * somebody's hands. A loose ball sings across the whole pitch; a carried one does not. So
+   * "can I hear the hum" now answers *loose or carried* outright, honestly, for free — and every
+   * player, human or bot, gets the same answer at the same moment.
+   *
+   * What is left to work out is WHO, and that is the interesting half: a catch, a throw, a
+   * whistle, and the beep of the ball itself, which is the only thing that says where the man
+   * with it is standing.
    */
   private updatePossession(frame: PerceptionFrame): void {
     if (frame.self.hasBall) {
@@ -565,10 +588,8 @@ export class Belief {
       this.attachCarrier();
       return;
     }
-    // Discrete evidence first: a catch, a throw and a fumble each say something unambiguous
-    // about who is holding what, and they say it the instant they are heard.
     for (const ev of frame.events) {
-      if (ev.kind === 'catch') {
+      if (ev.kind === 'catch' || ev.kind === 'steal') {
         if (ev.sourceId !== null && this.mate && ev.sourceId === this.mate.id) this.setPossession('mate');
         else if (ev.sourceId === null) this.setPossession('opponent');
       } else if (ev.kind === 'throw' || ev.kind === 'fumble') {
@@ -579,52 +600,23 @@ export class Belief {
       }
     }
 
-    const ball = this.ball;
-    if (!ball) return;
-    const speed = this.ballBaselineSpeed(ball.pos);
-    const carrySpeed = this.cfg.player.runSpeed * 1.15;
-    if (speed < BALL_CARRY_MIN_SPEED) {
-      if (this.ballStillSince < 0) this.ballStillSince = this.now;
-      this.ballMovingSince = -1;
-    } else {
-      this.ballStillSince = -1;
-      if (this.ballMovingSince < 0) this.ballMovingSince = this.now;
-    }
-
-    // Then the hum itself, which never latches. A belief about possession that can only be
-    // *entered* is the bug that made the bot spend half of every match acting as a support
-    // player for a team-mate who had thrown the ball away eight seconds earlier: it heard the
-    // catch, and nothing ever told it the ball was on the floor again.
-    // The rulebook is information too. Nobody may hold the ball longer than the passivity limit,
-    // and taking it away is whistled — so a hum that has not moved for longer than that, with no
-    // whistle heard, cannot be in anybody's hands. It is a ball on the floor, and somebody has
-    // to go and get it. Without this deduction a stalemate is stable: every bot believes an
-    // opponent is standing on the ball and every bot holds its post.
-    const carryLimit = this.cfg.match.carryTimeoutSec;
-    if (carryLimit > 0 && this.ballStillSince > 0 && this.now - this.ballStillSince > carryLimit + 0.6) {
+    // The hum decides loose-or-carried, and it cannot be argued with. A throw heard a moment ago
+    // says the same thing before the hum has had time to say anything at all.
+    if (this.now - this.lastThrowT < 0.3) this.setPossession('loose');
+    const humming = frame.emitters.some((e) => e.kind === 'ball');
+    if (humming) {
       this.setPossession('loose');
-    } else if (len2(ball.vel) > carrySpeed * 1.5 || this.now - this.lastThrowT < 0.9) {
-      this.setPossession('loose');
-    } else if (this.ballStillSince > 0 && this.now - this.ballStillSince > 0.6) {
-      this.setPossession(this.whoIsStandingOn(ball.pos) ?? 'loose');
-    } else if (this.ballMovingSince > 0 && this.now - this.ballMovingSince > 0.4) {
-      // A hum that walks and does not slow down like friction is in somebody's hands.
-      this.setPossession(this.whoIsStandingOn(ball.pos) ?? 'opponent');
+      return;
     }
-
+    // Silence means a pair of hands. Whose is a guess, and the beeps are what it is made of: a
+    // beep that belief puts on a body belongs to that body, and one it cannot place is somebody
+    // — most likely an opponent, since a team-mate's beeps come back with his name on them.
+    if (this.possession === 'loose' || this.possession === 'unknown') {
+      const ball = this.ball;
+      const who = ball ? this.whoIsStandingOn(ball.pos) : null;
+      this.setPossession(who ?? 'opponent');
+    }
     if (this.possession === 'opponent') this.attachCarrier();
-  }
-
-  /** Metres per second the hum has really covered, measured over a baseline the noise cannot fake. */
-  private ballBaselineSpeed(at: Vec2): number {
-    this.ballTrail.push({ t: this.now, x: at.x, y: at.y });
-    while (this.ballTrail.length > 2 && this.now - this.ballTrail[0]!.t > BALL_BASELINE_SEC) {
-      this.ballTrail.shift();
-    }
-    const first = this.ballTrail[0]!;
-    const dt = this.now - first.t;
-    if (dt < BALL_BASELINE_SEC * 0.6) return 0;
-    return dist2(at, { x: first.x, y: first.y }) / dt;
   }
 
   /**

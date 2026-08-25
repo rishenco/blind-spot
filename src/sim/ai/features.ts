@@ -39,6 +39,8 @@ export interface Features {
   oppArea: number[];
   oppAge: number[];
   mate: { pos: Vec2; fresh: boolean } | null;
+  /** Seconds since the team-mate shouted for the ball. 99 = he never has. */
+  mateCalled: number;
   /** Highest confidence any opponent has about where I am, 0..1. */
   mirrorKnown: number;
   /** Effective area of the opponents' picture of me, m² — the currency stealth is paid in. */
@@ -50,6 +52,14 @@ export interface Features {
   carrySeconds: number;
   /** The passivity limit, or 0 when the rule is off. */
   carryLimit: number;
+  /**
+   * How far up the ball's beep ramp this body's own carry has climbed, 0..1.
+   *
+   * Proprioception: the man holding the ball hears it getting louder in his own hands, which is
+   * the whole of the pressure on him now. It is what makes a pass a decision he takes rather
+   * than a rule he obeys.
+   */
+  carryNoise: number;
   /** True when this body wears the gloves: it may stand in its own crease and nothing else may. */
   keeper: boolean;
   /**
@@ -144,6 +154,7 @@ export function deriveFeatures(
       : null;
 
   const mate = belief.mate ? { pos: belief.mate.pos, fresh: belief.mate.fresh } : null;
+  const mateCalled = clamp(belief.now - belief.mateCallT, 0, 99);
 
   // Who goes for the ball: a deterministic function of what both of us can see, so two bots
   // running the same code usually agree without saying a word (RoboCup's trick). When the
@@ -206,12 +217,16 @@ export function deriveFeatures(
     oppArea,
     oppAge,
     mate,
+    mateCalled,
     mirrorKnown,
     mirrorArea,
     secondsUnseen: belief.secondsUnseen(),
     mirrorCentre,
     carrySeconds: hasBall ? clamp(belief.now - belief.possessionT, 0, 99) : 0,
     carryLimit: cfg.match.carryTimeoutSec,
+    carryNoise: hasBall
+      ? clamp((belief.now - belief.possessionT - cfg.ball.voice.quietSec) / Math.max(1e-6, cfg.ball.voice.rampSec), 0, 1)
+      : 0,
     keeper: isKeeper && cfg.keeper.enabled,
     keeperPost,
     guardPost,

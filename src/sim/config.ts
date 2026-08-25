@@ -139,6 +139,8 @@ export interface PlayerConfig {
    * wide arc never accumulates into one.
    */
   brakeTurnWindowSec: number;
+  /** Minimum gap between two shouts for the ball. */
+  callCooldownSec: number;
 }
 
 /**
@@ -536,6 +538,9 @@ export const DEFAULT_LOUDNESS: Record<SoundKind, number> = {
   // A change of possession is always audible. It has to be: the ball is the one thing everybody
   // can hear, so a ball that changes hands in silence tells the whole pitch a lie.
   steal: 9,
+  // A shout. Same radius as a run: loud enough to reach a team-mate across half the pitch, and
+  // loud enough that asking for the ball tells the defence where you are asking from.
+  call: 9,
   sonar: 40,
   whistle: 100,
 };
@@ -574,7 +579,13 @@ export function defaultConfig(): SimConfig {
       // followed: a 3 m mouth in a 14 m wall was walk-in-and-place, and a 22 m/s release covered
       // eight metres in 0.36 s, which is less than anybody's reaction time — a shot that fast is
       // not a shot, it is a scoring button.
-      goalWidth: 2.5,
+      // Widened from 2.5 m with the goalkeeper. It was narrowed *because* the mouth was empty by
+      // rule — "тупейший бейзлайн забивал в пустые почти всегда" — and that reason is gone. At
+      // 3.2 m the keeper's hands cover the middle and not the corners, which is the whole of
+      // what makes goalkeeping a guess instead of a formality. Measured against 2.5 and 4.0 in
+      // `npm run shape`: 2.5 m turns him into a wall (a goal every 40 s), 4.0 m makes the corner
+      // free.
+      goalWidth: 3.2,
       creaseRadius: 4,
       wallRestitution: 0.75,
       // Two seconds, not one: with a keeper in there, a ball parried into the crease is a
@@ -589,7 +600,11 @@ export function defaultConfig(): SimConfig {
       restartDelaySec: 1.2,
       spawnJitter: 0.75,
       kickoffTeam: 'fixed',
-      carryTimeoutSec: 5,
+      // OFF. It was a rule that did the ball's job: "hold it too long and you lose it" is now
+      // said by the ball itself, earlier, to both sides, and in a way you can act on. A big
+      // number is kept as a safety net rather than as a mechanic — see the report's measurement
+      // of how long anybody actually holds it once the beep is doing the work.
+      carryTimeoutSec: 12,
     },
     player: {
       radius: 0.35,
@@ -606,6 +621,7 @@ export function defaultConfig(): SimConfig {
       // below that or the cut switches itself off halfway through.
       brakeTurnMinSpeed: 3.2,
       brakeTurnWindowSec: 0.5,
+      callCooldownSec: 1.6,
     },
     ball: {
       radius: 0.12,
@@ -613,11 +629,16 @@ export function defaultConfig(): SimConfig {
       restitution: 0.75,
       carryOffset: 0.5,
       humIntervalSec: 0.2,
+      // Swept in `npm run shape` (rows v-*, 16 seeds × 90 s). Against a lazier ball (2 s of
+      // quiet, a 7 s ramp) and against the old continuous hum, this rhythm produced clearly the
+      // most passing — 0.77 passes per possession against 0.56 and 0.50 — at the same scoreline.
+      // The quiet window is the reward for a pass, and it has to be long enough to be worth
+      // having and short enough that walking the ball in is never the quiet option.
       voice: {
-        quietSec: 1.2,
-        intervalStart: 1.2,
+        quietSec: 0.8,
+        intervalStart: 0.9,
         intervalMin: 0.3,
-        rampSec: 5,
+        rampSec: 3,
         startLoudFrac: 0.25,
       },
       inheritCarrierVelocity: false,
@@ -662,8 +683,8 @@ export function defaultConfig(): SimConfig {
       // automatic: taking a ball that is moving fast. An ordinary body has 0.6 m of reach
       // against a 16 m/s shot, the keeper has 1.4 m — enough to own the middle of a 3.2 m mouth
       // and not enough to own the corners, which is exactly the shape goalkeeping should have.
-      reachMul: 2.4,
-      depth: 1.4,
+      reachMul: 1.8,
+      depth: 1,
       // Past the crease on purpose: walking out to here is what takes the gloves off him, so a
       // team that wins the ball is a team with two attackers a second and a half later.
       attackDepth: 5.5,
@@ -677,12 +698,19 @@ export function defaultConfig(): SimConfig {
       cooldownSec: 1.2,
     },
     ping: {
-      cooldownSec: 1.5,
-      range: 14,
+      // Rarer and stronger, measured rather than argued (`npm run contest`, rows ping-*). At
+      // 1.5 s a ping was cheap rather than rare, so it was spent "just in case"; at 3 s, seeing
+      // the whole pitch for two seconds, it is a decision — and it is the row where knowing
+      // things is worth the most (a telepath's possession edge went from +12 to +19 points, and
+      // the bot that may not ping finally loses measurably to the one that may).
+      cooldownSec: 3,
+      // The whole pitch. The concept says 14 m; this is a deliberate revision to be signed off,
+      // and it is what makes one ping worth a three-second silence.
+      range: 24,
       waveSpeed: 42,
       coneDeg: 360,
       wallSampleStep: 0.5,
-      lifeSec: 1,
+      lifeSec: 2,
     },
     loudness: { ...DEFAULT_LOUDNESS },
     perception: {
@@ -701,7 +729,13 @@ export function defaultConfig(): SimConfig {
     },
     contest: {
       steal: {
-        enabled: true,
+        // OFF, by the человек's verdict after playing: "в целом сейчас чуваки в борьбу играют и
+        // просто мяч перекрадывают, не очень". It measured worst of the four contest mechanics
+        // anyway (+0.9 pp of possession to a telepath against the tackle's +6.6), and for a
+        // reason that is now obvious: the carrier used to hum, so hunting him needed no
+        // information at all. It produced a scrimmage that looked like play and was not.
+        // The switch stays so the rule tournament can still price it.
+        enabled: false,
         // Measured, not guessed: 1.5 m for half a second produced twenty-two steals a minute in
         // the rule tournament — a change of possession every 2.6 seconds, almost all of them
         // accidental, because two bots converging on a ball are inside 1.5 m of each other most

@@ -50,7 +50,9 @@ export type ActionKind =
   /** Close on the believed carrier and stay on him until the ball comes loose. */
   | 'contest'
   /** Throw the body at where an opponent is going to be. */
-  | 'tackle';
+  | 'tackle'
+  /** Shout for the ball: tell the man with it where I am, and everybody else too. */
+  | 'call';
 
 export interface Action {
   kind: ActionKind;
@@ -107,7 +109,11 @@ const WEIGHTS: Record<Role, PolicyWeights> = {
 };
 
 /** How much a role cares about being heard. A carrier hums anyway; a shadow lives on silence. */
-const EXPOSURE: Record<Role, number> = { carrier: 0.12, support: 1, chase: 0.5, guard: 0.9, keeper: 0.15 };
+// The carrier's 0.12 dated from the ball that hummed forever: he was a beacon whatever he did,
+// so noise was free to him. He is not a beacon any more — for the first second he is the quietest
+// man on the pitch — so being heard costs him something like what it costs anybody else, and the
+// mirror belief goes back to being what decides whether he is already given away.
+const EXPOSURE: Record<Role, number> = { carrier: 0.3, support: 1, chase: 0.5, guard: 0.9, keeper: 0.15 };
 /** How much a role wants to know where the opponents are. Defenders need it most. */
 const INFO_NEED: Record<Role, number> = { carrier: 0.7, support: 0.4, chase: 0.35, guard: 1, keeper: 0.8 };
 
@@ -176,6 +182,8 @@ export interface PolicyInput {
   cfg: SimConfigView;
   /** Ping cooldown remaining, seconds. */
   pingCooldown: number;
+  /** Shout cooldown remaining, seconds. */
+  callCooldown: number;
   /** Tag chosen last time — the hysteresis anchor. */
   lastTag: string | null;
   /** 0..1: how many of the generated candidates the bot is allowed to look at. */
@@ -262,10 +270,14 @@ export function generateCandidates(input: PolicyInput): Action[] {
     // shooter where he is standing, and the shooter is the one man who benefits from knowing.
     out.push({ kind: 'move', tag: 'keeper-post', to: legal(f.keeperPost), mode: 'walk' });
     out.push({ kind: 'move', tag: 'keeper-post-run', to: legal(f.keeperPost), mode: 'run' });
-    // A ball loose in his own area is his. Outside it, it is somebody else's problem — a keeper
-    // who chases is a keeper who is not in goal when the shot comes.
-    if (f.ballPos && dist2(f.ballPos, f.ownGoal) < f.field.creaseRadius + 2.5) {
-      out.push({ kind: 'move', tag: 'keeper-collect', to: legal(f.ballPos), mode: 'run' });
+    // A ball loose in his own area is his. So is a loose ball anywhere, if nobody else is going
+    // to get there first: a keeper who never leaves his line is a keeper who watches the ball sit
+    // in the middle of an empty pitch. Outside those two cases it is somebody else's problem —
+    // chasing is how a keeper ends up not being in goal when the shot comes.
+    const loose = input.belief.possession === 'loose';
+    const mine = f.ballPos && dist2(f.ballPos, f.ownGoal) < f.field.creaseRadius + 2.5;
+    if (f.ballPos && (mine || (loose && f.primary))) {
+      out.push({ kind: 'move', tag: 'keeper-collect', to: legal(f.intercept?.point ?? f.ballPos), mode: 'run' });
     }
     if (f.intercept && f.intercept.slack > -0.3 && dist2(f.intercept.point, f.ownGoal) < f.field.creaseRadius + 3) {
       out.push({ kind: 'move', tag: 'keeper-cut', to: legal(f.intercept.point), mode: 'run' });
@@ -283,6 +295,14 @@ export function generateCandidates(input: PolicyInput): Action[] {
     if (f.intercept && f.intercept.slack > -0.35) {
       out.push({ kind: 'move', tag: 'intercept-run', to: legal(f.intercept.point), mode: 'run' });
     }
+  }
+
+  // Asking for it. A pass can only be thrown at somebody the thrower can place, and a body that
+  // has been standing still is by definition unplaceable — so somebody has to speak. The cost is
+  // real and symmetric (9 m, exactly where I stand), which is why it is a scored option and not
+  // a reflex, and why it wins only when the ball is near, my man has it, and I am open.
+  if (f.role === 'support' && input.callCooldown <= 1e-6) {
+    out.push({ kind: 'call', tag: 'call' });
   }
 
   if (f.role === 'support' || f.role === 'guard') {
@@ -425,6 +445,10 @@ function score(action: Action, input: PolicyInput): ScoredAction {
       noiseRadius = cfg.loudness.throw;
       break;
     }
+    case 'call': {
+      noiseRadius = cfg.loudness.call;
+      break;
+    }
     case 'feint': {
       // Loud leg out, quiet leg back past the start — the noise is at the turn, the body is not.
       noisePos = action.via!;
@@ -440,6 +464,20 @@ function score(action: Action, input: PolicyInput): ScoredAction {
       noiseRadius = cfg.loudness.dive;
       travelT = cfg.dive.durationSec + cfg.dive.recoverySec;
       break;
+    }
+  }
+  // The ball in my hands is a noise I am making, and it gets worse. Any plan that still has the
+  // ball at the end of it is at least as loud as the beep will be by then; a throw and a pass
+  // are not, because the ball will not be mine. That asymmetry is the whole reason to pass, and
+  // it belongs on the noise axis rather than in a rule.
+  if (f.role === 'carrier') {
+    const v = cfg.ball.voice;
+    const held = f.carrySeconds + Math.min(travelT, HORIZON);
+    if (held > v.quietSec && action.kind !== 'shoot' && action.kind !== 'pass') {
+      const ramp = clamp((held - v.quietSec) / Math.max(1e-6, v.rampSec), 0, 1);
+      const full = cfg.loudness['ball-carry'];
+      noiseRadius = Math.max(noiseRadius, full * v.startLoudFrac + (full - full * v.startLoudFrac) * ramp);
+      noisePos = dest;
     }
   }
   // Everything a plan promises is worth less the longer it takes to arrive, and a plan that
@@ -537,8 +575,15 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
     const gain = after > mine * 0.9 ? 1 : 0.55;
     // Throwing at a place you last heard him four seconds ago is a worse idea than throwing at
     // one you heard him in half a second ago, but it is not a forbidden idea.
-    const trust = f.mate && f.mate.fresh ? 1 : 0.45;
-    return clamp(0.8 * complete * (0.3 + 0.7 * after) * gain * trust, 0.02, 1);
+    // A shout is the strongest fix there is on a team-mate: he said where he was, by name, on
+    // purpose. It is also the only way a human team-mate is ever placed at all.
+    const trust = f.mateCalled < 2.5 ? 1.15 : f.mate && f.mate.fresh ? 1 : 0.45;
+    // And the half of a pass that has nothing to do with where it lands: it takes the ball out
+    // of a pair of hands that has been beeping for four seconds and puts it into a pair that is
+    // silent. Getting quiet again is a reason to pass, and it is the reason the человек asked
+    // for — "пас… становится способом снова стать невидимым".
+    const relief = 0.6 + 0.9 * f.carryNoise;
+    return clamp(0.8 * complete * (0.3 + 0.7 * after) * gain * trust * relief, 0.02, 1);
   }
   if (action.kind === 'dive') {
     if (!f.intercept) return 0.05;
@@ -573,6 +618,18 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
     // safety axis (nobody has to be near me for it to hurt), so it is priced here.
     return clamp(hit * worth + (1 - hit) * 0.03, 0.02, 1);
   }
+  if (action.kind === 'call') {
+    // Worth exactly what a pass to me would be worth, times how badly the man with the ball
+    // needs one — and nothing at all if he has not got it, or if he can already place me.
+    if (belief.possession !== 'mate' || !f.ballPos) return 0.02;
+    const worth = receiveValue(f, f.me, f.ballPos, cfg);
+    const alreadyKnown = f.mate && f.mate.fresh ? 0.45 : 1;
+    // A ball that has been in one pair of hands for a while is a ball whose owner is looking for
+    // somewhere to put it. That is the moment to speak.
+    const v = cfg.ball.voice;
+    const hisTrouble = clamp(0.35 + 0.65 * clamp((f.now - belief.possessionT - v.quietSec) / v.rampSec, 0, 1), 0, 1);
+    return clamp(worth * alreadyKnown * hisTrouble, 0.02, 1);
+  }
   if (action.kind === 'investigate') {
     const i = action.track ?? 0;
     // Worth doing in proportion to how stale the guess is, how vague it is, and how much it
@@ -590,10 +647,14 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
     case 'carrier': {
       const shot = shotValue(f, endPos, cfg).value;
       const closer = clamp(1 - (dist2(endPos, f.goal) - f.field.creaseRadius) / 12, 0.05, 1);
-      // The passivity clock is part of the position: a spot I cannot legally stand on for
-      // another second is not a good spot, however open it is.
+      // The clock that matters is no longer the passivity rule, it is the ball itself. Every
+      // extra second in one pair of hands makes it beep louder and more often, so a plan that
+      // *keeps* the ball is worth less the longer it has already been kept — and the bot works
+      // that out from a noise it can hear itself making, not from a rule it was told.
+      const v = cfg.ball.voice;
+      const ramp = clamp((f.carrySeconds + travelT - v.quietSec) / Math.max(1e-6, v.rampSec), 0, 1);
       const clock = f.carryLimit > 0 ? clamp(1 - (f.carrySeconds + travelT) / f.carryLimit, 0, 1) : 1;
-      const urgency = 0.3 + 0.7 * clock;
+      const urgency = (0.3 + 0.7 * clock) * (1 - 0.7 * ramp);
       return clamp(policyKnobs(cfg).positionDiscount * arrival * (0.2 * closer + 0.8 * shot) * urgency, 0.02, 1);
     }
     case 'chase': {
@@ -628,12 +689,18 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
       // Everything is measured against the line from the ball to the middle of my own goal.
       // There is no cleverer quantity available to a blind keeper: he cannot know the corner,
       // so the best he can do is stand where the angle is narrowest and keep his feet.
-      const hold = clamp(1 - dist2(endPos, f.keeperPost) / 3.5, 0.05, 1);
-      const collect =
-        f.ballPos && belief.possession !== 'self' && belief.possession !== 'mate' &&
-        dist2(f.ballPos, f.ownGoal) < f.field.creaseRadius + 2.5
-          ? clamp(1 - dist2(endPos, f.ballPos) / 4, 0, 1)
-          : 0;
+      const target = f.intercept?.point ?? f.ballPos;
+      const loose = belief.possession === 'loose';
+      const collectable =
+        target !== null &&
+        (dist2(target, f.ownGoal) < f.field.creaseRadius + 2.5 || (loose && f.primary));
+      // How much the line is worth holding at all. Against a carrier it is everything; with the
+      // ball loose and nobody else going for it, standing on it is how a keeper watches the ball
+      // sit in the middle of an empty pitch.
+      const threat =
+        belief.possession === 'opponent' ? 1 : loose ? (f.primary && collectable ? 0.25 : 0.6) : 0.4;
+      const hold = clamp(1 - dist2(endPos, f.keeperPost) / 3.5, 0.05, 1) * threat;
+      const collect = target && collectable ? clamp(1 - dist2(endPos, target) / 4, 0, 1) : 0;
       return clamp(arrival * Math.max(hold, collect), 0.02, 1);
     }
     case 'guard': {

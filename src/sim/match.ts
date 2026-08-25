@@ -349,7 +349,7 @@ export class Match {
       shape.throws += 1;
       shape.holdBeforeThrowSum += held;
       const team: TeamId = ev.sourceId < this.config.teamSize ? 0 : 1;
-      if (this.aimedAtGoal(ev.pos, s.ball.vel, team)) {
+      if (this.aimedAtGoal(ev.pos, s.ball.vel, team) && !this.aimedAtMate(ev.sourceId, ev.pos, s.ball.vel)) {
         shape.shots += 1;
         shape.holdBeforeShotSum += held;
         const d = dist2(ev.pos, f.goalCentre[team === 0 ? 1 : 0]!);
@@ -387,6 +387,13 @@ export class Match {
         this.heldBy = carrier;
         this.heldSince = s.t;
       }
+      // Straight off the simulation's own clock: "how long has THIS carrier had it", which is
+      // also the number the ball's beep ramps on.
+      shape.holdMax = Math.max(shape.holdMax, s.ball.carryT);
+    } else {
+      // A ball in flight belongs to nobody. Without this the same man picking up his own rebound
+      // looked like one uninterrupted forty-second carry.
+      this.heldBy = null;
     }
     // A goal ends the attack whoever restarts it — the ball is handed to the conceding team in
     // the same tick, so without this the scoring possession would be merged into the next one.
@@ -396,6 +403,30 @@ export class Match {
       this.possessionStart = s.t;
       this.possessionPasses = 0;
     }
+  }
+
+  /**
+   * Is there a team-mate standing on this throw's line, in front of it?
+   *
+   * A pass to a man who happens to be in front of the goal is geometrically indistinguishable
+   * from a shot, and counting it as one inflates both the shot rate and the shot distance — the
+   * two numbers this whole measurement exists to read.
+   */
+  private aimedAtMate(thrower: EntityId, from: Vec2, vel: Vec2): boolean {
+    const s = this.sim.state;
+    const team = thrower < this.config.teamSize ? 0 : 1;
+    const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
+    if (speed < 1e-6) return false;
+    const ux = vel.x / speed;
+    const uy = vel.y / speed;
+    for (const p of s.players) {
+      if (p.id === thrower || p.team !== team) continue;
+      const along = (p.pos.x - from.x) * ux + (p.pos.y - from.y) * uy;
+      if (along <= 0) continue;
+      const off = Math.abs((p.pos.x - from.x) * -uy + (p.pos.y - from.y) * ux);
+      if (off <= this.config.catching.radius * 1.5) return true;
+    }
+    return false;
   }
 
   /** Would a ball released at `from` with velocity `vel` reach the goal `team` is attacking? */

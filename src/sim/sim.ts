@@ -60,6 +60,8 @@ export interface PlayerState {
   pingCd: number;
   /** Cooldown before this body may touch the ball again (after a release, catch or fumble). */
   ballCd: number;
+  /** Cooldown before this body may shout for the ball again. */
+  callCd: number;
   /** Metres travelled since the last footstep sound. */
   strideAcc: number;
   brakeCd: number;
@@ -285,6 +287,7 @@ export class Simulation {
         diveDir: v2(1, 0),
         pingCd: 0,
         ballCd: 0,
+        callCd: 0,
         strideAcc: 0,
         brakeCd: 0,
         peakSpeed: 0,
@@ -365,6 +368,7 @@ export class Simulation {
       p.recoverT = 0;
       p.diveCd = 0;
       p.ballCd = 0;
+      p.callCd = 0;
       p.strideAcc = 0;
       p.brakeCd = 0;
       p.peakSpeed = 0;
@@ -627,6 +631,7 @@ export class Simulation {
     p.pingCd = Math.max(0, p.pingCd - dt);
     p.diveCd = Math.max(0, p.diveCd - dt);
     p.ballCd = Math.max(0, p.ballCd - dt);
+    p.callCd = Math.max(0, p.callCd - dt);
     p.brakeCd = Math.max(0, p.brakeCd - dt);
     p.robbedCd = Math.max(0, p.robbedCd - dt);
     p.staggerT = Math.max(0, p.staggerT - dt);
@@ -720,6 +725,15 @@ export class Simulation {
       // The loudest sound in the game, and it carries the pinger's exact position. That is the
       // whole price of asking a question (concept, law 4).
       this.emit('sonar', p.pos, p.id);
+    }
+
+    // --- the shout ----------------------------------------------------------
+    // The one deliberate noise in the game that carries no information about the ball: it says
+    // "I am open". A team-mate hears who it was; everybody else hears a body, at 9 m, exactly
+    // where it stood. That symmetry is the price, and it is the whole design of the mechanic.
+    if (intent.call && !prev.call && p.callCd <= 0 && p.downT <= 0 && !p.hasBall) {
+      p.callCd = cfg.player.callCooldownSec;
+      this.emit('call', p.pos, p.id);
     }
 
     // --- throw: hold to wind up, release to let go ---------------------------
@@ -1638,7 +1652,7 @@ export class Simulation {
       nums.push(
         p.id, p.team, p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.aim.x, p.aim.y,
         p.hasBall ? 1 : 0, p.charging ? 1 : 0, p.chargeT, p.diveT, p.recoverT, p.diveCd,
-        p.pingCd, p.ballCd, p.strideAcc, p.brakeCd, p.peakSpeed, p.peakAge, p.loudness,
+        p.pingCd, p.ballCd, p.callCd, p.strideAcc, p.brakeCd, p.peakSpeed, p.peakAge, p.loudness,
         p.dirRef.x, p.dirRef.y, p.dirRefNext.x, p.dirRefNext.y, p.dirRefAge, p.downT, p.staggerT, p.contestT,
         p.contestTarget ?? -99, p.robbedCd, p.tackleHit ? 1 : 0, p.reachT, p.reachCd,
         p.keeper ? 1 : 0,
@@ -1693,6 +1707,7 @@ function idleIntentInternal(): Intent {
     charge: false,
     catch: false,
     dive: false,
+    call: false,
   };
 }
 
@@ -1705,5 +1720,6 @@ function copyIntent(i: Intent): Intent {
     charge: i.charge,
     catch: i.catch,
     dive: i.dive,
+    call: i.call,
   };
 }

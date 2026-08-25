@@ -15,10 +15,9 @@
  *   2. **Numbers.** The same run reports how long the player was audible, how many balls they
  *      fumbled, how many pings they bought. A change to the feedback layer that makes a catch
  *      systematically late shows up as a number here.
- *   3. **A fairness argument.** `catch-early` presses two metres too soon on purpose. If the
- *      read-out under the player's nose does not then say EARLY, with a plausible number of
- *      milliseconds, the game is punishing people without telling them why — which is the exact
- *      failure this whole layer exists to prevent.
+ *   3. **A fairness argument.** `catch-early` runs at a hard pass at full speed on purpose. If
+ *      the read-out under the player's nose does not then say TOO FAST, the game is punishing
+ *      people without telling them why — which is the exact failure this layer exists to prevent.
  *
  * Every rule below reads the frame and nothing else. None of them may look at the world; if one
  * ever needed to, it would no longer be a model of a player.
@@ -109,21 +108,26 @@ export class ThrowHand implements HandScript {
 }
 
 /**
- * The receiver: stand still and press catch by a rule.
+ * The receiver: walk into the line of the pass and let it arrive.
  *
- * `mode` is the whole experiment. 'timed' presses at the moment of closest approach — what a
- * player who has read the ball correctly does. 'early' presses as soon as the ball is inside a
- * given range, which is what a nervous player does, and is the case the read-out has to explain.
+ * `mode` is the whole experiment. 'timed' is a player who reads the pass and settles; 'charge' is
+ * a player who sprints at it, which is the one way left to drop one.
  */
 export class CatchHand implements HandScript {
   readonly name: string;
   label = 'listening';
   private prev: Vec2 | null = null;
-  private fired = false;
-  /** `station`: walk here quietly first, then stand and wait for the pass. */
+  /**
+   * Two ways of meeting a pass, now that catching is automatic and there is no button at all.
+   *
+   * `timed` — walk to the spot and stand: the ball arrives inside the reach and is simply taken.
+   * `charge` — sprint at it, which is the one remaining way to drop one (`catching.sprintSpeed`).
+   *
+   * `station`: walk here quietly first, then stand and wait for the pass.
+   */
   constructor(
-    private mode: 'timed' | 'early',
-    private earlyRange = 3.2,
+    private mode: 'timed' | 'charge',
+    private chargeRange = 6.5,
     name = 'catch-hand',
     private station: Vec2 | null = null,
   ) {
@@ -131,7 +135,6 @@ export class CatchHand implements HandScript {
   }
   reset(): void {
     this.prev = null;
-    this.fired = false;
     this.label = 'listening';
   }
   act(frame: PerceptionFrame, _t: number): Intent {
@@ -139,33 +142,30 @@ export class CatchHand implements HandScript {
     const { d, tca, pos } = ballTca(frame, this.prev);
     this.prev = pos;
     intent.aim = pos ? unit({ x: pos.x - frame.self.pos.x, y: pos.y - frame.self.pos.y }) : frame.self.aim;
+    if (frame.self.hasBall) {
+      this.label = 'holding';
+      return intent;
+    }
+    if (this.mode === 'charge' && pos && d < this.chargeRange) {
+      // Running at a hard pass: the ball bounces off, loudly, and the read-out says why.
+      const away = { x: pos.x - frame.self.pos.x, y: pos.y - frame.self.pos.y };
+      const gap = Math.max(1e-6, Math.hypot(away.x, away.y));
+      intent.move = { x: away.x / gap, y: away.y / gap };
+      intent.moveMode = 'run';
+      this.label = `running at it, ${d.toFixed(1)} m`;
+      return intent;
+    }
     if (this.station) {
       const away = { x: this.station.x - frame.self.pos.x, y: this.station.y - frame.self.pos.y };
       const gap = Math.hypot(away.x, away.y);
       if (gap > 0.3) {
-        // Walking, not running: a receiver who sprints into position has announced the pass.
+        // Walking, not running: a receiver who sprints into position has announced the pass —
+        // and, since the sprint rule came in, would drop the ball as well.
         intent.move = { x: away.x / gap, y: away.y / gap };
         intent.moveMode = 'walk';
       }
     }
-    if (this.fired || frame.self.hasBall) {
-      this.label = frame.self.hasBall ? 'holding' : 'pressed';
-      return intent;
-    }
-    const press =
-      this.mode === 'early'
-        ? d < this.earlyRange && Number.isFinite(tca) && tca > 0
-        // A real receiver presses *into* the arrival, not on top of it. With the reach model a
-        // press opens the hands for `reachSec` (0.22 s), so the window to aim at is a fifth of a
-        // second of remaining flight — earlier than the old rule wanted, and much less fussy.
-        : d < 3 && Number.isFinite(tca) && tca > 0.04 && tca < 0.18;
-    if (press) {
-      this.fired = true;
-      intent.catch = true;
-      this.label = this.mode === 'early' ? `pressed at ${d.toFixed(1)} m` : `pressed ${(tca * 1000).toFixed(0)} ms before arrival`;
-    } else {
-      this.label = `ball ${d.toFixed(1)} m${Number.isFinite(tca) ? ` · ${(tca * 1000).toFixed(0)} ms` : ''}`;
-    }
+    this.label = `ball ${d.toFixed(1)} m${Number.isFinite(tca) ? ` · ${(tca * 1000).toFixed(0)} ms` : ''}`;
     return intent;
   }
 }
@@ -256,6 +256,7 @@ export class ScriptPoller {
       charge: intent.charge,
       catch: intent.catch,
       dive: intent.dive,
+      call: intent.call,
     };
     return poll;
   }

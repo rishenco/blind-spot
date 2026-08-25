@@ -53,6 +53,7 @@ export function recordInput(rec: Recording, tick: number, id: EntityId, intent: 
       charge: intent.charge,
       catch: intent.catch,
       dive: intent.dive,
+      call: intent.call,
     },
   });
 }

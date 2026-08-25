@@ -74,6 +74,8 @@ export interface ShapeStats {
   possessionTimeSum: number;
   /** Saves: a shot stopped by a keeper inside his own crease. */
   keeperSaves: number;
+  /** The longest anybody held the ball, seconds — the check that carrying has a real price. */
+  holdMax: number;
 }
 
 export function emptyShapeStats(): ShapeStats {
@@ -90,6 +92,7 @@ export function emptyShapeStats(): ShapeStats {
     goalsWithoutPass: 0,
     possessionTimeSum: 0,
     keeperSaves: 0,
+    holdMax: 0,
   };
 }
 
@@ -182,6 +185,10 @@ export function aggregate(all: MatchStats[]): {
   for (const m of all) {
     for (const key of Object.keys(shape) as (keyof ShapeStats)[]) {
       if (key === 'shotDistances') continue;
+      if (key === 'holdMax') {
+        shape.holdMax = Math.max(shape.holdMax, m.shape.holdMax);
+        continue;
+      }
       (shape[key] as number) += m.shape[key] as number;
     }
     shape.shotDistances.push(...m.shape.shotDistances);

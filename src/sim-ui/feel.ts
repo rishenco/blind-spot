@@ -7,7 +7,7 @@
  * outcome that a person could read as "the game cheated me" gets an explanation computed at the
  * instant of the input:
  *
- *   * a missed catch says EARLY or LATE, with the number of seconds, or OUT OF REACH;
+ *   * a missed catch says TOO FAST or OUT OF REACH, and never fails silently;
  *   * a wind-up says how much power is in it and when it crossed the commit threshold;
  *   * a ping says, for a beat, that the whole pitch just heard you.
  *
@@ -21,7 +21,7 @@ import type { PerceptionFrame, SoundKind, Vec2 } from '../sim/types';
 import type { Poll } from './input';
 import type { PerceivedModel } from './perceived';
 
-export type CatchVerdict = 'caught' | 'early' | 'late' | 'reach' | 'pending';
+export type CatchVerdict = 'caught' | 'sprint' | 'past' | 'late' | 'pending';
 
 export interface CatchAttempt {
   t: number;
@@ -51,7 +51,13 @@ export interface FeelConfig {
   minCharge: number;
   maxCharge: number;
   catchRadius: number;
-  catchWindow: number;
+  /** How fast the reach shrinks with the ball's speed — see `SimConfig.catching`. */
+  catchSpeedSpan: number;
+  minReachFrac: number;
+  slowBallSpeed: number;
+  /** Above this own speed a hard ball cannot be taken cleanly. */
+  sprintSpeed: number;
+  keeperReachMul: number;
   walkLoud: number;
   runLoud: number;
   pingCooldown: number;
@@ -101,21 +107,20 @@ export class Feel {
   ballDistance = Infinity;
   ballClosing = 0;
   ballTca = Infinity;
-  /** True when the ball is inside reach and the timing window is open right now. */
-  catchWindowOpen = false;
+  /** True while the ball is inside the reach it has at its current speed. */
+  ballInReach = false;
+  /**
+   * The reach this body has RIGHT NOW, in metres.
+   *
+   * Not a constant any more: catching is automatic, and what a player has to learn instead is
+   * that a fast ball can only be taken in a small area. Drawing that area, shrinking live as the
+   * ball speeds up, is how the rule gets taught without a word of text.
+   */
+  reachNow = 0;
   score: readonly [number, number] = [0, 0];
   /** Match statistics a person can read without a debug panel. */
   stats = { pings: 0, throws: 0, catches: 0, fumbles: 0, loudSeconds: 0, quietSeconds: 0 };
 
-  /**
-   * Whether the body was holding the ball at the START of this tick.
-   *
-   * The frame handed to `update` is the one produced AFTER the simulation stepped, so on the
-   * very tick a catch succeeds `self.hasBall` is already true — testing it directly would throw
-   * away the press that caused the catch, and the read-out would never say CAUGHT. This is the
-   * kind of one-tick offset that makes feedback silently wrong, so it gets its own field.
-   */
-  private hadBall = false;
   /** Timestamp of the last failure the core reported, so each one is announced exactly once. */
   private lastFailT = -99;
 
@@ -137,7 +142,6 @@ export class Feel {
     this.silentFor = 0;
     this.flashes = [];
     this.hints = [];
-    this.hadBall = false;
     this.lastFailT = -99;
     this.carryFor = 0;
     this.score = [0, 0];
@@ -188,42 +192,30 @@ export class Feel {
       // closest approach almost never resolves as a catch. Drawing the symmetric ±window would
       // therefore promise a green light that does not exist, and the whole point of this layer
       // is to stop promising things.
-      this.catchWindowOpen =
-        !self.hasBall &&
-        this.ballDistance <= this.cfg.catchRadius &&
-        this.ballTca >= -0.02 &&
-        this.ballTca <= this.cfg.catchWindow;
+      const relSpeed = Math.sqrt(vv);
+      const base = this.cfg.catchRadius * (self.keeper ? this.cfg.keeperReachMul : 1);
+      const over = relSpeed - this.cfg.slowBallSpeed;
+      this.reachNow =
+        over <= 0
+          ? base
+          : base * Math.min(1, Math.max(this.cfg.minReachFrac, 1 - over / Math.max(1e-6, this.cfg.catchSpeedSpan)));
+      this.ballInReach = !self.hasBall && this.ballDistance <= this.reachNow;
     } else {
       this.ballDistance = Infinity;
-      this.catchWindowOpen = false;
+      this.ballInReach = false;
+      this.reachNow = this.cfg.catchRadius * (self.keeper ? this.cfg.keeperReachMul : 1);
     }
 
-    // --- what the fingers did --------------------------------------------
-    if (poll?.pressedCatch && !this.hadBall) {
-      // The verdict is decided here, at the press, from what the player could hear — not from
-      // the outcome. If the ball was out of reach it says so; otherwise the sign of the time to
-      // closest approach is the whole answer, and it is the same quantity the simulation uses.
-      const offset = Number.isFinite(this.ballTca) ? this.ballTca : 0;
-      // The verdict is NOT decided here any more. A press opens the hands for `reachSec`, so
-      // pressing while the ball is still two metres out is the correct thing to do, not a
-      // mistake — and the simulation is the only thing that knows whether it worked. It says so
-      // in `self.lastCatchFail`, read below.
-      this.lastCatch = { t: this.t, verdict: 'pending', offset, distance: this.ballDistance };
-    }
-    // The core's own verdict, published as proprioception rather than reconstructed out here
-    // from the sign of a time-to-closest-approach. That reconstruction was fragile before the
-    // reach model and simply wrong after it: it called a successful catch TOO SOON for the four
-    // ticks between the press and the ball arriving.
+    // --- what the ball did -----------------------------------------------
+    // Nothing here reads a button any more: catching is automatic, so the only verdicts left are
+    // the ones the simulation hands over as proprioception. That is a strict improvement — the
+    // verdict used to be reconstructed out here from the sign of a time-to-closest-approach, and
+    // it was wrong for the four ticks between a press and the ball arriving.
     if (self.lastCatchFail && self.lastCatchFailT > this.lastFailT) {
       this.lastFailT = self.lastCatchFailT;
-      const distance = this.lastCatch && this.t - this.lastCatch.t < 1 ? this.lastCatch.distance : this.ballDistance;
-      const offset = self.lastCatchFail === 'early' ? 1 : -1;
-      this.lastCatch = {
-        t: this.t,
-        verdict: self.lastCatchFail === 'early' ? 'reach' : 'late',
-        offset,
-        distance,
-      };
+      const verdict: CatchVerdict =
+        self.lastCatchFail === 'sprint' ? 'sprint' : self.lastCatchFail === 'past' ? 'past' : 'late';
+      this.lastCatch = { t: this.t, verdict, offset: 0, distance: this.ballDistance };
     }
     if (poll?.pressedPing && self.pingCooldown <= 0) this.push('ping', 1);
     if (poll?.releasedCharge && self.hasBall) {
@@ -240,17 +232,14 @@ export class Feel {
         this.push('throw', 1);
         this.stats.throws++;
       } else if (ev.kind === 'catch') {
-        if (this.lastCatch) this.lastCatch.verdict = 'caught';
+        // There is no press to hang the verdict on any more, so the catch itself creates the
+        // read-out. Saying CAUGHT is not decoration: it is the difference between "the ball is
+        // gone from the air" and "the ball is in my hands" for somebody who cannot see either.
+        this.lastCatch = { t: this.t, verdict: 'caught', offset: 0, distance: this.ballDistance };
         this.push('catch', 0.8);
         this.stats.catches++;
       } else if (ev.kind === 'fumble') {
-        if (this.lastCatch && this.t - this.lastCatch.t < 0.25) {
-          // A press that produced a fumble: say which way it was wrong. Positive tca means the
-          // ball had not arrived yet — the player was early.
-          if (this.lastCatch.verdict === 'pending') {
-            this.lastCatch.verdict = this.lastCatch.offset > 0 ? 'early' : 'late';
-          }
-        } else {
+        if (!this.lastCatch || this.t - this.lastCatch.t > 0.25) {
           this.lastCatch = { t: this.t, verdict: 'late', offset: 0, distance: this.ballDistance };
         }
         this.push('fumble', 1);
@@ -260,21 +249,12 @@ export class Feel {
       }
     }
 
-    // A press that produced neither a catch nor a fumble: the ball was either never in reach,
-    // or the encounter had already been resolved by the rules a tick earlier — which, from the
-    // fingers' point of view, is the definition of late. Both cases get a name; neither is
-    // allowed to be silence.
-    if (this.lastCatch && this.lastCatch.verdict === 'pending' && this.t - this.lastCatch.t > 0.05) {
-      this.lastCatch.verdict = this.lastCatch.distance > this.cfg.catchRadius ? 'reach' : 'late';
-    }
-
     if (frame.match.score[0] !== this.score[0] || frame.match.score[1] !== this.score[1]) {
       const mine = frame.match.score[self.team];
       this.push(mine > this.score[self.team] ? 'goal' : 'conceded', 1);
       this.score = [frame.match.score[0], frame.match.score[1]];
     }
 
-    this.hadBall = self.hasBall;
     this.releaseFlash = Math.max(0, this.releaseFlash - dt * 2.2);
     for (const f of this.flashes) f.strength -= dt * 1.6;
     this.flashes = this.flashes.filter((f) => f.strength > 0);
@@ -328,13 +308,13 @@ export class Feel {
     // Telling them "too early" without saying "by two and a half metres" would be true and
     // useless.
     if (c.verdict === 'caught') return { text: 'CAUGHT', colour: '#7dffa8', alpha };
-    if (c.verdict === 'reach') {
-      return c.offset > 0
-        ? { text: `TOO SOON · it was still ${c.distance.toFixed(1)} m out`, colour: '#ff9a52', alpha }
-        : { text: `TOO LATE · it was already ${c.distance.toFixed(1)} m past`, colour: '#ff4d6d', alpha };
+    // Three failures, and each one names the thing to do differently. There is no button to blame
+    // any more, so a verdict that does not name a cause is worse than no verdict at all.
+    if (c.verdict === 'sprint') return { text: 'TOO FAST · slow down to take it', colour: '#ff9a52', alpha };
+    if (c.verdict === 'past') {
+      return { text: `OUT OF REACH · it was ${c.distance.toFixed(1)} m wide`, colour: '#ff9a52', alpha };
     }
-    if (c.verdict === 'early') return { text: `EARLY · ${(c.offset * 1000).toFixed(0)} ms`, colour: '#ff9a52', alpha };
-    if (c.verdict === 'late') return { text: `LATE · ${(-c.offset * 1000).toFixed(0)} ms`, colour: '#ff4d6d', alpha };
+    if (c.verdict === 'late') return { text: 'OFF THE BODY · too hard to hold', colour: '#ff4d6d', alpha };
     return null;
   }
 }
@@ -363,12 +343,11 @@ function defaultHints(pad: boolean): { id: string; text: string; when: (f: Perce
   const move = pad ? 'LEFT STICK' : 'WASD';
   const quiet = pad ? 'ease the stick' : 'hold SHIFT';
   const ping = pad ? 'LB' : 'SPACE';
-  const grab = pad ? 'RB' : 'RIGHT MOUSE';
   const throwKey = pad ? 'RT' : 'LEFT MOUSE';
   return [
     {
       id: 'ball',
-      text: 'the ball never stops singing — that gold mark is the only thing you always know',
+      text: 'a LOOSE ball sings from anywhere — that gold mark is the one thing everybody knows',
       when: (f) => f.match.t > 0.6 && f.emitters.length > 0,
     },
     {
@@ -383,7 +362,7 @@ function defaultHints(pad: boolean): { id: string; text: string; when: (f: Perce
     },
     {
       id: 'catch',
-      text: `${grab} to catch — press when the ball is ON you. The green ring is your reach`,
+      text: 'catching is automatic — the ring is your reach, and it shrinks the faster the ball comes',
       when: (_f, s) => s.ballDistance < 3.5,
     },
     {
@@ -393,12 +372,26 @@ function defaultHints(pad: boolean): { id: string; text: string; when: (f: Perce
     },
     {
       id: 'carry',
-      text: 'you cannot hold the ball for more than five seconds — and it sings, so they all know where you are',
-      when: (f) => f.self.hasBall,
+      // The most important thing to teach now: the ball is silent when you take it and gets
+      // louder the longer you keep it, so a pass is how you disappear again.
+      text: 'the ball beeps in your hands, louder the longer you hold it. Pass, and you go quiet',
+      when: (_f, s) => s.carryFor > 1.4,
+    },
+    {
+      id: 'keeper',
+      text: 'you are the keeper: you alone may stand inside your own arc, and you find the ball by ear',
+      when: (f) => f.self.keeper,
+    },
+    {
+      id: 'call',
+      // The human's one way of taking part in the attack: a bot cannot throw at a body it
+      // cannot place, and standing still is exactly what makes a body unplaceable.
+      text: `${pad ? 'RB' : 'E'} shouts for the ball — your team-mate will throw at the shout, and so will they`,
+      when: (f) => !f.self.hasBall && f.match.t > 8,
     },
     {
       id: 'ping',
-      text: `${ping} pings: one second of sight, and every single player hears exactly where you fired it from`,
+      text: `${ping} pings: a second of sight, and every single player hears exactly where you fired it from`,
       when: (f) => f.match.t > 14 && f.self.pingCooldown <= 0,
     },
   ];

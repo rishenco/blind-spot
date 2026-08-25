@@ -43,10 +43,127 @@ export interface ShapeRow {
 export const ROWS: ShapeRow[] = [
   { name: 'base', note: 'the rules as they are', apply: () => {} },
   {
+    name: 'v1',
+    note: 'the rules as they were before this pass: no keeper, ball humming for ever, timed catch, proximity steal, 2.5 m goal, 1.5 s ping',
+    apply: (c) => {
+      c.keeper.enabled = false;
+      c.field.goalWidth = 2.5;
+      c.catching.auto = false;
+      c.catching.catchSpeedSpan = 1e9;
+      c.contest.steal.enabled = true;
+      c.match.carryTimeoutSec = 5;
+      c.ping.cooldownSec = 1.5;
+      c.ping.range = 14;
+      c.ping.lifeSec = 1;
+      // The ball as it was: a continuous whole-pitch hum in the hands as well as in flight.
+      c.ball.voice.quietSec = 0;
+      c.ball.voice.rampSec = 0.01;
+      c.ball.voice.intervalStart = 0.2;
+      c.ball.voice.intervalMin = 0.2;
+      c.ball.voice.startLoudFrac = 1;
+      c.loudness['ball-carry'] = 30;
+    },
+  },
+  {
     name: 'no-keeper',
     note: 'the crease is forbidden to everybody — the rule that left the goal mouth empty',
     apply: (c) => {
       c.keeper.enabled = false;
+    },
+  },
+  // --- the ball's voice: the main tuning surface of the game now ---------------------------
+  {
+    name: 'v-eager',
+    note: 'a short quiet window (0.8 s) and a fast ramp (3 s): carrying gets expensive quickly',
+    apply: (c) => {
+      c.ball.voice.quietSec = 0.8;
+      c.ball.voice.rampSec = 3;
+      c.ball.voice.intervalStart = 0.9;
+    },
+  },
+  {
+    name: 'v-eager2',
+    note: 'shorter still: 0.6 s of quiet, a 2.5 s ramp, first beep at 0.7 s',
+    apply: (c) => {
+      c.ball.voice.quietSec = 0.6;
+      c.ball.voice.rampSec = 2.5;
+      c.ball.voice.intervalStart = 0.7;
+    },
+  },
+  {
+    name: 'v-eager3',
+    note: 'the eager rhythm with a louder first beep (0.45 of full) — carrying is costly at once',
+    apply: (c) => {
+      c.ball.voice.quietSec = 0.8;
+      c.ball.voice.rampSec = 3;
+      c.ball.voice.intervalStart = 0.9;
+      c.ball.voice.startLoudFrac = 0.45;
+    },
+  },
+  {
+    name: 'v-lazy',
+    note: 'a long quiet window (2 s) and a slow ramp (7 s): carrying stays cheap for a while',
+    apply: (c) => {
+      c.ball.voice.quietSec = 2;
+      c.ball.voice.rampSec = 7;
+    },
+  },
+  {
+    name: 'v-loud',
+    note: 'the same rhythm, but a fully-ramped ball is audible from 30 m — the whole pitch',
+    apply: (c) => {
+      c.loudness['ball-carry'] = 30;
+    },
+  },
+  {
+    name: 'v-soft',
+    note: 'a fully-ramped ball only carries 14 m: holding it is much cheaper',
+    apply: (c) => {
+      c.loudness['ball-carry'] = 14;
+    },
+  },
+  {
+    name: 'v-always',
+    note: 'the old rule for comparison: the ball hums across the whole pitch, in the hands too',
+    apply: (c) => {
+      c.ball.voice.quietSec = 0;
+      c.ball.voice.rampSec = 0.01;
+      c.ball.voice.intervalStart = 0.2;
+      c.ball.voice.intervalMin = 0.2;
+      c.ball.voice.startLoudFrac = 1;
+      c.loudness['ball-carry'] = 30;
+    },
+  },
+  {
+    name: 'k-3.2-hands',
+    note: '3.2 m mouth, keeper as configured (2.4× reach at 1.4 m out)',
+    apply: (c) => {
+      c.field.goalWidth = 3.2;
+    },
+  },
+  {
+    name: 'k-3.2-small',
+    note: '3.2 m mouth, smaller hands (1.8×) and a keeper on his line (1.0 m)',
+    apply: (c) => {
+      c.field.goalWidth = 3.2;
+      c.keeper.reachMul = 1.8;
+      c.keeper.depth = 1;
+    },
+  },
+  {
+    name: 'k-4.0-hands',
+    note: '4 m mouth, 2.4× reach at 1.4 m out',
+    apply: (c) => {
+      c.field.goalWidth = 4;
+    },
+  },
+  {
+    name: 'k-4.0-small',
+    note: '4 m mouth, 1.8× reach on the line',
+    apply: (c) => {
+      c.field.goalWidth = 4;
+      c.keeper.reachMul = 1.8;
+      c.keeper.depth = 1;
     },
   },
   {
@@ -209,7 +326,7 @@ async function main(): Promise<void> {
   const results = await runAll(jobs, workers);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
 
-  const head = ['row', 'goals/min', 'pass/poss', 'pass/goal', 'passes', 'hold→shot', 'hold→throw', 'shots/min', 'shot d p25', 'p50', 'p75', 'direct%', 'poss/min', 'saves/min', 'silent%', 'ping/min'];
+  const head = ['row', 'goals/min', 'pass/poss', 'pass/goal', 'passes', 'hold→shot', 'hold→throw', 'shots/min', 'shot d p25', 'p50', 'p75', 'direct%', 'poss/min', 'hold max', 'saves/min', 'silent%', 'ping/min'];
   const body: string[][] = [];
   for (const r of rows) {
     const stats = results.filter((x) => x.row === r.name).map((x) => x.stats);
@@ -232,6 +349,7 @@ async function main(): Promise<void> {
       quantile(dist, 0.75).toFixed(1),
       ((sh.goalsWithoutPass / Math.max(1, sh.goals)) * 100).toFixed(0),
       (sh.possessions / mins).toFixed(1),
+      sh.holdMax.toFixed(1),
       (sh.keeperSaves / mins).toFixed(2),
       ((agg.players.length ? sum((p) => p.silentShare) / agg.players.length : 0) * 100).toFixed(0),
       sum((p) => p.pingsPerMinute).toFixed(2),

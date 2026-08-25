@@ -291,10 +291,9 @@ function drawRelease(ctx: CanvasRenderingContext2D, cam: Camera, o: HudOptions):
  * like a mote of dust: a thin line from the body to the estimate, the range in metres, and —
  * when the ball is close and closing — the catch telegraph.
  *
- * The telegraph is the fairness fix for a timed catch. It draws the *window*, not the answer: a
- * ring that shrinks towards the body at the ball's own closing speed, and a bright band while
- * the press would land inside `catchWindowSec`. A player who misses can see they pressed while
- * the ring was still wide.
+ * The telegraph is the fairness fix for automatic catching. It draws the AREA the ball can be
+ * taken in, live: the ring shrinks as the ball speeds up and goes green when the ball is inside
+ * it. A player who misses can see that the ring was smaller than his mistake.
  */
 function drawBallLeash(ctx: CanvasRenderingContext2D, cam: Camera, o: HudOptions): void {
   const { feel, frame } = o;
@@ -316,9 +315,11 @@ function drawBallLeash(ctx: CanvasRenderingContext2D, cam: Camera, o: HudOptions
   }
 
   if (!self.hasBall && feel.ballDistance < 4.5) {
-    // The closing ring: where the ball will be in `catchWindow` seconds, drawn as a radius.
-    const reach = feel.cfg.catchRadius;
-    ring(ctx, cam, pos, reach, feel.catchWindowOpen ? '#7dffa8' : '#3f5a75', feel.catchWindowOpen ? 0.8 : 0.25, feel.catchWindowOpen ? 2 : 1, feel.catchWindowOpen ? undefined : [3, 5]);
+    // The reach, drawn live. It shrinks as the ball speeds up, which is the whole rule of
+    // catching now that there is no button: a lob can be taken from a metre away, a shot has to
+    // hit your hands.
+    const reach = feel.reachNow;
+    ring(ctx, cam, pos, reach, feel.ballInReach ? '#7dffa8' : '#3f5a75', feel.ballInReach ? 0.8 : 0.25, feel.ballInReach ? 2 : 1, feel.ballInReach ? undefined : [3, 5]);
     if (Number.isFinite(feel.ballTca) && feel.ballTca > 0 && feel.ballTca < 1.2) {
       // A countdown arc: full circle at 1.2 s out, empty at the moment of arrival.
       const cx = sx(cam, pos);
@@ -333,14 +334,14 @@ function drawBallLeash(ctx: CanvasRenderingContext2D, cam: Camera, o: HudOptions
       ctx.stroke();
       ctx.restore();
     }
-    if (feel.catchWindowOpen) ring(ctx, cam, pos, reach * 0.62, '#7dffa8', 0.45, 1);
+    if (feel.ballInReach) ring(ctx, cam, pos, reach * 0.62, '#7dffa8', 0.45, 1);
   }
 
   const readout = feel.catchReadout;
   if (readout) {
     // Below the reach ring, never on top of the body: the verdict has to be readable at the
     // exact moment the body is the brightest thing on the screen.
-    const below = sy(cam, pos) + Math.max(28, feel.cfg.catchRadius * cam.scale + 20);
+    const below = sy(cam, pos) + Math.max(28, feel.reachNow * cam.scale + 20);
     text(ctx, readout.text, sx(cam, pos), below, readout.colour, 12, 'center', readout.alpha);
   }
 }

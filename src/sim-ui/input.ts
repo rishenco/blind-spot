@@ -74,7 +74,7 @@ export class HumanInput {
   private padActive = false;
   private padAim: Vec2 | null = null;
   /** Latest pad button state, sampled in `readPad` and merged into the intent in `poll`. */
-  private padButtons = { charge: false, catchB: false, dive: false, ping: false };
+  private padButtons = { charge: false, catchB: false, dive: false, ping: false, call: false };
 
   /** Maps a canvas point to world metres; set by the playground for whichever pane is hovered. */
   toWorld: ((clientX: number, clientY: number, target: HTMLCanvasElement) => Vec2) | null = null;
@@ -110,7 +110,8 @@ export class HumanInput {
       });
       canvas.addEventListener('mousedown', (e) => {
         if (e.button === 0) this.charging = true;
-        if (e.button === 2) this.catchHeld = true;
+        // The right button is deliberately unbound. Catching is automatic, and the fewer buttons
+        // a two-minute jam game has, the better: the mouse aims, the left button throws.
         if (e.button === 1) this.diveHeld = true;
         this.latchedButtons.add(e.button);
         this.gesture();
@@ -120,7 +121,6 @@ export class HumanInput {
     }
     window.addEventListener('mouseup', (e) => {
       if (e.button === 0) this.charging = false;
-      if (e.button === 2) this.catchHeld = false;
       if (e.button === 1) this.diveHeld = false;
     });
     window.addEventListener('gamepadconnected', (e) => {
@@ -156,7 +156,9 @@ export class HumanInput {
     const rt = pad.buttons[7]?.value ?? 0;
     this.padButtons = {
       charge: rt > 0.15 || btn(0),
-      catchB: btn(5) || btn(1),
+      // The pad's catch button goes the same way as the right mouse button — it now shouts.
+      catchB: false,
+      call: btn(5) || btn(1),
       dive: btn(2),
       ping: btn(4),
     };
@@ -223,11 +225,16 @@ export class HumanInput {
     }
     intent.aim = aim;
 
-    const pb = pad ? this.padButtons : { charge: false, catchB: false, dive: false, ping: false };
+    const pb = pad ? this.padButtons : { charge: false, catchB: false, dive: false, ping: false, call: false };
     intent.ping = pb.ping || down('Space');
     intent.charge = pb.charge || this.charging || this.latchedButtons.has(0) || down('KeyF');
-    intent.catch = pb.catchB || this.catchHeld || this.latchedButtons.has(2) || down('KeyC') || down('KeyE');
+    // Kept in the contract (a bot may still reach deliberately to block) but no longer bound to
+    // anything a person has to press: `catching.auto` decides catches.
+    intent.catch = pb.catchB || this.catchHeld;
     intent.dive = pb.dive || this.diveHeld || this.latchedButtons.has(1) || down('KeyQ');
+    // The shout, on the key the catch used to sit on. It is the only thing a player says on
+    // purpose, and it is what makes a bot team-mate throw the ball at a human.
+    intent.call = pb.call || down('KeyE') || down('KeyC') || this.latchedButtons.has(2);
 
     const poll: Poll = {
       intent,
@@ -262,7 +269,7 @@ export class HumanInput {
 
   get helpText(): string {
     return this.padActive
-      ? 'stick = move (push far = run = loud) · right stick = aim · RT hold/release = throw · RB = catch · LB = ping · X = dive'
-      : 'WASD move · SHIFT = walk (quiet) · mouse aim · LMB hold/release = THROW · RMB/E = catch · SPACE = ping · Q = dive';
+      ? 'stick = move (push far = run = loud) · right stick = aim · RT hold/release = throw · RB = CALL for the ball · LB = ping · X = dive · catching is automatic'
+      : 'WASD move · SHIFT = walk (quiet) · mouse aim · LMB hold/release = THROW · E/RMB = CALL for the ball · SPACE = ping · Q = dive · catching is automatic';
   }
 }

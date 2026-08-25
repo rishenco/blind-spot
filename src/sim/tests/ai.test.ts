@@ -246,6 +246,7 @@ describe('the policy', () => {
       belief,
       cfg: ctx.config,
       pingCooldown: 0,
+      callCooldown: 0,
       lastTag: null,
       decisionQuality: 1,
     });
@@ -259,7 +260,7 @@ describe('the policy', () => {
     const belief = new Belief(ctx);
     const f = deriveFeatures(belief, { x: 0, y: 0 }, 0, false, 0, 0, ctx.field, ctx.config);
     const make = (q: number): number =>
-      generateCandidates({ features: f, belief, cfg: ctx.config, pingCooldown: 0, lastTag: null, decisionQuality: q })
+      generateCandidates({ features: f, belief, cfg: ctx.config, pingCooldown: 0, callCooldown: 0, lastTag: null, decisionQuality: q })
         .length;
     expect(make(0.3)).toBeLessThan(make(1));
     // Holding is first in the list, so it survives any amount of narrowing.
@@ -268,6 +269,7 @@ describe('the policy', () => {
       belief,
       cfg: ctx.config,
       pingCooldown: 0,
+      callCooldown: 0,
       lastTag: null,
       decisionQuality: 0.1,
     });

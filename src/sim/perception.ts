@@ -285,6 +285,7 @@ export class Perceiver {
       down: me.downT > 0,
       reaching: me.reachT > 0,
       keeper: me.keeper,
+      callCooldown: me.callCd,
       stealPressure: pressure,
       carrySeconds: me.hasBall ? view.ball.carryT : 0,
       lastCatchFail: me.lastCatchFail,

@@ -65,6 +65,10 @@ const PROFILES: Partial<Record<SoundKind, Profile>> = {
   throw: { ring: 620, decay: 0.16, noise: 0.55, gain: 1, q: 1.2 },
   'ball-hum': { ring: 320, decay: 0.2, noise: 0.2, gain: 0.5, q: 3 },
   'ball-wall': { ring: 780, decay: 0.12, noise: 0.35, gain: 0.9, q: 2.4 },
+  // A short high blip, deliberately unlike the hum: the hum means "loose, come and get it", the
+  // blip means "somebody is holding it, and here he is".
+  'ball-carry': { ring: 1180, decay: 0.05, noise: 0.05, gain: 0.8, q: 6 },
+  call: { ring: 520, decay: 0.18, noise: 0.3, gain: 0.9, q: 1.8 },
   sonar: { ring: 1400, decay: 0.5, noise: 0.25, gain: 1, q: 2 },
   whistle: { ring: 2100, decay: 0.45, noise: 0.1, gain: 0.8, q: 6 },
 };

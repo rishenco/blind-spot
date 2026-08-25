@@ -169,6 +169,7 @@ export class Bot implements Controller {
       belief: this.belief,
       cfg: this.ctx.config,
       pingCooldown: frame.self.pingCooldown,
+      callCooldown: frame.self.callCooldown,
       lastTag: this.chosen?.action.tag ?? null,
       decisionQuality: quality,
       allowPing: this.opts.allowPing !== false,
@@ -213,6 +214,9 @@ export class Bot implements Controller {
           intent.move = a.dir!;
           this.diveLock = cfg.dive.cooldownSec;
         }
+        break;
+      case 'call':
+        if (frame.self.callCooldown <= 1e-6) intent.call = true;
         break;
       case 'ping':
         if (this.pingLock <= 0 && frame.self.pingCooldown <= 1e-6) {

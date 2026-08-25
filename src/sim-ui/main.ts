@@ -169,7 +169,11 @@ function feelConfig(config: SimConfig): ConstructorParameters<typeof Feel>[0] {
     catchRadius: config.catching.radius,
     // `windowSec` is gone: a catch is now "one press opens the hands for `reachSec`", which is
     // the same quantity from the player's point of view — how long the grab lasts.
-    catchWindow: config.catching.reachSec,
+    catchSpeedSpan: config.catching.catchSpeedSpan,
+    minReachFrac: config.catching.minReachFrac,
+    slowBallSpeed: config.catching.slowBallSpeed,
+    sprintSpeed: config.catching.sprintSpeed,
+    keeperReachMul: config.keeper.reachMul,
     walkLoud: config.loudness['step-walk'],
     runLoud: config.loudness['step-run'],
     pingCooldown: config.ping.cooldownSec,
@@ -816,7 +820,7 @@ const hb = {
       silentFor: f.silentFor,
       ballDistance: Number.isFinite(f.ballDistance) ? f.ballDistance : null,
       ballTca: Number.isFinite(f.ballTca) ? f.ballTca : null,
-      catchWindowOpen: f.catchWindowOpen,
+      ballInReach: f.ballInReach,
       lastCatch: f.lastCatch,
       readout: f.catchReadout?.text ?? null,
       hint: f.activeHint?.text ?? null,
