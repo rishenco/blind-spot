@@ -35,6 +35,7 @@ import {
   PLAYER_EMITTER_ID,
   SOUND_CLASSES,
   SoundBus,
+  isComposedClass,
   type SoundClass,
   type SoundEvent,
 } from '../../src/paint/soundEvents';
@@ -45,16 +46,31 @@ const ORIGIN: ListenerState = { x: 0, y: 0, z: 0, range: 18, emitter: PLAYER_EMI
 function emit(
   cls: SoundClass,
   at: { x?: number; y?: number; z?: number } = {},
-  extra: Partial<{ mat: number; source: 'player' | 'prop' | 'spider' | 'world'; emitter: number }> = {},
+  extra: Partial<{
+    mat: number;
+    objMat: number;
+    source: 'player' | 'prop' | 'spider' | 'world';
+    emitter: number;
+  }> = {},
 ): SoundEvent {
   const bus = new SoundBus();
   const ping = !SOUND_CLASSES[cls] ? {} : cls.endsWith('ping') ? { dirX: 1, dirY: 0, dirZ: 0 } : {};
+  /*
+   * A composed class is refused by the bus unless it is told what struck the surface, so the
+   * helper names one when the class needs one and never otherwise. Concrete, because its
+   * multiplier is 1.0 and so is the geometric mean of it with itself: the pair costs the class
+   * nothing, and every sweep below goes on measuring the class and the *struck* surface exactly
+   * as it did before there were two-bodied classes. A caller that wants a real pair passes its
+   * own `objMat` through `extra`.
+   */
+  const struck = isComposedClass(cls) ? { objMat: MAT_CONCRETE } : {};
   return bus.emit({
     class: cls,
     x: at.x ?? 0,
     y: at.y ?? 0,
     z: at.z ?? 0,
     ...ping,
+    ...struck,
     ...extra,
   });
 }
@@ -152,7 +168,11 @@ describe('how loud, at a distance', () => {
         checked++;
       }
     }
-    expect(checked).toBe(23);
+    // Nine classes over four materials, less the single cell that never reaches the near field
+    // (the next test names it). It read 23 while the table held six classes: this is the
+    // *cardinality of the sweep*, pinned so that a class silently dropping out of the loop is a
+    // failure rather than a quieter test, and it moves exactly when the class table does.
+    expect(checked).toBe(35);
   });
 
   it('except for the one sound that never carries as far as your own feet', () => {
@@ -160,8 +180,10 @@ describe('how loud, at a distance', () => {
     // soles — so its whole audible life happens inside the near field and it tops out at
     // 1.2/1.5 of the edge gain. That is the right answer rather than an exception to patch: a
     // sound that dies closer than your own footfall never gets to be as loud as the quietest
-    // thing you can hear at range. It is also the only one of the twenty-four, which is the
-    // number worth pinning — a second one appearing means a class or a multiplier moved.
+    // thing you can hear at range. It is also the only one of the thirty-six, which is the
+    // number worth pinning — a second one appearing means a class or a multiplier moved. (It
+    // was the only one of twenty-four before the three throw classes joined the table; the
+    // quietest cell either of them can reach is a dust-on-dust knock at 2.4 m.)
     const belowNearField = (Object.keys(SOUND_CLASSES) as SoundClass[]).flatMap((cls) =>
       [MAT_CONCRETE, MAT_METAL, MAT_STONE, MAT_DUST]
         .map((mat) => emit(cls, {}, isContactVoice(cls) ? { mat } : {}))
@@ -248,6 +270,36 @@ describe('§3.9: the multiplier is the only thing that makes one material louder
     expect(20 * Math.log10(metal / concrete)).toBeCloseTo(3.522, 3);
   });
 
+  /**
+   * The composed half of the same law: a pair of bodies reaches the ear at the mean of their two
+   * promises, in dB, and it does so without the director ever knowing there were two.
+   *
+   * `gainFor` reads `hearingRadius` and nothing else, so the geometric mean the bus applied is
+   * already in the level by the time the mixer sees it — which is what keeps §3.9's "the level
+   * is the carry radius" true for pairs as well as for surfaces. Read in decibels the geometric
+   * mean becomes the arithmetic mean of the two rows of the promised-dB table, which is the
+   * whole content of choosing it over the product: the product would double the distance from
+   * concrete at every pair.
+   */
+  it('prices a two-bodied contact at the mean of the two promises, in dB', () => {
+    const at = 5;
+    const MATERIALS = [MAT_CONCRETE, MAT_METAL, MAT_STONE, MAT_DUST];
+    const promisedDb = (mat: number): number => 20 * Math.log10(materialLoudness(mat));
+    const gainOn = (obj: number, surf: number): number =>
+      gainFor(emit('prop-impact', {}, { mat: surf, objMat: obj }), at);
+    const reference = gainOn(MAT_CONCRETE, MAT_CONCRETE);
+    for (const obj of MATERIALS) {
+      for (const surf of MATERIALS) {
+        const label = `${MATERIAL_NAMES[obj]} on ${MATERIAL_NAMES[surf]}`;
+        const deltaDb = 20 * Math.log10(gainOn(obj, surf) / reference);
+        expect(deltaDb, label).toBeCloseTo((promisedDb(obj) + promisedDb(surf)) / 2, 12);
+      }
+    }
+    // And the diagonal is the single-material promise, unchanged: a steel can on a steel plate
+    // arrives at the same 3.5 dB above concrete that a footfall on that plate does.
+    expect(20 * Math.log10(gainOn(MAT_METAL, MAT_METAL) / reference)).toBeCloseTo(3.522, 3);
+  });
+
   it('reads the same loudness the spider will: level tracks hearingRadius, class by class', () => {
     // Sight, hearing and the hunt from one number. If a class is ever given a volume of its own
     // beside its §3.3 row, this is what says so.
@@ -281,6 +333,24 @@ describe('what a spec says', () => {
     for (const mat of [MAT_CONCRETE, MAT_METAL, MAT_STONE, MAT_DUST]) {
       expect(director.decide(emit('landing', { x: 1 }, { mat }))!.mat, MATERIAL_NAMES[mat]).toBe(mat);
     }
+  });
+
+  it('carries the second body too, and null when there is not one', () => {
+    // The wire §3.9's timbre half rides on: `voices.ts` selects the exciter row from `objMat` and
+    // the modal bank from `mat`, so a director that dropped this field would make every thrown
+    // thing sound like the floor it hit — and nothing about the level would move, because the
+    // level is the radius and the radius already spent the pair. This is the only assertion
+    // between the bus and the synthesis that says the second material survives the trip.
+    const director = new AudioDirector(ORIGIN);
+    for (const obj of [MAT_CONCRETE, MAT_METAL, MAT_STONE, MAT_DUST]) {
+      const spec = director.decide(emit('prop-impact', { x: 1 }, { mat: MAT_STONE, objMat: obj }))!;
+      expect(spec.objMat, MATERIAL_NAMES[obj]).toBe(obj);
+      expect(spec.mat, MATERIAL_NAMES[obj]).toBe(MAT_STONE);
+    }
+    // A footfall struck the floor with a body the game has no material for, and a ping struck
+    // nothing at all. Both say so, and `null` is what puts the voice back on the diagonal.
+    expect(director.decide(emit('walk-step', { x: 1 }))!.objMat).toBeNull();
+    expect(director.decide(emit('q-ping'))!.objMat).toBeNull();
   });
 
   it('carries the cone, so the two pings can sound like their shapes (§3.5)', () => {

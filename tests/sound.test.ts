@@ -9,6 +9,9 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import {
+  IMPACT_FULL_SPEED,
+  IMPACT_MAX_RADIUS,
+  IMPACT_MIN_SPEED,
   LANDING_FULL_IMPACT,
   LANDING_MAX_RADIUS,
   LANDING_MIN_IMPACT,
@@ -18,11 +21,27 @@ import {
   SoundBus,
   WAVE_SPEEDS,
   eventTint,
+  isComposedClass,
+  isContactClass,
   type SoundClass,
   type SoundEvent,
   type SoundSource,
 } from '../src/paint/soundEvents';
 import { MAT_CONCRETE } from '../src/paint/materials';
+
+/**
+ * The bodies a class has to be handed before it will emit at all.
+ *
+ * Read off `CONTACT_CLASSES` and `COMPOSED_CLASSES` rather than from a list of names, so a loop
+ * over the whole table keeps working when the table grows — which is the only reason the loops
+ * below survived M2's three new rows without being rewritten. Concrete on both sides on purpose:
+ * its multiplier is 1.0 and so is the pair's geometric mean, so a class's own numbers come
+ * through the material law unchanged and the loops are testing the class and not the surface.
+ */
+function bodiesFor(cls: SoundClass): { mat?: number; objMat?: number } {
+  if (isComposedClass(cls)) return { mat: MAT_CONCRETE, objMat: MAT_CONCRETE };
+  return isContactClass(cls) ? { mat: MAT_CONCRETE } : {};
+}
 
 describe('the class table', () => {
   it('every class names a wave group that WAVE_SPEEDS defines', () => {
@@ -36,6 +55,9 @@ describe('the class table', () => {
   it('holds exactly the classes implemented so far, in §3.3 order', () => {
     expect(Object.keys(SOUND_CLASSES)).toEqual([
       'crouch-step', 'walk-step', 'sprint-step', 'landing', 'q-ping', 'e-ping',
+      // M2's throwable: §3.3's reserved prop row, the settle under it, and the rig's own arm —
+      // which §3.3 has no row for, because a wind-up is a mechanism rather than a contact.
+      'prop-impact', 'prop-knock', 'throw-windup',
     ]);
   });
 
@@ -49,9 +71,13 @@ describe('the class table', () => {
       landing: { paintRadius: 8, hearingRadius: 28, coneAngleDeg: 360, intensity: 1.0, wave: 'step' },
       'q-ping': { paintRadius: 12, hearingRadius: 18, coneAngleDeg: 360, intensity: 1.05, wave: 'ping' },
       'e-ping': { paintRadius: 22, hearingRadius: 30, coneAngleDeg: 110, intensity: 1.15, wave: 'beam' },
+      'prop-impact': { paintRadius: 8, hearingRadius: 25, coneAngleDeg: 360, intensity: 1.0, wave: 'step' },
+      'prop-knock': { paintRadius: 1.5, hearingRadius: 4, coneAngleDeg: 360, intensity: 0.7, wave: 'step' },
+      'throw-windup': { paintRadius: 0.5, hearingRadius: 2.5, coneAngleDeg: 360, intensity: 0.6, wave: 'step' },
     });
     expect(WAVE_SPEEDS).toEqual({ step: 25, ping: 25, beam: 45 });
     expect([LANDING_MIN_IMPACT, LANDING_FULL_IMPACT, LANDING_MAX_RADIUS]).toEqual([5, 14, 14]);
+    expect([IMPACT_MIN_SPEED, IMPACT_FULL_SPEED, IMPACT_MAX_RADIUS]).toEqual([2.5, 16, 12]);
   });
 });
 
@@ -107,6 +133,71 @@ describe('SoundBus.landingRadius', () => {
   });
 });
 
+describe('SoundBus.impactRadius', () => {
+  const base = SOUND_CLASSES['prop-impact'].paintRadius; // 8
+
+  /**
+   * The same shape as the landing's band, and deliberately the same code (`speedFraction`).
+   *
+   * A thrown thing and a falling body are the same event seen twice — a contact whose loudness
+   * is how fast it arrived — so a second hand-written clamp here would be a second place for
+   * the NaN trapdoor below to be reopened. What differs is only the band: an impact starts
+   * ringing at a much lower speed than a landing does, because a can does not have to be
+   * dropped four metres to be worth hearing.
+   */
+  it('is flat at the base below and at IMPACT_MIN_SPEED', () => {
+    // Under this the contact is a set-down, and the emitter never reaches the bus at all — the
+    // quiet "place it, do not throw it" verb, priced at nothing.
+    expect(SoundBus.impactRadius(-5)).toBe(base);
+    expect(SoundBus.impactRadius(0)).toBe(base);
+    expect(SoundBus.impactRadius(2.4999)).toBe(base);
+    expect(SoundBus.impactRadius(IMPACT_MIN_SPEED)).toBe(base);
+  });
+
+  it('starts rising immediately above IMPACT_MIN_SPEED', () => {
+    expect(SoundBus.impactRadius(IMPACT_MIN_SPEED + 1e-4)).toBeCloseTo(8.00002962962963, 12);
+  });
+
+  it('interpolates linearly across the 8-12 m band', () => {
+    expect(SoundBus.impactRadius(9.25)).toBe(10); // halfway
+    expect(SoundBus.impactRadius(5.875)).toBe(9); // a quarter
+    expect(SoundBus.impactRadius(12.625)).toBe(11); // three quarters
+  });
+
+  it('clamps at IMPACT_MAX_RADIUS from IMPACT_FULL_SPEED upward', () => {
+    expect(SoundBus.impactRadius(IMPACT_FULL_SPEED)).toBe(IMPACT_MAX_RADIUS);
+    expect(SoundBus.impactRadius(100)).toBe(IMPACT_MAX_RADIUS);
+    expect(SoundBus.impactRadius(Infinity)).toBe(IMPACT_MAX_RADIUS);
+  });
+
+  it('never leaves the 8-12 m band, whatever it is handed', () => {
+    // Including NaN, for the landing's reason exactly: a NaN radius paints nothing while the
+    // sound is still heard, which is a law-2 lie the type system cannot see.
+    const nasty = [
+      NaN, Infinity, -Infinity, 0, -0, 2.5, 16, 1e308, -1e308, 1e-308,
+      Number.MIN_VALUE, Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER,
+    ];
+    for (const v of nasty) {
+      const r = SoundBus.impactRadius(v);
+      expect(Number.isFinite(r), `impactRadius(${v}) = ${r}`).toBe(true);
+      expect(r).toBeGreaterThanOrEqual(base);
+      expect(r).toBeLessThanOrEqual(IMPACT_MAX_RADIUS);
+    }
+    expect(SoundBus.impactRadius(NaN)).toBe(base);
+  });
+
+  it('leaves the landing band exactly where it was', () => {
+    // The two bands now share a clamp, and this is the assertion that the sharing changed
+    // nothing: a landing's radius is a number the whole audio suite is levelled against, so a
+    // refactor that moved it by one ulp would be a silent retune of every drop in the game.
+    expect(SoundBus.landingRadius(9.5)).toBe(11);
+    expect(SoundBus.landingRadius(LANDING_MIN_IMPACT + 1e-4)).toBe(8.000066666666667);
+    expect(SoundBus.landingRadius(NaN)).toBe(SOUND_CLASSES.landing.paintRadius);
+    // Different bands, and neither reads the other's constants.
+    expect(SoundBus.impactRadius(9.5)).not.toBe(SoundBus.landingRadius(9.5));
+  });
+});
+
 describe('SoundBus state', () => {
   it('starts at time 0 with nothing emitted', () => {
     const bus = new SoundBus();
@@ -156,6 +247,8 @@ describe('SoundBus.emit', () => {
       // radii above were scaled by, so what the event says it hit and what it was priced as are
       // never two different answers.
       mat: MAT_CONCRETE,
+      // No second body: a walk-step is the rig meeting a floor, and the rig has no material.
+      objMat: null,
       paintRadius: 4,
       hearingRadius: 11,
       intensity: 0.9,
@@ -431,7 +524,7 @@ describe('every class round-trips through emit', () => {
   it.each(Object.keys(SOUND_CLASSES) as SoundClass[])('%s', (cls) => {
     const bus = new SoundBus();
     const profile = SOUND_CLASSES[cls];
-    const e = bus.emit({ class: cls, x: 0, y: 0, z: 0 });
+    const e = bus.emit({ class: cls, x: 0, y: 0, z: 0, ...bodiesFor(cls) });
     expect(e.class).toBe(cls);
     expect(e.paintRadius).toBe(profile.paintRadius);
     expect(e.hearingRadius).toBe(profile.hearingRadius);
@@ -575,10 +668,22 @@ describe('a radius is positive, finite metres, or it is not a sound (§1)', () =
 
   it('every shipped class passes its own defaults, on every material', () => {
     const bus = new SoundBus();
-    for (const cls of Object.keys(SOUND_CLASSES) as Array<keyof typeof SOUND_CLASSES>) {
-      const mats = cls.endsWith('ping') ? [undefined] : [0, 1, 2, 3];
+    for (const cls of Object.keys(SOUND_CLASSES) as SoundClass[]) {
+      // Which materials a class may be handed is the bus's own question, asked of the predicates
+      // rather than of the class's name — a composed class is handed a pair, and every pair.
+      const mats = isContactClass(cls) ? [0, 1, 2, 3] : [undefined];
+      const objMats = isComposedClass(cls) ? [0, 1, 2, 3] : [undefined];
       for (const mat of mats) {
-        expect(() => bus.emit({ class: cls, ...at, ...(mat === undefined ? {} : { mat }) })).not.toThrow();
+        for (const objMat of objMats) {
+          expect(() =>
+            bus.emit({
+              class: cls,
+              ...at,
+              ...(mat === undefined ? {} : { mat }),
+              ...(objMat === undefined ? {} : { objMat }),
+            }),
+          ).not.toThrow();
+        }
       }
     }
     bus.dispose();

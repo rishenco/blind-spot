@@ -32,6 +32,7 @@ import {
   PLAYER_EMITTER_ID,
   SOUND_CLASSES,
   SoundBus,
+  isComposedClass,
   isContactClass,
   type SoundClass,
   type SoundEvent,
@@ -157,10 +158,15 @@ describe('the ceiling covers the game (§3.3, §3.9)', () => {
       // asked of the shipped predicate rather than restated as a list. A landing is a contact
       // class and is not in STEP_CLASSES, which is exactly the row this test is here to cover.
       const mats = isContactClass(cls) ? MATERIALS : [undefined];
+      // A composed class is priced by two materials, so the sweep is over every pair of them —
+      // the ceiling has to cover the loudest *pair* a prop can make, not the loudest surface.
+      const objMats = isComposedClass(cls) ? MATERIALS : [undefined];
       for (const mat of mats) {
-        const r = bus.carryRadius(cls, mat);
-        expect(r).toBeLessThanOrEqual(HALO_MAX_RADIUS_M);
-        if (r > loudest) loudest = r;
+        for (const objMat of objMats) {
+          const r = bus.carryRadius(cls, mat ?? null, objMat ?? null);
+          expect(r).toBeLessThanOrEqual(HALO_MAX_RADIUS_M);
+          if (r > loudest) loudest = r;
+        }
       }
     }
     expect(loudest).toBeCloseTo(HALO_MAX_RADIUS_M, 10);

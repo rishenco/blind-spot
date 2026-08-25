@@ -463,6 +463,77 @@ export const MATERIAL_LOUDNESS_LAW = Object.freeze({
 export const BRIGHT_LEAK_MAX_DB = 0.35;
 
 // ---------------------------------------------------------------------------
+// The composed contact (§3.9 generalized) — two bodies, two rows, one sound
+
+/*
+ * These five arrived with the seam in `src/audio/voices.ts`, before any class carried a composed
+ * contact, and lived in `tests/audio/composedVoice.test.ts` for exactly one commit — the whole
+ * verification story of that commit was that it touched no existing file, pinned numbers
+ * included. The class exists now (`prop-impact`), so they take their place beside the
+ * single-material pins they generalize, unchanged: every number below is the same measurement it
+ * was when it was made.
+ */
+
+/**
+ * Above this, 150–300 ms after the strike, a surface is still ringing, dBFS.
+ *
+ * Measured at this file's gain staging, the four metal-surfaced pairs sit between −67.5 and
+ * −61.5 dBFS; the loosest is 12.5 dB clear of this line. Absolute rather than relative because
+ * the claim being made is "there is still a sound there", and it is paired with
+ * `DULL_TAIL_CEILING_DBFS` so the two together are a partition rather than two independent
+ * numbers. Both move together if the gain staging does — assert differences, not these, when the
+ * claim is about how far apart two materials are.
+ */
+export const RINGING_TAIL_FLOOR_DBFS = -80;
+
+/**
+ * Below this, the surface has stopped, dBFS. Measured worst (loudest) dull pair: −99.4.
+ *
+ * 9.4 dB of margin, and the gap between the two constants is 10 dB of no-man's land that no
+ * measured pair is anywhere near — which is what stops a modest retune from making the partition
+ * ambiguous instead of failing it.
+ */
+export const DULL_TAIL_CEILING_DBFS = -90;
+
+/**
+ * The least a struck metal surface may out-ring a struck dull one, dB, at the same object.
+ *
+ * Measured minimum over the four objects is 32.0 dB (a metal object, metal floor against
+ * concrete floor); the largest is 37.9. This is `MIN_METAL_TAIL_SEPARATION_DB`'s claim asked of
+ * the composed voice, and pinned lower than its 35 for one reason: at the composed shape the
+ * *object* row also feeds the bank, so the same surface separation is worth a few dB less when a
+ * dull object is doing the driving. 25 keeps 7 dB of headroom under the worst measured pair.
+ */
+export const MIN_SURFACE_TAIL_SEPARATION_DB = 25;
+
+/**
+ * The most the *object* may move the ring on a fixed surface, dB.
+ *
+ * The other half of "the ring belongs to the floor": on steel, the four objects ring within
+ * 6.0 dB of each other — the object drives the bank harder or softer, it does not decide whether
+ * the bank rings at all. 15 is 2.5× that. Wired backwards this reads 34.5 dB, because it becomes
+ * the *surface* spread measured under the object's name.
+ */
+export const MAX_OBJECT_TAIL_SPREAD_DB = 15;
+
+/**
+ * The least a dust object must out-brighten a concrete one on the same dull floor, Hz.
+ *
+ * Measured 396 Hz on concrete, 411 on stone, 725 on dust. It is the scuff: dust's exciter is the
+ * softest in the table (1100 Hz against concrete's 3200) but almost all of it is heard directly
+ * — `scuff` 0.9 against 0.25 — where concrete's is mostly spent driving modes that sit below
+ * it.
+ * So a handful of grit reads *brighter* on the attack than a lump of concrete, which is the same
+ * "brightness is a scuff-versus-ring axis, not a hardness axis" finding `materialVoices.test.ts`
+ * records, arriving here as the object axis.
+ *
+ * 250 leaves 146 Hz of margin on the tightest of the three, which is inside the ±100–150 Hz
+ * tolerances the material centroids already carry. Ignore `objMat` in the voice and this
+ * collapses to exactly 0 on all three floors, which is the mutation this number exists for.
+ */
+export const MIN_OBJECT_CENTROID_GAP_HZ = 250;
+
+// ---------------------------------------------------------------------------
 // The Halo hum (§3.8)
 
 /**

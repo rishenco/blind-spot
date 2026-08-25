@@ -172,7 +172,21 @@ function floorAgeFor(cls: SoundClass, wave: WaveTunables, ramp: AgeRamp): number
   return isStep(cls) ? ramp.freshSeconds * wave.stepFloor : 0;
 }
 
-/** Event-layer palette (§3.2): self is amber, and the pings are the same self, brighter. */
+/**
+ * Event-layer palette (§3.2): self is amber, and the pings are the same self, brighter.
+ *
+ * The two `prop-*` rows are §3.2's pale yellow, which is the right *colour* arriving by the
+ * wrong road — this table is keyed on the class and §3.2's palette is keyed on the source, and
+ * the two only agree because no player-made class is a prop and no prop-made class is a rig's.
+ * That coincidence ends the moment anything else can knock a can, and `eventTint`
+ * (`soundEvents.ts`) is the function that already answers the question properly and that nothing
+ * calls. Wiring it is a separate job with its own screenshots; what is here is the honest
+ * minimum, so a thrown can does not render as the player's own footstep.
+ *
+ * `throw-windup` stays in the amber family and at the bottom of it, because it *is* the rig: the
+ * arm winding up is the player making a noise, exactly as a crouch-step is, and it is the
+ * quietest thing either of them does.
+ */
 const EVENT_COLORS: Record<SoundClass, number> = {
   'crouch-step': 0xd98a2b,
   'walk-step': 0xffa63c,
@@ -180,6 +194,9 @@ const EVENT_COLORS: Record<SoundClass, number> = {
   landing: 0xffd08a,
   'q-ping': 0xffe6b4,
   'e-ping': 0xfff0cc,
+  'prop-impact': 0xf2df9a,
+  'prop-knock': 0xd9c47e,
+  'throw-windup': 0xd98a2b,
 };
 
 /** How many event-layer markers can be alive at once. */

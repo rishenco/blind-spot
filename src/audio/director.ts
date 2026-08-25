@@ -59,11 +59,11 @@ export interface VoiceSpec {
    * can is the case that is not null: the strike is the can's and the ring is the floor's, and
    * the voice needs both rows to say so.
    *
-   * Written as a literal `null` in `decide` for now, because the bus has no event that carries a
-   * second material yet — the class that does arrives with the throwable. Declaring the field
-   * before there is an event for it is deliberate: it makes the seam in `contactVoice` a thing
-   * the compiler knows about, and lets the whole existing suite re-render through it and prove
-   * nothing moved, which is a proof that is only available while the answer is still `null`.
+   * Copied from `SoundEvent.objMat` and never decided here, so which classes carry two bodies is
+   * a fact of the bus's `COMPOSED_CLASSES` and of nothing else. The level that comes with it is
+   * already spent: `gainFor` reads `hearingRadius`, which left `emit` carrying the pair's
+   * geometric mean, so the ear and the carry agree about a pair by exactly the construction that
+   * makes them agree about a single surface.
    */
   readonly objMat: number | null;
   /** Metres from the listener to the origin — the number `gainFor` used, kept for the mixer. */
@@ -175,6 +175,34 @@ const CLASS_VOICES: Readonly<Record<SoundClass, ClassVoice>> = Object.freeze({
   // tell them apart, and `toneHz` sets how high each one sits.
   'q-ping': Object.freeze({ voice: 'ping' as const, bright: 1.0, toneHz: 420, durationSec: 1.1 }),
   'e-ping': Object.freeze({ voice: 'ping' as const, bright: 1.0, toneHz: 760, durationSec: 1.0 }),
+  /*
+   * The two composed classes share a `bright`, and that is a measured constraint rather than a
+   * claim that a settle strikes as hard as a throw.
+   *
+   * `voices.ts`'s twelve off-diagonal norms — the constants that make all sixteen material pairs
+   * arrive at one level — were fitted at one exciter shape, `COMPOSED_NORM_FIT_BRIGHT` (1.45),
+   * and the fit does not travel. Measured over the 192-strike estimator at every pair: the worst
+   * residual is 0.26 dB at 1.45, 0.41 at a walk's 1.0, 0.97 at 0.8 and 3.07 at a crouch's 0.55,
+   * all of it on a dust object striking a metal floor, where how much of the scuff survives the
+   * attack window depends entirely on what it is driving. §3.9's whole budget is half a decibel,
+   * so a duller knock would be a class whose loudness law is simply false.
+   *
+   * So the knock is separated from the impact by its reach (4 m of carry against 25 — it is a
+   * sound you have to be next to the can to learn anything from), by a lighter thump and by a
+   * shorter run, and *not* by its strike hardness. Buying that back means fitting a second row
+   * of twelve norms at the knock's shape; `tests/audio/materialVoices.test.ts` names the
+   * obligation by asserting every composed class carries this number.
+   */
+  'prop-impact': Object.freeze({ voice: 'contact' as const, bright: 1.45, toneHz: 200, durationSec: 0.8 }),
+  'prop-knock': Object.freeze({ voice: 'contact' as const, bright: 1.45, toneHz: 260, durationSec: 0.6 }),
+  /*
+   * The wind-up is a `'ping'` because `VoiceKind` has two builders and the module-load check
+   * below refuses a non-contact class the contact one — it strikes nothing, so it cannot have a
+   * struck surface's modes. That is the honest placeholder and not the shipped sound: a servo
+   * winding up is a mechanism, not a sonar pulse, and its real voice is the audio owner's commit
+   * along with the emitter that first plays it. Nothing emits this class today.
+   */
+  'throw-windup': Object.freeze({ voice: 'ping' as const, bright: 1.0, toneHz: 300, durationSec: 0.5 }),
 });
 
 /**
@@ -258,9 +286,13 @@ export class AudioDirector {
        * material, and `isContactClass` is asserted against it below so the two can never drift.
        */
       mat: event.mat,
-      // No event names a second body yet — see `VoiceSpec.objMat`. One literal, one line, and
-      // the day the throwable's class lands this reads `event.objMat` instead.
-      objMat: null,
+      /*
+       * Straight from the event as well, `null` included, and for the same reason: the bus is
+       * where §3.9 is priced, so a director that decided for itself what struck what would be a
+       * second answer to a question `emit` has already answered. `null` for every class with one
+       * body in it; the can's material for the two that have two.
+       */
+      objMat: event.objMat,
       distance,
       x: event.x,
       y: event.y,

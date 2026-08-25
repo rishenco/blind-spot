@@ -30,12 +30,17 @@ import {
   materialLoudness,
 } from '../src/paint/materials';
 import {
+  COMPOSED_CLASSES,
   CONTACT_CLASSES,
+  IMPACT_FULL_SPEED,
+  IMPACT_MIN_SPEED,
   LANDING_FULL_IMPACT,
   PLAYER_EMITTER_ID,
   SOUND_CLASSES,
   SoundBus,
+  isComposedClass,
   isContactClass,
+  materialVoiceFor,
   type SoundClass,
 } from '../src/paint/soundEvents';
 import {
@@ -93,7 +98,32 @@ describe('which classes have a material at all', () => {
       landing: true,
       'q-ping': false,
       'e-ping': false,
+      // A thrown can meets a floor and so does the can settling; the wind-up is the rig's arm
+      // and meets nothing, so no surface gets a say in how loud it is.
+      'prop-impact': true,
+      'prop-knock': true,
+      'throw-windup': false,
     });
+  });
+
+  it('names the two-bodied contacts, and every one of them is a contact', () => {
+    // The pair that carries §3.9's geometric mean. Composed implies contact — `soundEvents.ts`
+    // throws at module load otherwise — and this is the same statement read as data, so a class
+    // added to one table and not the other is a failure here rather than a crash on import.
+    expect(COMPOSED_CLASSES).toEqual({
+      'crouch-step': false,
+      'walk-step': false,
+      'sprint-step': false,
+      landing: false,
+      'q-ping': false,
+      'e-ping': false,
+      'prop-impact': true,
+      'prop-knock': true,
+      'throw-windup': false,
+    });
+    for (const cls of Object.keys(SOUND_CLASSES) as SoundClass[]) {
+      if (isComposedClass(cls)) expect(isContactClass(cls), cls).toBe(true);
+    }
   });
 
   it('every implemented class answers the question', () => {
@@ -196,6 +226,196 @@ describe('SoundBus.emit applies the voice, once, to both radii (§3.9)', () => {
     );
     // Rejected before the sequence number is taken: the bus keeps no trace of a refused emit.
     expect(bus.emitted).toBe(0);
+  });
+});
+
+describe('a composed contact is priced by both bodies (§3.9 generalized)', () => {
+  const impact = SOUND_CLASSES['prop-impact'];
+  const MATERIALS = [MAT_CONCRETE, MAT_METAL, MAT_STONE, MAT_DUST];
+  const name = (mat: number): string => MATERIAL_NAMES[mat]!;
+
+  /** §3.9's multiplier for a contact between two bodies: the geometric mean of the two voices. */
+  const gm = (obj: number, surf: number): number =>
+    Math.sqrt(materialLoudness(obj) * materialLoudness(surf));
+
+  const hit = (obj: number, surf: number, over: Partial<{ paintRadius: number }> = {}) =>
+    new SoundBus().emit({
+      class: 'prop-impact',
+      x: 0,
+      y: 0,
+      z: 0,
+      mat: surf,
+      objMat: obj,
+      ...over,
+    });
+
+  /**
+   * The law, at every pair, to the bit.
+   *
+   * `toBe` and not `toBeCloseTo`: this is arithmetic on four literals, and the three rules that
+   * lost to the geometric mean all fail it by whole decibels rather than by rounding. The
+   * product puts metal on metal at 2.25x — outside §3.9's own band, and a footfall and an impact
+   * on the same plate would then obey different physics. Either material alone silences the
+   * other half of the contact, which is the half the paint needs: a bolt dropped on dust and a
+   * bolt dropped on steel would light the same radius, and the probe would have stopped
+   * reporting the world.
+   */
+  it('scales both radii by the geometric mean, for all sixteen pairs', () => {
+    for (const obj of MATERIALS) {
+      for (const surf of MATERIALS) {
+        const e = hit(obj, surf);
+        const label = `${name(obj)} on ${name(surf)}`;
+        expect(e.paintRadius, label).toBe(impact.paintRadius * gm(obj, surf));
+        expect(e.hearingRadius, label).toBe(impact.hearingRadius * gm(obj, surf));
+      }
+    }
+  });
+
+  it('scales *both* radii by the same factor, for all sixteen pairs', () => {
+    // The composed half of the claim the single-material block above makes: a pair that painted
+    // further than it carried would be loud to the player and quiet to the spider.
+    for (const obj of MATERIALS) {
+      for (const surf of MATERIALS) {
+        const e = hit(obj, surf);
+        expect(e.paintRadius / impact.paintRadius, `${name(obj)} on ${name(surf)}`).toBe(
+          e.hearingRadius / impact.hearingRadius,
+        );
+      }
+    }
+  });
+
+  /**
+   * Symmetry, and it is the *property* rather than a gap in the coverage.
+   *
+   * Swapping the two arguments of the geometric mean is a mutation this file deliberately
+   * survives: a bolt landing on a dust pile and a clod landing on a steel plate are equally
+   * loud, and what tells them apart is timbre — measured at −89.9 dBFS / 250 Hz against
+   * −43.4 / 999 (`tests/audio/composedVoice.test.ts`). §3.9 splits those two jobs on purpose:
+   * the multiplier carries loudness, the voice carries identity. A test that demanded the level
+   * distinguish them would be asking the multiplier to do the voice's work.
+   */
+  it('is symmetric: what struck what changes the sound, not the distance', () => {
+    for (const obj of MATERIALS) {
+      for (const surf of MATERIALS) {
+        const there = hit(obj, surf);
+        const back = hit(surf, obj);
+        expect(there.paintRadius, `${name(obj)}/${name(surf)}`).toBe(back.paintRadius);
+        expect(there.hearingRadius, `${name(obj)}/${name(surf)}`).toBe(back.hearingRadius);
+        // …and they are genuinely two different events: each still reports its own two bodies.
+        expect([there.objMat, there.mat]).toEqual([obj, surf]);
+        expect([back.objMat, back.mat]).toEqual([surf, obj]);
+      }
+    }
+  });
+
+  /**
+   * The reduction, which is the constraint that chose the rule.
+   *
+   * A can of the same stuff as the floor is a single-material contact, and it has to be priced
+   * as one — otherwise the diagonal of the composed table and §3.9's four multipliers are two
+   * different laws for the same event, and a metal footfall and a metal-on-metal clang would
+   * disagree about how far steel carries.
+   */
+  it('reduces exactly to the single-material law on the diagonal', () => {
+    const walk = SOUND_CLASSES['walk-step'];
+    for (const mat of MATERIALS) {
+      const e = hit(mat, mat);
+      expect(e.paintRadius / impact.paintRadius, name(mat)).toBe(materialLoudness(mat));
+      const step = new SoundBus().emit({ class: 'walk-step', x: 0, y: 0, z: 0, mat });
+      expect(e.hearingRadius / impact.hearingRadius, name(mat)).toBe(
+        step.hearingRadius / walk.hearingRadius,
+      );
+    }
+    // The number §3.9 names, arrived at through the composed path: steel on steel is still 1.5x.
+    expect(hit(MAT_METAL, MAT_METAL).hearingRadius).toBe(impact.hearingRadius * 1.5);
+  });
+
+  it('never leaves the band §3.9 tunes, and reaches both ends of it only on the diagonal', () => {
+    // Closure is the other half of why the mean and not the product: every pair lands inside
+    // the four multipliers the doc actually tuned, so no pair of ordinary materials can out-shout
+    // the loudest surface in the game or undercut the quietest.
+    const factors: number[] = [];
+    for (const obj of MATERIALS) {
+      for (const surf of MATERIALS) factors.push(hit(obj, surf).paintRadius / impact.paintRadius);
+    }
+    expect(Math.min(...factors)).toBe(materialLoudness(MAT_DUST));
+    expect(Math.max(...factors)).toBe(materialLoudness(MAT_METAL));
+    for (const f of factors) {
+      expect(f).toBeGreaterThanOrEqual(0.6);
+      expect(f).toBeLessThanOrEqual(1.5);
+    }
+  });
+
+  it('scales a speed-scaled paint radius too, by the same pair', () => {
+    // §3.9's "every radius the event carries": the impact computed its own paint radius from how
+    // fast the thing was going before the bus saw it, and the two bodies still price it.
+    const radius = SoundBus.impactRadius(IMPACT_FULL_SPEED);
+    const e = hit(MAT_METAL, MAT_DUST, { paintRadius: radius });
+    expect(e.paintRadius).toBe(radius * gm(MAT_METAL, MAT_DUST));
+    // Hearing stays the class's, scaled by the same pair — speed moves paint, not ear level.
+    expect(e.hearingRadius).toBe(impact.hearingRadius * gm(MAT_METAL, MAT_DUST));
+  });
+
+  it('asks the Halo the same question and gets the same answer', () => {
+    // `carryRadius` is what §3.8's ring reads. It shares the resolver rather than recomputing
+    // the mean, so the ring cannot claim a radius the emitted event does not have.
+    const bus = new SoundBus();
+    for (const obj of MATERIALS) {
+      for (const surf of MATERIALS) {
+        expect(bus.carryRadius('prop-impact', surf, obj), `${name(obj)} on ${name(surf)}`).toBe(
+          hit(obj, surf).hearingRadius,
+        );
+      }
+    }
+  });
+
+  it('refuses a second body on a class that has only one, and on one that has none', () => {
+    // The guard that keeps footfalls on the diagonal by construction: the rig has no material of
+    // its own yet, and a `objMat` quietly accepted here would price every step by a body nobody
+    // has decided on.
+    const bus = new SoundBus();
+    expect(() =>
+      bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0, mat: MAT_CONCRETE, objMat: MAT_METAL }),
+    ).toThrow(/not a contact between two bodies/);
+    expect(() => bus.emit({ class: 'q-ping', x: 0, y: 0, z: 0, objMat: MAT_METAL })).toThrow(
+      /not a contact between two bodies/,
+    );
+    expect(() => bus.carryRadius('walk-step', MAT_CONCRETE, MAT_METAL)).toThrow(
+      /not a contact between two bodies/,
+    );
+    expect(bus.emitted).toBe(0);
+  });
+
+  it('refuses a composed contact that names only the floor', () => {
+    // The other direction, and the more dangerous one: silently defaulting the missing body to
+    // concrete would charge a steel can as a lump of concrete and nothing would ever say so.
+    const bus = new SoundBus();
+    expect(() => bus.emit({ class: 'prop-impact', x: 0, y: 0, z: 0, mat: MAT_METAL })).toThrow(
+      /named no objMat/,
+    );
+    expect(() => bus.emit({ class: 'prop-knock', x: 0, y: 0, z: 0 })).toThrow(/named no objMat/);
+    expect(() => bus.carryRadius('prop-impact', MAT_METAL)).toThrow(/named no objMat/);
+    expect(bus.emitted).toBe(0);
+  });
+
+  it('answers an unrecognised second body with concrete, the way it answers a first one', () => {
+    // Same policy as `materialLoudness`: an index nobody recognises is the default surface, not
+    // a throw and not a NaN radius. The guard above is about a *missing* body, which is a
+    // different mistake — the emitter forgot to say, rather than said something unknown.
+    expect(materialVoiceFor('prop-impact', MAT_METAL, 99)).toBe(gm(MAT_CONCRETE, MAT_METAL));
+    expect(materialVoiceFor('prop-impact', 99, MAT_METAL)).toBe(gm(MAT_METAL, MAT_CONCRETE));
+    expect(materialVoiceFor('prop-impact', MAT_DUST, MAT_DUST)).toBe(materialLoudness(MAT_DUST));
+    // And a class with only one body ignores the argument it was never given a meaning for.
+    expect(materialVoiceFor('walk-step', MAT_METAL)).toBe(materialLoudness(MAT_METAL));
+    expect(materialVoiceFor('q-ping', null)).toBe(1);
+  });
+
+  it('is silent below the speed that makes a contact a sound at all', () => {
+    // The set-down verb, free: the emitter gates on this and never reaches the bus, so placing a
+    // can is the quiet way to move it. Pinned here because the band's floor is what makes that
+    // verb exist rather than a comment in an emitter that does not exist yet.
+    expect(SoundBus.impactRadius(IMPACT_MIN_SPEED)).toBe(impact.paintRadius);
+    expect(IMPACT_MIN_SPEED).toBeLessThan(IMPACT_FULL_SPEED);
   });
 });
 

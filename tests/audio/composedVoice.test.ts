@@ -25,16 +25,23 @@
  * else at once — wiring the composition backwards fails twelve tests in this file and not one
  * anywhere else.
  *
- * The impact class does not exist yet — it arrives with the throwable, along with its row in
- * `AUDIO_CLASS_VOICES` and the bus arithmetic that pairs two materials into one carry radius.
- * Until then this file renders that class's *shape* by hand from a director-built spec, the way
- * `voices.test.ts` renders a halved gain: `COMPOSED_NORM_FIT_BRIGHT` is the brightness the twelve
- * off-diagonal norms were fitted at, and the day a class carries a composed contact it owes an
- * assertion that its `bright` is still that number.
+ * **The class exists now.** `prop-impact` is §3.3's thrown-object row, and this file renders its
+ * shipped `AUDIO_CLASS_VOICES` entry rather than a hand-written imitation of it — `bright`,
+ * `toneHz` and `durationSec` are read from the row, so a retune of the class is a retune of what
+ * is measured here. The debt the previous commit recorded is paid in the same move:
+ * `COMPOSED_NORM_FIT_BRIGHT` is the brightness the twelve off-diagonal norms were fitted at, and
+ * `keeps the class at the shape its norms were fitted at` is the assertion that a composed class
+ * still carries it. Beyond it the fit does not travel — measured, the worst residual over the
+ * sixteen pairs runs 0.26 dB at 1.45, 0.41 at a walk's 1.0 and 3.07 at a crouch's 0.55, against
+ * §3.9's half-decibel budget — so moving a composed class's brightness means refitting twelve
+ * numbers, and that pin is what says so out loud instead of letting the law quietly become false.
  *
- * Pins live here rather than in `tests/support/audioSpec.ts` for one commit only: the whole
- * verification story of the seam is that not a single existing test file was touched. They move
- * to the pinned table with the class.
+ * The five measured pins this file used to declare locally have moved to
+ * `tests/support/audioSpec.ts`, unchanged, now that there is a class for them to belong to. What
+ * stays here is what the *level* half of the law cannot say: the bus arithmetic that pairs two
+ * materials into one carry radius is measured in `tests/materials.test.ts` (exactly) and in
+ * `tests/audio/materialVoices.test.ts` (rendered, at all sixteen pairs). This file is the
+ * timbre.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -48,8 +55,13 @@ import {
 } from '../support/audioMetrics';
 import {
   ATTACK_LEVEL_SAMPLE,
+  DULL_TAIL_CEILING_DBFS,
   MATERIAL_LOUDNESS_LAW,
+  MAX_OBJECT_TAIL_SPREAD_DB,
   MAX_PEAK_DBFS,
+  MIN_OBJECT_CENTROID_GAP_HZ,
+  MIN_SURFACE_TAIL_SEPARATION_DB,
+  RINGING_TAIL_FLOOR_DBFS,
   RING_TAIL_WINDOW,
 } from '../support/audioSpec';
 import { renderOffline } from '../support/audioRender';
@@ -61,7 +73,12 @@ import {
   NOISE_SLOTS,
   contactVoice,
 } from '../../src/audio/voices';
-import { AudioDirector, type ListenerState, type VoiceSpec } from '../../src/audio/director';
+import {
+  AUDIO_CLASS_VOICES,
+  AudioDirector,
+  type ListenerState,
+  type VoiceSpec,
+} from '../../src/audio/director';
 import { MATERIAL_NAMES } from '../../src/paint/materials';
 import { PLAYER_EMITTER_ID, SoundBus } from '../../src/paint/soundEvents';
 
@@ -86,14 +103,25 @@ const DULL = ['concrete', 'stone', 'dust'] as const;
 
 const indexOf = (mat: Material): number => MATERIAL_NAMES.indexOf(mat);
 
+/** The class whose shape this file renders — the first one in the game made by two bodies. */
+const IMPACT = AUDIO_CLASS_VOICES['prop-impact'];
+
 /**
  * The shape of a thrown thing's first contact, on a spec the director actually built.
  *
- * Only the class shaping is the test's — `bright`, `toneHz` and `durationSec`, which are the row
- * the impact class will carry — plus the seed and the two materials. Level is left exactly where
- * the director put it, and left there *unchanged across all sixteen pairs*: this file measures
- * timbre, and holding the gain still is what makes a difference between two renders a difference
- * of composition rather than of loudness. The loudness half of the law has its own block below.
+ * Only the class shaping is the test's — `bright`, `toneHz` and `durationSec`, read from the
+ * shipped `prop-impact` row rather than copied out of it — plus the seed and the two materials.
+ * Level is left exactly where the director put it, and left there *unchanged across all sixteen
+ * pairs*: this file measures timbre, and holding the gain still is what makes a difference
+ * between two renders a difference of composition rather than of loudness. The loudness half of
+ * the law has its own block below, and the *bus* half — the geometric mean of the two
+ * multipliers — is measured exactly in `tests/materials.test.ts` and, rendered, in
+ * `tests/audio/materialVoices.test.ts`.
+ *
+ * The event is still a `walk-step` at concrete, and deliberately: the gain staging every pinned
+ * dBFS below was measured at is a walk-step's, and emitting the impact class here instead would
+ * move all five pins by the ratio of the two carry radii without a single claim in the file
+ * changing. The class row supplies the *shape*; the level is held still on purpose.
  */
 function impactSpec(obj: Material | null, surf: Material, seed = FINGERPRINT_SEED): VoiceSpec {
   const bus = new SoundBus();
@@ -112,9 +140,9 @@ function impactSpec(obj: Material | null, surf: Material, seed = FINGERPRINT_SEE
     ...spec,
     mat: indexOf(surf),
     objMat: obj === null ? null : indexOf(obj),
-    bright: COMPOSED_NORM_FIT_BRIGHT,
-    toneHz: 200,
-    durationSec: 0.8,
+    bright: IMPACT.bright,
+    toneHz: IMPACT.toneHz,
+    durationSec: IMPACT.durationSec,
     seed,
   };
 }
@@ -145,67 +173,6 @@ const ring = (obj: Material, surf: Material): number =>
  */
 const strikeBright = (obj: Material, surf: Material): number =>
   centroidHz(pair(obj, surf), STRIKE_AT, STRIKE_AT + ATTACK_WINDOW_SEC);
-
-// ---------------------------------------------------------------------------
-// The pins
-
-/**
- * Above this, 150–300 ms after the strike, a surface is still ringing, dBFS.
- *
- * Measured at this file's gain staging, the four metal-surfaced pairs sit between −67.5 and
- * −61.5 dBFS; the loosest is 12.5 dB clear of this line. Absolute rather than relative because
- * the claim being made is "there is still a sound there", and it is paired with
- * `DULL_TAIL_CEILING_DBFS` so the two together are a partition rather than two independent
- * numbers. Both move together if the gain staging does — assert differences, not these, when the
- * claim is about how far apart two materials are.
- */
-const RINGING_TAIL_FLOOR_DBFS = -80;
-
-/**
- * Below this, the surface has stopped, dBFS. Measured worst (loudest) dull pair: −99.4.
- *
- * 9.4 dB of margin, and the gap between the two constants is 10 dB of no-man's land that no
- * measured pair is anywhere near — which is what stops a modest retune from making the partition
- * ambiguous instead of failing it.
- */
-const DULL_TAIL_CEILING_DBFS = -90;
-
-/**
- * The least a struck metal surface may out-ring a struck dull one, dB, at the same object.
- *
- * Measured minimum over the four objects is 32.0 dB (a metal object, metal floor against
- * concrete floor); the largest is 37.9. This is `MIN_METAL_TAIL_SEPARATION_DB`'s claim asked of
- * the composed voice, and pinned lower than its 35 for one reason: at the composed shape the
- * *object* row also feeds the bank, so the same surface separation is worth a few dB less when a
- * dull object is doing the driving. 25 keeps 7 dB of headroom under the worst measured pair.
- */
-const MIN_SURFACE_TAIL_SEPARATION_DB = 25;
-
-/**
- * The most the *object* may move the ring on a fixed surface, dB.
- *
- * The other half of "the ring belongs to the floor": on steel, the four objects ring within
- * 6.0 dB of each other — the object drives the bank harder or softer, it does not decide whether
- * the bank rings at all. 15 is 2.5× that. Wired backwards this reads 34.5 dB, because it becomes
- * the *surface* spread measured under the object's name.
- */
-const MAX_OBJECT_TAIL_SPREAD_DB = 15;
-
-/**
- * The least a dust object must out-brighten a concrete one on the same dull floor, Hz.
- *
- * Measured 396 Hz on concrete, 411 on stone, 725 on dust. It is the scuff: dust's exciter is the
- * softest in the table (1100 Hz against concrete's 3200) but almost all of it is heard directly
- * — `scuff` 0.9 against 0.25 — where concrete's is mostly spent driving modes that sit below it.
- * So a handful of grit reads *brighter* on the attack than a lump of concrete, which is the same
- * "brightness is a scuff-versus-ring axis, not a hardness axis" finding `materialVoices.test.ts`
- * records, arriving here as the object axis.
- *
- * 250 leaves 146 Hz of margin on the tightest of the three, which is inside the ±100–150 Hz
- * tolerances the material centroids already carry. Ignore `objMat` in the voice and this
- * collapses to exactly 0 on all three floors, which is the mutation this number exists for.
- */
-const MIN_OBJECT_CENTROID_GAP_HZ = 250;
 
 // ---------------------------------------------------------------------------
 
@@ -253,6 +220,24 @@ describe('the composed norm table', () => {
    * because the number is a property of the voices and will move with any modal retune. What
    * must not move is that it is far too large to factorize away.
    */
+  /**
+   * The shape the twelve off-diagonals were fitted at, pinned where the file that depends on it
+   * can see it.
+   *
+   * Every number in this file is measured through `IMPACT`, so if the class's `bright` moved off
+   * the fit shape the pins would still pass — they would simply be measuring a different sound,
+   * quietly, and the sixteen-pair level block at the bottom would start reporting residuals that
+   * are the fit failing to travel rather than anything about the voices. `materialVoices.test.ts`
+   * makes the same claim about *every* composed class; this one is about the class this file's
+   * numbers were measured at.
+   */
+  it('keeps the class at the shape its norms were fitted at', () => {
+    expect(IMPACT.bright).toBe(COMPOSED_NORM_FIT_BRIGHT);
+    // And the class really is a contact — a composed voice that took the ping builder would
+    // never reach `contactVoice` at all, and every render below would be measuring nothing.
+    expect(IMPACT.voice).toBe('contact');
+  });
+
   it('cannot be factorized into one norm per material', () => {
     let worst = 0;
     let where = '';

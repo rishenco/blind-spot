@@ -69,6 +69,7 @@ import {
 import { renderOffline } from '../support/audioRender';
 import {
   ATTACK_WINDOW_SEC,
+  COMPOSED_NORM_FIT_BRIGHT,
   MATERIAL_ATTACK_NORMS,
   NOISE_SLOTS,
   playVoice,
@@ -82,6 +83,7 @@ import {
 } from '../../src/audio/director';
 import { MATERIAL_NAMES, materialLoudness } from '../../src/paint/materials';
 import {
+  isComposedClass,
   PLAYER_EMITTER_ID,
   SOUND_CLASSES,
   SoundBus,
@@ -107,9 +109,17 @@ const LISTENER: ListenerState = { x: 0, y: 0, z: 0, range: 40, emitter: PLAYER_E
 /** The pinned table's materials, in the order the file reads best. */
 const MATERIALS = ['dust', 'concrete', 'stone', 'metal'] as const;
 
-/** Every class that strikes a surface, from the sound table rather than from a second list. */
+/**
+ * Every class that strikes a surface with a *single* named material, from the sound table rather
+ * than from a second list.
+ *
+ * Composed classes are filtered out here and measured in their own block at the end of the file.
+ * They strike two bodies, so `specFor`'s one `mat` cannot describe them and every promise in the
+ * blocks below — one multiplier, one row of `MATERIAL_ATTACK_NORMS` — is the wrong shape for
+ * them by one dimension. The generalized law that covers both is asserted where they are.
+ */
 const STANCES: readonly SoundClass[] = (Object.keys(SOUND_CLASSES) as SoundClass[]).filter(
-  isContactVoice,
+  (cls) => isContactVoice(cls) && !isComposedClass(cls),
 );
 
 const indexOf = (mat: PinnedMaterial): number => MATERIAL_NAMES.indexOf(mat);
@@ -122,7 +132,12 @@ const indexOf = (mat: PinnedMaterial): number => MATERIAL_NAMES.indexOf(mat);
  * pass against a level the director never produces, which is precisely the claim §3.9 makes:
  * the level is the carry radius, and the carry radius already carries the material.
  */
-function specFor(cls: SoundClass, mat: PinnedMaterial, seed: number): VoiceSpec {
+function specFor(
+  cls: SoundClass,
+  mat: PinnedMaterial,
+  seed: number,
+  obj?: PinnedMaterial,
+): VoiceSpec {
   const bus = new SoundBus();
   const event = bus.emit({
     class: cls,
@@ -130,6 +145,14 @@ function specFor(cls: SoundClass, mat: PinnedMaterial, seed: number): VoiceSpec 
     y: 0,
     z: 0,
     mat: indexOf(mat),
+    /*
+     * A composed class is refused by the bus unless it is told what struck the surface, and no
+     * other class is allowed to name one. `obj` therefore reaches the emit only where the class
+     * has somewhere to put it, and defaults to the surface's own material: on the diagonal the
+     * geometric mean is the surface's multiplier exactly and the norm is the same float a
+     * footfall uses, so a composed class asked for one material answers as one.
+     */
+    ...(isComposedClass(cls) ? { objMat: indexOf(obj ?? mat) } : {}),
     source: 'player',
     emitter: PLAYER_EMITTER_ID,
   });
@@ -189,14 +212,18 @@ const SAMPLE_SEEDS: readonly number[] = Array.from(
  * nothing else — see that field for the measurement, both of what it saves and of the thing it
  * could have changed and does not.
  */
-async function attackLevels(cls: SoundClass, mat: PinnedMaterial): Promise<number[]> {
+async function attackLevels(
+  cls: SoundClass,
+  mat: PinnedMaterial,
+  obj?: PinnedMaterial,
+): Promise<number[]> {
   const { firstAtSec, spacingSec, strikesPerRender } = ATTACK_LEVEL_SAMPLE;
   const out: number[] = [];
   for (let from = 0; from < SAMPLE_SEEDS.length; from += strikesPerRender) {
     const chunk = SAMPLE_SEEDS.slice(from, from + strikesPerRender);
     const buffer = await renderOffline(firstAtSec + spacingSec * chunk.length, (ctx, master) => {
       chunk.forEach((seed, i) => {
-        playVoice(ctx, master, specFor(cls, mat, seed), firstAtSec + spacingSec * i);
+        playVoice(ctx, master, specFor(cls, mat, seed, obj), firstAtSec + spacingSec * i);
       });
     });
     chunk.forEach((_, i) => {
@@ -582,6 +609,170 @@ describe("§3.9's loudness law: the multiplier is the whole of the difference", 
         `${cls} (bright ${AUDIO_CLASS_VOICES[cls].bright}) leaks ${leak.toFixed(3)} dB of level`,
       ).toBeLessThanOrEqual(BRIGHT_LEAK_MAX_DB);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §3.9 generalized: the contact made by two bodies
+
+/** Every class the bus prices by two materials instead of one. */
+const COMPOSED: readonly SoundClass[] = (Object.keys(SOUND_CLASSES) as SoundClass[]).filter(
+  isComposedClass,
+);
+
+/**
+ * The composed class this block measures.
+ *
+ * The loudest of them, and the one an emitter reaches for first. The other composed class shares
+ * its `bright` — which is not a coincidence but a constraint, asserted at the end of the block:
+ * the twelve off-diagonal norms were fitted at one exciter shape, so a composed class at a
+ * different shape would be a class whose loudness law is simply false.
+ */
+const PAIRED: SoundClass = 'prop-impact';
+
+/**
+ * What §3.9 promises a *pair* to be, relative to concrete on concrete, in dB.
+ *
+ * The geometric mean of the two multipliers is their arithmetic mean in decibels, which is why
+ * the generalized law is still one line: `½·(P(o) + P(s))`. The rules that lost say something
+ * visibly different here — the product would read `P(o) + P(s)`, twice as far from concrete at
+ * every pair and off the top of §3.9's band on the diagonal.
+ */
+const pairPromisedDb = (obj: PinnedMaterial, surf: PinnedMaterial): number =>
+  (promisedDb(obj) + promisedDb(surf)) / 2;
+
+const pairSampled = new Map<string, number[]>();
+for (const obj of MATERIALS) {
+  for (const surf of MATERIALS) {
+    pairSampled.set(`${obj}/${surf}`, await attackLevels(PAIRED, surf, obj));
+  }
+}
+const pairAttackDb = (obj: PinnedMaterial, surf: PinnedMaterial): number =>
+  powerMeanDb(pairSampled.get(`${obj}/${surf}`)!);
+
+describe('§3.9 generalized: a contact between two bodies', () => {
+  /**
+   * The constraint that chose the geometric mean, checked as arithmetic before anything is
+   * rendered against it.
+   *
+   * A can made of the same stuff as the floor is a single-material contact. If the generalized
+   * promise did not collapse onto the original one *exactly* here, the game would hold two
+   * different laws for one event — and every assertion below would be measuring the wrong one on
+   * a quarter of the table. `toBe`, because both sides are the same closed-form expression and
+   * a near-miss would mean the two are only accidentally close.
+   */
+  it('reduces exactly to the single-material promise on the diagonal', () => {
+    for (const mat of MATERIALS) {
+      expect(pairPromisedDb(mat, mat), mat).toBe(promisedDb(mat));
+    }
+    // And it is a genuine generalization rather than a rename: off the diagonal it says
+    // something the old form cannot say at all, and says it between the two rows it averages.
+    const lo = Math.min(promisedDb('dust'), promisedDb('metal'));
+    const hi = Math.max(promisedDb('dust'), promisedDb('metal'));
+    expect(pairPromisedDb('dust', 'metal')).toBeGreaterThan(lo);
+    expect(pairPromisedDb('dust', 'metal')).toBeLessThan(hi);
+  });
+
+  /**
+   * The measured law, at all sixteen pairs.
+   *
+   * Same estimator, same window, same tolerance as the single-material rows — this is that
+   * assertion with one more axis, not a weaker one.
+   *
+   * Measured, the twelve off-diagonal residuals are 0.000 dB and the four diagonal ones are
+   * 0.000 / 0.097 / 0.016 / 0.262 (concrete, metal, stone, dust). That shape is worth reading
+   * honestly: the off-diagonals are zero because the twelve norms were fitted by this estimator,
+   * so those cells are a regression pin at birth rather than an independent measurement — the
+   * same admitted circularity the four shipped `attackNorm`s carry. The diagonal is the
+   * independent part, because its norms are the shipped floats by reference and nothing was
+   * fitted for this class: what shows there is the familiar `bright` leak, worst on dust at
+   * 0.262 dB against a budget of 0.5. The genuinely independent content of the composed law is
+   * elsewhere and exact — the geometric mean in the radii (`tests/materials.test.ts`) and
+   * level-tracks-carry through `gainFor` (`tests/audio/director.test.ts`).
+   */
+  it.each(MATERIALS)('every object striking %s arrives at the mean of both promises', (surf) => {
+    const base = pairAttackDb('concrete', 'concrete');
+    for (const obj of MATERIALS) {
+      const measured = pairAttackDb(obj, surf) - base;
+      const promised = pairPromisedDb(obj, surf);
+      expect(Number.isFinite(measured), `${obj} on ${surf} rendered nothing measurable`).toBe(true);
+      expect(
+        Math.abs(measured - promised),
+        `${obj} on ${surf}: measured ${measured.toFixed(3)} dB, promised ${promised.toFixed(3)}`,
+      ).toBeLessThanOrEqual(MATERIAL_LOUDNESS_LAW.toleranceDb);
+    }
+  });
+
+  /**
+   * Symmetry, in the ear, and it is the property rather than a hole in the coverage.
+   *
+   * A steel bolt landing on dust and a clod of dust landing on a steel plate are equally *loud*:
+   * the mean does not care which body is which, and swapping its two arguments is a mutation
+   * this file is supposed to survive. What separates them is timbre, which is measured in
+   * `composedVoice.test.ts` — a 46 dB difference in ring and a 750 Hz difference in strike
+   * brightness, at the same level. That is §3.9's own division of labour: the multiplier carries
+   * loudness, the voice carries identity, and a level that tried to carry both would be a second
+   * volume knob nobody priced.
+   *
+   * The tolerance is the difference of two independently sampled residuals, hence twice the
+   * per-pair budget — the same doubling the metal-versus-dust assertion above makes.
+   */
+  it('hears the same level whichever body was the thrown one', () => {
+    for (const obj of MATERIALS) {
+      for (const surf of MATERIALS) {
+        const there = pairAttackDb(obj, surf);
+        const back = pairAttackDb(surf, obj);
+        expect(
+          Math.abs(there - back),
+          `${obj}/${surf}: ${there.toFixed(3)} dB one way, ${back.toFixed(3)} the other`,
+        ).toBeLessThanOrEqual(2 * MATERIAL_LOUDNESS_LAW.toleranceDb);
+        // Measured, every pair is symmetric to well inside three decimal places; the tolerance
+        // is here for the estimator's sake, not because the arithmetic is expected to drift.
+      }
+    }
+  });
+
+  /**
+   * The four single-material stances, re-read through the generalized promise.
+   *
+   * Not a second measurement — it is the *same* sample the block above asserts, asked the new
+   * law's question. The point is that the generalized form is what the whole table obeys and not
+   * a special rule bolted on beside the old one: if `pairPromisedDb` ever stopped collapsing
+   * onto `promisedDb`, every footfall in the game would fail here even though nothing about
+   * footfalls changed.
+   */
+  it('is the law the single-material stances already obey, at every stance', () => {
+    for (const cls of STANCES) {
+      const base = attackDb(cls, 'concrete');
+      for (const mat of MATERIALS) {
+        const measured = attackDb(cls, mat) - base;
+        expect(
+          Math.abs(measured - pairPromisedDb(mat, mat)),
+          `${cls} on ${mat}: measured ${measured.toFixed(3)} dB`,
+        ).toBeLessThanOrEqual(MATERIAL_LOUDNESS_LAW.acrossStancesToleranceDb);
+      }
+    }
+  });
+
+  /**
+   * The refit obligation, named rather than left to be discovered.
+   *
+   * The twelve off-diagonal norms in `COMPOSED_ATTACK_NORMS` were fitted at one exciter shape,
+   * and the fit does not travel: measured over this same estimator, the worst residual across
+   * the sixteen pairs is 0.26 dB at 1.45, 0.41 at a walk's 1.0, 0.97 at 0.8 and 3.07 at a
+   * crouch's 0.55 — all of it a dust object on a metal floor, where how much of the scuff
+   * survives the attack window depends entirely on what it is driving. §3.9's whole budget is
+   * half a decibel, so retuning a composed class's brightness silently invalidates the block
+   * above. This turns that into a named refit: a second row of twelve norms, or no retune.
+   */
+  it('keeps every composed class at the shape its norms were fitted at', () => {
+    expect(COMPOSED.length).toBeGreaterThan(0);
+    for (const cls of COMPOSED) {
+      expect(AUDIO_CLASS_VOICES[cls].bright, cls).toBe(COMPOSED_NORM_FIT_BRIGHT);
+    }
+    // The class this block measured is one of them, so the numbers above are numbers about the
+    // shape the pin protects.
+    expect(COMPOSED).toContain(PAIRED);
   });
 });
 
