@@ -88,15 +88,22 @@ export function defaultRifleTunables(): RifleTunables {
     // move, but the gun comes back on its own and a three-round burst stays on a torso at 15 m.
     // The knobs are in the GUI (`G` -> rifle) because this is exactly the kind of thing that has
     // to be felt rather than argued about.
-    risePitchDeg: 0.62,
-    riseYawDeg: 0.26,
-    recoverRate: 16,
-    recoverDelay: 0.08,
-    recoverFraction: 0.86,
-    punchPitchDeg: 1.5,
-    punchYawDeg: 0.55,
-    punchBackM: 0.045,
-    punchDecay: 17,
+    //
+    // M4d, after a playtest: "отдача винтовки — думаю чуть потяжелее надо". *Чуть.* The weight
+    // is bought mostly with the free half — the view punch, which flinches the body and costs no
+    // aim (+40% pitch, +36% yaw, +44% shove, and a slower decay so the frame after the shot is
+    // still moving) — and only a little with the expensive half, the aim kick the player has to
+    // correct by hand (+21% climb, and two points less of it comes back). A five-round burst
+    // now climbs ~4.3° instead of ~3.4° and leaves ~0.7° of permanent drift instead of ~0.5°.
+    risePitchDeg: 0.75,
+    riseYawDeg: 0.31,
+    recoverRate: 15,
+    recoverDelay: 0.09,
+    recoverFraction: 0.84,
+    punchPitchDeg: 2.1,
+    punchYawDeg: 0.75,
+    punchBackM: 0.065,
+    punchDecay: 14,
     gunshotLoudness: 90,
     hitLoudness: 15,
     hitImpulse: 6.5,

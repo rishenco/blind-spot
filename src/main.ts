@@ -1074,6 +1074,9 @@ class App {
     gun.add(vm, 'wrap', 0, 2, 0.05).onChange(() => this.rifleView.applyLook());
     gun.add(vm, 'kickBack', 0, 3, 0.05).name('mesh kick: back');
     gun.add(vm, 'kickPitch', 0, 3, 0.05).name('mesh kick: pitch');
+    gun.add(vm, 'ahead', 0.3, 1.6, 0.02).name('hold: out in front').onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'drop', -0.2, 0.8, 0.01).name('hold: below the eye').onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'side', -0.6, 0.6, 0.01).name('hold: off to the right').onChange(() => this.rifleView.applyLook());
     gun.add(vm, 'cant', -0.8, 0.8, 0.01).name('hold: to the shoulder').onChange(() => this.rifleView.applyLook());
     gun.add(vm, 'tilt', -0.6, 0.6, 0.01).name('hold: below the sight line').onChange(() => this.rifleView.applyLook());
     gun.add(vm, 'roll', -0.6, 0.6, 0.01).name('hold: roll').onChange(() => this.rifleView.applyLook());

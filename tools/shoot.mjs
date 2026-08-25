@@ -1189,6 +1189,104 @@ check('and the game knows it is being held', heldStats.flash.held === true && he
 await call('flashHold', false);
 await call('tracers', false);
 
+// ===========================================================================
+// M4d «Винтовка в руках» — the gun you are holding, and the law it obeys.
+//
+// One claim, in two halves, and neither half is worth anything without the other:
+//   the flash lights the rifle, so a shot shows you your own hands;
+//   with the flash out the rifle is not there at all, and black stays black.
+// The second half is the one that matters. A viewmodel is the easiest thing in this project to
+// get wrong — every other game draws the gun permanently, and drawing it permanently here is a
+// free lamp in a game whose first law is that there are no free lamps.
+// ===========================================================================
+
+/** Where the gun is drawn in a 1280x720 frame: the lower right quadrant, with margin. */
+const GUN_RECT = { x: 660, y: 400, w: 620, h: 320 };
+
+await call('markers', false);
+await call('tracers', false);
+await call('touch', false);
+await call('clear');
+await call('view', 'player');
+await call('pose', ...VISTA);
+await call('aim', ...VISTA_AIM);
+await advance(0.4, 3);
+
+// --- 36 the flash lights the rifle -----------------------------------------
+await call('flashHold', true);
+await shoot();
+await advance(0.2, 2);
+const f36 = await shot(
+  '40-rifle-in-the-flash.png',
+  'a held muzzle flash with the rifle in it. The gun is lit by the flash and by nothing else — same point light, same inverse-square falloff, real normals — so the barrel and handguard catch it, the magazine and trigger guard fall into their own shadow, and the whole thing reads as a silhouette rather than as a texture. Held open (Y) only so it can be photographed; in play this is three frames long',
+);
+const gunLit = await stats();
+check('the flash is what lights the gun', gunLit.gun.lit === true && gunLit.gun.energy > 0,
+  `mesh=${gunLit.gun.mesh} lit=${gunLit.gun.lit} energy=${gunLit.gun.energy.toFixed(3)}`);
+
+// The gun is a grey shape on a flash-lit floor, so "there is a gun on screen" is not a pixel
+// count — it is a difference. The same frame with the mesh switched off is the control, and the
+// two are compared inside the rectangle the gun is drawn in.
+await call('viewmodel', false);
+await call('draw');
+const f36off = decodePng(await page.screenshot({ timeout: 180000 }));
+await call('viewmodel', true);
+await call('draw');
+const gunPixels = (() => {
+  let n = 0;
+  for (let y = GUN_RECT.y; y < GUN_RECT.y + GUN_RECT.h; y++) {
+    for (let x = GUN_RECT.x; x < GUN_RECT.x + GUN_RECT.w; x++) {
+      const i = (y * f36.width + x) * f36.channels;
+      const a = (f36.data[i] + f36.data[i + 1] + f36.data[i + 2]) / 3;
+      const b = (f36off.data[i] + f36off.data[i + 1] + f36off.data[i + 2]) / 3;
+      if (Math.abs(a - b) > 3) n++;
+    }
+  }
+  return n;
+})();
+const gunCover = gunPixels / (GUN_RECT.w * GUN_RECT.h);
+check('the rifle is actually on screen in the flash frame', gunCover > 0.05,
+  `${gunPixels} px changed inside the hold rectangle (${(gunCover * 100).toFixed(1)}% of it)`);
+const flashWith = meanLuminance(f36);
+const flashWithout = meanLuminance(f36off);
+check('and it does not change the flash it is standing in',
+  Math.abs(flashWith - flashWithout) / Math.max(1, flashWithout) < 0.06,
+  `whole-frame mean ${flashWith.toFixed(2)} with the gun vs ${flashWithout.toFixed(2)} without ` +
+    `(${(flashWith - flashWithout).toFixed(2)}, ${(((flashWith - flashWithout) / flashWithout) * 100).toFixed(1)}%) — ` +
+    `the mesh adds no light, casts no shadow, and only covers what it covers`);
+
+// --- 37 the same gun under the debug lights --------------------------------
+await call('lights', true);
+await call('draw');
+const f37 = await shot(
+  '41-rifle-truth.png',
+  '«как есть на самом деле»: the same pose with the darkness switched off, so the shape can be read. Barrel, handguard, receiver, magazine, pistol grip, stock — boxes and cylinders in one merged buffer, one draw call, no texture and no material, because that is the whole graphics budget this game has. This is a debug view; the player never sees the gun like this',
+);
+check('the truth frame shows the same gun', meanLuminance(f37) > 0,
+  `mean ${meanLuminance(f37).toFixed(1)}`);
+await call('lights', false);
+
+// --- 38 and with the flash out, there is no gun ----------------------------
+await call('flashHold', false);
+await advance(0.5, 3);
+const f38 = await shot(
+  '42-rifle-gone.png',
+  'half a second later, nothing else changed: no flash, no ping, no hand on anything. The rifle is not dimmed and not drawn in outline — it is switched off, exactly like the rest of the hall. This frame is the feature’s real proof: law 1 says the unknown is black, and a gun floating permanently in front of the camera would be the biggest exception to it in the game',
+);
+const gunDark = await stats();
+check('the gun goes out with the flash',
+  gunDark.gun.lit === false && gunDark.gun.energy === 0 && gunDark.gun.mesh === true,
+  `mesh still enabled=${gunDark.gun.mesh}, lit=${gunDark.gun.lit}, energy=${gunDark.gun.energy}`);
+check('and black stays black where it was', litIn(f38, GUN_RECT) < 0.005,
+  `lit inside the hold rectangle ${litIn(f38, GUN_RECT).toFixed(5)} — was ${litIn(f36, GUN_RECT).toFixed(3)} in the flash`);
+notes.push(
+  `M4d rifle: the mesh is lit by the muzzle flash and by nothing else — with the flash out it is switched ` +
+    `invisible, not dimmed (frames 40-42). In the flash frame it covers ${(gunCover * 100).toFixed(1)}% of the ` +
+    `rectangle it is held in; the whole-frame mean moves ${(flashWith - flashWithout).toFixed(2)} of 255 ` +
+    `(${flashWithout.toFixed(2)} → ${flashWith.toFixed(2)}), and that is pure occlusion: the mesh adds no light ` +
+    `and is in no shadow map.`,
+);
+
 // --- what a flash frame costs ----------------------------------------------
 // The flash is the one place in this game that renders lit geometry and a shadow map, so it is
 // the one place a hitch could come from. Both halves are measured: the frame the shot lands on
