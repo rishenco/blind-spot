@@ -68,6 +68,60 @@ built from the corrected law above rather than the old one — a suite written a
 safe because the thinnest collider is Y m thick" must be recomputed against `Y/2 + r`, and any
 such claim about *unswept* motion is a smell in the first place.
 
+### Three of the four materials do not sound different, and a thrown can hides the fourth
+
+`src/audio/voices.ts` (`MATERIAL_VOICES`) and `src/paint/soundEvents.ts` (`materialVoiceFor`).
+Measured by `tools/listen.mjs` §06, which lobs the *same* can two metres along each of the four
+floors the test room has, with the first impact of every segment 1.645 m from the ear to three
+decimals — so the distance term is held fixed and what is left is the material.
+
+Metal is unmistakable. Concrete, stone and dust are not distinguishable from each other.
+
+| after the first impact | concrete | metal | stone | dust |
+|---|---|---|---|---|
+| RMS at 100–150 ms, dBFS | −73.6 | **−49.2** | −71.7 | −74.9 |
+| attack centroid, 0–85 ms | 606 Hz | **1643 Hz** | 552 Hz | 534 Hz |
+
+Metal is +24 dB over concrete in the ring window and +1037 Hz clear on the attack; the other
+three sit within 3.2 dB and 72 Hz of one another. `voices.ts` already argues that the ring tail
+rather than the centroid is the hardness axis, and it is right — but concrete's modes are gone in
+0.04–0.09 s and dust has one mode at 0.05 s, so on that axis those two are the same material and
+stone is only just not.
+
+**Level cannot rescue it, and the throw is why.** §3.9's normalization made the multiplier the
+sole level difference, so metal-to-dust is 20·log10(1.5/0.6) = 7.96 dB — except that
+`materialVoiceFor` composes a struck pair as the geometric mean of the two multipliers, which is
+the *arithmetic* mean in dB, so a fixed metal can halves every surface difference it lands on:
+3.98 dB across the whole table. Single-strike spread already reaches 3.70 dB (`audioSpec.ts`
+documents why: the loudness law is a power mean over 192 strikes precisely because one strike is
+not a measurement). The design gap and the noise floor are the same size.
+
+The consequence is specific and it lands on M2's own verb: **the can you throw to learn what is
+over there is the worst probe of what is over there the game could have handed you.** It drags
+the timbre toward metal and halves the level difference, in exchange for being loud. Plain
+landings on the same four floors separate better (metal +29.4 dB, stone +7.6, dust −0.3 against
+concrete at 100–150 ms) — so the composition is what flattens stone, and the table itself is what
+leaves concrete and dust identical.
+
+Not fixed here, because there are three candidate fixes and they are not interchangeable:
+weighting the composition toward the surface (physically right — the object gives the transient,
+the larger body gives the resonance); spreading the three dull voices apart in *tail*, which is
+free because the invariant in `tests/audio/materialVoices.test.ts` pins attack level and
+explicitly leaves timbre and decay alone; or widening dust's multiplier, which §3.9 already names
+as the honest knob and which moves paint radius and enemy hearing with it. Picking among them is
+a design call, not a repair.
+
+Nothing is broken today: dust is plainly distinguishable *visually* (one walk-step hands back
+2184 floor dots on concrete against 673 on dust), which is what the test room's apron fork is
+actually built on, and the audio agrees with the paint about level to within the documented
+spread. What is unkept is §3.9's wider promise — "a change of timbre mid-stride is a change of
+surface" — which today is true only of metal.
+
+**Owner: M3.** The gym is the first level where material is a route choice rather than a
+probe, and the tower's completion gradient (core-loop §1) is the first place a player is asked to
+read a floor by ear. Whichever fix is chosen should land with the level that makes it matter, and
+with the listening scene above as its before/after.
+
 ### The ears do not crouch, and the beam leaves from above a crouched head
 
 `src/game/sim.ts`. `E_PING_HEIGHT` is 1.5 m and does two jobs: `syncListener` puts the paint
