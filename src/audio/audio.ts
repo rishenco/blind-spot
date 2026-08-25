@@ -1,24 +1,32 @@
 /**
  * Procedural spatial audio — the third consumer of the sound bus.
  *
- * Three rules the milestone spec sets, and how they land here:
+ * The stage owns *where* and *how loud*; `voices.ts` owns *what it sounds like*. Splitting them
+ * that way is what let the offline renderer (`offline.ts`, `tools/audio.mjs`) prove the timbres
+ * without a device: both paths run the same `buildTimbre`.
  *
  * **Spatial, HRTF.** Every voice ends in its own `PannerNode` in `HRTF` mode, positioned at the
  * event's world point, with the listener driven from the camera each frame. Mono would be kitsch
  * in a game whose whole proposition is "where did that come from".
  *
- * **Synthesised, never sampled.** We have no textures and no materials, so we have no sample
- * library either. A hit is two things summed: a *body* — filtered noise, the scrape and crush of
- * the collision — and a *ring* — a decaying partial at the material's own frequency. Both come
- * straight out of `MATERIALS` (`ring`, `decay`, `noise`, `gain`), the same five numbers the
- * physics and the mask already use. Glass is a bright short ping over almost no noise; wood is
- * a dead thud that is almost all noise; steel rings low and long. Nobody authored a wav.
+ * **Loudness is metres.** The bus contract calls `loudness` the range at which a noise can be
+ * noticed, so that is what it does here: it sets the panner's rolloff so the sound has actually
+ * faded out around that range, and it does *not* set the level. The previous version made it the
+ * amplitude (`min(1, loudness / 26)`), which capped everything at 26 m and made a 90 m gunshot
+ * exactly as loud as a heavy landing — half of why the rifle sounded like a knock on a door.
  *
  * **A bounded pool with priority eviction.** A stack going over is dozens of impacts inside half
  * a second. An unbounded `new PannerNode` per hit is both a stall and a wall of mud, so there is
  * a fixed ring of voices, and a new sound only takes one if it out-ranks the weakest voice
  * currently sounding. Rank is loudness over distance — a quiet far knock never evicts a loud
- * near one, which is exactly the failure mode the spec calls out.
+ * near one.
+ *
+ * **The blast is privileged.** The muzzle flash is the loudest event in the game by a factor of
+ * six, and the spec asks for «разрыв пространства»: it gets its own voice that the pool can
+ * never steal, it goes into the master *ahead* of the ducking bus, and it slams that bus shut
+ * behind itself. For the next half second the hall is quiet and muffled — the shot has taken
+ * your hearing, not the mixer's headroom. A limiter across the master keeps the peak inside the
+ * rails, so it is loud the way a mix is loud, not the way clipping is loud.
  *
  * The whole thing is optional at runtime. The keyframe harness runs in headless Chromium with no
  * audio device and must never touch an `AudioContext`; browsers also refuse to start one before
@@ -27,7 +35,7 @@
  * here — audio is a pure sink, so its presence or absence cannot change a frame.
  */
 import type { SoundEvent } from '../events/bus';
-import { MATERIALS, type MaterialName } from '../props/shapes';
+import { buildTimbre, loudnessGain, makeNoiseBuffer, timbreFor, type Timbre } from './voices';
 
 /** One voice's fixed chain. Built once; only its parameters change per sound. */
 interface Voice {
@@ -40,30 +48,36 @@ interface Voice {
   seq: number;
 }
 
-/** Per-source voicing for things that are not prop impacts and so have no material. */
-interface Profile {
-  ring: number;
-  decay: number;
-  noise: number;
-  gain: number;
-}
-
-const FOOTSTEP: Profile = { ring: 120, decay: 0.09, noise: 0.92, gain: 0.5 };
-const LANDING: Profile = { ring: 90, decay: 0.16, noise: 0.9, gain: 0.8 };
-
 export interface AudioTunables {
   /** Simultaneous voices. Each one is an HRTF panner, which is the expensive part. */
   voices: number;
   /** Master gain. */
   volume: number;
-  /** Metres at which a sound of loudness L is at half amplitude — the panner's reference. */
-  refDistance: number;
   /** Above this age (seconds) an event is stale and is dropped rather than played late. */
   maxLatency: number;
+  /**
+   * How far the world is pushed down while the shot is still in your ears, 0..1. 0.25 means the
+   * hall comes back at a quarter of its level and climbs out of it.
+   */
+  deafDepth: number;
+  /** How long that takes to recover, seconds. */
+  deafSeconds: number;
+  /** Cutoff of the muffling filter at the bottom of the duck, Hz. */
+  deafCutoff: number;
+  /** The ring left in your ears after a shot, 0..1. 0 turns it off. */
+  tinnitus: number;
 }
 
 export function defaultAudioTunables(): AudioTunables {
-  return { voices: 24, volume: 0.5, refDistance: 1.2, maxLatency: 0.25 };
+  return {
+    voices: 24,
+    volume: 0.7,
+    maxLatency: 0.25,
+    deafDepth: 0.15,
+    deafSeconds: 0.9,
+    deafCutoff: 700,
+    tinnitus: 0.03,
+  };
 }
 
 export interface AudioStats {
@@ -75,16 +89,38 @@ export interface AudioStats {
   played: number;
   /** Sounds dropped because every voice held something louder. */
   dropped: number;
+  /** Sounds skipped because the ear was outside their loudness radius. */
+  outOfRange: number;
+  /** Name of the last timbre played — the quickest way to see the table is being reached. */
+  last: string;
+}
+
+/**
+ * Distance mapping. `loudness` is the radius at which the event is still noticeable, so pick a
+ * reference distance that puts the inverse curve near the floor at exactly that radius: with
+ * `refDistance = loudness / 12` the gain at `loudness` metres is ~1/12 of the close-range level,
+ * which is quiet-but-there, and the cull at `loudness * 1.2` finishes the job.
+ */
+export function refDistanceFor(loudness: number): number {
+  return Math.min(8, Math.max(0.45, loudness / 12));
 }
 
 export class AudioStage {
   readonly tunables: AudioTunables;
   private ctx: AudioContext | null = null;
+  /** Post-everything: volume, then the limiter, then out. */
   private master: GainNode | null = null;
+  /** Everything except the blast passes through here, and the blast closes it. */
+  private duck: GainNode | null = null;
+  private muffle: BiquadFilterNode | null = null;
   private noise: AudioBuffer | null = null;
   private voices: Voice[] = [];
+  /** The muzzle blast's own voice: pre-duck, never evicted, never evicting. */
+  private blast: Voice | null = null;
   private cursor = 0;
-  private readonly stats: AudioStats = { state: 'off', active: 0, played: 0, dropped: 0 };
+  private readonly stats: AudioStats = {
+    state: 'off', active: 0, played: 0, dropped: 0, outOfRange: 0, last: '-',
+  };
   /**
    * Set false by the keyframe harness before it sends any input. A headless run has no device,
    * no listener and nothing to prove by opening one, and an AudioContext there is pure noise in
@@ -127,38 +163,52 @@ export class AudioStage {
   private build(): void {
     const ctx = this.ctx;
     if (ctx === null) return;
+
+    // out ← limiter ← master(volume) ← { blast direct | muffle ← duck ← voices }
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -3;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.002;
+    limiter.release.value = 0.22;
+    limiter.connect(ctx.destination);
+
     const master = ctx.createGain();
     master.gain.value = this.tunables.volume;
-    master.connect(ctx.destination);
+    master.connect(limiter);
     this.master = master;
 
-    // One second of white noise, shared by every voice and read from a random offset. The body
-    // of every impact in the game comes out of this buffer; allocating a fresh one per hit is
-    // the classic way to make a collapsing stack hitch.
-    const rate = ctx.sampleRate;
-    const buf = ctx.createBuffer(1, rate, rate);
-    const data = buf.getChannelData(0);
-    let s = 0x9e3779b9;
-    for (let i = 0; i < data.length; i++) {
-      s = (s * 1664525 + 1013904223) >>> 0;
-      data[i] = (s / 0xffffffff) * 2 - 1;
-    }
-    this.noise = buf;
+    const muffle = ctx.createBiquadFilter();
+    muffle.type = 'lowpass';
+    muffle.frequency.value = 20000;
+    muffle.Q.value = 0.7;
+    muffle.connect(master);
+    this.muffle = muffle;
 
-    for (let i = 0; i < this.tunables.voices; i++) {
-      const panner = ctx.createPanner();
-      panner.panningModel = 'HRTF';
-      panner.distanceModel = 'inverse';
-      panner.refDistance = this.tunables.refDistance;
-      panner.rolloffFactor = 1;
-      panner.maxDistance = 200;
-      const gain = ctx.createGain();
-      gain.gain.value = 0;
-      gain.connect(panner);
-      panner.connect(master);
-      this.voices.push({ panner, gain, until: 0, rank: 0, seq: -1 });
-    }
+    const duck = ctx.createGain();
+    duck.gain.value = 1;
+    duck.connect(muffle);
+    this.duck = duck;
+
+    this.noise = makeNoiseBuffer(ctx);
+
+    for (let i = 0; i < this.tunables.voices; i++) this.voices.push(this.makeVoice(ctx, duck));
+    this.blast = this.makeVoice(ctx, master);
     this.stats.state = ctx.state;
+  }
+
+  private makeVoice(ctx: AudioContext, dest: AudioNode): Voice {
+    const panner = ctx.createPanner();
+    panner.panningModel = 'HRTF';
+    panner.distanceModel = 'inverse';
+    panner.refDistance = 1;
+    panner.rolloffFactor = 1;
+    panner.maxDistance = 300;
+    const gain = ctx.createGain();
+    gain.gain.value = 1;
+    gain.connect(panner);
+    panner.connect(dest);
+    return { panner, gain, until: 0, rank: 0, seq: -1 };
   }
 
   /** Off means off: an already-running device is closed, not just muted. */
@@ -211,15 +261,17 @@ export class AudioStage {
     this.sceneTime = seconds;
   }
 
+  /** A copy: the overlay used to be handed the live object and could not diff two samples. */
   getStats(): AudioStats {
     const ctx = this.ctx;
-    if (ctx === null) return this.stats;
+    if (ctx === null) return { ...this.stats };
     this.stats.state = ctx.state;
     const now = ctx.currentTime;
     let active = 0;
     for (const v of this.voices) if (v.until > now) active++;
+    if (this.blast !== null && this.blast.until > now) active++;
     this.stats.active = active;
-    return this.stats;
+    return { ...this.stats };
   }
 
   /** Bus subscriber. Inert when the device never started. */
@@ -235,85 +287,97 @@ export class AudioStage {
     const dx = event.x - this.lx;
     const dy = event.y - this.ly;
     const dz = event.z - this.lz;
-    const dist = Math.max(0.3, Math.hypot(dx, dy, dz));
+    const dist = Math.max(0.25, Math.hypot(dx, dy, dz));
     // Loudness is "metres at which this can be noticed" (bus contract), so past that range there
     // is nothing to hear and no reason to spend a voice.
-    if (dist > event.loudness * 1.2) return;
+    if (dist > event.loudness * 1.2) {
+      this.stats.outOfRange++;
+      return;
+    }
     const rank = event.loudness / dist;
+    const timbre = timbreFor(event);
 
-    const voice = this.take(rank);
+    const voice = timbre.blast === true ? this.blast : this.take(rank);
     if (voice === null) {
       this.stats.dropped++;
       return;
     }
 
-    const prof = this.profileFor(event);
-    // Amplitude: loud things are louder, but the panner does the distance work, so this must not
-    // fold distance in twice.
-    const amp = Math.min(1, event.loudness / 26) * prof.gain;
     const t0 = ctx.currentTime + 0.005;
-    const decay = prof.decay;
-    const dur = Math.min(1.6, decay * 3 + 0.06);
-
-    voice.panner.positionX?.setValueAtTime(event.x, t0);
-    voice.panner.positionY?.setValueAtTime(event.y, t0);
-    voice.panner.positionZ?.setValueAtTime(event.z, t0);
-    if (voice.panner.positionX === undefined) {
-      (voice.panner as unknown as { setPosition(x: number, y: number, z: number): void })
-        .setPosition(event.x, event.y, event.z);
-    }
+    this.place(voice, event, t0);
     voice.gain.gain.cancelScheduledValues(t0);
-    voice.gain.gain.setValueAtTime(amp, t0);
-    voice.gain.gain.exponentialRampToValueAtTime(0.0005, t0 + dur);
+    voice.gain.gain.setValueAtTime(1, t0);
 
-    // --- body: a burst of noise through a band-pass sitting on the material's own frequency.
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    const band = ctx.createBiquadFilter();
-    band.type = 'bandpass';
-    band.frequency.value = Math.min(9000, prof.ring * 2.2);
-    band.Q.value = 0.9;
-    const bodyGain = ctx.createGain();
-    bodyGain.gain.setValueAtTime(prof.noise, t0);
-    bodyGain.gain.exponentialRampToValueAtTime(0.0005, t0 + Math.min(dur, 0.05 + decay * 0.6));
-    src.connect(band);
-    band.connect(bodyGain);
-    bodyGain.connect(voice.gain);
-    // A random window of the shared buffer, seeded from the event's own sequence number so a
-    // replayed scenario sounds identical — determinism is a law here, audio included.
-    const off = ((event.seq * 0.6180339887) % 1) * (this.noise.duration - dur - 0.01);
-    src.start(t0, Math.max(0, off), dur);
-    src.stop(t0 + dur);
+    const amp = loudnessGain(event.loudness, timbre.ref);
+    const end = buildTimbre(ctx, voice.gain, timbre, this.noise, t0, amp, event.seq);
 
-    // --- ring: the partial that makes a bottle a bottle. Slightly detuned per event so twelve
-    // identical cans do not phase into one synthetic tone.
-    const osc = ctx.createOscillator();
-    osc.type = 'triangle';
-    const detune = 1 + (((event.seq * 2654435761) % 1000) / 1000 - 0.5) * 0.12;
-    osc.frequency.setValueAtTime(prof.ring * detune, t0);
-    // Real objects drop in pitch as the strike energy leaves them.
-    osc.frequency.exponentialRampToValueAtTime(prof.ring * detune * 0.86, t0 + dur);
-    const ringGain = ctx.createGain();
-    ringGain.gain.setValueAtTime(Math.max(0.03, 1 - prof.noise), t0);
-    ringGain.gain.exponentialRampToValueAtTime(0.0005, t0 + dur);
-    osc.connect(ringGain);
-    ringGain.connect(voice.gain);
-    osc.start(t0);
-    osc.stop(t0 + dur);
+    if (timbre.blast === true) this.deafen(t0);
 
-    voice.until = t0 + dur;
+    voice.until = end;
     voice.rank = rank;
     voice.seq = event.seq;
     this.stats.played++;
+    this.stats.last = timbre.name;
   }
 
-  private profileFor(event: SoundEvent): Profile {
-    if (event.source === 'player-step') return FOOTSTEP;
-    if (event.source === 'player-land') return LANDING;
-    const name = event.material as MaterialName | undefined;
-    const m = name !== undefined && name in MATERIALS ? MATERIALS[name] : undefined;
-    if (m === undefined) return FOOTSTEP;
-    return { ring: m.ring, decay: m.decay, noise: m.noise, gain: m.gain * 0.5 };
+  private place(voice: Voice, event: SoundEvent, t0: number): void {
+    const p = voice.panner;
+    p.refDistance = refDistanceFor(event.loudness);
+    p.maxDistance = Math.max(4, event.loudness * 1.25);
+    if (p.positionX !== undefined) {
+      p.positionX.setValueAtTime(event.x, t0);
+      p.positionY.setValueAtTime(event.y, t0);
+      p.positionZ.setValueAtTime(event.z, t0);
+    } else {
+      (p as unknown as { setPosition(x: number, y: number, z: number): void })
+        .setPosition(event.x, event.y, event.z);
+    }
+  }
+
+  /**
+   * «Разрыв пространства.» The blast has already gone past this point in the graph, so what it
+   * shuts is everything *else*: the hall drops to a quarter of its level behind a lowpass and
+   * climbs back out over about three quarters of a second, with a faint ring left on top. For
+   * those few tenths the player is deaf, which is the price the concept keeps talking about,
+   * and it is paid in perception rather than in a number on a HUD.
+   */
+  private deafen(t0: number): void {
+    const ctx = this.ctx;
+    const duck = this.duck;
+    const muffle = this.muffle;
+    const master = this.master;
+    if (ctx === null || duck === null || muffle === null || master === null) return;
+    const t = this.tunables;
+    // Onset 20 ms after the trigger: the crack of the shot lands first, then the world goes.
+    const shut = t0 + 0.02;
+    const open = shut + t.deafSeconds;
+    duck.gain.cancelScheduledValues(t0);
+    duck.gain.setValueAtTime(duck.gain.value, t0);
+    duck.gain.linearRampToValueAtTime(Math.max(0.01, t.deafDepth), shut);
+    duck.gain.setTargetAtTime(1, shut, t.deafSeconds * 0.7);
+    duck.gain.setValueAtTime(1, open + t.deafSeconds);
+
+    muffle.frequency.cancelScheduledValues(t0);
+    muffle.frequency.setValueAtTime(20000, t0);
+    muffle.frequency.linearRampToValueAtTime(Math.max(120, t.deafCutoff), shut);
+    muffle.frequency.setTargetAtTime(20000, shut, t.deafSeconds * 0.6);
+    muffle.frequency.setValueAtTime(20000, open + t.deafSeconds);
+
+    if (t.tinnitus > 0) {
+      // Not a scripted scare: it is the shot's own after-image, born from the same event.
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(3900, shut);
+      osc.frequency.exponentialRampToValueAtTime(3300, shut + t.deafSeconds * 1.4);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(t.tinnitus, shut);
+      g.gain.exponentialRampToValueAtTime(0.0001, shut + t.deafSeconds * 1.4);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(t0);
+      osc.stop(shut + t.deafSeconds * 1.4 + 0.02);
+    }
   }
 
   /**
@@ -350,6 +414,12 @@ export class AudioStage {
     void this.ctx.close().catch(() => undefined);
     this.ctx = null;
     this.voices = [];
+    this.blast = null;
+    this.master = null;
+    this.duck = null;
+    this.muffle = null;
     this.stats.state = 'off';
   }
 }
+
+export type { Timbre };

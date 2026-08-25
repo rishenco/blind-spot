@@ -10,7 +10,8 @@
     "shots": "npm run build && node tools/shoot.mjs",
     "quiet": "npm run build && node tools/quiet.mjs",
     "shots:spiders": "npm run build && node tools/spiders.mjs",
-    "shots:hud": "npm run build && node tools/hud.mjs"
+    "shots:hud": "npm run build && node tools/hud.mjs",
+    "shots:audio": "npm run build && node tools/audio.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",
