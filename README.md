@@ -1,7 +1,7 @@
-# BLIND SPOT — dark warehouse (prototype)
+# BLIND HANDBALL (prototype)
 
-Первый milestone: чёрный зал, лидар, тактильный контур, дебаг-оверлеи.
-Концепт — `doc/proto/concept.md`, порядок работы — `doc/proto/process.md`.
+Слепой гандбол 2×2. Концепт и законы — ниже по ссылкам.
+Концепт — `doc/concept.md`, порядок работы — `doc/process.md`.
 
 ## Запуск
 
