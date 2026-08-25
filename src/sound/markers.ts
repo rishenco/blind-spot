@@ -38,56 +38,114 @@ const PER_MARKER = 1;
 /**
  * Per-source hot-core colour and weight. Everything lives in the warm half of the spectrum on
  * purpose — the geometry layer owns cold white/grey, so warmth alone already says "this is the
- * other channel". Your own noise is dull ember; other people's things burn.
+ * other channel".
+ *
+ * The gains used to bias the player's own noise *down* (a step was 0.4 of a prop impact), which
+ * fought the one thing this layer is for: the size and the glare of a mark are the bill for the
+ * mistake you just made, and a sprinting player is the loudest thing in the hall until the rifle
+ * goes off. Loudness alone decides how big and how hot a mark burns; the gain is now only a
+ * small per-source character shift.
  */
 const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number }> = {
-  'player-step': { color: 0xff7a3c, gain: 0.4 },
-  'player-land': { color: 0xff8a44, gain: 0.55 },
+  'player-step': { color: 0xff8438, gain: 1 },
+  'player-land': { color: 0xff7a28, gain: 1.1 },
   'prop-impact': { color: 0xffc46a, gain: 1 },
   gunshot: { color: 0xfff0c0, gain: 1.15 },
   'bullet-hit': { color: 0xffd890, gain: 1 },
   spider: { color: 0xff9ec0, gain: 1 },
 };
 
+/**
+ * The four looks. The human's verdict on the first one was "conveys the information, but it is
+ * not great — maybe the epicentre is too small and the halo around it too big", and he was not
+ * sure of his own diagnosis. So this is deliberately four *different* answers rather than one
+ * polished one, switchable at runtime (GUI → sound marks → style, or `bs.markerStyle(name)`),
+ * and the frame set shoots the same moment through each of them.
+ *
+ *  - `ember`  the original language, recalibrated: white-hot pinpoint core, amber body, a rim
+ *             that bleeds into deep red. Hue says *who* made the noise.
+ *  - `iso`    an isotherm palette, like a real thermal camera: colour is temperature, so it is
+ *             loudness that walks the blob up violet → red → orange → yellow → white, with faint
+ *             iso-bands in the falloff. A quiet noise physically cannot go yellow.
+ *  - `coal`   the answer to the human's own hypothesis: a big flat hot centre and a short
+ *             shoulder, so the blob is mostly epicentre and barely any aura.
+ *  - `bloom`  the opposite extreme: no core at all, one soft monochrome haze. Kept as the
+ *             control — it is what "too much aura" actually looks like.
+ */
+export type MarkerStyle = 'ember' | 'iso' | 'coal' | 'bloom';
+
+export const MARKER_STYLES: readonly MarkerStyle[] = ['ember', 'iso', 'coal', 'bloom'];
+
+const STYLE_INDEX: Record<MarkerStyle, number> = { ember: 0, iso: 1, coal: 2, bloom: 3 };
+
 export interface MarkerTunables {
   /** How long a mark survives, seconds. Far longer than the sound — that is the point. */
   life: number;
-  /** Blob radius at one metre, pixels — before the loudness term and the distance falloff. */
-  pixelsAtOneMetre: number;
+  /**
+   * Pixel radius of a reference-loud mark seen at one metre, before the distance falloff. This
+   * is the master knob of the whole scale.
+   */
+  scale: number;
+  /** The loudness, in metres of notice, that `scale` is quoted for. A walking footstep is 9. */
+  loudRef: number;
+  /**
+   * How hard loudness bites. Above 1 the scale is stretched: the gap between a can ticking and a
+   * barrel going over grows faster than the gap in the physics. That stretch is the point — the
+   * mark is an error indicator, and the eye has to read "how badly did I just give myself away"
+   * in one glance, not by comparing two blobs.
+   */
+  loudPower: number;
   /** Smallest and largest on-screen radius, pixels. */
   minRadius: number;
   maxRadius: number;
+  /**
+   * Radius, in pixels, above which a blob starts paying for the screen it covers. It exists so a
+   * can dropped at your boot does not become a white sun — but it used to be set at 38 px, which
+   * meant *everything* interesting was being dimmed and the whole loudness scale collapsed into
+   * the quiet end. It is now far out of the way of ordinary marks.
+   */
+  spread: number;
   /** Falloff exponent of the blob. Low = wide woolly haze, high = tight core. */
   softness: number;
   brightness: number;
+  style: MarkerStyle;
 }
 
 export function defaultMarkerTunables(): MarkerTunables {
   return {
     life: 7,
-    pixelsAtOneMetre: 120,
-    minRadius: 13,
-    maxRadius: 96,
+    scale: 210,
+    loudRef: 9,
+    loudPower: 1.25,
+    minRadius: 7,
+    maxRadius: 460,
+    spread: 150,
     softness: 1.5,
     brightness: 1,
+    style: 'iso',
   };
 }
 
 const VERTEX = /* glsl */ `
   uniform float uTime;
   uniform float uLife;
-  uniform float uPixelsAtOneMetre;
+  uniform float uScale;
+  uniform float uLoudRef;
+  uniform float uLoudPower;
   uniform float uMinRadius;
   uniform float uMaxRadius;
+  uniform float uSpread;
 
   attribute float aBirth;
   attribute float aLoud;
   attribute float aSeed;
+  attribute float aGain;
   attribute vec3  aTint;
 
   varying vec3  vColor;
   varying float vFade;
   varying float vSeed;
+  varying float vHeat;
 
   void main() {
     float age = uTime - aBirth;
@@ -106,32 +164,46 @@ const VERTEX = /* glsl */ `
     }
 
     /*
-     * Size is loudness, softened by distance. Not pure screen space: a barrel going over at the
-     * far wall would then paint the same crater as one going over at your feet, and the frame
-     * turns into a flare. Not honest perspective either: a far-off sound would shrink to a pixel
-     * and start passing for geometry, which is the one thing this layer must never do. So the
-     * blob falls off slower than perspective (d^0.65) and never gets smaller than uMinRadius
-     * — far noises stay small, soft smudges you can still tell from a dot.
+     * Size is loudness. The scale has to be *wide*: a spider's foot and a barrel going over are
+     * a factor of ten apart in metres of notice, and on screen they have to be a factor of ten
+     * apart too — small smudge versus a crater you cannot miss. The previous curve was
+     * 0.42 + loud * 0.12, a range of four and a half, and then it clamped at 96 px, so in
+     * practice everything from a can to a barrel came out the same size. That is the bug this
+     * whole pass exists to fix.
+     *
+     * Distance falls off slower than perspective (d^0.8). Not honest perspective: a far-off
+     * sound would shrink to a pixel and start passing for geometry, which is the one thing this
+     * layer must never do. Not screen-space either: a barrel at the far wall must not paint the
+     * same crater as one at your feet.
      */
-    float dist = max(1.0, -mv.z);
-    float radius = clamp(uPixelsAtOneMetre * (0.42 + aLoud * 0.12) / pow(dist, 0.65),
-                         uMinRadius, uMaxRadius);
+    float dist = max(0.8, -mv.z);
+    float loud = max(0.4, aLoud);
+    float norm = loud / max(0.5, uLoudRef);
+    float radius = uScale * pow(norm, uLoudPower) / pow(dist, 0.8);
+    radius = clamp(radius, uMinRadius, uMaxRadius);
+
     // A blob swells for a moment as the sound registers, then settles back. Cheap, and it is the
     // difference between "heat bloomed here" and "a circle switched on".
     float t = age / uLife;
-    radius *= 0.72 + 0.38 * (1.0 - exp(-age * 9.0)) - 0.10 * t;
+    radius *= 0.62 + 0.42 * (1.0 - exp(-age * 11.0)) - 0.08 * t;
 
-    // Fade: bright while the noise is news, then a long shallow tail. Written in *seconds*, not
-    // in fractions of the lifetime, because what the eye reads is "that happened a moment ago" —
-    // an earlier version dropped to 40% inside a second and the mark of a barrel going over was
-    // already a smudge by the time you turned to look at it.
-    vFade = pow(1.0 - t, 1.5) * (0.55 + 0.45 * exp(-age * 1.2));
-    // Spread, not gain: a blob that covers four times the screen is not four times the event, so
-    // the closer and wider it gets the thinner it is painted. Without this a can dropped at your
-    // feet burns a white disc in the middle of the frame and starts looking like a light.
-    vFade *= clamp(38.0 / radius, 0.4, 1.0);
+    // Fade: bright while the noise is news, then a long shallow tail.
+    float decay = pow(1.0 - t, 1.4) * (0.74 + 0.26 * exp(-age * 1.6));
+    /*
+     * Loudness drives brightness as well as size, and it is allowed to win. A loud thing has to
+     * look loud even when it is close enough to fill the frame — "если я как слон, то тут
+     * китайский новый год должен начаться". The old code dimmed strictly by area, which made
+     * every big mark pale and put the whole scale back in the quiet end.
+     */
+    float loudGain = clamp(pow(norm, 0.7), 0.26, 1.6) * aGain;
+    // Some anti-glare is still wanted: a mark that covers a third of the screen would otherwise
+    // wash the frame out. It bites only well past the size of an ordinary mark, and it is capped
+    // so even a crater keeps half its punch.
+    vFade = decay * loudGain * clamp(uSpread / radius, 0.5, 1.0);
     vColor = aTint;
     vSeed = aSeed;
+    // How far up the thermal ramp this event is entitled to climb. Quiet noises stay red.
+    vHeat = clamp(pow(norm, 0.55) * 0.62, 0.16, 1.0);
     gl_PointSize = radius * 2.0;
     gl_Position = clip;
   }
@@ -141,9 +213,20 @@ const FRAGMENT = /* glsl */ `
   precision highp float;
   uniform float uSoftness;
   uniform float uBright;
+  uniform float uStyle;
   varying vec3  vColor;
   varying float vFade;
   varying float vSeed;
+  varying float vHeat;
+
+  /** The isotherm ramp: violet embers, red, orange, yellow, white. Temperature is loudness. */
+  vec3 isoRamp(float v) {
+    vec3 c = mix(vec3(0.16, 0.03, 0.30), vec3(0.72, 0.06, 0.14), smoothstep(0.00, 0.30, v));
+    c = mix(c, vec3(1.00, 0.32, 0.04), smoothstep(0.26, 0.56, v));
+    c = mix(c, vec3(1.00, 0.80, 0.16), smoothstep(0.54, 0.82, v));
+    c = mix(c, vec3(1.00, 0.99, 0.92), smoothstep(0.80, 1.00, v));
+    return c;
+  }
 
   void main() {
     vec2 d = gl_PointCoord - 0.5;
@@ -154,21 +237,61 @@ const FRAGMENT = /* glsl */ `
      * warp is small: it must never read as a shape claim about the object that made the noise.
      */
     float warp = 1.0 + 0.18 * sin(ang * 2.0 + vSeed) + 0.11 * sin(ang * 3.0 - vSeed * 2.3);
-    float r = length(d) * 2.0 / warp;
+    /*
+     * The warp stretches the silhouette outwards, which can push the shape past the edge of the
+     * point sprite's own quad — and a quad has corners, so a fat style (coal) came out with
+     * visible axis-aligned bites taken out of it. The second factor fades whatever survives to
+     * nothing over the outermost fifth of the quad, so the cut always happens where the blob is
+     * already black.
+     */
+    float rr = length(d) * 2.0;
+    float r = rr / warp;
     if (r > 1.0) discard;
+    float k = (1.0 - r) * smoothstep(1.0, 0.82, rr);
 
-    // Thermal falloff: hot core, wide soft shoulder, nothing at the rim. Almost the whole sprite
-    // is nearly transparent — that is what makes it read as heat and not as a dot.
-    float body = pow(max(0.0, 1.0 - r), uSoftness);
-    float core = pow(max(0.0, 1.0 - r), uSoftness * 2.8);
-    float a = (body * 0.85 + core * 0.55) * vFade * uBright;
+    float a;
+    vec3 c;
+    if (uStyle < 0.5) {
+      // ember — pinpoint white core, amber body, deep-red rim.
+      float body = pow(k, uSoftness);
+      float core = pow(k, uSoftness * 2.8);
+      a = body * 0.85 + core * 0.55;
+      vec3 rim = vColor * vec3(0.72, 0.16, 0.05);
+      c = mix(rim, vColor, smoothstep(0.0, 0.55, body));
+      c = mix(c, vec3(1.0, 0.94, 0.86), core * 0.5 * vHeat);
+    } else if (uStyle < 1.5) {
+      // iso — a thermal camera's isotherm palette. Colour *is* loudness: the falloff is read as
+      // temperature and clipped at what this event is hot enough to reach, so a quiet noise
+      // physically cannot produce yellow and a barrel cannot help producing white.
+      float v = pow(k, uSoftness * 0.85) * vHeat;
+      a = pow(k, uSoftness * 1.15) * (0.86 + 0.14 * sin(v * 26.0));
+      c = isoRamp(v) * (0.45 + 0.55 * vHeat);
+    } else if (uStyle < 2.5) {
+      // coal — the human's own hypothesis taken seriously: nearly all epicentre and almost no
+      // aura. A hot slug with a soft rim over its outer quarter, so it stays a silhouette and
+      // never a UI disc, but what you read is the *area* of the thing rather than a halo.
+      float slug = smoothstep(0.0, 0.30, k);
+      float ember = pow(k, uSoftness * 2.2);
+      a = slug * 0.62 + ember * 0.22;
+      vec3 cold = vec3(0.55, 0.05, 0.01);
+      vec3 hot = vec3(1.0, 0.58, 0.10);
+      vec3 base = mix(cold, hot, vHeat);
+      c = mix(base * 0.7, base, slug) + vec3(0.9, 0.75, 0.5) * ember * vHeat * 0.5;
+    } else {
+      // bloom — the far pole: no epicentre at all, one soft monochrome cloud. Included because
+      // the complaint might be the other way round from the hypothesis, and this is what "all
+      // aura" honestly looks like when nothing is competing with it.
+      // The plateau is the whole point: alpha climbs fast and then flattens, so there is no
+      // pinpoint anywhere and the colour does not vary across the blob at all. Only the alpha
+      // carries shape, which is as close to "all aura, no epicentre" as this layer can get.
+      float haze = 1.0 - pow(1.0 - k, 2.4);
+      a = haze * 0.80;
+      vec3 pale = mix(vColor, vec3(1.0, 0.88, 0.74), 0.35);
+      c = pale * (0.5 + 0.5 * vHeat);
+    }
+
+    a *= vFade * uBright;
     if (a <= 0.002) discard;
-
-    // Colour ramp along the falloff, like a thermal palette: the middle whitens out, the shoulder
-    // keeps the source's hue, the rim bleeds into deep red before it vanishes.
-    vec3 rim = vColor * vec3(0.75, 0.18, 0.06);
-    vec3 c = mix(rim, vColor, smoothstep(0.0, 0.55, body));
-    c = mix(c, vec3(1.0, 0.94, 0.86), core * 0.5);
     gl_FragColor = vec4(c * a, a);
   }
 `;
@@ -232,6 +355,7 @@ export class SoundMarkers {
   private readonly birth: Float32Array;
   private readonly loud: Float32Array;
   private readonly seed: Float32Array;
+  private readonly gain: Float32Array;
   private readonly tint: Float32Array;
 
   private readonly ringPos: Float32Array;
@@ -254,6 +378,7 @@ export class SoundMarkers {
     this.birth = new Float32Array(n).fill(NEVER);
     this.loud = new Float32Array(n);
     this.seed = new Float32Array(n);
+    this.gain = new Float32Array(n);
     this.tint = new Float32Array(n * 3);
 
     const g = this.geometry;
@@ -261,6 +386,7 @@ export class SoundMarkers {
     g.setAttribute('aBirth', new THREE.BufferAttribute(this.birth, 1));
     g.setAttribute('aLoud', new THREE.BufferAttribute(this.loud, 1));
     g.setAttribute('aSeed', new THREE.BufferAttribute(this.seed, 1));
+    g.setAttribute('aGain', new THREE.BufferAttribute(this.gain, 1));
     g.setAttribute('aTint', new THREE.BufferAttribute(this.tint, 3));
     g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
 
@@ -268,11 +394,15 @@ export class SoundMarkers {
       uniforms: {
         uTime: { value: 0 },
         uLife: { value: tunables.life },
-        uPixelsAtOneMetre: { value: tunables.pixelsAtOneMetre },
+        uScale: { value: tunables.scale },
+        uLoudRef: { value: tunables.loudRef },
+        uLoudPower: { value: tunables.loudPower },
         uMinRadius: { value: tunables.minRadius },
         uMaxRadius: { value: tunables.maxRadius },
+        uSpread: { value: tunables.spread },
         uSoftness: { value: tunables.softness },
         uBright: { value: tunables.brightness },
+        uStyle: { value: STYLE_INDEX[tunables.style] },
       },
       vertexShader: VERTEX,
       fragmentShader: FRAGMENT,
@@ -340,6 +470,16 @@ export class SoundMarkers {
     return this.radiusOn;
   }
 
+  /** Switch the look. Free — one uniform; nothing in the ring buffer depends on the style. */
+  setStyle(style: MarkerStyle): void {
+    this.tunables.style = style;
+    this.material.uniforms.uStyle!.value = STYLE_INDEX[style] ?? 0;
+  }
+
+  get style(): MarkerStyle {
+    return this.tunables.style;
+  }
+
   setTime(seconds: number): void {
     this.time = seconds;
     this.material.uniforms.uTime!.value = seconds;
@@ -359,11 +499,15 @@ export class SoundMarkers {
     const t = this.tunables;
     const u = this.material.uniforms;
     u.uLife!.value = t.life;
-    u.uPixelsAtOneMetre!.value = t.pixelsAtOneMetre;
+    u.uScale!.value = t.scale;
+    u.uLoudRef!.value = t.loudRef;
+    u.uLoudPower!.value = t.loudPower;
     u.uMinRadius!.value = t.minRadius;
     u.uMaxRadius!.value = t.maxRadius;
+    u.uSpread!.value = t.spread;
     u.uSoftness!.value = t.softness;
     u.uBright!.value = t.brightness;
+    u.uStyle!.value = STYLE_INDEX[t.style] ?? 0;
     this.ringMaterial.uniforms.uLife!.value = t.life;
   }
 
@@ -375,9 +519,9 @@ export class SoundMarkers {
 
     const look = SOURCE_LOOK[event.source] ?? SOURCE_LOOK['prop-impact'];
     const c = new THREE.Color(look.color);
-    const r = c.r * look.gain;
-    const g = c.g * look.gain;
-    const b = c.b * look.gain;
+    const r = c.r;
+    const g = c.g;
+    const b = c.b;
     const s = ((this.written * 0.6180339887) % 1) * 6.283;
 
     const i = slot * PER_MARKER;
@@ -387,6 +531,7 @@ export class SoundMarkers {
     this.birth[i] = event.time;
     this.loud[i] = event.loudness;
     this.seed[i] = s;
+    this.gain[i] = look.gain;
     this.tint[i * 3] = r;
     this.tint[i * 3 + 1] = g;
     this.tint[i * 3 + 2] = b;
@@ -395,6 +540,7 @@ export class SoundMarkers {
     upload(this.geometry, 'aBirth', i, PER_MARKER);
     upload(this.geometry, 'aLoud', i, PER_MARKER);
     upload(this.geometry, 'aSeed', i, PER_MARKER);
+    upload(this.geometry, 'aGain', i, PER_MARKER);
     upload(this.geometry, 'aTint', i * 3, PER_MARKER * 3);
 
     if (this.radiusOn) {
@@ -426,6 +572,22 @@ export class SoundMarkers {
     return { alive, written: this.written, capacity: this.capacity };
   }
 
+  /**
+   * Debug: every mark still alive, as [x, y, z, loudness, age]. The counters in `getStats` say
+   * how many marks exist; this says *where* they are and how loud, which is the only way to tell
+   * "the layer drew nothing" from "the layer drew it off-screen".
+   */
+  list(): Array<[number, number, number, number, number]> {
+    const out: Array<[number, number, number, number, number]> = [];
+    for (let s = 0; s < this.capacity; s++) {
+      const i = s * PER_MARKER;
+      const b = this.birth[i]!;
+      if (b <= NEVER || this.time - b > this.tunables.life) continue;
+      out.push([this.pos[i * 3]!, this.pos[i * 3 + 1]!, this.pos[i * 3 + 2]!, this.loud[i]!, this.time - b]);
+    }
+    return out;
+  }
+
   clear(): void {
     this.birth.fill(NEVER);
     this.ringBirth.fill(NEVER);
@@ -444,9 +606,21 @@ export class SoundMarkers {
 }
 
 /** Marks one slice of one attribute dirty. Whole-buffer re-uploads are what a ring exists to avoid. */
+/*
+ * Queue one slot of one attribute for the next `bufferSubData`.
+ *
+ * This used to call `clearUpdateRanges()` first, and that was the bug behind "I sprint, I look
+ * back, and there is a trickle of ten pixels behind me". Several sound events routinely land
+ * between two renders (a stride, the two props the knee just clipped, a whole pile collapsing);
+ * every one of them called this, and each call threw away the ranges queued by the events before
+ * it in the same frame. Only the *last* event of a frame ever reached the GPU — the rest sat in
+ * the CPU array with their slots still holding whatever the previous owner of the slot wrote, so
+ * they drew stale or drew nothing. Three clears the ranges itself once it has uploaded them
+ * (WebGLAttributes.update), and it sorts and merges them first, so simply accumulating is both
+ * correct and cheap.
+ */
 function upload(g: THREE.BufferGeometry, name: string, offset: number, count: number): void {
   const attr = g.getAttribute(name) as THREE.BufferAttribute;
-  attr.clearUpdateRanges();
   attr.addUpdateRange(offset, count);
   attr.needsUpdate = true;
 }
