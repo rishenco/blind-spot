@@ -27,7 +27,7 @@
 import * as THREE from 'three';
 import { StaticWorld, aabbFromBounds } from '../core/collision';
 import { MAT_CONCRETE, MAT_DUST, MAT_METAL, MAT_STONE } from '../paint/materials';
-import { CAN_REACH, CAN_STACK_PITCH, type CanPose } from './cans';
+import { CAN_RACK_CAP, CAN_REACH, CAN_STACK_PITCH, type CanPose } from './cans';
 
 // Room shell.
 const HALF_X = 15;
@@ -176,10 +176,23 @@ const APRON_X = -3.8;
  * in the currency this lane is already priced in — a can is `MAT_METAL`, the ×1.5 voice, going
  * off in the middle of the room beside the landmark everything else navigates by.
  *
- * **The column.** Six cans on `CAN_STACK_PITCH`, which is one can tall each, so the bar is
- * 0.72 m and every can's centre sits in the middle of its own slot. Six is deliberately more
- * than the rack holds (`CAN_RACK_CAP` is 4): a stack is a place you take *from*, at the price
- * of standing next to it, and never a pile you pocket in passing.
+ * **The column.** Cans on `CAN_STACK_PITCH`, one can tall each, every can's centre in the
+ * middle of its own slot. How many is *derived, not chosen*: the tallest column whose top can
+ * is still within `CAN_REACH` of the feet, which today is five and a bar 0.60 m tall.
+ *
+ * The derivation is not tidiness. Retrieval measures three dimensions from the rig's feet
+ * (`game/throwables.ts`), so a can higher than `CAN_REACH` cannot be lifted from any position
+ * on the floor — and because lifting takes the highest can *in reach*, an over-tall column
+ * would hand you the second can down and drop the unreachable one on the pile. Every first
+ * touch of the stack would clang, on every run, with nothing the player could do about it.
+ * That is a tax rather than a price, and this game prices things. Authoring six cans looked
+ * fine on paper and played as an unavoidable noise; deriving the count off the same reach the
+ * retrieval uses makes the column mineable one can at a time, quietly, by a player who walks.
+ *
+ * It stays deliberately taller than the rack holds (`CAN_RACK_CAP` is 4): a stack is a place
+ * you take *from*, at the price of standing next to it, and never a pile you pocket in passing.
+ * The two constraints squeeze from opposite sides, so the throw below is what keeps a future
+ * change to either number from silently producing a column that is unreachable or pocketable.
  *
  * The lean is 3.5 cm of drift at the top, accumulating as the running total 1+2+3+4+5 — each
  * can set down a little further off than the one below it, which is how a hand-stacked column
@@ -190,8 +203,22 @@ const APRON_X = -3.8;
  * most visible from the one direction anybody ever sees this thing from. Authored, never
  * random — a seeded run has to be reproducible.
  */
-/** Cans in the column. */
-const CAN_STACK_COUNT = 6;
+/**
+ * Cans in the column: the tallest stack whose top can is within `CAN_REACH` of the feet.
+ *
+ * A can's centre sits at `(i + 0.5) · CAN_STACK_PITCH`, so the top of an `n`-can column is at
+ * `(n - 0.5) · CAN_STACK_PITCH` and the constraint `(n - 0.5) · pitch <= CAN_REACH` inverts to
+ * the expression below.
+ */
+const CAN_STACK_COUNT = Math.floor(CAN_REACH / CAN_STACK_PITCH + 0.5);
+
+if (CAN_STACK_COUNT <= CAN_RACK_CAP) {
+  throw new Error(
+    `room: a ${CAN_STACK_COUNT}-can column fits inside a ${CAN_RACK_CAP}-can rack, so the stack ` +
+      'is a pile you pocket in passing rather than a place you come back to. Raise CAN_REACH, ' +
+      'lower CAN_STACK_PITCH, or author a second stack.',
+  );
+}
 /** Metres of horizontal drift at the top can. Under `CAN_RADIUS`, so it is still a column. */
 const CAN_STACK_LEAN = 0.035;
 

@@ -20,6 +20,7 @@ import {
   CAN_EMITTER_BASE,
   Throwables,
   throwSpeed,
+  type CanReadout,
   type PrintSink,
   type ThrowSound,
   type Thrower,
@@ -49,11 +50,13 @@ import {
   CAN_MUZZLE_M,
   CAN_RACK_CAP,
   CAN_RADIUS,
+  CAN_REACH,
   CAN_REARM_M,
   CAN_STACK_PITCH,
   CAN_THROW_MAX,
   CAN_THROW_MIN,
 } from '../src/world/cans';
+import { CAN_STACK } from '../src/world/room';
 
 const HZ = 120;
 const DT = 1 / HZ;
@@ -176,6 +179,62 @@ function throwInGame(game: HeadlessGame, seconds: number, after = 6): void {
   game.run(seconds);
   game.input.release('throw');
   game.run(after);
+}
+
+/**
+ * How many cans the room hands you before you have thrown anything.
+ *
+ * Not zero, and every count below is written against this rather than against an empty world:
+ * `world/room.ts` authors a stack beside the tank and `GameSim` boots it. A test that asserted
+ * `inWorld === 1` after one throw was quietly asserting the room was empty, which stopped being
+ * true the moment the stack was wired — and would stop being true again for the next prop.
+ */
+const BOOT_CANS = CAN_STACK.length;
+
+/**
+ * The can *this throw* put in the world — identified by difference, never by index.
+ *
+ * `cansSnapshot()[0]` is the bottom of the authored stack, twenty metres away beside the tank,
+ * so "the can" has to be named rather than assumed. The only naming that survives a room growing
+ * a second stack is the one that does not depend on the room at all: the can that was not there
+ * a moment ago.
+ */
+function throwOne(game: HeadlessGame, seconds: number, after = 6): CanReadout {
+  const before = new Set(game.sim.throwables.cansSnapshot().map((c) => c.id));
+  throwInGame(game, seconds, after);
+  const fresh = game.sim.throwables.cansSnapshot().filter((c) => !before.has(c.id));
+  expect(fresh.length).toBe(1);
+  return fresh[0]!;
+}
+
+
+/**
+ * Throws the whole rack straight down at the rig's feet, so a test can walk up to the stack
+ * wanting something. A full rack cannot lift (`Throwables.lift`), so an un-emptied rack turns
+ * every mining test into a test of nothing.
+ */
+function emptyRack(game: HeadlessGame): void {
+  game.input.look(0, 900);
+  game.step();
+  for (let i = 0; i < CAN_RACK_CAP; i++) throwInGame(game, 0.05, 1.2);
+  expect(game.sim.throwables.carried).toBe(0);
+  game.input.look(0, -900);
+  game.step();
+}
+
+/** Puts the rig on the lane `back` metres west of the column, facing along it. */
+function atTheStack(game: HeadlessGame, back: number): void {
+  game.sim.player.setSpawn(new THREE.Vector3(CAN_STACK[0]!.x - back, 0, CAN_STACK[0]!.z), -90);
+  game.step();
+}
+
+/** Every prop contact the bus carried from here on, in order. */
+function recordProps(game: HeadlessGame): SoundEvent[] {
+  const out: SoundEvent[] = [];
+  game.sim.bus.subscribe((e) => {
+    if (e.class === 'prop-impact' || e.class === 'prop-knock') out.push({ ...e });
+  });
+  return out;
 }
 
 // ===========================================================================
@@ -630,19 +689,26 @@ describe('the resting print (§4)', () => {
 
   it('appears when a thrown can settles, survives K as a pose, and is relearned by a ping', () => {
     const game = createHeadlessGame();
-    throwInGame(game, 0.05, 8);
+    const can = throwOne(game, 0.05, 8);
     const prints = game.sim.paint.prints;
-    expect(game.sim.throwables.inWorld).toBe(1);
-    expect(prints.placed).toBe(1);
+    expect(game.sim.throwables.inWorld).toBe(BOOT_CANS + 1);
+    expect(prints.placed).toBe(BOOT_CANS + 1);
 
-    const can = game.sim.throwables.cansSnapshot()[0]!;
     const p = game.sim.player.position;
     const dist = Math.hypot(can.x - p.x, can.z - p.z);
     // Precondition, stated out loud: a tap has to land inside a Q-ping or this proves nothing.
     expect(dist).toBeLessThan(SOUND_CLASSES['q-ping'].paintRadius);
+    // And the companion precondition the boot stack added for free: it is out there, its print
+    // is laid, and it is far enough that the ping below cannot reach it. So `known` counting to
+    // exactly one is a claim about *which* can was learned, not just how many.
+    for (const stacked of CAN_STACK) {
+      expect(Math.hypot(stacked.x - p.x, stacked.z - p.z)).toBeGreaterThan(
+        SOUND_CLASSES['q-ping'].paintRadius,
+      );
+    }
 
     game.sim.paint.clear();
-    expect(prints.placed).toBe(1);
+    expect(prints.placed).toBe(BOOT_CANS + 1);
     expect(prints.known).toBe(0);
 
     game.sim.firePing('q-ping');
@@ -668,22 +734,23 @@ describe('the resting print (§4)', () => {
     near.input.look(0, 500);
     near.step();
     expect(near.sim.player.pitch).toBeCloseTo(-Math.PI / 3, 3);
-    throwInGame(near, 0.05, 8);
-    const can = near.sim.throwables.cansSnapshot()[0]!;
+    const can = throwOne(near, 0.05, 8);
     const p = near.sim.player.position;
     const d = Math.hypot(can.x - p.x, can.y - p.y, can.z - p.z);
     expect(d).toBeLessThan(SOUND_CLASSES['prop-knock'].hearingRadius);
-    expect(near.sim.paint.prints.placed).toBe(1);
+    expect(near.sim.paint.prints.placed).toBe(BOOT_CANS + 1);
+    // One, not BOOT_CANS + 1: the authored stack laid its prints at boot and nothing has been
+    // heard out there, so the room's own cans are as dark as the far case below. An authored can
+    // is not free intel — law 1 does not waive itself for props the level designer placed.
     expect(near.sim.paint.prints.known).toBe(1);
     near.sim.dispose();
 
     const far = createHeadlessGame();
-    throwInGame(far, 0.05, 8);
-    const fcan = far.sim.throwables.cansSnapshot()[0]!;
+    const fcan = throwOne(far, 0.05, 8);
     const fp = far.sim.player.position;
     const fd = Math.hypot(fcan.x - fp.x, fcan.y - fp.y, fcan.z - fp.z);
     expect(fd).toBeGreaterThan(SOUND_CLASSES['prop-knock'].hearingRadius * 1.5);
-    expect(far.sim.paint.prints.placed).toBe(1);
+    expect(far.sim.paint.prints.placed).toBe(BOOT_CANS + 1);
     expect(far.sim.paint.prints.known).toBe(0);
     far.sim.dispose();
   });
@@ -709,6 +776,161 @@ describe('the resting print (§4)', () => {
     expect(b.hand.inWorld).toBe(0);
     expect(b.hand.carried).toBe(CAN_RACK_CAP);
     expect(sounds.filter((s) => s.kind === 'knock').length).toBe(1);
+  });
+});
+
+describe("the room's own stack (§8)", () => {
+  /**
+   * The wiring itself: `GameSim` boots `world/room.ts`'s authored column, and it is *dark*.
+   *
+   * This is the assertion the whole of M2 was missing while the boot seam sat unwired — the
+   * stack existed as data and as a room test, and no can of it was ever in the game. It has two
+   * halves and the second is the one with teeth. Cans in the world is a wiring claim; cans whose
+   * prints are laid and *unknown* is law 1: an authored prop is not free intel, and a level
+   * designer placing something does not hand the player its position. You learn the stack is
+   * there the way you learn everything else — you make a noise, or it does.
+   */
+  it('boots where the room authored it, and is unlit until something is heard', () => {
+    const game = createHeadlessGame();
+    expect(game.sim.throwables.inWorld).toBe(BOOT_CANS);
+    expect(game.sim.paint.prints.placed).toBe(BOOT_CANS);
+    expect(game.sim.paint.prints.known).toBe(0);
+
+    const booted = game.sim.throwables.cansSnapshot();
+    for (const authored of CAN_STACK) {
+      const match = booted.find(
+        (c) => Math.hypot(c.x - authored.x, c.y - authored.y, c.z - authored.z) < 1e-9,
+      );
+      expect(match, `nothing booted at y=${authored.y.toFixed(2)}`).toBeDefined();
+      // Asleep and armed: a column stands because nothing in it is moving, and an authored can is
+      // touchable on the first tick — the re-arm rule is about things *you* let go of.
+      expect(match!.asleep).toBe(true);
+      expect(match!.armed).toBe(true);
+      expect(match!.settled).toBe(true);
+    }
+    game.sim.dispose();
+  });
+
+  /**
+   * Walk the lane with an empty rack and the column is a quiet resupply, mined off the top.
+   *
+   * The fork §8 asks for, measured from the game rather than argued. Four lift knocks
+   * (`prop-knock`, 1.5 m paint) and **no impact at all** — nothing falls, because taking the
+   * highest can in reach never unsupports anything. The bottom can is still standing at the end,
+   * which is the rack cap doing its job: a stack is a place you come back to, not a pile you
+   * empty in one visit.
+   *
+   * The descending-height assertion is the one that pins the reach *shape*. Reach used to be a
+   * ball around the feet, and a ball has no height left at 0.6 m out — so approaching the column
+   * handed you the bottom can and dropped the other four. That version passed every count in
+   * this test; it fails this line.
+   */
+  it('is mined off the top, quietly, by an empty rack that walks up to it', () => {
+    const game = createHeadlessGame();
+    emptyRack(game);
+    atTheStack(game, 3.5);
+    const props = recordProps(game);
+
+    game.input.hold('forward');
+    game.run(2.5);
+    game.input.release('forward');
+    game.run(3);
+
+    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP);
+    expect(props.filter((e) => e.class === 'prop-impact')).toEqual([]);
+    const lifts = props.filter((e) => e.class === 'prop-knock');
+    expect(lifts.length).toBe(CAN_RACK_CAP);
+    for (let i = 1; i < lifts.length; i++) {
+      expect(lifts[i]!.y, 'the column is mined off the top, not out from under').toBeLessThan(
+        lifts[i - 1]!.y,
+      );
+    }
+
+    // What is left standing: the bottom can, exactly where the room put it.
+    const left = game.sim.throwables
+      .cansSnapshot()
+      .filter((c) => Math.hypot(c.x - CAN_STACK[0]!.x, c.z - CAN_STACK[0]!.z) < CAN_REACH);
+    expect(left.length).toBe(1);
+    expect(left[0]!.y).toBeCloseTo(CAN_STACK[0]!.y, 10);
+    expect(left[0]!.asleep).toBe(true);
+    game.sim.dispose();
+  });
+
+  /**
+   * Sprint the same line and the same column is a trap that rings the room.
+   *
+   * `CAN_LIFT_SPEED` is the whole difference — one number, two readings of the same three metres
+   * of floor (`world/cans.ts`). Arriving at sprint the rig cannot pocket anything: the rack comes
+   * out the far side exactly as full as it went in, five cans are loose on the floor of the
+   * loudest lane in the room, and every one of them is `MAT_METAL`, the ×1.5 voice, going off
+   * beside the landmark the whole room navigates by.
+   *
+   * That the rack is untouched is the part worth stating out loud. The lane is not "the fast
+   * route that also resupplies you" — it is fast, and you pay, and you get nothing for it.
+   */
+  it('is kicked across the floor by a sprint, and hands the sprinter nothing', () => {
+    const game = createHeadlessGame();
+    atTheStack(game, 3.5);
+    const props = recordProps(game);
+
+    game.input.hold('forward');
+    game.input.hold('sprint');
+    game.run(2.5);
+    game.input.release('forward');
+    game.input.release('sprint');
+    game.run(3);
+
+    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP);
+    expect(game.sim.throwables.inWorld).toBe(BOOT_CANS);
+    // Every can struck something: a boot is not a teleport, and a can that never landed would
+    // be a can that made no sound where it stopped.
+    expect(props.filter((e) => e.class === 'prop-impact').length).toBeGreaterThanOrEqual(BOOT_CANS);
+
+    const loose = game.sim.throwables.cansSnapshot();
+    for (const can of loose) {
+      expect(can.asleep, 'a kicked can comes to rest inside three seconds').toBe(true);
+      // On the floor, not stacked: the column is the thing that is gone.
+      expect(can.y).toBeLessThan(CAN_STACK_PITCH);
+      const home = CAN_STACK.some(
+        (a) => Math.hypot(can.x - a.x, can.y - a.y, can.z - a.z) < CAN_RADIUS,
+      );
+      expect(home, `a can is still at an authored pose after a sprint through it`).toBe(false);
+    }
+    game.sim.dispose();
+  });
+
+  /**
+   * The reach shape, on the bare rig, where nothing about the room can rescue it.
+   *
+   * Two cans at the same moment: one on the floor a whisker inside `CAN_REACH`, one at hand
+   * height and half a metre out. Their straight-line distances from the feet are 0.59 m and
+   * 0.71 m — so a *ball* of radius `CAN_REACH` contains only the floor can, and a cylinder
+   * contains both. The rig takes the higher one, which is the answer only a cylinder can give.
+   */
+  it('reaches in a cylinder, not a ball: the high can is in reach at arm\'s length', () => {
+    const b = bench();
+    // A full rack cannot lift, so the rack goes on the floor first — four taps, level, which
+    // puts them meters downrange where they cannot be part of the answer.
+    for (let i = 0; i < CAN_RACK_CAP; i++) {
+      b.throwAfter(0.05);
+      b.settle();
+    }
+    expect(b.hand.carried).toBe(0);
+
+    const low = b.hand.spawnAt(0.59, CAN_RADIUS, 0);
+    const high = b.hand.spawnAt(0.5, 0.5, 0);
+    expect(Math.hypot(0.59, CAN_RADIUS)).toBeLessThan(CAN_REACH);
+    expect(Math.hypot(0.5, 0.5)).toBeGreaterThan(CAN_REACH);
+
+    b.rig.groundSpeed = 1;
+    b.tick();
+
+    const left = b.hand.cansSnapshot().map((c) => c.id);
+    expect(left).toContain(low);
+    expect(left, 'the can outside a ball but inside the cylinder was not taken').not.toContain(
+      high,
+    );
+    expect(b.hand.carried).toBe(1);
   });
 });
 
@@ -846,27 +1068,50 @@ describe('carry and retrieve (§5)', () => {
     expect(Math.max(...left.map((c) => c.y))).toBeCloseTo(0.05 + 2 * CAN_STACK_PITCH, 6);
   });
 
+  /**
+   * The cascade, on the one column shape that can still trigger it: taller than the rig reaches.
+   *
+   * Reach is a cylinder `CAN_REACH` tall (`retrieve`), so on any column the rig can see the top
+   * of, the highest-first rule takes the top and nothing is ever unsupported — which is the whole
+   * reason `world/room.ts` derives its authored count off this same reach. Build one taller and
+   * the rule bites: the rig takes the highest can it *can* reach, which is holding up everything
+   * above it, and the column comes down from there.
+   *
+   * So this is two tests in one honest setup. It is the cascade test, and it is the demonstration
+   * of what an over-tall stack costs — the failure the room's derivation exists to prevent, kept
+   * alive here where it can be measured instead of only argued about in a docstring.
+   */
   it('lifting a can that holds up others wakes every one of them, all the way up', () => {
     const b = bench();
     b.throwAfter(0.05);
     b.settle();
     const stray = new Set(b.hand.cansSnapshot().map((c) => c.id));
+    const count = Math.ceil((2 * CAN_REACH) / CAN_STACK_PITCH);
     const ids: number[] = [];
-    for (let i = 0; i < 6; i++) ids.push(b.hand.spawnAt(10, 0.05 + i * CAN_STACK_PITCH, 0));
-    expect(b.prints.poses.size).toBe(6 + stray.size);
+    const heightOf = (i: number): number => 0.05 + i * CAN_STACK_PITCH;
+    for (let i = 0; i < count; i++) ids.push(b.hand.spawnAt(10, heightOf(i), 0));
+    expect(b.prints.poses.size).toBe(count + stray.size);
 
-    // Reach the bottom can only: 0.58 m to the side puts every can above it out of `CAN_REACH`.
-    b.rig.position.x = 10 - 0.58;
+    const reachable = ids.filter((_, i) => heightOf(i) <= CAN_REACH);
+    const above = ids.slice(reachable.length);
+    // The setup's own precondition: there has to be a can out of reach for this to mean anything.
+    expect(above.length).toBeGreaterThan(0);
+
+    b.rig.position.x = 10 - 0.5;
     b.rig.groundSpeed = 0;
     b.tick();
 
     expect(b.hand.carried).toBe(CAN_RACK_CAP);
-    const left = b.hand.cansSnapshot().filter((c) => !stray.has(c.id));
-    expect(left.length).toBe(5);
-    // Every survivor is awake and every print is gone: the column is coming down.
-    expect(left.every((c) => !c.asleep)).toBe(true);
-    expect(b.prints.poses.size).toBe(stray.size);
-    for (const id of ids.slice(1)) expect(b.hand.canAt(id)!.grounded).toBe(false);
+    // Taken: the highest can the rig could reach, which is not the highest can there is.
+    expect(b.hand.canAt(reachable[reachable.length - 1]!)).toBe(null);
+    for (const id of above) {
+      const can = b.hand.canAt(id)!;
+      expect(can.asleep, 'a can left with nothing under it is still asleep').toBe(false);
+      expect(can.grounded).toBe(false);
+    }
+    // Everything below the one that went is undisturbed, and its print is still on the floor.
+    for (const id of reachable.slice(0, -1)) expect(b.hand.canAt(id)!.asleep).toBe(true);
+    expect(b.prints.poses.size).toBe(stray.size + reachable.length - 1);
   });
 });
 
@@ -906,15 +1151,27 @@ describe('the rack (§5) and the reset', () => {
     throwInGame(game, 0.05, 5);
     throwInGame(game, 0.05, 5);
     expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP - 2);
-    expect(game.sim.throwables.inWorld).toBe(2);
-    expect(game.sim.paint.prints.placed).toBe(2);
+    expect(game.sim.throwables.inWorld).toBe(BOOT_CANS + 2);
+    expect(game.sim.paint.prints.placed).toBe(BOOT_CANS + 2);
 
     game.input.tapKey('KeyR');
     game.step();
 
     expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP);
-    expect(game.sim.throwables.inWorld).toBe(0);
-    expect(game.sim.paint.prints.placed).toBe(0);
+    // Back to the room as authored, not to an empty room: R restores a start state, and the
+    // stack beside the tank is part of it. Counting alone would pass a reset that left the
+    // column lying in a heap, so the poses are checked as well — a respawn that forgot where
+    // the room put its cans would be a room that quietly degrades over a session of resets.
+    expect(game.sim.throwables.inWorld).toBe(BOOT_CANS);
+    expect(game.sim.paint.prints.placed).toBe(BOOT_CANS);
+    const back = game.sim.throwables.cansSnapshot();
+    for (const authored of CAN_STACK) {
+      const match = back.find(
+        (c) => Math.hypot(c.x - authored.x, c.y - authored.y, c.z - authored.z) < 1e-9,
+      );
+      expect(match, `no can back at (${authored.x}, ${authored.y}, ${authored.z})`).toBeDefined();
+      expect(match!.asleep).toBe(true);
+    }
     game.sim.dispose();
   });
 
@@ -938,7 +1195,7 @@ describe('the whole verb, in the game', () => {
     const idle = game.sim.debugState();
     expect(idle.carriedCans).toBe(CAN_RACK_CAP);
     expect(idle.chargeT).toBe(0);
-    expect(idle.worldCans).toBe(0);
+    expect(idle.worldCans).toBe(BOOT_CANS);
     expect(Array.isArray(idle.canPoses)).toBe(true);
 
     game.input.hold('throw');
@@ -951,12 +1208,12 @@ describe('the whole verb, in the game', () => {
     game.run(6);
     const done = game.sim.debugState();
     expect(done.carriedCans).toBe(CAN_RACK_CAP - 1);
-    expect(done.worldCans).toBe(1);
-    expect(done.canPrints).toBe(1);
+    expect(done.worldCans).toBe(BOOT_CANS + 1);
+    expect(done.canPrints).toBe(BOOT_CANS + 1);
     const poses = done.canPoses as Array<Record<string, unknown>>;
-    expect(poses.length).toBe(1);
+    expect(poses.length).toBe(BOOT_CANS + 1);
     expect(typeof poses[0]!.x).toBe('number');
-    expect(poses[0]!.asleep).toBe(true);
+    for (const pose of poses) expect(pose.asleep).toBe(true);
     game.sim.dispose();
   });
 
@@ -987,26 +1244,37 @@ describe('the whole verb, in the game', () => {
     expect(trace()).toBe(a);
   });
 
-  it('keeps the emission rate sane through a six-can cascade', () => {
+  /**
+   * A stack coming down is a clatter, not a flood.
+   *
+   * The loudest thing M2 can do to the bus in one place, driven the way a player produces it —
+   * sprint the north lane into the room's own column. Its companion above asserts what happens;
+   * this one only asks what it *costs*, because a verb that spikes the event rate spikes the
+   * paint pass and the mixer with it, and the failure mode of a clatter is a hitch.
+   *
+   * Props alone, not the whole bus: seven and a half seconds of sprinting is a dozen footsteps
+   * and they are not what is being measured. The peak is per-tick across *everything*, though —
+   * a flood does not care which class it came from.
+   */
+  it('keeps the emission rate sane through a collapsing stack', () => {
     const game = createHeadlessGame();
-    throwInGame(game, 0.05, 5);
-    const p = game.sim.player.position;
-    for (let i = 0; i < 6; i++) {
-      game.sim.throwables.spawnAt(p.x + 0.58, 0.05 + i * CAN_STACK_PITCH, p.z);
-    }
-    const before = game.sim.bus.emitted;
+    atTheStack(game, 3.5);
+    const props = recordProps(game);
     let peak = 0;
+    game.input.hold('forward');
+    game.input.hold('sprint');
     for (let i = 0; i < 900; i++) {
       game.step();
       peak = Math.max(peak, game.sim.bus.emittedThisTick);
     }
-    const total = game.sim.bus.emitted - before;
-    // A stack coming down is a clatter, not a flood: the whole collapse costs fewer events than
-    // four seconds of sprinting, and no single tick emits more than a handful.
-    expect(total).toBeGreaterThan(6);
-    expect(total).toBeLessThanOrEqual(40);
+    game.input.release('forward');
+    game.input.release('sprint');
+
+    // More than one contact per can — a boot, then where it lands — and nowhere near a flood.
+    expect(props.length).toBeGreaterThan(BOOT_CANS);
+    expect(props.length).toBeLessThanOrEqual(40);
     expect(peak).toBeLessThanOrEqual(8);
-    expect(game.sim.throwables.inWorld).toBe(6);
+    expect(game.sim.throwables.inWorld).toBe(BOOT_CANS);
     game.sim.dispose();
   });
 
@@ -1015,8 +1283,9 @@ describe('the whole verb, in the game', () => {
    *
    * Everything else about M2 — the charge curve, the rack, the cairn, the stack — is
    * arrangement around one claim: a can thrown into the dark lights the place it lands,
-   * somewhere you are not. If a thrown can ever stops painting on impact, this fails outright and says why, rather
-   * than the suite going quietly green around a verb that no longer does anything.
+   * somewhere you are not. If a thrown can ever stops painting on impact, this fails outright
+   * and says why, rather than the suite going quietly green around a verb that no longer does
+   * anything.
    *
    * It has already caught one real bug. `ballistics.ts` reports a contact at the point *on* the
    * struck face, and a point source lying on a plane grazes that plane at 90° everywhere: emitted

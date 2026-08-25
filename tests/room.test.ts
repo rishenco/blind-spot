@@ -629,17 +629,46 @@ describe('an authored can burdens whoever authors it', () => {
    */
   it('stacks on the can pitch, on the floor under it', () => {
     const world = room();
-    expect(CAN_STACK.length).toBe(6);
+    expect(CAN_STACK.length).toBe(5);
     for (const can of CAN_STACK) {
       const ground = standOn(world, can.x, can.z);
       expect(ground, `no floor under the can at y=${can.y.toFixed(2)}`).not.toBeNull();
       // A can owns a slot one pitch tall, so the bottom of the column is half a pitch up and the
-      // whole bar is CAN_STACK_PITCH × the count — 0.72 m, the silhouette cans.ts asks for.
+      // whole bar is CAN_STACK_PITCH × the count — 0.60 m, the silhouette cans.ts asks for.
       const slot = (can.y - ground!.maxY) / CAN_STACK_PITCH - 0.5;
       expect(slot).toBeCloseTo(Math.round(slot), 10);
       expect(slot).toBeGreaterThanOrEqual(0);
       expect(slot).toBeLessThan(CAN_STACK.length);
     }
+  });
+
+  /**
+   * The column has to be mineable to the last can by a player who walks up to it.
+   *
+   * Retrieval measures three dimensions from the *feet* and takes the highest can in reach
+   * (`game/throwables.ts`), so a column taller than `CAN_REACH` strands its top can: reaching
+   * for it hands you the one below instead, and the stranded can falls on the pile. That is a
+   * clang on the first touch of the stack, on every run, that no amount of skill avoids — and
+   * an authored count of six did exactly that until the count was derived off this reach.
+   *
+   * The second half is the half that matters. Reachability alone is satisfied by a stack of
+   * one; asserting that one *more* can would break it says the column is as tall as the rule
+   * allows and no taller, so this fails from either direction — a shortened stack and an
+   * over-tall one both land here rather than in a playtest.
+   */
+  it('is mineable to the last can, and is exactly as tall as reach allows', () => {
+    const world = room();
+    for (const can of CAN_STACK) {
+      const ground = standOn(world, can.x, can.z)!;
+      // The vertical leg alone, which is the floor of any 3-D distance to it: unreachable here
+      // is unreachable from everywhere on the floor.
+      const up = can.y - ground.maxY;
+      expect(up, `the can at y=${can.y.toFixed(2)} is out of reach`).toBeLessThanOrEqual(CAN_REACH);
+    }
+
+    const top = CAN_STACK[CAN_STACK.length - 1]!;
+    const ground = standOn(world, top.x, top.z)!;
+    expect(top.y - ground.maxY + CAN_STACK_PITCH).toBeGreaterThan(CAN_REACH);
   });
 
   it('leans off plumb by centimetres, and stays a column while it does', () => {

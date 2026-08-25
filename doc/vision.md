@@ -348,6 +348,22 @@ signature. They are read-and-route puzzles (crouch through, go around), and they
 price of moving through unpainted space. Machinery hazards obey law 4: they sing their rhythm
 (crushers thump their cycle) — timed by ear, confirmed by ping. No ragdoll comedy anywhere.
 
+**A prop can also be a supply**, and the stacked cans are the first one that is. The verb list
+grows a third entry beside crouch-through and go-around: *take from*. The same column reads two
+ways depending on the speed you meet it at, which is `CAN_LIFT_SPEED` doing the same job
+everywhere else in this document — pricing rather than preventing. Walk up with room in the rack
+and you mine it off the top, one can per touch, for four soft knocks nobody hears past 6 m.
+Sprint the same line and you boot the column across the loudest lane in the room and come out
+the far side with an empty-handed rack and a floor full of metal. It is deliberately not "the
+fast route that also resupplies you": you pay, and you get nothing for it.
+
+The constraint this puts on whoever authors the next one: **a column may be no taller than the
+rig can reach**, because retrieval takes the highest can in reach and a can above that line is
+one nobody can ever pick up — reaching for it hands you the can below and drops the stranded one
+on the pile, a clang on the first touch of every run that no skill avoids. `world/room.ts`
+derives its count from the reach rather than choosing it, so the tower's stacks cannot quietly
+inherit the bug the test room found.
+
 ## 9. Upgrades
 
 **In-run: chips** — post-first-playable (core-loop §6); all **unbuilt**. Found in vaults and

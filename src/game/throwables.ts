@@ -656,7 +656,8 @@ export class Throwables {
    *
    * The **highest** can in reach is the target, so lifting from a column takes it off the top and
    * the support rule has nothing to wake. Take one from underneath and everything above it comes
-   * down, which is the point of stacking them.
+   * down, which is the point of stacking them — and which is why the reach below is a cylinder
+   * rather than a ball, since a ball made "underneath" the only thing you could ever reach.
    */
   private retrieve(): void {
     const p = this.thrower.position;
@@ -674,10 +675,26 @@ export class Throwables {
         if (d2 > CAN_REARM_M * CAN_REARM_M) can.armed = true;
         continue;
       }
-      // Three dimensions from the *feet*, which is where `position` is: `CAN_REACH` is the stoop,
-      // and measuring it from a mid-body point would put a can on the floor out of reach of a rig
-      // standing on top of it.
-      if (d2 > CAN_REACH * CAN_REACH) continue;
+      /*
+       * Reach is a **cylinder** around the feet, not a ball: `CAN_REACH` sideways and
+       * `CAN_REACH` up, tested separately.
+       *
+       * From the feet, because that is where `position` is and because measuring from a
+       * mid-body point would put a can on the floor out of reach of a rig standing on top of
+       * it. But a ball couples the two axes, and that coupling had a consequence nobody
+       * intended: walking up to the authored column, the *nearest* can is always the bottom
+       * one — at 0.6 m out the sphere has no height left for anything else — so the rule below
+       * handed you the bottom of the stack and everything above it came down. Measured, before
+       * this was a cylinder: four lifts bottom-upward and a `prop-impact` as the last can hit
+       * the floor. The column was unmineable by design and collapsible by accident.
+       *
+       * A cylinder is also the honest shape. What a rig can reach vertically is how far it
+       * stoops and how high it raises, and neither of those shrinks because it took a step
+       * sideways. With the axes uncoupled, approaching the column puts every can in reach at
+       * once and the highest-first rule below finally means what it says.
+       */
+      if (Math.abs(dy) > CAN_REACH) continue;
+      if (dx * dx + dz * dz > CAN_REACH * CAN_REACH) continue;
       if (b.y > bestY) {
         bestY = b.y;
         best = id;

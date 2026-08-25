@@ -57,7 +57,14 @@ import {
 import { Halo } from '../paint/halo';
 import { defaultAgeRamp } from '../paint/ageRamp';
 import { defaultStructuredTunables } from '../paint/structured';
-import { PROBE_REGIONS, SPAWN, SPAWN_YAW_DEG, buildRoom, type Room } from '../world/room';
+import {
+  CAN_STACK,
+  PROBE_REGIONS,
+  SPAWN,
+  SPAWN_YAW_DEG,
+  buildRoom,
+  type Room,
+} from '../world/room';
 import { CAN_MAT, CAN_RADIUS } from '../world/cans';
 import { CAN_EMITTER_BASE, Throwables, type ThrowSound } from './throwables';
 
@@ -250,12 +257,14 @@ export class GameSim {
       movement: this.movement,
       prints: this.paint.prints,
       /*
-       * No authored cans yet. `world/room.ts` is where a stack gets placed and this is the one
-       * line that would hand it over (`boot: this.room.cans`); until then the pool is exactly a
-       * rack's worth and every can in the world is one the player threw. Wiring the authored
-       * stack is a room job, not a hand job: nothing in `throwables.ts` knows what a stack is
-       * beyond "cans that were asleep before you touched the one underneath".
+       * The room's authored stack (§8), handed across as six poses and nothing else — no
+       * structure, no parent, no "stack" object. Nothing in `throwables.ts` knows what a stack
+       * *is*: a column is a fact about six sets of coordinates, and the moment one is disturbed
+       * the room simply contains six cans in worse places. That is what makes a knocked-over
+       * stack cost nothing to represent, and it is why the room authors poses rather than
+       * handing the sim a thing to maintain.
        */
+      boot: CAN_STACK,
     });
     this.unsubscribeBus = this.bus.subscribe(this.paint.handle);
     this.unsubscribeHalo = this.bus.subscribe(this.onOwnNoise);

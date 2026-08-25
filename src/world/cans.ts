@@ -16,10 +16,18 @@
  * halves importing them.
  *
  * **A can is a point.** `core/ballistics.ts` integrates a point against `raycastWorld` — there
- * is no can-shaped collider anywhere in the game, and `CAN_RADIUS` below is a *drawing* number,
- * not a physics one. This is deliberate: the perception of a can is its resting print (a cairn
- * of matter-layer dots), and a print is drawn around a position. Giving physics a radius would
- * buy nothing the player can perceive and would cost the swept integrator its ray.
+ * is no can-shaped collider anywhere in the game. This is deliberate: the perception of a can is
+ * its resting print (a cairn of matter-layer dots), and a print is drawn around a position.
+ * Giving physics a radius would buy nothing the player can perceive and would cost the swept
+ * integrator its ray.
+ *
+ * What `CAN_RADIUS` therefore is: the size of a can *to everything except the solver*. It is the
+ * radius the cairn is drawn on, and it is `PROP_STANDOFF` in `game/sim.ts` — how far off a
+ * struck face the contact sound radiates from, because a can whose centre touches a plane has
+ * its centre one radius off that plane. A point source lying exactly *on* a face grazes it at
+ * 90° everywhere and paints nothing, so this is not a decorative number: it was worth 39 362
+ * dots the first time it was measured. Physics treats a can as a point and perception treats it
+ * as a 6 cm object, and both are right about their own half.
  */
 
 import { MAT_METAL } from '../paint/materials';
@@ -87,12 +95,24 @@ export const CAN_CHARGE_SECONDS = 0.9;
 export const CAN_MUZZLE_M = 0.35;
 
 /**
- * Metres. How close the rig's body centre must come to a can, in three dimensions, to touch it.
+ * Metres. How close a can must come to the rig's feet to be touched — `CAN_REACH` sideways and
+ * `CAN_REACH` up, tested on the two axes separately. Reach is a **cylinder**, not a ball.
  *
  * There is no pickup key. The rig stoops for a can its body meets, which is exactly the register
  * of §3.1's "surfaces you touch" — and the reason a key would be wrong is that a key implies a
  * prompt, and a prompt implies the game telling you a can is there. The can's resting print
  * already told you.
+ *
+ * Measured from the feet, so a can on the floor is reachable by a rig standing on top of it. The
+ * cylinder is the half that had to be learned in play: a ball couples the two axes, so at full
+ * horizontal stretch there is no height left, and walking up to a stack the *nearest* can is
+ * always the bottom one. `game/throwables.ts` takes the highest can in reach; under a ball that
+ * rule could never fire on an approach, and the column came down every time. Uncoupled, the
+ * stack is minable off the top and this number means what it says.
+ *
+ * It is load-bearing twice over, which is worth knowing before moving it: it sets how tall an
+ * authored column may be (`world/room.ts` derives its can count from exactly this), and it is
+ * the gap the stack is placed at off the tank's face.
  */
 export const CAN_REACH = 0.6;
 
@@ -130,9 +150,14 @@ export const CAN_LIFT_SPEED = 4.5;
  *
  * A stack is a *column*, not a pile, and the reason is perceptual rather than physical. Every
  * other thing in the room is a lattice-sampled surface, so a flat pile competes directly with
- * the floor beneath it; a tight vertical bar of cairns 0.7 m tall competes with nothing and
- * reads instantly as something a person stacked. The room is black — the silhouette is the only
- * thing a player gets, so the silhouette has to do the work.
+ * the floor beneath it; a tight vertical bar of cairns competes with nothing and reads instantly
+ * as something a person stacked. The room is black — the silhouette is the only thing a player
+ * gets, so the silhouette has to do the work.
+ *
+ * The pitch also decides how many cans fit under `CAN_REACH`, and so how tall an authored column
+ * is allowed to be: `world/room.ts` divides one by the other. Shrinking it buys a taller
+ * silhouette out of the same reach; growing it costs cans off the top of every stack in the
+ * game. It is not a free knob.
  */
 export const CAN_STACK_PITCH = 0.12;
 

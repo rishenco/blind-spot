@@ -547,10 +547,17 @@ check(
   Number(loaded.structUnlockedDots) === 0 && Number(loaded.structUnlockedEdges) === 0,
   `${loaded.structUnlockedDots} dots / ${loaded.structUnlockedEdges} lines known`,
 );
+// Each verb named separately rather than one contiguous run of the string: a new verb landing
+// in the middle of the line is the *expected* change (F throw did exactly that), and a check
+// that breaks on it teaches you to loosen the check. What must never happen is a verb quietly
+// dropping out of the one line the game uses to tell anybody it exists.
+const hintLine = await page.textContent('.bs-hint');
 check(
-  'the game owns the hint line',
-  (await page.textContent('.bs-hint')).includes('Q ping · E beam · L reveal'),
-  await page.textContent('.bs-hint'),
+  'the game owns the hint line, and every verb is named on it',
+  ['WASD move', 'Q ping', 'E beam', 'F throw', 'L reveal', 'H help'].every((v) =>
+    hintLine.includes(v),
+  ),
+  hintLine,
 );
 
 const darkBuf = await shot('01-dark.png');
