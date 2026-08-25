@@ -257,6 +257,63 @@ export function shapeEdges(parts: readonly Part[]): EdgeSet {
   return { pos: new Float32Array(pos), nrm: new Float32Array(nrm), segments: pos.length / 6 };
 }
 
+/**
+ * One collider, as Rapier will actually see it: a box, a ball or a Y-axis cylinder, with the
+ * centre it sits at in body-local space.
+ *
+ * This exists because layout and physics used to disagree. Placement measured a prop by its
+ * *sampled point cloud* — a coarse dot pattern that stops short of the real surface by up to
+ * half a pitch, and for a can that is most of the can. So things were seated centimetres below
+ * where their colliders begin, spawned already interpenetrating the floor, the shelf and each
+ * other, and the solver spent the rest of the session shoving them apart. That is where a
+ * silent hall's permanent background noise came from.
+ *
+ * Now there is exactly one description of what a prop's body is, and both the collider builder
+ * and the placement code read it. They cannot drift apart again.
+ */
+export type ColliderPrim =
+  | { kind: 'box'; cx: number; cy: number; cz: number; hx: number; hy: number; hz: number }
+  | { kind: 'ball'; cx: number; cy: number; cz: number; r: number }
+  /** Cylinder about local Y: half-height `hh`, radius `r`. */
+  | { kind: 'cyl'; cx: number; cy: number; cz: number; hh: number; r: number };
+
+/** The colliders of a shape. The single source of truth for "how big is this thing, really". */
+export function colliderPrims(parts: readonly Part[]): ColliderPrim[] {
+  const out: ColliderPrim[] = [];
+  for (const part of parts) {
+    if (part.kind === 'box') {
+      out.push({ kind: 'box', cx: part.cx, cy: part.cy, cz: part.cz, hx: part.hx, hy: part.hy, hz: part.hz });
+    } else if (part.kind === 'ball') {
+      out.push({ kind: 'ball', cx: 0, cy: part.cy, cz: 0, r: part.r });
+    } else {
+      // A truncated cone becomes a cylinder of the mean radius — Rapier has no cone primitive
+      // worth the trouble here, and a bottle's shoulder is not load-bearing.
+      const r = ((part.r1 ?? part.r0) + part.r0) / 2;
+      const hh = Math.max(0.004, (part.y1 - part.y0) / 2);
+      out.push({ kind: 'cyl', cx: 0, cy: (part.y0 + part.y1) / 2, cz: 0, hh, r: Math.max(0.004, r) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Axis-aligned bounds of the *colliders*, body-local: [minX, minY, minZ, maxX, maxY, maxZ].
+ * This is what placement must use — not the point cloud, which is only a picture of the thing.
+ */
+export function colliderBounds(parts: readonly Part[]): [number, number, number, number, number, number] {
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const c of colliderPrims(parts)) {
+    const hx = c.kind === 'box' ? c.hx : c.kind === 'ball' ? c.r : c.r;
+    const hy = c.kind === 'box' ? c.hy : c.kind === 'ball' ? c.r : c.hh;
+    const hz = c.kind === 'box' ? c.hz : c.kind === 'ball' ? c.r : c.r;
+    minX = Math.min(minX, c.cx - hx); maxX = Math.max(maxX, c.cx + hx);
+    minY = Math.min(minY, c.cy - hy); maxY = Math.max(maxY, c.cy + hy);
+    minZ = Math.min(minZ, c.cz - hz); maxZ = Math.max(maxZ, c.cz + hz);
+  }
+  return [minX, minY, minZ, maxX, maxY, maxZ];
+}
+
 /** Largest dimension of a shape's bounding box, metres — its size class in one number. */
 export function shapeSpan(parts: readonly Part[]): number {
   let minX = Infinity, minY = Infinity, minZ = Infinity;
