@@ -25,7 +25,7 @@
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { cpus } from 'node:os';
-import { cloneConfig, defaultConfig, type PerceptionConfig, type SimConfig } from '../config';
+import { applyRuleset, cloneConfig, defaultConfig, resizeField, type PerceptionConfig, type Ruleset, type SimConfig } from '../config';
 import { roster } from '../controllers';
 import { Match } from '../match';
 import { aggregate, type MatchStats } from '../stats';
@@ -288,6 +288,10 @@ interface Job {
   secs: number;
   /** Players per team. Defaults to 2×2; `--team 3` runs the same tournament at 3×3. */
   team: number;
+  /** Which rule set to ask the three questions of. Both are live in the same build. */
+  ruleset: Ruleset;
+  /** Pitch, as "WxH". The rule set and the pitch are one tuning surface, not two. */
+  field: string;
 }
 
 interface JobResult extends Job {
@@ -311,9 +315,11 @@ interface JobResult extends Job {
 function buildConfig(job: Job): { config: SimConfig; a: string; b: string } {
   const variant = VARIANTS.find((v) => v.name === job.variant);
   if (!variant) throw new Error(`unknown variant: ${job.variant}`);
-  const config = cloneConfig(defaultConfig());
+  const config = applyRuleset(cloneConfig(defaultConfig()), job.ruleset);
   variant.apply(config);
   config.teamSize = job.team;
+  const dims = job.field.split('x').map(Number);
+  if (dims.length === 2 && dims[0]! > 0 && dims[1]! > 0) resizeField(config, dims[0]!, dims[1]!);
   // Fixed length, never "first to N": a race to five goals turns the scoreline into a clock.
   config.match.durationSec = job.secs;
   config.match.goalsToWin = 1e9;
@@ -487,6 +493,7 @@ async function main(): Promise<void> {
   if (args.help === 'true') {
     console.log(
       'usage: npm run contest -- [--only a,b] [--seeds 1-8] [--secs 90] [--workers 4] [--json]\n' +
+        '                            [--ruleset classic|touch] [--team 2] [--field 24x14]\n' +
         `variants: ${VARIANTS.map((v) => v.name).join(', ')}`,
     );
     process.exit(0);
@@ -496,6 +503,8 @@ async function main(): Promise<void> {
   const seeds = parseSeeds(args.seeds ?? '1-8');
   const secs = Number(args.secs ?? 90);
   const team = Number(args.team ?? 2);
+  const ruleset = (args.ruleset ?? 'classic') as Ruleset;
+  const field = args.field ?? '24x14';
   const tests: Job['test'][] = (args.tests ?? 'truth,omni,ping,play').split(',') as Job['test'][];
   const workers = Number(args.workers ?? Math.max(1, Math.min(cpus().length, 8)));
 
@@ -505,8 +514,8 @@ async function main(): Promise<void> {
       for (const seed of seeds) {
         // Both role assignments, always: the kickoff is worth real goals and it must not land
         // on the same side as the advantage.
-        jobs.push({ variant: v.name, test, seed, swap: false, secs, team });
-        if (test !== 'play') jobs.push({ variant: v.name, test, seed, swap: true, secs, team });
+        jobs.push({ variant: v.name, test, seed, swap: false, secs, team, ruleset, field });
+        if (test !== 'play') jobs.push({ variant: v.name, test, seed, swap: true, secs, team, ruleset, field });
       }
     }
   }
@@ -545,7 +554,7 @@ async function main(): Promise<void> {
   const widths = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i]!.length)));
   const line = (cells: string[]) => cells.map((c, i) => c.padStart(widths[i]!)).join('  ');
   console.log(
-    `\nrule tournament — ${seeds.length} seeds × ${secs}s, both sides swapped.\n` +
+    `\nrule tournament — ${ruleset} rules, ${team}×${team} on ${field}, ${seeds.length} seeds × ${secs}s, both sides swapped.\n` +
       `Δg = the advantaged side's goals per minute minus the plain side's.\n` +
       `Δp = the same in possession share, percentage points — the same question asked with a\n` +
       `hundred times less noise, because it is sampled every tick instead of every goal.\n`,

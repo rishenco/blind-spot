@@ -333,8 +333,13 @@ export interface PerceptionFrame {
    * team-mate you cannot find is not a second unknown worth having, it is just friction on top of
    * the one that matters. This is proprioception's twin rather than hearing — it costs nothing to
    * receive and gives away nothing to the other side, so it does not touch law 4 at all.
+   *
+   * `keeper` rides along for the same reason `SelfState.keeper` does: the role is assigned by
+   * the rules from public positions, so it is not intel — and without it a team cannot answer
+   * the one question it must answer every second of the `touch` rule set, "which of us is going
+   * to the ball", because the keeper is usually the man standing nearest to it and must not be.
    */
-  mates: readonly { id: EntityId; pos: Vec2; vel: Vec2 }[];
+  mates: readonly { id: EntityId; pos: Vec2; vel: Vec2; keeper: boolean }[];
 }
 
 export type MoveMode = 'walk' | 'run';

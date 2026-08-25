@@ -170,6 +170,111 @@ export class CatchHand implements HandScript {
   }
 }
 
+/**
+ * The `touch` rule set's one verb, played the way it is meant to be played and the way it is not.
+ *
+ * `settle` — walk onto the ball's line early, stop, and stand there with the swing loaded. The
+ * ball arrives and leaves along the aim, at the power that was already in the hands.
+ * `charge` — sprint at it instead. Same ball, same aim, and the strike is a ricochet: this is the
+ * storyboard that has to exist, because the rule set's whole anti-scrum argument is that those
+ * two are different outcomes and not different amounts of the same one.
+ */
+export class TouchHand implements HandScript {
+  readonly name: string;
+  label = 'reading it';
+  private prev: Vec2 | null = null;
+  /** How fast the ball was seen to be going last tick — the difference between waiting and fetching. */
+  private prevSpeed = 0;
+  private struck = false;
+  constructor(
+    private mode: 'settle' | 'charge',
+    /** Where to send it. Null = the far goal. */
+    private target: Vec2 | null = null,
+    name = 'touch-hand',
+    /** Stand here and wait for the ball rather than going to meet it. */
+    private station: Vec2 | null = null,
+    /** Do nothing at all for this long first — a passer waiting for his man to get set. */
+    private delay = 0,
+  ) {
+    this.name = name;
+  }
+  reset(): void {
+    this.prev = null;
+    this.prevSpeed = 0;
+    this.struck = false;
+    this.label = 'reading it';
+  }
+  act(frame: PerceptionFrame, t: number): Intent {
+    const intent = idleIntent();
+    const { d, pos } = ballTca(frame, this.prev);
+    if (pos && this.prev) this.prevSpeed = Math.hypot(pos.x - this.prev.x, pos.y - this.prev.y) * 60;
+    this.prev = pos;
+    const at = this.target ?? frame.field.goalCentre[frame.self.team === 0 ? 1 : 0];
+    // Facing the target, always: in this rule set the aim IS the shot, held in advance.
+    intent.aim = unit({ x: at.x - frame.self.pos.x, y: at.y - frame.self.pos.y });
+    // And the wind-up, held in advance too. There is no moment to press: the ball decides when.
+    intent.charge = true;
+    if (!pos) {
+      this.label = 'cannot hear it';
+      return intent;
+    }
+    if (this.struck) {
+      this.label = 'struck — it is gone';
+      return intent;
+    }
+    if (frame.events.some((e) => e.self && (e.kind === 'throw' || e.kind === 'fumble'))) {
+      this.struck = true;
+      this.label = 'struck';
+      return intent;
+    }
+    const away = { x: pos.x - frame.self.pos.x, y: pos.y - frame.self.pos.y };
+    const gap = Math.max(1e-6, Math.hypot(away.x, away.y));
+    // Standing on a spot the ball is coming to, rather than chasing where it is now. This is
+    // the good version of the rule set, and it is the reason it is worth having: get there
+    // early, stop, and let it come.
+    if (this.station && this.mode === 'settle') {
+      const to = { x: this.station.x - frame.self.pos.x, y: this.station.y - frame.self.pos.y };
+      const far = Math.hypot(to.x, to.y);
+      if (far > 0.3) {
+        intent.move = { x: to.x / far, y: to.y / far };
+        intent.moveMode = 'walk';
+        this.label = `walking to the spot, ${far.toFixed(1)} m`;
+      } else {
+        this.label = `set · swing loaded · ball ${d.toFixed(1)} m`;
+      }
+      return intent;
+    }
+    if (t < this.delay) {
+      this.label = `waiting · ${(this.delay - t).toFixed(1)}s`;
+      return intent;
+    }
+    if (this.mode === 'charge') {
+      // Sprint at the spot if there is one, at the ball otherwise — and never stop. The point of
+      // this variant is to be moving fast at the moment of contact, which is the mistake.
+      const to = this.station && gap > 3 ? this.station : pos;
+      const run = { x: to.x - frame.self.pos.x, y: to.y - frame.self.pos.y };
+      const far = Math.max(1e-6, Math.hypot(run.x, run.y));
+      intent.move = { x: run.x / far, y: run.y / far };
+      intent.moveMode = 'run';
+      this.label = `sprinting into it, ${d.toFixed(1)} m`;
+      return intent;
+    }
+    // A ball that is not going anywhere has to be walked up to and struck: standing off it
+    // waiting for it to arrive is a deadlock, which is exactly what this line used to produce.
+    const moving = this.prevSpeed > 1;
+    const stand = moving ? 1.1 : 0.35;
+    // Settle: close the last metres at a walk, then stand perfectly still and wait.
+    if (gap > stand) {
+      intent.move = { x: away.x / gap, y: away.y / gap };
+      intent.moveMode = 'walk';
+      this.label = `walking onto its line, ${d.toFixed(1)} m`;
+      return intent;
+    }
+    this.label = `set · swing loaded · ball ${d.toFixed(1)} m`;
+    return intent;
+  }
+}
+
 /** Loudness demo: sprint, then walk, then stand — the three states of being findable. */
 export class LoudHand implements HandScript {
   readonly name = 'loud-hand';

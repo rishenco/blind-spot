@@ -257,6 +257,7 @@ export function solveIntercept(
   vmax: number,
   reach: number,
   horizon = 2.5,
+  wantSlack = 0,
 ): InterceptSolution | null {
   // One integration, sampled as it goes — not one integration per candidate time. Re-rolling the
   // ball from t = 0 for every checkpoint was, by a wide margin, the most expensive thing the bot
@@ -278,7 +279,12 @@ export function solveIntercept(
       const dy = y - self.y;
       const need = travelTime(Math.max(0, Math.sqrt(dx * dx + dy * dy) - reach), selfSpeed, accel, vmax);
       const slack = t - need;
-      if (slack >= 0) return { point: { x, y }, t, slack };
+      // `wantSlack` is what the `touch` rule set needs and the classic one does not: arriving
+      // exactly as the ball does means arriving at a sprint, and a strike made at a sprint is a
+      // ricochet. Asking for a point I can reach with half a second to spare is asking to be
+      // standing still when it gets to me — which is the whole difference between winning the
+      // ball and knocking it into the nearest wall.
+      if (slack >= wantSlack) return { point: { x, y }, t, slack };
       if (!best || slack > best.slack) best = { point: { x, y }, t, slack };
     }
     const speed = Math.sqrt(vx * vx + vy * vy);

@@ -265,6 +265,47 @@ export interface ThrowConfig {
   maxSpeed: number;
 }
 
+/**
+ * The second rule set — "touch", added 2026-08-25 after the third play session.
+ *
+ * The complaint was the same three times running: everybody piles onto the ball and there is no
+ * positional play. Four attempts to fix it inside the classic rules (drop the steal, add a
+ * keeper, make body contact harmless, turn the tackle into a trap) each moved the pile somewhere
+ * new and left the shot-distance spread untouched. The diagnosis the человек and the PM arrived
+ * at is structural: **holding the ball creates a stationary meeting point**, and while it can be
+ * held, a crowd around it is inevitable.
+ *
+ * So in this rule set the ball cannot be held at all. There is no catch, no carrier, no
+ * possession as a state — the ball is always a loose physical object and a body meeting it is a
+ * strike. Three props hold it up, and all three are numbers in here:
+ *
+ *   1. the strike is AUTOMATIC and PRE-AIMED (`radius`, and the wind-up is held in advance), so
+ *      the skill is being in the right place facing the right way, not hitting a frame;
+ *   2. the strike's quality falls off with the striker's OWN speed (`controlSpeed`..`wildSpeed`)
+ *      — this is the antidote to the pile: a crowd of sprinters converging on the ball produces
+ *      chaos for itself, and the man who arrived early and stopped takes it cleanly;
+ *   3. the ball is SLOWER (`ThrowConfig` is retuned by `applyRuleset`), so a blind body can
+ *      actually meet a moving ball and the game stops being played at arm's length.
+ */
+export interface TouchConfig {
+  /** How close the ball must come to a body's centre before it is struck. */
+  radius: number;
+  /** Cooldown before the same body may strike again — the tempo of dribbling. */
+  cooldownSec: number;
+  /** At or below this own speed the strike goes exactly where the body is aiming. */
+  controlSpeed: number;
+  /** At or above this own speed the strike is a pure ricochet plus scatter. */
+  wildSpeed: number;
+  /** Scatter, in radians, applied at `wildSpeed`. Zero at `controlSpeed`. */
+  wildScatter: number;
+  /** How much of the incoming ball's speed a wild deflection keeps. */
+  ricochet: number;
+  /** Own speed fraction (0..1 of `wildSpeed`) above which a touch reads as a mistake, and sounds like one. */
+  wildSoundAt: number;
+  /** A body committed to a dive strikes as if it were standing: the slide clearance and the save. */
+  diveControls: boolean;
+}
+
 export interface DiveConfig {
   durationSec: number;
   recoverySec: number;
@@ -382,7 +423,7 @@ export interface AiConfig {
    *   belief    `beliefCell` `mirrorCell` `beliefHz` `beliefFloor` `wStand` `wWalk` `wRun`
    *             `pDetectSonar` `sonarShrink` `pDetectHear` `dirHintLife`
    *   policy    `posMul` `safeMul` `quietMul` `infoMul` `deceiveMul` `positionDiscount`
-   *             `shotRangeSpan`
+   *             `shotTimeSpan`
    *
    * Their defaults live next to the code that reads them (`ai/belief.ts`, `ai/policy.ts`), so an
    * absent key always means "the default", never "zero".
@@ -501,7 +542,22 @@ export interface ContestConfig {
   block: BlockConfig;
 }
 
+/**
+ * Which rule set a match is played under.
+ *
+ * `classic` — the game as documented in `doc/concept.md`: the ball is caught, carried, and
+ * beeps louder the longer one man keeps it.
+ * `touch` — the ball cannot be held at all; every meeting with a body is a strike. See
+ * `TouchConfig` for why it exists and `applyRuleset` for the numbers that come with it.
+ *
+ * Both are live in one build, switchable from the panel and from the start card, because the
+ * человек asked to decide this with his hands rather than with a fourth table of numbers.
+ */
+export type Ruleset = 'classic' | 'touch';
+
 export interface SimConfig {
+  /** Which rule set the simulation plays. See `Ruleset`. */
+  ruleset: Ruleset;
   /** Fixed simulation step. Never read from a wall clock anywhere. */
   dt: number;
   /** Players per team. Ids 0..teamSize-1 are team 0, the rest team 1. */
@@ -511,6 +567,8 @@ export interface SimConfig {
   player: PlayerConfig;
   ball: BallConfig;
   catching: CatchConfig;
+  /** The strike rules of the `touch` rule set. Ignored entirely when `ruleset` is `classic`. */
+  touch: TouchConfig;
   throwing: ThrowConfig;
   dive: DiveConfig;
   keeper: KeeperConfig;
@@ -602,8 +660,73 @@ export function resizeField(cfg: SimConfig, width: number, height: number): void
   cfg.field.height = height;
 }
 
+/**
+ * Switches a config between the two rule sets, numbers and all.
+ *
+ * It is a function rather than two presets because the rule set has to be a *toggle*: the panel,
+ * the start card, the batch runner and the keyframe generator all flip it on a config that
+ * already carries whatever else was set (field size, team size, perception knobs), and every one
+ * of them would otherwise have to know the whole list of numbers that move with it.
+ *
+ * What moves, and why:
+ *
+ *   - **release speed**. 16 m/s crosses a 24 m pitch in a second and a half, which is not
+ *     interceptable by anybody who cannot see — so in `classic` everyone plays at arm's length.
+ *     `touch` drops it to 10 m/s, which is the change the человек asked to try first: half of the
+ *     "возня" may simply be the ball being too fast for blind players.
+ *   - **friction**. A struck ball has to come to rest somewhere reachable, or the game is played
+ *     off the walls. At 2.2 m/s² a 10 m/s strike runs about 23 m — one length of the pitch.
+ *   - **the passivity clock and the steal** stop existing, because nobody holds anything.
+ *   - **body contact stays**, and matters more: with no possession, a body in the corridor is the
+ *     only defending there is.
+ */
+export function applyRuleset(cfg: SimConfig, ruleset: Ruleset): SimConfig {
+  cfg.ruleset = ruleset;
+  if (ruleset === 'classic') {
+    cfg.throwing.weakSpeed = 6;
+    cfg.throwing.minSpeed = 12;
+    cfg.throwing.maxSpeed = 16;
+    cfg.ball.friction = 1.6;
+    cfg.match.carryTimeoutSec = 12;
+    return cfg;
+  }
+  // A strike with no wind-up at all is a dribbling nudge; a full wind-up is the shot.
+  //
+  // MEASURED, and it reverses the hypothesis this rule set was commissioned with. The brief asked
+  // for a SLOWER ball (9–11 m/s) on the theory that half the scrimmage is the ball being too fast
+  // for blind players to meet. In `touch` the opposite is true and it is not close: sweeping
+  // release speed 10→16 against friction 0.8→1.6 (10 seeds × 60 s each), every column improves
+  // monotonically with speed — the scrum share falls from 20 % to 4 %, mean pair distance rises
+  // from 8.1 m to 10.5 m, passes per attack from 0.22 to 0.55, and the shot-distance spread from
+  // 2.4 m to 11 m. The mechanism is obvious once seen: a struck ball that travels leaves the
+  // crowd, and bodies have to spread out to cover where it might go. A slow ball never leaves the
+  // pile it was struck in.
+  //
+  // 14 m/s with 1.4 m/s² of friction is the middle of that surface: fast enough that the pitch
+  // opens up (13 % scrum against `classic`'s 31 %), slow enough that silence survives as a real
+  // share of the match (43 %, against 31 % at 16 m/s) and that a soft touch is still a dribble —
+  // an un-wound strike runs 5.7 m, a full one crosses the pitch.
+  cfg.throwing.weakSpeed = 4;
+  cfg.throwing.minSpeed = 9;
+  cfg.throwing.maxSpeed = 14;
+  cfg.ball.friction = 1.4;
+  // Nothing to be passive with.
+  cfg.match.carryTimeoutSec = 0;
+  cfg.contest.steal.enabled = false;
+  // NO KEEPER, and it is a design decision rather than a tuning number. The keeper was added to
+  // `classic` because the crease left the mouth empty *by rule* and catching was the skill he was
+  // the specialist at. Neither is true here: a body standing in the crease deflects every ball
+  // that comes within 0.9 m of it whatever its speed, so he is a wall rather than a guess —
+  // measured at four times fewer goals (0.28/min against 1.17) and the worst scrum share of any
+  // variant tried, because in 2×2 a keeper means one outfield player per side and nothing to
+  // occupy. The 4 m arc nobody may enter is the goal's protection in this rule set.
+  cfg.keeper.enabled = false;
+  return cfg;
+}
+
 export function defaultConfig(): SimConfig {
   return {
+    ruleset: 'classic',
     dt: 1 / 60,
     teamSize: 2,
     field: {
@@ -702,6 +825,27 @@ export function defaultConfig(): SimConfig {
       contactFumbleMinSpeed: 3,
       fumbleSpeed: 4,
       fumbleScatter: 0.6,
+    },
+    touch: {
+      // A little wider than a body plus a ball (0.47 m): the ball has to be *met*, not threaded
+      // through a needle, or a blind player never touches anything. Small enough that walking
+      // past the ball at a metre's distance leaves it alone.
+      radius: 0.9,
+      // Long enough that one body cannot carry the ball forward by tapping it every frame —
+      // dribbling is a chain of separate, audible strikes, which is the whole point — and short
+      // enough that a rebound off the wall can be played again.
+      cooldownSec: 0.35,
+      // Walking pace is fully controlled; a full sprint is not controlled at all. The gap is
+      // deliberately the entire walk-to-run band, because this curve is the game's answer to the
+      // pile: it has to be felt, not measured.
+      controlSpeed: 2.6,
+      wildSpeed: 5,
+      // ~34°, one sigma-free deterministic draw. At a sprint that is most of the goal mouth's
+      // width from ten metres out: a shot taken on the run is not a shot, it is a scatter gun.
+      wildScatter: 0.6,
+      ricochet: 0.75,
+      wildSoundAt: 0.55,
+      diveControls: true,
     },
     throwing: {
       minCharge: 0.15,
@@ -839,6 +983,12 @@ export const PRESETS: Record<string, () => SimConfig> = {
   /** The concept as written. */
   default: defaultConfig,
 
+  /**
+   * The second rule set: the ball cannot be held, every meeting with a body is a strike.
+   * See `TouchConfig` for the design and `applyRuleset` for the numbers.
+   */
+  touch: () => applyRuleset(defaultConfig(), 'touch'),
+
   /** The same, with the ping collapsed to an instant snapshot — the A/B of the wavefront. */
   'instant-ping': () => {
     const c = defaultConfig();
@@ -934,6 +1084,7 @@ export function cloneConfig(c: SimConfig): SimConfig {
     player: { ...c.player },
     ball: { ...c.ball, voice: { ...c.ball.voice } },
     catching: { ...c.catching },
+    touch: { ...c.touch },
     throwing: { ...c.throwing },
     dive: { ...c.dive },
     keeper: { ...c.keeper },

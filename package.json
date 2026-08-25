@@ -18,7 +18,8 @@
     "honesty": "tsx src/sim/cli/honesty.ts",
     "contest": "tsx src/sim/cli/contest.ts",
     "shape": "tsx src/sim/cli/shape.ts",
-    "quality": "tsx src/sim/cli/quality.ts"
+    "quality": "tsx src/sim/cli/quality.ts",
+    "pivot": "tsx src/sim/cli/pivot.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",

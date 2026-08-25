@@ -193,7 +193,7 @@ export class Bot implements Controller {
   private execute(chosen: Chosen, frame: PerceptionFrame, intent: Intent, f: Features): void {
     const cfg = this.ctx.config;
     const a = chosen.action;
-    intent.aim = aimFor(a, f);
+    intent.aim = aimFor(a, f, cfg);
 
     switch (a.kind) {
       case 'hold':
@@ -202,6 +202,26 @@ export class Bot implements Controller {
       case 'investigate':
         this.steer(intent, f.me, a.to!, a.mode ?? 'walk');
         break;
+      case 'strike': {
+        // Getting there is the whole action, and HOW is the whole game: run while there is
+        // ground to make up, walk the last stretch, and be standing still when it arrives.
+        // Sprinting into the ball is not a faster version of this, it is a different and much
+        // worse outcome (`Simulation.strikeBall`).
+        const meet = a.to ?? f.me;
+        const gap = dist2(f.me, meet);
+        const eta = a.ballEta ?? 0;
+        const runT = gap / Math.max(1e-6, cfg.player.runSpeed);
+        // Run only while arriving on time is in doubt; otherwise walk, which is both quieter and
+        // the only way to be under `touch.controlSpeed` at the moment of contact.
+        const hurry = runT > Math.max(0, eta - 0.45);
+        this.steer(intent, f.me, meet, hurry ? 'run' : 'walk');
+        // Standing on the spot with the wind-up held is the point of the rule set: the strike is
+        // pre-aimed, so the last thing to do before the ball arrives is nothing at all.
+        if (gap < 0.5 && eta > 0.15) intent.move = { x: 0, y: 0 };
+        const want = clamp(a.charge ?? 0, 0, cfg.throwing.maxCharge);
+        intent.charge = want > 0 && frame.self.chargeT < want;
+        break;
+      }
       case 'contest': {
         // Get on top of him and stay there. Close in at a run, then stop running once inside the
         // steal radius so the last stride does not carry straight past him.
@@ -287,6 +307,9 @@ export class Bot implements Controller {
    * be dealt with this tick or it becomes a fumble — the loudest mistake in the game.
    */
   private catchReflex(frame: PerceptionFrame, intent: Intent, f: Features): void {
+    // Nothing to catch in `touch`: the ball cannot be held, so opening the hands does nothing at
+    // all and pressing for it would only add a phantom input to every replay.
+    if (this.ctx.config.ruleset === 'touch') return;
     if (frame.self.hasBall || this.catchLock > 0 || frame.self.reaching || !f.ball) return;
     const cfg = this.ctx.config.catching;
     const reach = this.reach(frame);

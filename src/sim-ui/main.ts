@@ -21,7 +21,15 @@
  */
 import GUI from 'lil-gui';
 
-import { cloneConfig, configFromPreset, PRESETS, type SimConfig } from '../sim/config';
+import {
+  applyRuleset,
+  cloneConfig,
+  configFromPreset,
+  PRESETS,
+  resizeField,
+  type Ruleset,
+  type SimConfig,
+} from '../sim/config';
 import { CONTROLLERS, makeController } from '../sim/controllers';
 import { Match, type TimelineEntry } from '../sim/match';
 import { newRecording, recordInput, replayTo, serialiseRecording, type Recording } from '../sim/replay';
@@ -81,9 +89,21 @@ const eyesCtx = eyesCanvas.getContext('2d')!;
 const views = el<HTMLElement>('views');
 
 const params = {
+  /**
+   * Which rule set. It is a live toggle rather than two builds because the человек asked to
+   * decide between them with his hands: "числа он уже видел три раза, теперь решать будут
+   * пальцы". Flipping it restarts the match with the same seed and roster.
+   */
+  ruleset: 'classic' as Ruleset,
   preset: 'default',
   seed: 20260825,
   teamSize: 2,
+  /**
+   * Pitch size, as a picked string. It is in the panel because the sweep says it matters as much
+   * as anything else in this pass: at 2×2 the scrum share falls from 28 % to 19 % between 24×14
+   * and 28×16, and the человек has to be able to feel that rather than read it.
+   */
+  field: '24x14',
   teamA: 'striker',
   teamB: 'goalie',
   human: 'none',
@@ -138,8 +158,10 @@ const pollerFor = (id: EntityId): ScriptPoller => {
 // -- setup ----------------------------------------------------------------
 
 function buildSetup(): Setup {
-  const config = configFromPreset(params.preset);
+  const config = applyRuleset(configFromPreset(params.preset), params.ruleset);
   config.teamSize = params.teamSize;
+  const dims = params.field.split('x').map(Number);
+  if (dims.length === 2 && dims[0]! > 0 && dims[1]! > 0) resizeField(config, dims[0]!, dims[1]!);
   const size = config.teamSize;
   const controllers = [
     ...Array.from({ length: size }, () => makeController(params.teamA)),
@@ -166,10 +188,12 @@ function feelConfig(config: SimConfig): ConstructorParameters<typeof Feel>[0] {
   return {
     minCharge: config.throwing.minCharge,
     maxCharge: config.throwing.maxCharge,
-    catchRadius: config.catching.radius,
+    // In `touch` the "reach" the cockpit draws is the strike zone, and it does not shrink with
+    // the ball's speed — there is no catch to fail, only a ball that arrives and leaves.
+    catchRadius: config.ruleset === 'touch' ? config.touch.radius : config.catching.radius,
     // `windowSec` is gone: a catch is now "one press opens the hands for `reachSec`", which is
     // the same quantity from the player's point of view — how long the grab lasts.
-    catchSpeedSpan: config.catching.catchSpeedSpan,
+    catchSpeedSpan: config.ruleset === 'touch' ? 1e9 : config.catching.catchSpeedSpan,
     minReachFrac: config.catching.minReachFrac,
     slowBallSpeed: config.catching.slowBallSpeed,
     sprintSpeed: config.catching.sprintSpeed,
@@ -178,6 +202,7 @@ function feelConfig(config: SimConfig): ConstructorParameters<typeof Feel>[0] {
     runLoud: config.loudness['step-run'],
     pingCooldown: config.ping.cooldownSec,
     carryTimeout: config.match.carryTimeoutSec,
+    ruleset: config.ruleset,
   };
 }
 
@@ -430,6 +455,7 @@ function render(): void {
   el('score').textContent = `${state.score[0]} : ${state.score[1]}`;
   el('clock').textContent = `${state.t.toFixed(1)}s / ${setup.config.match.durationSec}s · ${state.phase}`;
   el('tickinfo').textContent = `tick ${state.tick} · seed ${setup.seed} · ${setup.config.teamSize}v${setup.config.teamSize}`;
+  el('ruleset').textContent = setup.config.ruleset === 'touch' ? 'TOUCH' : 'CLASSIC';
   el('fps').textContent = harness ? '' : `${fps.toFixed(0)} fps`;
 
   const scrub = el<HTMLInputElement>('scrub');
@@ -610,6 +636,14 @@ function leavePlay(): void {
   gui.show();
 }
 
+/** The toggle in the header: one click, same seed, the other rule set. It is the whole point. */
+el('ruleset').addEventListener('click', () => {
+  params.ruleset = params.ruleset === 'classic' ? 'touch' : 'classic';
+  restart();
+  playing = true;
+  syncTransport();
+});
+
 el('play').addEventListener('click', () => {
   if (params.mode === 'play') leavePlay();
   else enterPlay();
@@ -617,12 +651,23 @@ el('play').addEventListener('click', () => {
   el('play').textContent = params.mode === 'play' ? 'exit play' : '▶ play';
 });
 
-el('start-overlay').addEventListener('click', () => {
+/** The start card's two buttons: pick a rule set and play it. */
+function startWith(ruleset: Ruleset): void {
+  params.ruleset = ruleset;
   el('start-overlay').style.display = 'none';
   enterPlay();
   el('play').classList.add('on');
   el('play').textContent = 'exit play';
+}
+el('start-classic').addEventListener('click', (e) => {
+  e.stopPropagation();
+  startWith('classic');
 });
+el('start-touch').addEventListener('click', (e) => {
+  e.stopPropagation();
+  startWith('touch');
+});
+el('start-overlay').addEventListener('click', () => startWith(params.ruleset));
 el('start-skip').addEventListener('click', (e) => {
   e.stopPropagation();
   el('start-overlay').style.display = 'none';
@@ -679,9 +724,14 @@ input.toWorld = (clientX, clientY, target) => {
 
 const gui = new GUI({ title: 'blind handball' });
 const setupFolder = gui.addFolder('match');
+setupFolder
+  .add(params, 'ruleset', ['classic', 'touch'])
+  .name('RULE SET (classic / touch)')
+  .onChange(() => restart());
 setupFolder.add(params, 'preset', Object.keys(PRESETS)).onChange(() => restart());
 setupFolder.add(params, 'seed', 1, 99999, 1).onChange(() => restart());
 setupFolder.add(params, 'teamSize', 1, 4, 1).onChange(() => restart());
+setupFolder.add(params, 'field', ['24x14', '28x16', '32x18']).name('pitch').onChange(() => restart());
 setupFolder.add(params, 'teamA', Object.keys(CONTROLLERS)).name('team 0').onChange(() => restart());
 setupFolder.add(params, 'teamB', Object.keys(CONTROLLERS)).name('team 1').onChange(() => restart());
 setupFolder.add(params, 'human', ['none', '0', '1', '2', '3']).name('human slot').onChange(() => restart());
@@ -787,6 +837,12 @@ const hb = {
    * HUD on top — without changing one number in the simulation. `hud(false)` strips the corner
    * instruments so a close-up of a wind-up is a picture of a wind-up.
    */
+  /** The keyframe generator flips rule sets through the same door the panel does. */
+  ruleset(name: Ruleset) {
+    params.ruleset = name;
+    restart();
+    return hb.state();
+  },
   mode(m: 'debug' | 'play') {
     params.mode = m;
     document.body.classList.toggle('playing', m === 'play');
@@ -824,6 +880,8 @@ const hb = {
       lastCatch: f.lastCatch,
       readout: f.catchReadout?.text ?? null,
       hint: f.activeHint?.text ?? null,
+      task: f.task ? { text: f.task.text, why: f.task.why ?? null } : null,
+      holder: f.holder,
       stats: f.stats,
       flashes: f.flashes.map((x) => x.kind),
     };
@@ -915,6 +973,7 @@ const hb = {
     const eyes = clampEyes(setup.eyes);
     const model = session.models[eyes]!;
     return {
+      ruleset: setup.config.ruleset,
       tick: s.tick,
       t: s.t,
       phase: s.phase,

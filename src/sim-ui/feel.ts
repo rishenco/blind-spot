@@ -46,6 +46,10 @@ export interface Flash {
 }
 
 const HINT_LIFE = 5.0;
+/** How long a new answer must stay true before it may replace the one on screen. */
+const DWELL = 0.8;
+/** And how long the one on screen is guaranteed, however the world moves. */
+const MIN_TASK = 3.0;
 
 export interface FeelConfig {
   minCharge: number;
@@ -63,7 +67,37 @@ export interface FeelConfig {
   pingCooldown: number;
   /** Seconds a carrier may hold the ball before the rules take it away. 0 = no rule. */
   carryTimeout: number;
+  /** Which rule set is being played — the task readout says different things in each. */
+  ruleset: 'classic' | 'touch';
 }
+
+/**
+ * The named job, in two or three words.
+ *
+ * The человек's complaint after playing was not about rules: *«нифига не понятно, как
+ * позиционировать себя тут»*. Real blind football answers exactly this and treats it as part of
+ * the sport — a guide behind the goal, a coach at the centre line, a sighted keeper turning the
+ * defence round. A blind player is TOLD where to go, continuously, and nobody considers it a
+ * cheat.
+ *
+ * So this is that voice, and it is honest by construction: it is computed from the ball (which
+ * sings), from the phase (which everybody hears), from the walls and goals (which are memory,
+ * not perception) and from the team-mate (who is already published exactly, by the человек's own
+ * decision). It says nothing whatsoever about an opponent — the one thing the game is about
+ * stays unknown.
+ */
+export interface Task {
+  /** Two or three words, upper case. The whole readout. */
+  text: string;
+  /** A single short reason, shown smaller. Optional. */
+  why?: string;
+  colour: string;
+  /** Sim time it became the current task — the readout fades in. */
+  since: number;
+}
+
+/** Who has the ball, as far as the ears can tell. Never a guess about WHICH opponent. */
+export type Holder = 'me' | 'mate' | 'them' | 'loose' | 'unknown';
 
 /**
  * Live feel state for one human player.
@@ -118,6 +152,15 @@ export class Feel {
    */
   reachNow = 0;
   score: readonly [number, number] = [0, 0];
+  /** Who has the ball, worked out from what was heard. Never says WHICH opponent. */
+  holder: Holder = 'unknown';
+  /** The named job on screen right now. */
+  task: Task | null = null;
+  /** The candidate that is trying to replace it, and how long it has been trying. */
+  private pending: { text: string; why?: string; colour: string } | null = null;
+  private pendingT = 0;
+  /** How near the nearest wall is, and which one — the boards a blind player runs a hand along. */
+  wallDistance = Infinity;
   /** Match statistics a person can read without a debug panel. */
   stats = { pings: 0, throws: 0, catches: 0, fumbles: 0, loudSeconds: 0, quietSeconds: 0 };
 
@@ -128,7 +171,7 @@ export class Feel {
 
   constructor(cfg: FeelConfig, pad = false) {
     this.cfg = cfg;
-    this.hintQueue = defaultHints(pad);
+    this.hintQueue = defaultHints(pad, cfg.ruleset);
   }
 
   reset(): void {
@@ -144,6 +187,12 @@ export class Feel {
     this.hints = [];
     this.lastFailT = -99;
     this.carryFor = 0;
+    this.holder = 'unknown';
+    this.task = null;
+    this.pending = null;
+    this.pendingT = 0;
+    this.ballGuess = null;
+    this.wallDistance = Infinity;
     this.score = [0, 0];
     this.stats = { pings: 0, throws: 0, catches: 0, fumbles: 0, loudSeconds: 0, quietSeconds: 0 };
   }
@@ -179,6 +228,14 @@ export class Feel {
 
     // --- the ball, as the catch telegraph reads it ------------------------
     const ball = model.ball;
+    this.ballGuess = ball ? { x: ball.pos.x, y: ball.pos.y } : this.ballGuess;
+    // The boards. A blind footballer runs a hand along them and a blind handball player knows the
+    // hall; this is the same fact, drawn only when the wall is close enough to touch.
+    const fld = frame.field;
+    this.wallDistance = Math.min(
+      fld.halfWidth - Math.abs(self.pos.x),
+      fld.halfHeight - Math.abs(self.pos.y),
+    );
     if (ball) {
       const rel = { x: ball.pos.x - self.pos.x, y: ball.pos.y - self.pos.y };
       const relVel = { x: ball.vel.x - self.vel.x, y: ball.vel.y - self.vel.y };
@@ -259,8 +316,126 @@ export class Feel {
     for (const f of this.flashes) f.strength -= dt * 1.6;
     this.flashes = this.flashes.filter((f) => f.strength > 0);
 
+    this.updateHolder(frame);
+    this.updateTask(frame, dt);
     this.tutor(frame);
   }
+
+  /**
+   * Who has the ball, from sound alone.
+   *
+   * The rule is exactly the one the bot's belief layer uses and exactly the one a person applies
+   * without thinking: a hum means the ball is loose; a catch or a strike with a name on it means
+   * a team-mate; the same sound with no name on it means one of them.
+   */
+  private updateHolder(frame: PerceptionFrame): void {
+    if (frame.self.hasBall) {
+      this.holder = 'me';
+      return;
+    }
+    const touch = this.cfg.ruleset === 'touch';
+    for (const ev of frame.events) {
+      if (ev.kind === 'whistle') this.holder = 'unknown';
+      else if (touch) {
+        if (ev.kind !== 'throw' && ev.kind !== 'fumble') continue;
+        if (ev.self) this.holder = 'me';
+        else if (ev.sourceId !== null) this.holder = 'mate';
+        else this.holder = 'them';
+      } else if (ev.kind === 'catch' || ev.kind === 'steal') {
+        this.holder = ev.sourceId === null ? 'them' : ev.sourceId === frame.self.id ? 'me' : 'mate';
+      } else if (ev.kind === 'throw' || ev.kind === 'fumble') {
+        this.holder = 'loose';
+      } else if (ev.kind === 'ball-carry' && ev.sourceId === null) {
+        this.holder = 'them';
+      }
+    }
+    if (!touch && frame.emitters.some((e) => e.kind === 'ball')) this.holder = 'loose';
+    if (touch && this.holder === 'me') this.holder = 'loose';
+  }
+
+  /**
+   * The named job.
+   *
+   * Two rules about the wording, both learned from the complaint that produced it: it changes
+   * rarely (a hint that flickers every half second is worse than no hint), and it is never longer
+   * than a glance. `DWELL` is how long a new answer has to stay true before it is allowed on
+   * screen; `MIN_TASK` is the floor under how long the old one stays.
+   */
+  private updateTask(frame: PerceptionFrame, dt: number): void {
+    const next = this.pickTask(frame);
+    const cur = this.task;
+    if (cur && cur.text === next.text) {
+      this.pending = null;
+      this.pendingT = 0;
+      cur.why = next.why;
+      return;
+    }
+    if (!cur) {
+      this.task = { ...next, since: this.t };
+      return;
+    }
+    if (this.t - cur.since < MIN_TASK) return;
+    if (!this.pending || this.pending.text !== next.text) {
+      this.pending = next;
+      this.pendingT = 0;
+      return;
+    }
+    this.pendingT += dt;
+    if (this.pendingT < DWELL) return;
+    this.task = { ...next, since: this.t };
+    this.pending = null;
+    this.pendingT = 0;
+  }
+
+  private pickTask(frame: PerceptionFrame): { text: string; why?: string; colour: string } {
+    const self = frame.self;
+    const f = frame.field;
+    const ownGoal = f.goalCentre[self.team];
+    const theirGoal = f.goalCentre[self.team === 0 ? 1 : 0];
+    const ball = this.ballGuess;
+    const mate = frame.mates[0] ?? null;
+    const d = (a: Vec2, b: Vec2): number => Math.hypot(a.x - b.x, a.y - b.y);
+    if (frame.match.phase !== 'play') return { text: 'RESTART', why: 'wait for the whistle', colour: '#7e93a7' };
+
+    if (this.holder === 'me') {
+      const range = d(self.pos, theirGoal);
+      if (range < f.creaseRadius + 4.5) return { text: 'SHOOT', why: 'you are in range', colour: '#ffd166' };
+      if (mate && d(mate.pos, theirGoal) < range - 2) {
+        return { text: 'PASS', why: 'he is nearer the goal', colour: '#7dffa8' };
+      }
+      return { text: 'TAKE IT UP', why: 'towards their goal', colour: '#ffd166' };
+    }
+
+    // Who is the deeper of the two of us — the man who cannot leave. It is a comparison of two
+    // known positions, so it needs nothing anybody could call intel.
+    const iAmDeep = !mate || d(self.pos, ownGoal) <= d(mate.pos, ownGoal);
+    const nearMate = mate ? d(self.pos, mate.pos) : 99;
+
+    if (this.holder === 'mate') {
+      if (nearMate < 4) return { text: 'SPREAD OUT', why: 'too close to him', colour: '#4dd8ff' };
+      if (ball && d(self.pos, theirGoal) > d(ball, theirGoal) + 3) {
+        return { text: 'PUSH UP', why: 'get ahead of the ball', colour: '#7dffa8' };
+      }
+      return { text: 'GET OPEN', why: 'stand still and be findable', colour: '#7dffa8' };
+    }
+
+    if (this.holder === 'them') {
+      if (iAmDeep) return { text: 'COVER THE GOAL', why: 'you are the last man', colour: '#ff9a52' };
+      return { text: 'CLOSE HIM DOWN', why: 'the ball is theirs', colour: '#ff9a52' };
+    }
+
+    // Loose, or nobody knows. The ball is the one thing that is never a secret, so this is the
+    // one case where "go and get it" is always a legitimate instruction — for exactly one of us.
+    if (ball && mate && d(self.pos, ball) > d(mate.pos, ball) + 1) {
+      return iAmDeep
+        ? { text: 'COVER THE GOAL', why: 'he is closer to it', colour: '#ff9a52' }
+        : { text: 'GET OPEN', why: 'he is closer to it', colour: '#7dffa8' };
+    }
+    return { text: 'GO FOR THE BALL', why: 'nobody has it', colour: '#ffd166' };
+  }
+
+  /** Last heard position of the ball, in the same noisy terms the player has it. */
+  private ballGuess: Vec2 | null = null;
 
   private push(kind: Flash['kind'], strength: number): void {
     this.flashes.push({ kind, t: this.t, strength });
@@ -339,12 +514,53 @@ export const KIND_LABEL: Partial<Record<SoundKind, string>> = {
   whistle: 'whistle',
 };
 
-function defaultHints(pad: boolean): { id: string; text: string; when: (f: PerceptionFrame, s: Feel) => boolean }[] {
+function defaultHints(
+  pad: boolean,
+  ruleset: 'classic' | 'touch',
+): { id: string; text: string; when: (f: PerceptionFrame, s: Feel) => boolean }[] {
   const move = pad ? 'LEFT STICK' : 'WASD';
   const quiet = pad ? 'ease the stick' : 'hold SHIFT';
   const ping = pad ? 'LB' : 'SPACE';
   const throwKey = pad ? 'RT' : 'LEFT MOUSE';
+  const common = [
+    {
+      id: 'mate',
+      text: 'the green ring is your team-mate — always drawn, always exact. He and the walls are how you know where you are',
+      when: (f: PerceptionFrame) => f.match.t > 1.5 && f.mates.length > 0,
+    },
+    {
+      id: 'task',
+      text: 'the words at the top of the screen are your job right now. They change slowly on purpose',
+      when: (f: PerceptionFrame) => f.match.t > 5,
+    },
+  ];
+  if (ruleset === 'touch') {
+    return [
+      ...common,
+      {
+        id: 'touch-hold',
+        text: `hold ${throwKey} to keep a swing loaded — the ball flies where you FACE, the moment it reaches you`,
+        when: (f: PerceptionFrame) => f.match.t > 8,
+      },
+      {
+        id: 'touch-slow',
+        text: `${quiet}: arrive at a sprint and the ball flies anywhere. Get there early, stop, and it goes where you aimed`,
+        when: (_f: PerceptionFrame, s: Feel) => s.ballDistance < 4 && s.loudness > s.cfg.walkLoud + 1,
+      },
+      {
+        id: 'touch-noise',
+        text: 'every touch is heard. There is no quiet way to move the ball — so move it somewhere useful',
+        when: (_f: PerceptionFrame, s: Feel) => s.stats.throws > 1,
+      },
+      {
+        id: 'ping',
+        text: `${ping} pings: a second of sight, and every single player hears exactly where you fired it from`,
+        when: (f: PerceptionFrame) => f.match.t > 16 && f.self.pingCooldown <= 0,
+      },
+    ];
+  }
   return [
+    ...common,
     {
       id: 'ball',
       text: 'a LOOSE ball sings from anywhere — that gold mark is the one thing everybody knows',

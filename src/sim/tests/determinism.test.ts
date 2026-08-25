@@ -5,15 +5,15 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-import { defaultConfig } from '../config';
+import { applyRuleset, defaultConfig } from '../config';
 import { CONTROLLERS, roster } from '../controllers';
 import { Match } from '../match';
 import { newRecording, recordInput, replayTo } from '../replay';
 import { hashNumbers } from '../sim';
 import { idleIntent, type Intent } from '../types';
 
-function playHashes(seed: number, a = 'striker', b = 'goalie', ticks = 2400): number[] {
-  const cfg = defaultConfig();
+function playHashes(seed: number, a = 'striker', b = 'goalie', ticks = 2400, ruleset: 'classic' | 'touch' = 'classic'): number[] {
+  const cfg = applyRuleset(defaultConfig(), ruleset);
   const m = new Match({ config: cfg, seed, controllers: roster(a, b, cfg.teamSize) });
   const hashes: number[] = [];
   for (let i = 0; i < ticks && !m.isOver; i++) {
@@ -42,6 +42,13 @@ describe('determinism', () => {
     expect(a.length).toBe(b.length);
     expect(a.length).toBeGreaterThan(100);
     expect(hashNumbers(a)).toBe(hashNumbers(b));
+  });
+
+  it('replays a TOUCH match bit for bit, and it is a different match from the classic one', () => {
+    const a = playHashes(20260825, 'bot', 'bot', 1200, 'touch');
+    const b = playHashes(20260825, 'bot', 'bot', 1200, 'touch');
+    expect(hashNumbers(a)).toBe(hashNumbers(b));
+    expect(hashNumbers(a)).not.toBe(hashNumbers(playHashes(20260825, 'bot', 'bot', 1200, 'classic')));
   });
 
   it('produces different matches from different seeds', () => {

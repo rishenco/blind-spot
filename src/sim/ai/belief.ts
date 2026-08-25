@@ -134,6 +134,8 @@ export interface MateTrack {
   t: number;
   /** True while the estimate is fresh enough to plan a pass with. */
   fresh: boolean;
+  /** He is wearing the gloves — so he is not the man who should be chasing the ball. */
+  keeper: boolean;
 }
 
 /** Baseline over which the hum's movement is judged, and the speed that counts as carried. */
@@ -228,7 +230,10 @@ export class Belief {
         creditT: -99,
       });
     }
-    this.mate = ctx.teammates.length > 0 ? { id: ctx.teammates[0]!, pos: { x: 0, y: 0 }, t: -99, fresh: false } : null;
+    this.mate =
+      ctx.teammates.length > 0
+        ? { id: ctx.teammates[0]!, pos: { x: 0, y: 0 }, t: -99, fresh: false, keeper: false }
+        : null;
     this.scratch = new OccupancyGrid(this.mask);
     this.silentWalk = new Float32Array(this.mask.spec.nx * this.mask.spec.ny);
     this.silentRun = new Float32Array(this.mask.spec.nx * this.mask.spec.ny);
@@ -284,6 +289,7 @@ export class Belief {
       this.mate.pos = { x: m.pos.x, y: m.pos.y };
       this.mate.t = this.now;
       this.mate.fresh = true;
+      this.mate.keeper = m.keeper;
     }
 
     this.tracker.observe(frame.emitters.find((e) => e.kind === 'ball') ?? null, this.now);
@@ -595,6 +601,10 @@ export class Belief {
    * with it is standing.
    */
   private updatePossession(frame: PerceptionFrame): void {
+    if (this.cfg.ruleset === 'touch') {
+      this.updateTouchPossession(frame);
+      return;
+    }
     if (frame.self.hasBall) {
       this.setPossession('self');
       this.attachCarrier();
@@ -629,6 +639,29 @@ export class Belief {
       this.setPossession(who ?? 'opponent');
     }
     if (this.possession === 'opponent') this.attachCarrier();
+  }
+
+  /**
+   * Who touched it last, in the rule set where nobody can hold it.
+   *
+   * The hum answers nothing here — the ball is always loose, so it always sings — but the strike
+   * itself is a sound, and that sound is named for a team-mate and anonymous for an opponent, on
+   * exactly the terms every other sound in the game is. So "whose chain is this" is honest, free,
+   * and available to a human at the same instant: you heard your man hit it, or you heard
+   * somebody you cannot name hit it.
+   */
+  private updateTouchPossession(frame: PerceptionFrame): void {
+    for (const ev of frame.events) {
+      if (ev.kind === 'whistle') {
+        this.setPossession('unknown');
+        continue;
+      }
+      if (ev.kind !== 'throw' && ev.kind !== 'fumble') continue;
+      this.lastThrowT = this.now;
+      if (ev.self) this.setPossession('self');
+      else if (this.mate && ev.sourceId === this.mate.id) this.setPossession('mate');
+      else if (ev.sourceId === null) this.setPossession('opponent');
+    }
   }
 
   /**

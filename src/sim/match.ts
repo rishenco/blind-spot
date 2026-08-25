@@ -224,10 +224,14 @@ export class Match {
 
     if (this.keepLog) this.log.push(...out.events);
 
+    const touchRules = this.config.ruleset === 'touch';
     for (const p of s.players) {
       const st = this.stats.players[p.id]!;
       st.ticks += 1;
-      if (p.hasBall) st.possessionTicks += 1;
+      // Nobody holds anything in `touch`, so "possession" is read as "mine was the last hand on
+      // it" — the nearest honest analogue, and the one that keeps every downstream comparison
+      // (the telepath test, the ping test) meaning the same thing in both rule sets.
+      if (touchRules ? s.ball.lastToucher === p.id : p.hasBall) st.possessionTicks += 1;
       if (p.loudness <= 0) st.silentTicks += 1;
       st.distanceToBallSum += dist2(p.pos, s.ball.pos);
       st.distanceRun += Math.sqrt(p.vel.x * p.vel.x + p.vel.y * p.vel.y) * dt;
@@ -248,6 +252,19 @@ export class Match {
 
     for (const touch of out.touches) {
       const st = this.stats.players[touch.player]!;
+      if (touch.kind === 'strike') {
+        st.strikes += 1;
+        if (touch.fromTeam !== null && touch.fromTeam !== st.team) {
+          st.interceptions += 1;
+          this.push(s.tick, s.t, 'interception', touch.player, st.team,
+            `P${touch.player} cuts out P${touch.fromThrower}`);
+        } else if (touch.fromThrower !== null) {
+          st.passesReceived += 1;
+          this.push(s.tick, s.t, 'catch', touch.player, st.team,
+            `P${touch.player} takes it on from P${touch.fromThrower}`);
+        }
+        continue;
+      }
       if (touch.kind === 'fumble') {
         st.fumbles += 1;
         this.push(s.tick, s.t, 'fumble', touch.player, st.team, `fumble by P${touch.player}`);
@@ -323,6 +340,11 @@ export class Match {
       if (goal.scorer !== null) {
         const st = this.stats.players[goal.scorer];
         if (st && st.team === goal.team) st.goals += 1;
+        // The last body on the ball was defending its own goal: it went in off somebody. Worth
+        // counting separately in `touch`, where a deflection is an ordinary event rather than a
+        // freak one — a rule set that scores mostly by accident is not a rule set anybody can
+        // play on purpose.
+        else if (st) this.stats.shape.ownGoals += 1;
       }
       this.push(
         s.tick, goal.t, 'goal', goal.scorer, goal.team,
@@ -397,6 +419,34 @@ export class Match {
     }
 
     for (const touch of out.touches) {
+      if (touch.kind === 'strike') {
+        // A chain is the `touch` rule set's attack: consecutive strikes by one team. It ends the
+        // moment the other team gets a foot on the ball, which is the only "turnover" that
+        // exists here.
+        const team: TeamId = touch.player < this.config.teamSize ? 0 : 1;
+        shape.strikes += 1;
+        const struckAt = touch.speed ?? 0;
+        const wildAt =
+          this.config.touch.controlSpeed +
+          (this.config.touch.wildSpeed - this.config.touch.controlSpeed) * this.config.touch.wildSoundAt;
+        if (struckAt >= wildAt) {
+          shape.wildStrikes += 1;
+        }
+        if (touch.fromTeam === team && touch.fromThrower !== touch.player) {
+          this.possessionPasses += 1;
+          shape.passes += 1;
+        }
+        if (this.lastOwner !== null && team !== this.lastOwner) {
+          this.stats.possessionChanges += 1;
+          shape.chains += 1;
+          shape.possessions += 1;
+          shape.possessionTimeSum += Math.max(0, s.t - this.possessionStart);
+          this.possessionStart = s.t;
+          this.possessionPasses = 0;
+        }
+        this.lastOwner = team;
+        continue;
+      }
       if (touch.kind !== 'catch' || touch.fromThrower === null) continue;
       const team: TeamId = touch.player < this.config.teamSize ? 0 : 1;
       if (touch.fromTeam === team && touch.fromThrower !== touch.player) {
@@ -405,12 +455,26 @@ export class Match {
       }
     }
 
-    if (out.goals.length > 0) {
+    if (out.goals.length > 0 && this.config.ruleset !== 'touch') {
       shape.goals += out.goals.length;
       if (this.possessionPasses === 0) shape.goalsWithoutPass += out.goals.length;
     }
 
     const carrier = s.ball.carrier;
+    if (this.config.ruleset === 'touch') {
+      // Everything below this line reads possession off a carrier, and there is never one here.
+      // The chain bookkeeping above has already done the same job.
+      if (out.goals.length > 0) {
+        shape.goals += out.goals.length;
+        if (this.possessionPasses === 0) shape.goalsWithoutPass += out.goals.length;
+        shape.possessions += 1;
+        shape.chains += 1;
+        shape.possessionTimeSum += Math.max(0, s.t - this.possessionStart);
+        this.possessionStart = s.t;
+        this.possessionPasses = 0;
+      }
+      return;
+    }
     if (carrier !== null) {
       const owner: TeamId = carrier < this.config.teamSize ? 0 : 1;
       if (this.lastOwner !== null && owner !== this.lastOwner) {
@@ -467,7 +531,15 @@ export class Match {
     return false;
   }
 
-  /** Would a ball released at `from` with velocity `vel` reach the goal `team` is attacking? */
+  /**
+   * Would a ball released at `from` with velocity `vel` reach the goal `team` is attacking?
+   *
+   * "Reach" is meant literally: the ball has to still be rolling when it gets to the line. In
+   * `classic` that is free (a 16 m/s throw runs eighty metres before friction stops it) but in
+   * `touch` the ball is slow and the friction is high, so without this every hopeful clearance
+   * that happened to point down the pitch counted as a shot — which is precisely the number this
+   * whole measurement exists to read honestly.
+   */
   private aimedAtGoal(from: Vec2, vel: Vec2, team: TeamId): boolean {
     const f = this.field;
     const line = team === 0 ? f.halfWidth : -f.halfWidth;
@@ -475,7 +547,10 @@ export class Match {
     if (dx * vel.x <= 0) return false;
     const u = dx / vel.x;
     const y = from.y + vel.y * u;
-    return Math.abs(y) <= f.goalWidth / 2;
+    if (Math.abs(y) > f.goalWidth / 2) return false;
+    const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
+    const reach = (speed * speed) / (2 * Math.max(1e-6, this.config.ball.friction));
+    return reach >= Math.sqrt(dx * dx + (y - from.y) * (y - from.y));
   }
 
   private push(

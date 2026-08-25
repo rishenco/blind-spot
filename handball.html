@@ -66,6 +66,16 @@
       #start-card li b { color: #ffd166; }
       #start-card .go { color: #7dffa8; letter-spacing: 0.1em; }
       #start-skip { margin-top: 14px; }
+      /* The rule-set choice. It is the first thing the build exists to ask, so it is two big
+         buttons on the card rather than a line in a settings panel. */
+      #start-card .pick { color: #7e93a7; margin: 0 0 10px; letter-spacing: 0.06em; }
+      #start-card .rules { display: flex; gap: 10px; margin-bottom: 18px; }
+      #start-card .rules button { flex: 1; text-align: left; padding: 10px 12px; line-height: 1.4; }
+      #start-card .rules button b { display: block; color: #ffd166; letter-spacing: 0.16em; margin-bottom: 4px; }
+      #start-card .rules button span { color: #7e93a7; }
+      #start-card .rules button:hover { border-color: #4d80b0; }
+      /* The header toggle: the same choice, one click, mid-session. */
+      #ruleset { letter-spacing: 0.16em; color: #ffd166; border-color: #4a3a16; }
     </style>
   </head>
   <body>
@@ -76,12 +86,23 @@
         <ul>
           <li>The <b>ball never stops singing</b> — the gold mark is always real. Everything else on
             screen is a sound that already happened, fading.</li>
+          <li>Your <b>team-mate is always drawn</b>, with the distance to him. He and the walls are
+            how you know where you are. The other two are never drawn at all.</li>
           <li><b>Running is loud.</b> Walking is quiet. Standing still makes you invisible —
             that is a move, not a pause.</li>
+          <li>The words at the top of the screen are <b>your job right now</b>. Do that.</li>
           <li><b>SPACE pings:</b> one second of sight, paid for with your exact position.
             Everyone hears where you fired it from.</li>
         </ul>
-        <div class="go">click anywhere to play — WASD move · mouse aim · hold LMB to throw · RMB to catch</div>
+        <div class="pick">two rule sets are in this build. Play both, then say which one.</div>
+        <div class="rules">
+          <button id="start-classic"><b>CLASSIC</b><span>catch it, carry it, throw it. The ball
+            beeps louder the longer you hold it, so a pass makes you invisible again.</span></button>
+          <button id="start-touch"><b>TOUCH</b><span>the ball cannot be held at all. Hold the
+            mouse to keep a swing loaded, stand where the ball is going, and it flies where you
+            face. Arrive at a sprint and it flies anywhere.</span></button>
+        </div>
+        <div class="go">WASD move · SHIFT walk quietly · mouse aim · hold LMB to swing · SPACE ping · E shout</div>
         <button id="start-skip">skip — open the debug playground</button>
       </div>
     </div>
@@ -90,6 +111,7 @@
         <span class="big" id="score">0 : 0</span>
         <span id="clock" class="k"></span>
         <span id="tickinfo" class="k debug-only"></span>
+        <button id="ruleset" title="switch rule set (restarts the match)">CLASSIC</button>
         <button id="play">▶ play</button>
         <button id="playpause" class="debug-only">pause</button>
         <button id="stepone" class="debug-only">step ▸</button>

@@ -51,6 +51,15 @@ export type ActionKind =
   | 'contest'
   /** Throw the body at where an opponent is going to be. */
   | 'tackle'
+  /**
+   * Meet the loose ball and hit it somewhere — the `touch` rule set's only verb.
+   *
+   * It is one action rather than three (shoot / pass / dribble) because in that rule set they
+   * are literally the same act with a different wind-up and a different aim, and making them one
+   * candidate with a `target` and a `charge` is what lets the chooser price "smash it at goal
+   * from here" against "tap it two metres forward and walk after it" on the same scale.
+   */
+  | 'strike'
   /** Shout for the ball: tell the man with it where I am, and everybody else too. */
   | 'call';
 
@@ -69,6 +78,8 @@ export interface Action {
   dir?: Vec2;
   /** Which opponent track an `investigate` is about. */
   track?: number;
+  /** Seconds until the ball reaches a `strike`'s meeting point, from the intercept solution. */
+  ballEta?: number;
 }
 
 export interface ScoredAction {
@@ -139,8 +150,8 @@ export interface PolicyKnobs {
   infoMul: number;
   deceiveMul: number;
   positionDiscount: number;
-  /** Metres past the crease at which a shot is worth nothing. Smaller = the bot closes in more. */
-  shotRangeSpan: number;
+  /** Seconds of ball flight past which a shot is worth nothing. See `shotValue`. */
+  shotTimeSpan: number;
 }
 
 export function policyKnobs(cfg: SimConfigView): PolicyKnobs {
@@ -160,7 +171,7 @@ export function policyKnobs(cfg: SimConfigView): PolicyKnobs {
     infoMul: num('infoMul', 4),
     deceiveMul: num('deceiveMul', 1),
     positionDiscount: num('positionDiscount', 0.5),
-    shotRangeSpan: num('shotRangeSpan', 10),
+    shotTimeSpan: num('shotTimeSpan', 1.35),
   };
 }
 
@@ -209,6 +220,45 @@ export function generateCandidates(input: PolicyInput): Action[] {
   const legal = (p: Vec2): Vec2 => legalPoint(f.field, p, R, access);
 
   out.push({ kind: 'hold', tag: 'hold' });
+
+  // --- the `touch` rule set: meeting the ball is the only thing anybody ever does with it ----
+  if (cfg.ruleset === 'touch' && f.ballPos && f.role !== 'support') {
+    const meet = legal(f.intercept?.point ?? f.ballPos);
+    const eta = f.intercept?.t ?? 0;
+    const goalward = norm2(sub2(f.goal, meet), { x: f.team === 0 ? 1 : -1, y: 0 });
+    // Three things to do with a ball you cannot hold, and they differ only in aim and wind-up.
+    const shot = shotValue(f, meet, cfg);
+    out.push({ kind: 'strike', tag: 'strike-goal', to: meet, target: shot.target, charge: cfg.throwing.maxCharge, ballEta: eta });
+    // The nudge: two metres up the pitch, no wind-up at all. Dribbling is a chain of these, and
+    // every one of them is audible — you cannot walk the ball anywhere in silence.
+    out.push({
+      kind: 'strike',
+      tag: 'strike-push',
+      to: meet,
+      target: { x: meet.x + goalward.x * 4, y: meet.y + goalward.y * 4 },
+      charge: 0,
+      ballEta: eta,
+    });
+    if (f.mate) {
+      // A pass is aimed slightly ahead of the man, and hit hard enough to get there.
+      const lead = { x: f.mate.pos.x, y: f.mate.pos.y };
+      const speed = clamp(dist2(meet, lead) * 1.1, cfg.throwing.weakSpeed, cfg.throwing.maxSpeed);
+      out.push({ kind: 'strike', tag: 'strike-pass', to: meet, target: lead, charge: chargeForSpeed(speed, cfg.throwing), ballEta: eta });
+    }
+    if (f.role === 'guard' || f.role === 'keeper') {
+      // The clearance: away from my own goal, as hard as possible, aimed at nobody. It exists so
+      // a defender who gets to the ball first has something to do that is not a hopeful pass.
+      const away = norm2(sub2(meet, f.ownGoal), { x: f.team === 0 ? 1 : -1, y: 0 });
+      out.push({
+        kind: 'strike',
+        tag: 'strike-clear',
+        to: meet,
+        target: { x: meet.x + away.x * 12, y: meet.y + away.y * 12 },
+        charge: cfg.throwing.maxCharge,
+        ballEta: eta,
+      });
+    }
+  }
 
   const shootSpot = legal({
     x: f.goal.x + norm2(sub2(f.me, f.goal), { x: f.team === 0 ? -1 : 1, y: 0 }).x * (f.field.creaseRadius + 1.4),
@@ -452,6 +502,20 @@ function score(action: Action, input: PolicyInput): ScoredAction {
       noiseRadius = cfg.loudness.throw;
       break;
     }
+    case 'strike': {
+      // Judged where the ball is met, heard on the way there — and heard again, louder, the
+      // moment it is hit. A strike is never silent: that is the rule set's answer to the concept's
+      // third law, and the reason a dribble gives its owner away step by step.
+      dest = action.to ?? f.me;
+      travelT = travelTime(dist2(f.me, dest), f.mySpeed, cfg.player.accel, speed);
+      const mid = advance(f.me, dest, speed, Math.min(travelT, HORIZON) / 2);
+      const chargeFrac = clamp((action.charge ?? 0) / Math.max(1e-6, cfg.throwing.maxCharge), 0, 1);
+      const hitLoud = cfg.loudness.catch + (cfg.loudness.throw - cfg.loudness.catch) * chargeFrac;
+      const stepLoud = action.mode === 'run' ? cfg.loudness['step-run'] : cfg.loudness['step-walk'];
+      noisePos = hitLoud >= stepLoud ? dest : mid;
+      noiseRadius = Math.max(hitLoud, stepLoud);
+      break;
+    }
     case 'call': {
       noiseRadius = cfg.loudness.call;
       break;
@@ -580,6 +644,7 @@ function expApproxPos(v: number): number {
 
 function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: number, input: PolicyInput): number {
   const { features: f, belief, cfg } = input;
+  if (action.kind === 'strike') return strikeValue(action, arrival, input);
   if (action.kind === 'shoot') {
     return clamp(shotValue(f, f.me, cfg).value, 0.02, 1);
   }
@@ -688,6 +753,15 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
     }
     case 'chase': {
       if (!f.ballPos) return 0.1;
+      if (cfg.ruleset === 'touch') {
+        // In `touch` the race is not the decision — every "chase" plan that is not a strike is
+        // just walking towards the ball, and walking towards the ball is worth strictly less
+        // than hitting it, whoever wins the race. Capping it below a strike's ceiling is what
+        // stops the old failure mode, where standing still scored as well as going because the
+        // bot was already going to win the race "later".
+        const meet = f.intercept?.point ?? f.ballPos;
+        return clamp(arrival * clamp(1 - dist2(endPos, meet) / 7, 0.05, 1) * 0.35, 0.02, 1);
+      }
       const target = f.intercept ? f.intercept.point : f.ballPos;
       const speed = action.mode === 'run' ? cfg.player.runSpeed : cfg.player.walkSpeed;
       // Whether this action wins the race, not whether it points in roughly the right
@@ -741,13 +815,75 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
           : 0;
       // A defender who cannot tackle has exactly two jobs: be on the line the shot has to cross,
       // and be the nearest body when the passivity whistle hands the ball over.
+      // Standing next to the ball is worth something in `classic`, where the passivity whistle
+      // hands it to the nearest body. In `touch` there is no such rule and no such reward — it is
+      // simply a second man joining the pile, which is the thing the rule set exists to prevent.
       const nearCarrier =
-        f.ballPos && dist2(f.ballPos, f.me) < 14 ? clamp(1 - dist2(endPos, f.ballPos) / 9, 0, 1) : 0;
+        cfg.ruleset !== 'touch' && f.ballPos && dist2(f.ballPos, f.me) < 14
+          ? clamp(1 - dist2(endPos, f.ballPos) / 9, 0, 1)
+          : 0;
       const known = mirrorAt(belief, endPos);
       const core = Math.max(hold, cutBall, nearCarrier * 0.85);
       return clamp(arrival * core * (0.45 + 0.55 * (1 - known)), 0.02, 1);
     }
   }
+}
+
+/**
+ * What one strike is worth — the whole of the `touch` rule set's decision, in one number.
+ *
+ * Three factors multiply, and the middle one is the rule set's entire design:
+ *
+ *   - **the race**: can I get to the meeting point before anybody else;
+ *   - **the control**: will I have STOPPED by the time the ball arrives. A strike made at a
+ *     sprint is a ricochet with a third of a radian of scatter on it, so a plan that has me
+ *     arriving at full pelt is worth a quarter of the same plan with half a second to spare.
+ *     This is what makes the bot walk the last few metres instead of joining the pile;
+ *   - **the aim**: what hitting it there actually buys — a shot, a team-mate, a metre of ground,
+ *     or simply the ball being a long way from my own goal.
+ */
+function strikeValue(action: Action, arrival: number, input: PolicyInput): number {
+  const { features: f, cfg } = input;
+  const meet = action.to ?? f.me;
+  const target = action.target ?? f.goal;
+  const mineRun = travelTime(dist2(f.me, meet), f.mySpeed, cfg.player.accel, cfg.player.runSpeed);
+  const eta = action.ballEta ?? 0;
+  // Seconds spare between arriving and the ball arriving. `touch.controlSpeed` is a walking pace,
+  // so a body needs roughly a stride's worth of braking time to be in that band.
+  const slack = eta - mineRun;
+  const control = clamp(0.2 + 0.8 * clamp(slack / 0.7, 0, 1), 0.2, 1);
+  // Deliberately NOT a race term. There is one meeting point, so pricing it by "is an opponent
+  // nearer" suppresses every strike equally and the bot answers "he will get there first" by
+  // standing still — which is not an answer. Whether an opponent is on top of the ball is already
+  // priced on the safety axis; what belongs here is what the strike is worth if it happens.
+
+  let aim: number;
+  if (action.tag === 'strike-goal') {
+    aim = shotValue(f, meet, cfg).value;
+  } else if (action.tag === 'strike-pass') {
+    const speed = clamp(dist2(meet, target) * 1.1, cfg.throwing.weakSpeed, cfg.throwing.maxSpeed);
+    const lane = laneClear(f, meet, target, speed, cfg);
+    const after = shotValue(f, target, cfg).value;
+    const spacing = clamp(dist2(meet, target) / 7, 0, 1);
+    aim = 0.85 * lane * (0.3 + 0.7 * after) * (0.35 + 0.65 * spacing);
+  } else if (action.tag === 'strike-clear') {
+    // Worth what the danger is: clearing a ball from the halfway line is nothing, clearing one
+    // from the edge of my own crease is everything.
+    const peril = clamp(1 - (dist2(meet, f.ownGoal) - f.field.creaseRadius) / 10, 0, 1);
+    aim = 0.25 + 0.75 * peril;
+  } else {
+    // The nudge. A position rather than a payment, so it is discounted like every other position
+    // — otherwise tapping the ball forward for ever scores the same as shooting. And it is
+    // knocked down again by whatever the belief says is standing where the ball is going: a
+    // dribble puts the ball two metres into the dark, and the dark is where they are.
+    const gain = clamp(1 - (dist2(target, f.goal) - f.field.creaseRadius) / 14, 0.05, 1);
+    const into = threatAt(f, target, cfg, 1.6);
+    aim = policyKnobs(cfg).positionDiscount * (0.35 + 0.65 * gain) * (1 - 0.7 * into);
+  }
+  // Control is weighted heavily on purpose: a plan that has me arriving at a sprint is worth a
+  // quarter of the same plan with time to spare, so the bot would rather walk in behind the ball
+  // than join the race for it. That single coefficient is the anti-scrum, expressed as a number.
+  return clamp(arrival * (0.25 + 0.75 * control) * (0.35 + 0.65 * clamp(aim, 0, 1)), 0.02, 1);
 }
 
 /** How sure the opponents are, collectively, that I am at `q`. 0 = they have no idea. */
@@ -811,7 +947,13 @@ function deceptionValue(action: Action, endPos: Vec2, noisePos: Vec2, pHeard: nu
   const { features: f } = input;
   // A throw is not a manoeuvre: judging it on where it leaves the opposition's picture of me
   // would tax every shot in the game for a benefit that belongs to positioning.
-  if (action.kind === 'shoot' || action.kind === 'pass' || action.kind === 'dive' || action.kind === 'tackle') {
+  if (
+    action.kind === 'shoot' ||
+    action.kind === 'pass' ||
+    action.kind === 'dive' ||
+    action.kind === 'tackle' ||
+    action.kind === 'strike'
+  ) {
     return 0.5;
   }
   const believed = pHeard > 0.4 ? noisePos : f.mirrorCentre;
@@ -829,14 +971,26 @@ function teamValue(endPos: Vec2, input: PolicyInput): number {
 }
 
 /** Direction to face. The carrier aims where he intends to throw; everyone else at the ball. */
-export function aimFor(action: Action, f: Features): Vec2 {
+export function aimFor(action: Action, f: Features, cfg: SimConfigView): Vec2 {
   if (action.kind === 'shoot' || action.kind === 'pass') return norm2(sub2(action.target!, f.me), { x: 1, y: 0 });
+  // A strike goes exactly where the body is facing, so facing the target IS the aim of the shot —
+  // and it has to be held all the way in, because the ball decides when the strike happens.
+  if (action.kind === 'strike' && action.target) {
+    const from = action.to ?? f.me;
+    return norm2(sub2(action.target, from), { x: f.team === 0 ? 1 : -1, y: 0 });
+  }
   if (action.kind === 'tackle') return action.dir!;
   if (action.kind === 'contest' && action.to) return norm2(sub2(action.to, f.me), { x: 1, y: 0 });
   if (f.role === 'carrier') {
     const target = action.kind === 'move' && action.to ? action.to : f.goal;
     return norm2(sub2(target, f.me), { x: 1, y: 0 });
   }
+  // In `touch` a body IS a bat, whether it meant to be one or not: any ball that comes within
+  // 0.9 m leaves along this vector. So facing the ball — the sensible stance in `classic`, where
+  // contact is a catch — means every accidental deflection goes back the way the ball came, which
+  // in front of one's own goal means into it. Facing up the pitch turns the same accident into a
+  // clearance, and it is what a blind defender who knows which way he is attacking would do.
+  if (cfg.ruleset === 'touch') return norm2(sub2(f.goal, f.me), { x: f.team === 0 ? 1 : -1, y: 0 });
   if (f.ballPos) return norm2(sub2(f.ballPos, f.me), { x: 1, y: 0 });
   return { x: f.team === 0 ? 1 : -1, y: 0 };
 }

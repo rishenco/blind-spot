@@ -21,6 +21,8 @@ export interface PlayerStats {
   passesReceived: number;
   throws: number;
   fumbles: number;
+  /** Strikes on the ball — the `touch` rule set's only contact with it. */
+  strikes: number;
   pings: number;
   /** The fight for the ball, from this body's point of view. */
   steals: number;
@@ -92,6 +94,19 @@ export interface ShapeStats {
   nearOpponentTicks: number;
   /** Turnovers forced by the passivity clock rather than by a rule anybody actively lost to. */
   passivityTurnovers: number;
+  /**
+   * The `touch` rule set's replacements for the numbers that were built on possession.
+   *
+   * There is no possession to measure any more, so an attack is a CHAIN: consecutive strikes by
+   * one team, ended by the other team touching the ball. `chains` is the count of them, `strikes`
+   * their total length, and `wildStrikes` how many of those were made at a speed the striker
+   * could not control — the direct read-out of whether the crowd is still sprinting into it.
+   */
+  chains: number;
+  strikes: number;
+  wildStrikes: number;
+  /** Goals whose last toucher was defending — the "it went in off somebody" rate. */
+  ownGoals: number;
 }
 
 export function emptyShapeStats(): ShapeStats {
@@ -115,6 +130,10 @@ export function emptyShapeStats(): ShapeStats {
     pairSamples: 0,
     nearOpponentTicks: 0,
     passivityTurnovers: 0,
+    chains: 0,
+    strikes: 0,
+    wildStrikes: 0,
+    ownGoals: 0,
   };
 }
 
@@ -147,6 +166,7 @@ export function emptyPlayerStats(id: EntityId, team: TeamId, controller: string)
     passesReceived: 0,
     throws: 0,
     fumbles: 0,
+    strikes: 0,
     pings: 0,
     steals: 0,
     robbed: 0,

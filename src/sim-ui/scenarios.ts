@@ -11,11 +11,11 @@
  * in tens of milliseconds — the same property that makes the scrubber possible.
  */
 import { AI_SCENARIOS } from '../sim/ai/scenarios';
-import { configFromPreset, type SimConfig } from '../sim/config';
+import { applyRuleset, configFromPreset, type SimConfig } from '../sim/config';
 import { makeController, scripted } from '../sim/controllers';
 import type { ControllerFactory, TimelineEntry } from '../sim/match';
 import type { EntityId, Vec2 } from '../sim/types';
-import { CatchHand, LoudHand, PingHand, ThrowHand, type HandScript } from './hands';
+import { CatchHand, LoudHand, PingHand, ThrowHand, TouchHand, type HandScript } from './hands';
 
 export interface ScenarioSetup {
   config: SimConfig;
@@ -246,6 +246,89 @@ function handsConfig(): SimConfig {
   config.match.spawnJitter = 0;
   return config;
 }
+
+/**
+ * The second rule set, in pictures.
+ *
+ * Three of them, and each one is a claim the report makes: a match plays; a settled strike goes
+ * where it was aimed; the same strike made at a sprint does not.
+ */
+/** Where the receiver stands in the touch storyboards — the ball is struck at this point. */
+const TOUCH_RECEIVER: Vec2 = { x: 4.2, y: 0 };
+/** And where the man who gets it wrong is standing when the same ball is struck at him. */
+const TOUCH_SPRINT: Vec2 = { x: 4.2, y: -5 };
+
+function touchConfig(): SimConfig {
+  const config = applyRuleset(configFromPreset('default'), 'touch');
+  config.match.spawnJitter = 0;
+  return config;
+}
+
+const TOUCH_SCENARIOS: Scenario[] = [
+  {
+    name: 'touch-match',
+    note: 'the touch rule set, four bots: nobody can hold the ball, so every meeting with it is a strike',
+    ticks: 420,
+    make: () => {
+      const config = applyRuleset(configFromPreset('default'), 'touch');
+      return { config, seed: 4, controllers: pair('bot', 'bot', config.teamSize), eyes: 0 };
+    },
+  },
+  {
+    name: 'touch-strike',
+    note: 'the strike, done properly: walk onto the line early, stop, and let it arrive on a loaded swing',
+    ticks: 260,
+    playerSlot: 2,
+    hands: [
+      // The passer: walks the two steps to the restart ball and strikes it at the receiver.
+      { slot: 0, script: new TouchHand('settle', TOUCH_RECEIVER, 'passer', null, 2.6) },
+      { slot: 2, script: new TouchHand('settle', null, 'settler', TOUCH_RECEIVER) },
+    ],
+    make: () => {
+      const config = touchConfig();
+      const setup = {
+        config,
+        seed: 20260825,
+        controllers: [
+          makeController('human'),
+          makeController('statue'),
+          makeController('human'),
+          makeController('statue'),
+        ],
+        eyes: 2,
+      };
+      return setup;
+    },
+  },
+  {
+    name: 'touch-wild',
+    note: 'the same ball, met at a full sprint: a ricochet rather than a shot, and the read-out says why',
+    ticks: 260,
+    playerSlot: 2,
+    hands: [
+      // The same pass, struck at the man rather than in front of him — and the only thing he
+      // does differently is run at it instead of standing still and letting it come.
+      { slot: 0, script: new TouchHand('settle', TOUCH_SPRINT, 'passer', null, 2.6) },
+      { slot: 2, script: new TouchHand('charge', null, 'sprinter', null, 2.9) },
+    ],
+    make: () => {
+      const config = touchConfig();
+      return {
+        config,
+        seed: 20260825,
+        controllers: [
+          makeController('human'),
+          makeController('statue'),
+          makeController('human'),
+          makeController('statue'),
+        ],
+        eyes: 2,
+      };
+    },
+  },
+];
+
+SCENARIOS.push(...TOUCH_SCENARIOS);
 
 const HAND_SCENARIOS: Scenario[] = [
   {

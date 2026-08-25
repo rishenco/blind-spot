@@ -8,7 +8,7 @@
  *
  *   npm run tune                       # the default grid
  *   npm run tune -- --seeds 1-8 --opponents striker,ballchaser,goalie
- *   npm run tune -- --grid shotRangeSpan=5,6,8 --grid infoMul=1,2.5
+ *   npm run tune -- --grid shotTimeSpan=1.0,1.35,1.8 --grid infoMul=1,2.5
  *
  * The score is goal difference per match against the whole panel, summed. It is a blunt
  * instrument on purpose: readability is judged by the deception scenarios (`npm run deception`)
@@ -49,7 +49,7 @@ const opponents = (flags.opponents ?? 'striker,ballchaser,goalie,statue').split(
 
 /** The default grid: the knobs that actually changed behaviour during development. */
 const DEFAULT_GRID: Record<string, number[]> = {
-  shotRangeSpan: [5, 6, 8],
+  shotTimeSpan: [1, 1.35, 1.8],
   positionDiscount: [0.5, 0.7],
   infoMul: [1, 2.5],
 };

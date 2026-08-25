@@ -172,7 +172,14 @@ export interface WorldState {
 
 /** A body meeting the ball. Reported so the match can tell a pass from an interception. */
 export interface BallTouch {
-  kind: 'catch' | 'fumble';
+  /**
+   * `strike` is the `touch` rule set's only way a body and the ball ever meet: it is not a
+   * catch (nothing is held) and not a fumble (nothing was dropped), so it needs its own row —
+   * the statistics that used to be built on possession are built on chains of these instead.
+   */
+  kind: 'catch' | 'fumble' | 'strike';
+  /** How fast the body was moving when it met the ball — a strike's quality, published for stats. */
+  speed?: number;
   player: EntityId;
   /** Who threw the ball that was touched, if it was in flight from a throw. */
   fromThrower: EntityId | null;
@@ -411,8 +418,12 @@ export class Simulation {
     // role is settled before the first step rather than flickering into existence during it.
     this.updateKeepers(state);
     const carrier = state.players.find((p) => p.team === team) ?? state.players[0]!;
-    carrier.hasBall = true;
-    state.ball.carrier = carrier.id;
+    // In `touch` nobody may hold the ball, so a restart puts it on the floor at the restarting
+    // player's feet, a stride in front of him. He still has to go and strike it, which is the
+    // rule set in one line: the ball is never anybody's, it is only ever nearer to somebody.
+    const held = this.config.ruleset === 'classic';
+    carrier.hasBall = held;
+    state.ball.carrier = held ? carrier.id : null;
     state.ball.vel = v2();
     state.ball.lastToucher = carrier.id;
     state.ball.lastThrower = null;
@@ -422,6 +433,15 @@ export class Simulation {
     state.ball.carryT = 0;
     state.ball.voiceT = 0;
     this.placeCarriedBall(state, carrier);
+    if (!held) {
+      // A stride further out than a carried ball would sit. Inside `touch.radius` the restarting
+      // player would strike it on the very first tick, before anybody had taken a step — a
+      // restart has to be a moment somebody walks into, not a shot that happens to them.
+      const off = this.config.player.radius + this.config.ball.carryOffset + 0.7;
+      state.ball.pos = v2(carrier.pos.x + carrier.aim.x * off, carrier.pos.y + carrier.aim.y * off);
+      state.ball.vel = v2();
+      state.ball.goalValid = true;
+    }
     state.pings.length = 0;
   }
 
@@ -488,7 +508,8 @@ export class Simulation {
     this.resolveCollisions();
     this.resolveTraps();
     this.stepBall(dt);
-    this.resolveBallContacts(intents);
+    if (cfg.ruleset === 'touch') this.resolveStrikes();
+    else this.resolveBallContacts(intents);
     this.resolveSteals(intents, dt);
     this.checkCreaseBall(dt);
     this.checkPassivity(dt);
@@ -548,6 +569,16 @@ export class Simulation {
       return;
     }
     const carrier = s.ball.carrier === null ? null : s.players[s.ball.carrier] ?? null;
+    // Who is attacking. In `classic` that is whoever holds the ball. In `touch` nobody holds it,
+    // so the honest public substitute is the half the ball is in — a fact every blind player has
+    // for free, because a loose ball never stops singing. Without this both teams would keep a
+    // keeper at all times, which in 2×2 means one outfield player each and nothing to occupy.
+    const attackingTeam: TeamId | null =
+      this.config.ruleset === 'classic'
+        ? (carrier?.team ?? null)
+        : dist2(s.ball.pos, this.field.goalCentre[0]!) < dist2(s.ball.pos, this.field.goalCentre[1]!)
+          ? 1
+          : 0;
     for (let team = 0; team < 2; team++) {
       const own = this.field.goalCentre[team]!;
       let incumbent: PlayerState | null = null;
@@ -566,7 +597,7 @@ export class Simulation {
       // A team with the ball has no keeper. Two bodies attacking against one defender and a
       // keeper is what makes a pass worth anything; a permanent keeper turns 2×2 into 1×1 with
       // two spectators, and a pass into a throw at a man standing in his own goal.
-      const attacking = carrier !== null && carrier.team === team;
+      const attacking = attackingTeam === team;
       if (attacking) {
         // But he is not stripped of the gloves *inside* his crease: the rules would eject him
         // from where he stands the instant his side won the ball, which reads as a bug however
@@ -797,6 +828,18 @@ export class Simulation {
       } else if (p.charging) {
         this.releaseThrow(p);
       }
+    } else if (cfg.ruleset === 'touch') {
+      // The pre-load. Nobody holds the ball in this rule set, so the wind-up is held in ADVANCE
+      // and spent by the ball arriving — which is the whole of prop 1: the skill is standing in
+      // the right place already wound up, never hitting a frame. It is capped rather than left to
+      // run, so the readout under a player's nose means something after two seconds of waiting.
+      if (intent.charge) {
+        p.charging = true;
+        p.chargeT = Math.min(p.chargeT + dt, cfg.throwing.maxCharge);
+      } else {
+        p.charging = false;
+        p.chargeT = 0;
+      }
     } else {
       p.charging = false;
       p.chargeT = 0;
@@ -926,17 +969,20 @@ export class Simulation {
     }
   }
 
+  /**
+   * Release speed for a given wind-up. Shared by the classic throw and the touch strike, because
+   * "how hard did you swing" has to feel like one number in both rule sets.
+   */
+  private releaseSpeed(chargeT: number): number {
+    const th = this.config.throwing;
+    if (chargeT < th.minCharge) return lerp(th.weakSpeed, th.minSpeed, clamp(chargeT / th.minCharge, 0, 1));
+    const u = clamp((chargeT - th.minCharge) / (th.maxCharge - th.minCharge), 0, 1);
+    return lerp(th.minSpeed, th.maxSpeed, u);
+  }
+
   private releaseThrow(p: PlayerState): void {
     const cfg = this.config;
-    const th = cfg.throwing;
-    const t = p.chargeT;
-    let speed: number;
-    if (t < th.minCharge) {
-      speed = lerp(th.weakSpeed, th.minSpeed, clamp(t / th.minCharge, 0, 1));
-    } else {
-      const u = clamp((t - th.minCharge) / (th.maxCharge - th.minCharge), 0, 1);
-      speed = lerp(th.minSpeed, th.maxSpeed, u);
-    }
+    const speed = this.releaseSpeed(p.chargeT);
     p.charging = false;
     p.chargeT = 0;
     p.hasBall = false;
@@ -958,6 +1004,118 @@ export class Simulation {
     // the rule survives whatever future mechanic does let a body in there.
     b.goalValid = !insideCrease(this.field, b.pos);
     this.emit('throw', b.pos, p.id);
+  }
+
+  // -- the strike (the `touch` rule set) ------------------------------------
+
+  /**
+   * The ball meeting a body, when a body cannot hold it.
+   *
+   * One body per tick — the nearest one whose cooldown has expired — so two players arriving
+   * together do not both get to swing at it, and the tie is broken by id rather than by anything
+   * that could differ between two runs.
+   */
+  private resolveStrikes(): void {
+    const s = this.state;
+    if (s.phase !== 'play') return;
+    const b = s.ball;
+    const r = this.config.touch.radius;
+    let best: PlayerState | null = null;
+    let bestD = Infinity;
+    for (const p of s.players) {
+      if (p.ballCd > 0 || p.downT > 0) continue;
+      const d = dist2(p.pos, b.pos);
+      if (d > r || d >= bestD) continue;
+      bestD = d;
+      best = p;
+    }
+    if (best) this.strikeBall(best, bestD);
+  }
+
+  /**
+   * One strike, and the whole of what makes this rule set a game rather than pinball.
+   *
+   * The output is a blend of two things, mixed by the STRIKER'S OWN SPEED and nothing else:
+   *
+   *   - what he meant — his aim, at the speed of the wind-up he was already holding;
+   *   - what physics would have done to a body that simply happened to be in the way — the
+   *     incoming ball bounced off him and dragged along by his own momentum.
+   *
+   * Standing or walking, he gets the first; at a sprint he gets the second plus a scatter angle
+   * that is most of a goal mouth at ten metres. That curve is prop 2 of the rule set, and it is
+   * meant to be felt rather than measured: a crowd of sprinters converging on the ball
+   * manufactures chaos for itself, while the man who arrived first and stopped owns it.
+   */
+  private strikeBall(p: PlayerState, d: number): void {
+    const cfg = this.config;
+    const t = cfg.touch;
+    const b = this.state.ball;
+    const n =
+      d > 1e-6 ? { x: (b.pos.x - p.pos.x) / d, y: (b.pos.y - p.pos.y) / d } : clone2(p.aim);
+
+    const relVel = { x: b.vel.x - p.vel.x, y: b.vel.y - p.vel.y };
+    const relSpeed = len2(relVel);
+    const own = len2(p.vel);
+    // A body committed to a dive strikes as if it were standing: the slide clearance and the
+    // keeper's save are supposed to be deliberate, and they are already paid for with a second
+    // on the floor. Everything else is priced on the speed of the legs.
+    const diving = t.diveControls && p.diveT > 0;
+    const wildness = diving
+      ? 0
+      : clamp((own - t.controlSpeed) / Math.max(1e-6, t.wildSpeed - t.controlSpeed), 0, 1);
+
+    const speed = this.releaseSpeed(p.chargeT);
+    const aimed = { x: p.aim.x * speed, y: p.aim.y * speed };
+    // The accident: reflect whatever was coming at him off his own surface, keep some of it, and
+    // add his own momentum. This is the term that makes running into the ball a mistake.
+    const along = dot2(relVel, n);
+    const bounce = along < 0
+      ? { x: (relVel.x - 2 * along * n.x) * t.ricochet, y: (relVel.y - 2 * along * n.y) * t.ricochet }
+      : { x: relVel.x * t.ricochet, y: relVel.y * t.ricochet };
+    const wild = { x: bounce.x + p.vel.x, y: bounce.y + p.vel.y };
+
+    const mix = { x: lerp(aimed.x, wild.x, wildness), y: lerp(aimed.y, wild.y, wildness) };
+    let dir = norm2(mix, p.aim);
+    if (wildness > 1e-3) dir = scatterDir(dir, (this.rng() * 2 - 1) * t.wildScatter * wildness);
+    // A strike never leaves the ball dead on the striker's toes: below this it would sit inside
+    // his own cooldown radius and be struck again by the same man, which is carrying by another
+    // name — the one thing this rule set exists to make impossible.
+    const mag = Math.max(len2(mix), cfg.throwing.weakSpeed * 0.5);
+
+    const off = cfg.player.radius + cfg.ball.radius + 0.04;
+    b.pos = { x: p.pos.x + dir.x * off, y: p.pos.y + dir.y * off };
+    b.vel = { x: dir.x * mag, y: dir.y * mag };
+    b.carrier = null;
+    b.inCreaseT = 0;
+    b.carryT = 0;
+    b.voiceT = 0;
+    const fromThrower = b.lastToucher !== null && b.lastToucher !== p.id ? b.lastToucher : null;
+    const fromTeam = fromThrower === null ? null : this.teamOf(fromThrower);
+    this.noteSave(p, fromTeam, relSpeed);
+    b.lastToucher = p.id;
+    b.lastThrower = p.id;
+    b.lastThrowerTeam = p.team;
+    b.goalValid = !insideCrease(this.field, b.pos);
+    p.ballCd = t.cooldownSec;
+    p.charging = false;
+    p.chargeT = 0;
+
+    const wildly = wildness >= t.wildSoundAt;
+    if (wildly) {
+      // Proprioception, and the same word the classic rule set uses for the same mistake: the
+      // read-out under the player's nose says TOO FAST, because it was.
+      p.lastCatchFail = 'sprint';
+      p.lastCatchFailT = this.state.t;
+    }
+    // Every strike is audible, and that is prop 3 read backwards: dribbling is a chain of
+    // strikes, so walking the ball quietly up the touchline is not a thing physics allows. A
+    // gentle nudge carries as far as a catch used to; a full-blooded shot carries as far as a
+    // throw; a wild one is a mistake and is heard like one.
+    const loud = wildly
+      ? cfg.loudness.fumble
+      : lerp(cfg.loudness.catch, cfg.loudness.throw, clamp(mag / Math.max(1e-6, cfg.throwing.maxSpeed), 0, 1));
+    this.emitAt(wildly ? 'fumble' : 'throw', b.pos, p.id, loud);
+    this.touches.push({ kind: 'strike', player: p.id, fromThrower, fromTeam, speed: own });
   }
 
   // -- the fight for the ball ----------------------------------------------
@@ -1410,18 +1568,30 @@ export class Simulation {
       p.charging = false;
       p.chargeT = 0;
     }
-    best.hasBall = true;
-    best.ballCd = 0;
-    b.carrier = best.id;
+    const held = this.config.ruleset === 'classic';
+    best.hasBall = held;
+    best.ballCd = held ? 0 : this.config.touch.cooldownSec;
+    b.carrier = held ? best.id : null;
     b.vel = v2();
     b.lastToucher = best.id;
     b.lastThrower = null;
     b.lastThrowerTeam = null;
-    b.goalValid = false;
+    b.goalValid = held ? false : true;
     b.inCreaseT = 0;
     b.carryT = 0;
     b.voiceT = 0;
     this.placeCarriedBall(s, best);
+    if (!held) {
+      // Nobody can be handed a ball in this rule set, so the restart is a placement: the ball is
+      // put on the floor in front of the defending player, outside his own crease, and he has to
+      // go and strike it like anything else. The short cooldown stops the placement itself from
+      // being struck on the very tick it lands.
+      b.vel = v2();
+      const g = this.field.goalCentre[team]!;
+      const away = norm2({ x: b.pos.x - g.x, y: b.pos.y - g.y }, { x: team === 0 ? 1 : -1, y: 0 });
+      const out = this.field.creaseRadius + 0.8;
+      if (dist2(b.pos, g) < out) b.pos = { x: g.x + away.x * out, y: g.y + away.y * out };
+    }
     this.turnovers.push({ team, reason, t: s.t });
     this.emit('whistle', b.pos, best.id);
   }

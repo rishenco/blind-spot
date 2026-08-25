@@ -88,6 +88,43 @@ function drawCourt(ctx: CanvasRenderingContext2D, cam: Camera, o: HudOptions): v
   };
   mouth(attacking, '#4a3a16', 0.9);
   mouth(defending, '#1b2735', 0.9);
+
+  drawBoards(ctx, cam, o);
+}
+
+/**
+ * The boards, the way blind football uses them.
+ *
+ * In the real sport the side lines are physical barriers precisely so that a player can find out
+ * where he is by touching one. The pitch outline above is memory and stays at the edge of
+ * visibility; THIS is the touch channel the concept already grants ("контур в ~0.5 м вокруг
+ * тела"), extended along the one surface that is always exactly where it was: a wall within
+ * reach lights up along its length, brighter the closer it is.
+ */
+function drawBoards(ctx: CanvasRenderingContext2D, cam: Camera, o: HudOptions): void {
+  const f = o.frame.field;
+  const p = o.frame.self.pos;
+  const FEEL = 2.2;
+  const seg = (a: { x: number; y: number }, b: { x: number; y: number }, gap: number): void => {
+    if (gap > FEEL) return;
+    const k = 1 - gap / FEEL;
+    ctx.save();
+    ctx.globalAlpha = 0.15 + 0.55 * k * k;
+    ctx.strokeStyle = '#4dd8ff';
+    ctx.lineWidth = 1 + 2 * k;
+    ctx.beginPath();
+    ctx.moveTo(sx(cam, a), sy(cam, a));
+    ctx.lineTo(sx(cam, b), sy(cam, b));
+    ctx.stroke();
+    ctx.restore();
+  };
+  // Only the stretch of wall within arm's reach along the pitch, not the whole side: what is
+  // being drawn is a hand on a board, not a floodlight.
+  const span = 3.5;
+  seg({ x: p.x - span, y: f.halfHeight }, { x: p.x + span, y: f.halfHeight }, f.halfHeight - p.y);
+  seg({ x: p.x - span, y: -f.halfHeight }, { x: p.x + span, y: -f.halfHeight }, f.halfHeight + p.y);
+  seg({ x: f.halfWidth, y: p.y - span }, { x: f.halfWidth, y: p.y + span }, f.halfWidth - p.x);
+  seg({ x: -f.halfWidth, y: p.y - span }, { x: -f.halfWidth, y: p.y + span }, f.halfWidth + p.x);
 }
 
 function ring(
@@ -167,18 +204,21 @@ export function drawHud(ctx: CanvasRenderingContext2D, cam: Camera, o: HudOption
   // --- the aim line, and the wind-up on it -------------------------------
   const aimLen = 1.1 + feel.charge * 1.6;
   const tip = { x: pos.x + self.aim.x * aimLen, y: pos.y + self.aim.y * aimLen };
+  // A loaded swing counts as "armed" whether or not the ball is in the hand: in `touch` nobody
+  // ever holds it, and the whole skill is standing there already wound up.
+  const armed = self.hasBall || self.charging;
   ctx.save();
-  ctx.globalAlpha = self.hasBall ? 0.75 : 0.3;
-  ctx.strokeStyle = self.hasBall ? mixHex(CHARGE_COLD, CHARGE_HOT, feel.charge) : '#ffffff';
-  ctx.lineWidth = self.hasBall ? 1 + feel.charge * 2.5 : 1;
-  ctx.setLineDash(self.hasBall ? [] : [2, 4]);
+  ctx.globalAlpha = armed ? 0.75 : 0.3;
+  ctx.strokeStyle = armed ? mixHex(CHARGE_COLD, CHARGE_HOT, feel.charge) : '#ffffff';
+  ctx.lineWidth = armed ? 1 + feel.charge * 2.5 : 1;
+  ctx.setLineDash(armed ? [] : [2, 4]);
   ctx.beginPath();
   ctx.moveTo(sx(cam, pos), sy(cam, pos));
   ctx.lineTo(sx(cam, tip), sy(cam, tip));
   ctx.stroke();
   ctx.restore();
 
-  if (self.charging && self.hasBall) drawWindup(ctx, cam, o);
+  if (self.charging) drawWindup(ctx, cam, o);
   if (feel.releaseFlash > 0) drawRelease(ctx, cam, o);
 
   // --- the ball leash: bearing and range to the one thing always audible ---
@@ -507,6 +547,19 @@ function drawChrome(ctx: CanvasRenderingContext2D, cam: Camera, o: HudOptions): 
       11,
       'right',
     );
+  }
+
+  // --- the named job, top centre -----------------------------------------
+  // The one thing on screen that answers "what am I supposed to be doing". It sits above
+  // everything else, it changes rarely (see `Feel.updateTask`) and it is two or three words:
+  // a person with a black screen and no idea where anybody is has no attention to spare for a
+  // sentence. Nothing in it is intel — see `Task`.
+  const task = feel.task;
+  if (task) {
+    const age = feel.t - task.since;
+    const alpha = Math.min(1, age * 4);
+    text(ctx, task.text, w / 2, 34, task.colour, 20, 'center', alpha * 0.95);
+    if (task.why) text(ctx, task.why, w / 2, 50, '#7e93a7', 11, 'center', alpha * 0.7);
   }
 
   // --- the tutor line, centred, one at a time ----------------------------

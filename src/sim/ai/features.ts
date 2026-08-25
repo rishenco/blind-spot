@@ -147,8 +147,11 @@ export function deriveFeatures(
   mirrorArea /= nm;
   const mirrorCentre = { x: mcx / nm, y: mcy / nm };
 
+  // In `touch` the ball is always loose, so the meeting point is always the question: there is
+  // no state of the world in which somebody is holding it and nobody has to go and get it.
+  const touchRules = cfg.ruleset === 'touch';
   const intercept =
-    ball && belief.possession !== 'self' && belief.possession !== 'mate'
+    ball && (touchRules || (belief.possession !== 'self' && belief.possession !== 'mate'))
       ? solveIntercept(
           selfPos,
           selfSpeed,
@@ -157,7 +160,11 @@ export function deriveFeatures(
           belief.ballPhysics,
           cfg.player.accel,
           cfg.player.runSpeed,
-          cfg.catching.radius * 0.7,
+          (touchRules ? cfg.touch.radius : cfg.catching.radius) * 0.7,
+          2.5,
+          // Half a second of spare time in `touch`: enough to have stopped moving before it
+          // arrives, which is what a controlled strike costs.
+          touchRules ? 0.5 : 0,
         )
       : null;
 
@@ -168,7 +175,17 @@ export function deriveFeatures(
   // running the same code usually agree without saying a word (RoboCup's trick). When the
   // team-mate's position has gone stale they can disagree — and that is honest, not a bug.
   let primary = true;
-  if (mate && ballPos) {
+  const mateKeeps = (belief.mate?.keeper ?? false) && cfg.keeper.enabled;
+  const iKeep = isKeeper && cfg.keeper.enabled;
+  if (mateKeeps && !iKeep) {
+    // The gloves settle it: the keeper is usually the body nearest his own goal, which in
+    // defence is often the body nearest the ball as well. Letting the depth chart win that race
+    // leaves a team with a keeper chasing across the pitch and an outfield player standing
+    // still — which is exactly the picture 2×2 cannot afford.
+    primary = true;
+  } else if (iKeep && !mateKeeps) {
+    primary = false;
+  } else if (mate && ballPos) {
     const target = intercept ? intercept.point : ballPos;
     const dMe = dist2(selfPos, target);
     const dMate = dist2(mate.pos, target);
@@ -177,7 +194,17 @@ export function deriveFeatures(
   }
 
   let role: Role;
-  if (hasBall) role = 'carrier';
+  if (touchRules) {
+    // No carrier role exists here — nobody carries anything. What replaces it is a strict split
+    // between the one man going to meet the ball and the one who must NOT: the concept's whole
+    // complaint was four bodies converging on it, and this is the line that forbids the second
+    // body from joining in. Whether the man not chasing pushes up or drops off is decided by
+    // whose chain it is, which is a thing he honestly heard.
+    if (isKeeper && cfg.keeper.enabled) role = 'keeper';
+    else if (primary) role = 'chase';
+    else if (belief.possession === 'opponent') role = 'guard';
+    else role = 'support';
+  } else if (hasBall) role = 'carrier';
   else if (isKeeper && cfg.keeper.enabled) role = 'keeper';
   else if (belief.possession === 'mate') role = 'support';
   else if (belief.possession === 'opponent') role = 'guard';
@@ -325,13 +352,28 @@ export function shotValue(f: Features, q: Vec2, cfg: SimConfigView): { value: nu
   ];
   const d = dist2(q, f.goal);
   const legal = d > f.field.creaseRadius + cfg.player.radius * 0.5;
-  // Distance term. Steeper than it looks like it should be, and deliberately: a throw is
-  // perfectly accurate in this simulation, so the only thing distance really buys the defence is
-  // *time* to be on the line — but that is exactly the thing the shooter cannot see. A gentle
-  // curve made the bot fire from twelve metres into two defenders it could not hear, eleven
-  // times a match, and score once.
-  const span = typeof cfg.ai.shotRangeSpan === 'number' ? cfg.ai.shotRangeSpan : 10;
-  const range = clamp(1 - (d - f.field.creaseRadius) / span, 0.05, 1);
+  // The distance term, and it is now a TIME term — measured, 2026-08-25, and it turned out to be
+  // the single strongest lever on both of the numbers this pass is judged by.
+  //
+  // It used to be `1 − (d − crease)/shotRangeSpan` with a span of 10 m, and the whole shape of
+  // the game hung off that constant: sweeping it from 4 to 60 moved the shot-distance IQR from
+  // 0.5 m to 9.5 m and the scrum share from 34 % to 24 %, in BOTH rule sets, without one rule
+  // changing. A bot that only values shots from six metres walks the ball to six metres, and
+  // everybody else walks there with it — most of "они сбиваются в кучу" was this constant.
+  //
+  // What replaces it is the thing distance is actually a proxy for: how long the ball is in the
+  // air, which is how long a defender who heard the strike has to get onto its line. That is
+  // physical, it needs no tuning per rule set, and it prices a slow ball's long shot as the bad
+  // idea it is while leaving a fast one's alone.
+  const speed = cfg.throwing.maxSpeed;
+  const decel = Math.max(1e-6, cfg.ball.friction);
+  const arrival = speed * speed - 2 * decel * d;
+  // It cannot get there at all: not a shot, whatever the lane looks like.
+  if (arrival <= 0) return { value: 0, target: targets[1]!, charge: cfg.throwing.maxCharge };
+  const flight = (speed - Math.sqrt(arrival)) / decel;
+  const spanSec = typeof cfg.ai.shotTimeSpan === 'number' ? cfg.ai.shotTimeSpan : 1.35;
+  const free = 0.35;
+  const range = clamp(1 - (flight - free) / Math.max(1e-6, spanSec), 0.05, 1);
   let best = { value: 0, target: targets[1]!, charge: cfg.throwing.maxCharge };
   if (!legal) return best;
   for (const t of targets) {

@@ -190,7 +190,12 @@ export class Perceiver {
       opponents: this.opponents,
       mates: this.teammates.map((id) => {
         const mate = view.players[id]!;
-        return { id, pos: { x: mate.pos.x, y: mate.pos.y }, vel: { x: mate.vel.x, y: mate.vel.y } };
+        return {
+          id,
+          pos: { x: mate.pos.x, y: mate.pos.y },
+          vel: { x: mate.vel.x, y: mate.vel.y },
+          keeper: mate.keeper,
+        };
       }),
     };
   }

@@ -26,6 +26,8 @@ export interface Camera {
 
 export const TEAM_COLOR = ['#4dd8ff', '#ff9a52'] as const;
 export const BALL_COLOR = '#ffd166';
+/** The team-mate: the one body that is always known, so he gets his own colour and never fades. */
+export const MATE_COLOR = '#7dffa8';
 
 /**
  * Warm for sound, per the inherited language. The sonar is white because it is the loud one.
@@ -537,6 +539,35 @@ export function drawPerceived(ctx: CanvasRenderingContext2D, cam: Camera, o: Per
     ctx.arc(sx(cam, m.ball.pos), sy(cam, m.ball.pos), 4, 0, Math.PI * 2);
     ctx.fill();
     if (o.showVectors) arrow(ctx, cam, m.ball.pos, m.ball.vel, BALL_COLOR, 0.12);
+  }
+
+  // --- the team-mate: the only body on the pitch that is never a guess -----
+  // He is in the frame, exactly, always (`PerceptionFrame.mates`, the человек's decision), and
+  // until now nothing drew him — so the one fixed landmark a blind player has was invisible.
+  // He is drawn as a landmark rather than as a dot: a ring, a name, and a thin line from your own
+  // body to his with the distance on it, because "where am I" in this game is answered by "eight
+  // metres that way from him and four from the wall" and by nothing else.
+  for (const mate of frame.mates) {
+    const gap = Math.hypot(mate.pos.x - frame.self.pos.x, mate.pos.y - frame.self.pos.y);
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.strokeStyle = MATE_COLOR;
+    ctx.setLineDash([2, 8]);
+    ctx.beginPath();
+    ctx.moveTo(sx(cam, frame.self.pos), sy(cam, frame.self.pos));
+    ctx.lineTo(sx(cam, mate.pos), sy(cam, mate.pos));
+    ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = 0.8;
+    ctx.strokeStyle = MATE_COLOR;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(sx(cam, mate.pos), sy(cam, mate.pos), Math.max(5, o.playerRadius * cam.scale), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    if (o.showVectors) arrow(ctx, cam, mate.pos, mate.vel, MATE_COLOR);
+    label(ctx, `P${mate.id} · ${gap.toFixed(0)} m`, sx(cam, mate.pos) + 8, sy(cam, mate.pos) - 7, MATE_COLOR, 10);
   }
 
   // --- self: the one thing known exactly ----------------------------------

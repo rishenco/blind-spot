@@ -1,7 +1,7 @@
 /** The rules of the concept, each one pinned by the smallest situation that can break it. */
 import { describe, expect, it } from 'vitest';
 
-import { defaultConfig } from '../config';
+import { applyRuleset, defaultConfig } from '../config';
 import { roster, scripted } from '../controllers';
 import { insideCrease } from '../field';
 import { Match } from '../match';
@@ -492,5 +492,164 @@ describe('the fight for the ball', () => {
     expect(cut('run')).toBe(true);
     // Walking into a corner is how a body arrives anywhere quietly; it must stay free.
     expect(cut('walk')).toBe(false);
+  });
+});
+
+/**
+ * The second rule set. Every one of these is a property the whole design of `touch` rests on, so
+ * each is pinned by the smallest situation that could break it.
+ */
+describe('the touch rule set', () => {
+  /** One body per side, no jitter, the ball placed by hand. */
+  function rig(mutate: (c: ReturnType<typeof defaultConfig>) => void = () => {}) {
+    const cfg = applyRuleset(defaultConfig(), 'touch');
+    cfg.teamSize = 1;
+    cfg.match.spawnJitter = 0;
+    cfg.contest.tackle.enabled = false;
+    cfg.contest.collision.enabled = false;
+    mutate(cfg);
+    return new Simulation(cfg, 11);
+  }
+
+  /** Walks the world forward until the ball is struck, or gives up. */
+  function untilStrike(sim: Simulation, make: (tick: number) => Intent[], limit = 240) {
+    for (let i = 0; i < limit; i++) {
+      const out = sim.step(make(i));
+      if (out.touches.some((t) => t.kind === 'strike')) return out;
+    }
+    return null;
+  }
+
+  it('never lets anybody hold the ball, at kickoff or afterwards', () => {
+    const sim = rig();
+    expect(sim.state.ball.carrier).toBeNull();
+    const n = sim.playerCount;
+    run(sim, 900, () => {
+      const intents = idleFor(n);
+      for (const intent of intents) {
+        intent.move = { x: 1, y: 0 };
+        intent.moveMode = 'run';
+        intent.catch = true;
+      }
+      return intents;
+    });
+    expect(sim.state.ball.carrier).toBeNull();
+    for (const p of sim.state.players) expect(p.hasBall).toBe(false);
+  });
+
+  it('sends a ball met by a standing body exactly where that body is facing', () => {
+    const sim = rig();
+    const p = sim.state.players[0]!;
+    p.pos = { x: 0, y: 0 };
+    p.vel = { x: 0, y: 0 };
+    p.aim = { x: 0, y: 1 };
+    sim.state.players[1]!.pos = { x: 10, y: 8 };
+    sim.state.ball.pos = { x: -2, y: 0 };
+    sim.state.ball.vel = { x: 6, y: 0 };
+    const out = untilStrike(sim, () => {
+      const intents = idleFor(2);
+      intents[0]!.aim = { x: 0, y: 1 };
+      return intents;
+    });
+    expect(out).not.toBeNull();
+    const vel = sim.state.ball.vel;
+    // Straight up the y axis, whatever direction it came from.
+    expect(vel.y).toBeGreaterThan(3);
+    expect(Math.abs(vel.x)).toBeLessThan(Math.abs(vel.y) * 0.05);
+  });
+
+  it('scatters the same strike wildly when the body arrives at a sprint', () => {
+    const clean: number[] = [];
+    const wild: number[] = [];
+    for (let seed = 0; seed < 12; seed++) {
+      for (const sprint of [false, true]) {
+        const cfg = applyRuleset(defaultConfig(), 'touch');
+        cfg.teamSize = 1;
+        cfg.match.spawnJitter = 0;
+        const sim = new Simulation(cfg, 100 + seed);
+        const p = sim.state.players[0]!;
+        p.pos = { x: 0, y: 0 };
+        p.aim = { x: 0, y: 1 };
+        p.vel = sprint ? { x: cfg.player.runSpeed, y: 0 } : { x: 0, y: 0 };
+        sim.state.players[1]!.pos = { x: 11, y: 6 };
+        sim.state.ball.pos = { x: 0.6, y: 0 };
+        sim.state.ball.vel = { x: 0, y: 0 };
+        const out = untilStrike(sim, () => {
+          const intents = idleFor(2);
+          intents[0]!.aim = { x: 0, y: 1 };
+          if (sprint) {
+            intents[0]!.move = { x: 1, y: 0 };
+            intents[0]!.moveMode = 'run';
+          }
+          return intents;
+        }, 20);
+        expect(out).not.toBeNull();
+        const v = sim.state.ball.vel;
+        // How far off "straight up" the ball actually went, as a fraction of its speed.
+        const off = Math.abs(v.x) / Math.max(1e-6, Math.hypot(v.x, v.y));
+        (sprint ? wild : clean).push(off);
+      }
+    }
+    const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / xs.length;
+    expect(mean(clean)).toBeLessThan(0.05);
+    // Not "a bit worse": the whole anti-scrum argument is that a sprinting touch is a different
+    // outcome, not a slightly less accurate one.
+    expect(mean(wild)).toBeGreaterThan(0.4);
+  });
+
+  it('makes every touch audible — there is no quiet way to move the ball', () => {
+    const sim = rig();
+    const p = sim.state.players[0]!;
+    p.pos = { x: 0, y: 0 };
+    p.aim = { x: 1, y: 0 };
+    sim.state.players[1]!.pos = { x: 11, y: 6 };
+    sim.state.ball.pos = { x: 0.6, y: 0 };
+    sim.state.ball.vel = { x: 0, y: 0 };
+    const out = untilStrike(sim, () => idleFor(2), 20);
+    expect(out).not.toBeNull();
+    const heard = out!.events.filter((e) => e.kind === 'throw' || e.kind === 'fumble');
+    expect(heard.length).toBeGreaterThan(0);
+    expect(heard[0]!.intensity).toBeGreaterThanOrEqual(sim.config.loudness.catch);
+  });
+
+  it('hits harder with a wind-up held in advance than with none at all', () => {
+    const speeds: number[] = [];
+    for (const charged of [false, true]) {
+      const sim = rig();
+      const p = sim.state.players[0]!;
+      p.pos = { x: 0, y: 0 };
+      p.aim = { x: 1, y: 0 };
+      sim.state.players[1]!.pos = { x: 11, y: 6 };
+      // Far enough away that a held wind-up reaches full power before the ball arrives.
+      sim.state.ball.pos = { x: -6, y: 0 };
+      sim.state.ball.vel = { x: 4, y: 0 };
+      const out = untilStrike(sim, () => {
+        const intents = idleFor(2);
+        intents[0]!.aim = { x: 1, y: 0 };
+        intents[0]!.charge = charged;
+        return intents;
+      });
+      expect(out).not.toBeNull();
+      speeds.push(Math.hypot(sim.state.ball.vel.x, sim.state.ball.vel.y));
+    }
+    expect(speeds[1]!).toBeGreaterThan(speeds[0]! * 1.5);
+  });
+
+  it('plays a whole bot match under both rule sets without leaving the pitch', () => {
+    for (const ruleset of ['classic', 'touch'] as const) {
+      const cfg = applyRuleset(defaultConfig(), ruleset);
+      cfg.match.durationSec = 25;
+      cfg.match.goalsToWin = 1e9;
+      const match = new Match({ config: cfg, seed: 4, controllers: roster('bot', 'bot', 2) });
+      const res = match.run();
+      for (const p of match.sim.state.players) {
+        expect(Math.abs(p.pos.x)).toBeLessThanOrEqual(match.field.halfWidth + 1e-6);
+        expect(Math.abs(p.pos.y)).toBeLessThanOrEqual(match.field.halfHeight + 1e-6);
+      }
+      // The bot has to actually play both: a rule set nobody can move the ball in is not a
+      // rule set, it is a bug that happens to typecheck.
+      const moved = ruleset === 'touch' ? res.stats.shape.strikes : res.stats.shape.throws;
+      expect(moved).toBeGreaterThan(3);
+    }
   });
 });

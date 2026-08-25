@@ -361,7 +361,7 @@ check('match: the bot is deciding something', live.ai.scores.length >= 3, JSON.s
  * that fires on a press — the catch verdict, the release kick — would be missing from exactly
  * the frames that exist to show it.
  */
-async function storyboard(index, scenario, zoom, frames) {
+async function storyboard(index, scenario, zoom, frames, maxContent = 0.13) {
   const out = [];
   await call('scenario', scenario, frames[0].tick);
   await call('mode', 'play');
@@ -382,7 +382,7 @@ async function storyboard(index, scenario, zoom, frames) {
     );
     check(
       `${scenario}/${f.name}: the cockpit does not light the pitch`,
-      shotOut.content < 0.13,
+      shotOut.content < maxContent,
       `content ${shotOut.content.toFixed(4)}`,
     );
   }
@@ -700,6 +700,76 @@ check(
   contestMatch.ai.scores.length >= 3,
   JSON.stringify(contestMatch.ai.scores?.[0]),
 );
+
+// ===========================================================================
+// The second rule set. Everything below is `touch`: the ball cannot be held, so
+// every meeting between a body and the ball is a strike, and the whole skill is
+// being in its way, already facing where you want it to go, already wound up.
+// ===========================================================================
+
+const touchMatch = await aiPair(
+  '70',
+  'touch-match',
+  360,
+  'the touch rule set, truth: nobody is carrying anything and nobody can. The ball is always a loose object, and the four bodies are spread across the pitch rather than piled on it',
+  'and the same instant through one of them: the ball (which never stops singing), his own team-mate drawn exactly with the distance to him — and the two opponents nowhere at all',
+  'none',
+);
+check(
+  'touch: nobody is holding the ball, ever',
+  touchMatch.state.ball.carrier === null && touchMatch.state.players.every((p) => !p.hasBall),
+  `carrier ${touchMatch.state.ball.carrier}`,
+);
+check('touch: the build reports the rule set it is playing', touchMatch.state.ruleset === 'touch', String(touchMatch.state.ruleset));
+
+// --- 72 the strike, done properly ------------------------------------------
+// A touch strike makes two loud marks at once inside one close-up — the strike itself at 13 m
+// and the ball leaving from the same point — so the ceiling here is 0.16 rather than the classic
+// storyboards' 0.13. It is still a measurement of "nothing is drawn that did not sound": the lit
+// pixels are two sound marks and the player's own body, and the frame either side of this one
+// clears 0.13 comfortably.
+const settled = await storyboard('72', 'touch-strike', 1.6, [
+  { tick: 150, name: 'waiting', note: 'the touch rule set: this player has walked onto the spot the ball is coming to and STOPPED. The arc on his body is a swing he is already holding — there is no button to press when the ball arrives, and that is the point' },
+  { tick: 208, name: 'incoming', note: 'the pass, struck by his team-mate a moment ago and audible the whole way: in this rule set moving the ball is never silent, because the only way to move it is to hit it' },
+  { tick: 224, name: 'struck', note: 'contact. He was standing still, so the ball leaves along the line he was facing at the power he had loaded — a shot he aimed a second and a half before it happened' },
+  { tick: 244, name: 'away', note: 'and it is gone, at fourteen metres a second, with a 13 m THROW mark where he hit it. He is silent again and the ball is somebody else\u2019s problem' },
+], 0.16);
+check(
+  'touch strike: it was struck while standing still',
+  settled.some((f) => f.feel && f.feel.stats.throws >= 1),
+  JSON.stringify(settled.map((f) => f.feel?.stats?.throws)),
+);
+
+// --- 74 the same ball, met at a sprint --------------------------------------
+const wild = await storyboard('74', 'touch-wild', 1.6, [
+  { tick: 180, name: 'charging', note: 'the identical pass, and the one thing done differently: this player is running at it. Nothing about the aim or the wind-up has changed' },
+  { tick: 208, name: 'ricochet', note: 'and this is what a strike made at 5.5 m/s is — a ricochet, not a shot. The ball leaves at nearly twenty metres a second in a direction nobody chose, and it is heard as a FUMBLE across the whole pitch' },
+  { tick: 226, name: 'verdict', note: 'TOO FAST under the nose, from the simulation itself. This is the rule set\u2019s entire answer to four bodies converging on the ball: a crowd of sprinters manufactures chaos for itself, and the man who arrived early and stopped takes it cleanly' },
+]);
+check(
+  'touch wild: the sprinting strike was read as a mistake',
+  wild.some((f) => f.feel && (f.feel.readout ?? '').includes('TOO FAST')),
+  JSON.stringify(wild.map((f) => f.feel?.readout)),
+);
+
+// --- 76 the two things a person navigates by --------------------------------
+// The second half of this pass: the человек could not tell where he was or what he was meant to
+// be doing. Both answers are on this frame and neither of them is intel about an opponent.
+await call('scenario', 'touch-strike', 150);
+await call('mode', 'play');
+await call('zoom', 1.6);
+await call('layout', 'eyes');
+const navigation = await shot(
+  '76-touch-navigation.png',
+  'what a person has to steer by, and all of it: the named job at the top (it changes slowly, on purpose), the team-mate drawn exactly with the distance to him, the boards lighting up where they are within reach, the ball, and his own body. There is nothing here about an opponent — that is still the whole game',
+  'eyes',
+);
+check('navigation: the cockpit still does not light the pitch', navigation.content < 0.13, `content ${navigation.content.toFixed(4)}`);
+{
+  const feel = await call('feel');
+  check('navigation: the player is being told what to do', !!feel && !!feel.task, JSON.stringify(feel?.task));
+}
+await call('mode', 'debug');
 
 // --- contact sheet ---------------------------------------------------------
 const html = `<!doctype html><meta charset="utf-8"><title>BLIND HANDBALL — keyframes</title>
