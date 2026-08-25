@@ -12,7 +12,8 @@
  *  - `paintRadius`  — how much static geometry the sound reveals around its origin (§3.3,
  *                     left column). This is what the *player* gets out of the noise.
  *  - `hearingRadius`— how far away a listener can notice the event at all (§3.3, right
- *                     column). Nothing consumes it yet; the robo-dogs will.
+ *                     column). `SoundBus.canHear` is the one place it is read, and every ear in
+ *                     the game reads it through that.
  *
  * It also carries who made it — `source` and `emitter` — and that pair is deliberately *not* a
  * viewer's reading of it. See `SoundSource` and `eventTint`.
@@ -131,7 +132,7 @@ export const WAVE_SPEEDS: Readonly<Record<WaveGroup, number>> = Object.freeze({
 export interface SoundClassProfile {
   /** Paint radius at intensity 1, metres (§3.3). Tunable at runtime. */
   paintRadius: number;
-  /** How far a dog hears it, metres (§3.3). Not consumed yet — the enemy arrives later. */
+  /** How far this class carries, metres (§3.3, right column). Read by `SoundBus.canHear`. */
   hearingRadius: number;
   /** Full apex angle of the emission cone in degrees; 360 means omnidirectional. */
   coneAngleDeg: number;
@@ -429,6 +430,41 @@ export class SoundBus {
       fanoutScratch.length = 0;
     }
     return event;
+  }
+
+  /**
+   * **One hearing law, for every ear** — §3.1.
+   *
+   * An event reaches a listener only when the distance is inside *both* numbers: the listener's
+   * own range (18 m for the player's rig, more with the Sensitivity chip, whatever the spider
+   * turns out to have) and the event's own carry radius, the right-hand column of §3.3. A
+   * crouch-step carries 2 m, so standing 10 m away you do not hear it — and neither does
+   * anything else.
+   *
+   * `Math.min` of the two, in one place, deliberately. The alternative is a listener whose ears
+   * obey different physics from the enemy's, which would make §3.3's right column a rule on one
+   * side of the hunt and a fiction on the other: the player would receive paint from a footfall
+   * quiet enough that the spider two metres from it heard nothing. The whole table is a set of
+   * promises about *how far a sound goes*, and a sound that goes further for one listener than
+   * for another is the system lying (law 2).
+   *
+   * Static and instance-free because it is a law rather than a tuning knob — the same reason
+   * `landingRadius` is. M4's spider calls this exact function with its own range; so does every
+   * ear added after it.
+   */
+  static canHear(
+    event: SoundEvent,
+    listenerX: number,
+    listenerY: number,
+    listenerZ: number,
+    listenerRange: number,
+  ): boolean {
+    const distance = Math.hypot(
+      event.x - listenerX,
+      event.y - listenerY,
+      event.z - listenerZ,
+    );
+    return distance <= Math.min(listenerRange, event.hearingRadius);
   }
 
   /**

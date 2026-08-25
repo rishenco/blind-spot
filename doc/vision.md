@@ -87,7 +87,9 @@ a source's color — that would make age and trust unreadable.
 ### 3.3 Event classes (paint radius at origin / range the enemy hears it)
 
 The shipped classes match `src/paint/soundEvents.ts` exactly; rows marked **unbuilt** are
-designed but have no emitter yet. Nothing consumes the hearing column until the spider (M4).
+designed but have no emitter yet. The right-hand column is live for every ear that exists
+today: `SoundBus.canHear` is the one place it is read, and the player's own paint is already
+gated on it (§3.1). The spider joins that predicate at M4 rather than bringing its own.
 
 | Event | Paint | Enemy hears |
 |---|---|---|

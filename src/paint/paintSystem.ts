@@ -26,7 +26,7 @@
 import * as THREE from 'three';
 import type { StaticWorld } from '../core/collision';
 import { DEFAULT_DUST_SEED, makeRng } from '../core/rng';
-import type { SoundClass, SoundEvent } from './soundEvents';
+import { SoundBus, type SoundClass, type SoundEvent } from './soundEvents';
 import { type AgeRamp, defaultAgeRamp } from './ageRamp';
 import { MAX_LIVE_WAVES, TracerStreaks, WaveDust, type LiveWave } from './waveFx';
 import {
@@ -449,13 +449,22 @@ export class PaintSystem {
   // ---- the hook the bus calls ---------------------------------------------
 
   handle = (event: SoundEvent): void => {
-    // §3.1: no free intel. An event you cannot hear paints you nothing.
-    const heard = Math.hypot(
-      event.x - this.listener.x,
-      event.y - this.listener.y,
-      event.z - this.listener.z,
-    );
-    if (heard <= this.perception.hearingRange) {
+    /*
+     * §3.1: no free intel. An event you cannot hear paints you nothing — and "can hear it" is
+     * `SoundBus.canHear`, not a comparison of our own. This used to gate on the rig's 18 m
+     * alone, which quietly granted the player paint from sounds that carry two metres. The
+     * predicate lives on the bus because the spider will ask it the same question with its own
+     * range, and two ears reading §3.3's right column differently is the table becoming fiction.
+     */
+    if (
+      SoundBus.canHear(
+        event,
+        this.listener.x,
+        this.listener.y,
+        this.listener.z,
+        this.perception.hearingRange,
+      )
+    ) {
       this.lastRefreshFloor = floorAgeFor(event.class, this.wave, this.ramp);
       this.addEventMarker(event);
       this.addWave(event);
