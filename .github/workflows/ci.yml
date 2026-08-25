@@ -1,0 +1,53 @@
+# The gate, run by a machine instead of by hand.
+#
+# Three of the five commands the repo checks itself with. The other two — `tools/shoot.mjs`
+# (photometric) and `tools/listen.mjs` (phonometric) — are deliberately not here: they need a
+# browser and an offline audio context, they take minutes rather than seconds, and a slow check
+# is a check people learn to merge past. They stay a local command until there is evidence the
+# suite below misses something they would have caught.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A new push to the same branch makes the run in flight irrelevant, so stop paying for it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # Playwright is a dependency of `tools/shoot.mjs`, which this workflow does not run, and
+      # its postinstall otherwise fetches a browser this job will never open. Skipping it is
+      # most of the install time. Anything that adds the photometric gate here has to drop this.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      # v6 rather than the v7 of either: both v6 lines carry the July 2026
+      # `allow-unsafe-pr-checkout` hardening, and setup-node's v7 is a fresh ESM migration this
+      # repo has no reason to be the one to shake out. Bump when v7 has some miles on it.
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          # The version the game is developed against. Pinned to the major rather than to
+          # `latest`, so a Node release cannot turn a green branch red overnight.
+          node-version: '22'
+          cache: npm
+
+      # `ci` and not `install`: the lockfile is the input, and a run that quietly resolved a
+      # different tree than the developer has is a run whose green means nothing.
+      - run: npm ci
+
+      # Three steps rather than `npm run check`, which chains all three behind one `&&`. Split,
+      # a red run says *which* of them failed on the summary page without opening the log.
+      - run: npm run typecheck
+
+      - run: npm run test
+
+      # Runs `tsc --noEmit` again on its way through, and that redundancy is worth the two
+      # seconds: this step is the one that proves the thing the browser actually loads still
+      # builds, and it should be able to fail on its own terms.
+      - run: npm run build
