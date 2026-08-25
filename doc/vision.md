@@ -153,13 +153,17 @@ A ring around the reticle whose brightness equals your current audible radius, p
 hum pitch. You always know exactly how loud you are. Non-negotiable: the genre's most-repeated
 complaint is "I can't tell when I'm detectable."
 
-The hum's **pitch** is the readout, not its volume: `55·√(r/1.5)` Hz, mapping a 1.5 m crouch
-radius to 55 Hz — felt more than heard — and a 24 m sprint to 220 Hz, insistent. It glides
-continuously rather than stepping between stances, because the ring is continuous and the two
-must never disagree; quantizing the hum into gears would hide exactly the in-between states
-where you most want to know how loud you are. Level stays low and near-constant (≈ −21 dBFS)
-and ducks under events, so the information rides on pitch and the tone can sit under everything
-without fatiguing. A volume slider is an accessibility control, not a retreat — the ring remains
+The hum's **pitch** is the readout, not its volume: `55·√(r/1.5)` Hz, where `r` is the radius at
+which you can be **heard** — §3.3's right-hand column, scaled by the material you are standing on
+(§3.9) — not the radius you paint. 1.5 m is the formula's reference and the pitch floor, not a
+stance: a crouch-step on concrete carries 2 m and sits at 63 Hz, felt more than heard, and a
+24 m sprint reaches 220 Hz, insistent. Loud ground pushes past that — a sprint on metal carries
+36 m and rings at 269 Hz — which is the point: the ring and the hum report the radius the world
+actually hears, so the surface under your feet moves the readout. It glides continuously rather
+than stepping between stances, because the ring is continuous and the two must never disagree;
+quantizing the hum into gears would hide exactly the in-between states where you most want to
+know how loud you are. Level stays low and near-constant (≈ −21 dBFS) and ducks under events, so
+the information rides on pitch and the tone can sit under everything without fatiguing. A volume slider is an accessibility control, not a retreat — the ring remains
 the guaranteed readout. **Playtest gate:** if more than half of testers mute it, the stepped
 variant is the prepared fallback.
 

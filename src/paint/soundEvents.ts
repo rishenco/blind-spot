@@ -209,6 +209,23 @@ export function isContactClass(cls: SoundClass): boolean {
 }
 
 /**
+ * §3.9's multiplier for one class on one surface — the loudness law, in the only place it lives.
+ *
+ * A contact class is scaled by what it struck; a ping strikes nothing and is scaled by 1, which
+ * is concrete's voice and deliberately not a special case in the arithmetic (see `emit`).
+ *
+ * Exported because `emit` is no longer the only thing that needs the answer. §3.8's Halo has to
+ * report the radius the player is *currently* heard at, which is the radius `emit` would give
+ * their next footfall — and a Halo that recomputed `hearingRadius × materialLoudness` for itself
+ * would be a second copy of this law, free to drift from the one the world actually obeys. One
+ * function, read by the emitter and by the readout, is what stops the ring from claiming an
+ * audible radius the bus does not give.
+ */
+export function materialVoiceFor(cls: SoundClass, mat: number | null | undefined): number {
+  return materialLoudness(isContactClass(cls) ? mat ?? MAT_CONCRETE : MAT_CONCRETE);
+}
+
+/**
  * One simulation's own copy of the two tables above.
  *
  * The dev panel writes *here*, which is what makes two `GameSim`s in one process independent and
@@ -401,6 +418,24 @@ export class SoundBus {
     return this.tickPeak;
   }
 
+  /**
+   * How far a sound of this class on this surface would carry — §3.3's right-hand column, with
+   * §3.9's voice already in it.
+   *
+   * The same number `emit` writes into `SoundEvent.hearingRadius`, asked *before* the sound
+   * exists. §3.8's Halo is the caller: "how loud am I right now" is a question about the footfall
+   * the body is in the middle of making, and it has to be answerable between footfalls, while
+   * airborne, and while standing still — none of which produce an event to read.
+   *
+   * An instance method rather than a static one, because the class table is this simulation's own
+   * copy (`SoundTunables`): drag the hearing radius of a sprint-step on the dev panel and the
+   * ring follows it in the same frame, which is the whole reason the panel is worth having.
+   * `mat` is `null` for a class that strikes nothing, exactly as on the event.
+   */
+  carryRadius(cls: SoundClass, mat: number | null = null): number {
+    return this.tunables.classes[cls].hearingRadius * materialVoiceFor(cls, mat);
+  }
+
   subscribe(listener: SoundListener): () => void {
     this.listeners.add(listener);
     return () => {
@@ -469,7 +504,7 @@ export class SoundBus {
      * nothing changes the reach. Both are true and neither implies the other.
      */
     const mat = contact ? spec.mat ?? MAT_CONCRETE : null;
-    const loudness = materialLoudness(mat ?? MAT_CONCRETE);
+    const loudness = materialVoiceFor(spec.class, spec.mat);
     let dx = spec.dirX ?? 0;
     let dy = spec.dirY ?? 0;
     let dz = spec.dirZ ?? 0;
