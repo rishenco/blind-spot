@@ -31,6 +31,37 @@ test, which is also what `raycastWorld` is being built to serve.
 
 ---
 
+## Real, and deferred on purpose
+
+Wrong, not blocking anything, and cheaper to fix when the thing that makes them matter exists.
+
+### The ears do not crouch, and the beam leaves from above a crouched head
+
+`src/game/sim.ts`. `E_PING_HEIGHT` is 1.5 m and does two jobs: `syncListener` puts the paint
+listener there, and the E-ping radiates from there. Neither follows the stance. The *camera* does
+— `eyeStand` 1.62 drops to `eyeCrouch` 1.12 — so a crouched rig looks out at 1.12 m, listens at
+1.5 m, and fires its beam from 1.5 m through a collider whose top is `crouchHeight`, 1.2 m.
+
+Two separate costs. The listener sitting 38 cm above the eye is an inconsistency and nothing more:
+a listener is not an emitter, it paints nothing and emits nothing, and 38 cm is far inside every
+tolerance in §3.3's table. The *emitter* is the law-2 problem — "every blip and sound has a real
+physical source" — because a crouched rig's beam, and the paint it hands back, originate from 30 cm
+of empty air above its own head. §3.5 calls Q the panic button pressed from behind cover; E is the
+one you would use from behind the same cover to look down a corridor without standing up.
+
+Not fixed here because the blast radius is out of proportion to the miss. `NEAR_FIELD_M` in
+`audio/director.ts` is this same height read as a distance — ear to sole, the thing that makes your
+own footfall the reference level of the whole mix — so making the height track the stance re-bases
+the level law, every pinned figure in `tests/audio/`, and the whole-room raycast golden, in exchange
+for 30 cm in a room where nothing yet rewards crouching. `Q_PING_HEIGHT` is bounded onto the body in
+both stances (`tests/headless.test.ts`), so the pulse is already honest; it is the beam that is not.
+
+**Owner: M3.** The gym is the first level that makes crouching a route rather than a stance, and
+the fix should land with it — as a stance-tracking ear, with the mix's reference level re-derived
+deliberately rather than inherited.
+
+---
+
 ## Not bugs — checked and cleared
 
 Recorded so the next person does not spend the afternoon I spent.
