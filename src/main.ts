@@ -37,6 +37,11 @@ import {
   defaultMarkerTunables,
   type MarkerStyle,
 } from './sound/markers';
+import { FIRE_MODES, Rifle, defaultRifleTunables, type FireMode, type Shot } from './weapon/rifle';
+import { MuzzleFlash, defaultFlashTunables } from './weapon/flash';
+import { ShotTracers } from './weapon/tracers';
+import { Swarm, defaultSpiderTunables } from './spiders/swarm';
+import { SpiderOverlay } from './spiders/overlay';
 
 type ViewMode = 'player' | 'third' | 'top';
 
@@ -45,6 +50,10 @@ const HELP: HelpRow[] = [
   { keys: 'Shift / Ctrl', action: 'run / crouch' },
   { keys: 'Space', action: 'jump, climb at a ledge' },
   { keys: 'F  or  RMB', action: 'lidar ping — cone forward + halo around you' },
+  { keys: 'E  or  LMB', action: 'shoot — flash, recoil, and the loudest noise in the hall' },
+  { keys: 'X', action: 'fire mode: auto / single' },
+  { keys: 'Y', action: 'debug: hold the flash open (it lives 3 frames)' },
+  { keys: 'U', action: 'debug: hitscan tracers — where the bullets really went' },
   { keys: 'L', action: 'debug: darkness off (lights on)' },
   { keys: 'V', action: 'debug: view — player / third / top' },
   { keys: 'T', action: 'debug: touch layer on/off' },
@@ -59,7 +68,11 @@ const HELP: HelpRow[] = [
 ];
 
 const HINT =
-  'WASD move · Shift run · Ctrl crouch · F lidar ping · L lights · V view · T touch · M markers · G tuning · H help';
+  'WASD move · Shift run · Ctrl crouch · F lidar ping · E/LMB shoot · X fire mode · Y hold flash · U tracers · L lights · V view · G tuning · H help';
+
+/** Where the muzzle is relative to the eye, metres — matches the rifle's collider box. */
+const MUZZLE_AHEAD = 0.55;
+const MUZZLE_DROP = 0.14;
 
 /** How much of the loudness scale each thing the body does is worth, in metres of notice. */
 const STEP_LOUDNESS: Record<string, number> = { crouch: 3, walk: 9, sprint: 16 };
@@ -115,6 +128,28 @@ class App {
 
   private readonly lights = new THREE.Group();
   private gui: GUI | null = null;
+
+  /**
+   * The rifle (M3). Built with the props, because a hitscan needs something to hit — the same
+   * Rapier world the clutter lives in, so bullets and barrels share one truth.
+   */
+  private rifle: Rifle | null = null;
+  /** The one real light in the game. Always in the scene; dark, and free, until a shot. */
+  private readonly flash = new MuzzleFlash(defaultFlashTunables());
+  /** Debug overlay: where the hitscans actually went. Off by default (law 1). */
+  private readonly tracers = new ShotTracers(64);
+  /** Shots that left the barrel this tick. Reused; a burst is at most one round per tick. */
+  private readonly shotBuf: Shot[] = [];
+
+  /**
+   * The pack (M4). Third consumer of the sound bus and the only one that acts on what it hears.
+   * Built with the props so a panicking spider has something to throw about.
+   */
+  private spiders: Swarm | null = null;
+  /** The mandatory M4 state overlay. Off by default; P toggles it. */
+  private readonly spiderOverlay = new SpiderOverlay();
+  /** True while the truth geometry is on screen because the flash is burning. */
+  private flashRevealed = false;
 
   /** Simulation clock, seconds. Never wall-clock: the keyframe generator depends on it. */
   private time = 0;
@@ -194,6 +229,27 @@ class App {
     this.lights.visible = false;
     this.scene.add(this.hall.reveal, this.lights);
 
+    /*
+     * The flash. Concept: "единственный настоящий свет в игре… резкие тени".
+     *
+     * Shadows are switched on globally but their *auto* update is switched off: the flash is
+     * pinned in space at the instant of the shot and the hall is a still life for the three
+     * frames it burns, so exactly one cube-map render per shot is not a saving, it is the
+     * correct number. `render()` asks the flash whether this is that frame.
+     */
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.scene.add(this.flash.object);
+    this.scene.add(this.tracers.object);
+    this.hall.reveal.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+      }
+    });
+
     this.input = new Input(canvas);
     if (this.harness || this.params.get('look') === 'drag') this.input.forceDragLook();
     else this.input.detectLookMode();
@@ -239,13 +295,30 @@ class App {
     this.scene.add(this.dyn.object);
     this.touch.attach(this.dyn);
     this.propReveal = new PropReveal(this.props);
+    this.propReveal.object.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+      }
+    });
     this.scene.add(this.propReveal.object);
+    // The rifle gets the prop world as its hitscan target and a seed stream of its own, so how
+    // much you shoot cannot perturb the layout RNG and break every other keyframe.
+    this.rifle = new Rifle(this.bus, this.props, this.seed, defaultRifleTunables());
     this.propsMs = performance.now() - t0;
+
+    // The pack. Its own seed stream, so how long you survive cannot perturb the layout RNG.
+    this.spiders = new Swarm(this.hall.world, this.bus, this.seed, defaultSpiderTunables());
+    this.spiders.setProps(this.props);
+    this.scene.add(this.spiderOverlay.object, this.spiderOverlay.bodies);
 
     // Let the pile settle before anyone looks at it: laid-out props start a few millimetres
     // above their support and would otherwise be caught mid-drop on frame one.
     for (let i = 0; i < 90; i++) this.props.step(1 / 60, 0);
     this.props.settle();
+    // Spawned after the clutter has settled, so nobody starts the game inside a barrel.
+    this.spiders.spawn(undefined, this.player.position);
     this.hud.setSceneLabel('BLIND SPOT', 'M2 — clutter');
     if (!this.harness) this.loop.start();
   }
@@ -272,9 +345,17 @@ class App {
       const p = this.player.position;
       this.props.setPlayer(p.x, p.y, p.z, this.player.bodyRadius, this.player.bodyHeight);
       this.placeRifle(eye);
+      // Before the step, so a bullet's impulse is resolved by the very tick it was fired on.
+      this.updateWeapon(dt, eye);
       this.props.step(dt, this.time);
       this.dyn?.update(this.time);
       if (this.propReveal !== null && this.lightsOn) this.propReveal.sync();
+    }
+
+    if (this.spiders !== null) {
+      const p = this.player.position;
+      this.spiders.setPlayer(p.x, p.y, p.z);
+      this.spiders.update(dt, this.time);
     }
 
     this.touch.update(eye.x, eye.y, eye.z);
@@ -301,7 +382,70 @@ class App {
     if (i.wasKeyPressed('KeyJ')) this.lidar.refill();
     if (i.wasKeyPressed('KeyG')) this.toggleGui();
     if (i.wasKeyPressed('KeyH')) this.hud.toggleHelp();
-    if (i.wasKeyPressed('KeyR')) this.player.respawn();
+    if (i.wasKeyPressed('KeyR')) {
+      this.player.respawn();
+      this.rifle?.resetRecoil();
+    }
+    if (i.wasKeyPressed('KeyX')) this.cycleFireMode();
+    if (i.wasKeyPressed('KeyY')) this.flash.setHold(!this.flash.holding);
+    if (i.wasKeyPressed('KeyU')) this.tracers.setVisible(!this.tracers.visible);
+    if (i.wasKeyPressed('KeyP')) this.spiderOverlay.setVisible(!this.spiderOverlay.visible);
+  }
+
+  /**
+   * The rifle's tick. Everything here is on the simulation clock and on the player's own heading
+   * rather than on the render camera: the aim kick moves where you are *actually* pointing, and
+   * a recoil that depended on frame rate would not survive the keyframe generator.
+   */
+  private updateWeapon(dt: number, eye: THREE.Vector3): void {
+    const rifle = this.rifle;
+    if (rifle === null) return;
+    const i = this.input;
+
+    // Heading → direction. Same convention as the camera (YXZ, forward is -Z at yaw 0).
+    const cp = Math.cos(this.player.pitch);
+    const fx = -Math.sin(this.player.yaw) * cp;
+    const fy = Math.sin(this.player.pitch);
+    const fz = -Math.cos(this.player.yaw) * cp;
+    // The muzzle, roughly where the rifle's collider box ends. The flash has to be born out
+    // there and not inside your own head, or the light is occluded by nothing at all.
+    const mx = eye.x + fx * MUZZLE_AHEAD;
+    const my = eye.y + fy * MUZZLE_AHEAD - MUZZLE_DROP;
+    const mz = eye.z + fz * MUZZLE_AHEAD;
+
+    this.shotBuf.length = 0;
+    rifle.update(
+      dt,
+      i.isDown('fire'),
+      i.wasPressed('fire'),
+      mx, my, mz,
+      fx, fy, fz,
+      this.time,
+      this.shotBuf,
+    );
+
+    // The kick moves the player's real heading. Clamped exactly like mouse look, so emptying a
+    // magazine at the ceiling cannot flip you over backwards.
+    const kick = rifle.consumeAimKick();
+    if (kick.pitch !== 0 || kick.yaw !== 0) {
+      this.player.pitch += kick.pitch;
+      this.player.yaw += kick.yaw;
+      const clamp = (defaultCameraTunables().pitchClampDeg * Math.PI) / 180;
+      if (this.player.pitch > clamp) this.player.pitch = clamp;
+      if (this.player.pitch < -clamp) this.player.pitch = -clamp;
+    }
+
+    for (const shot of this.shotBuf) {
+      this.flash.trigger(shot.ox, shot.oy, shot.oz, shot.time);
+      this.tracers.add(shot);
+    }
+  }
+
+  private cycleFireMode(): FireMode {
+    const rifle = this.rifle;
+    if (rifle === null) return 'auto';
+    rifle.tunables.mode = rifle.tunables.mode === 'auto' ? 'single' : 'auto';
+    return rifle.tunables.mode;
   }
 
   /**
@@ -366,6 +510,20 @@ class App {
   private render(alpha: number): void {
     const frameStart = performance.now();
     this.player.applyToCamera(this.camera, alpha);
+    /*
+     * The view punch. Render-only and deliberately applied *after* the controller has posed the
+     * camera: the shot has already moved where you are pointing (that is the aim kick, in the
+     * simulation), and this is only the body flinching. Keeping the two apart is what makes it
+     * possible to tune "it feels violent" without also tuning "it is unaimable".
+     */
+    const punch = this.rifle?.viewPunch;
+    if (punch !== undefined && (punch.pitch !== 0 || punch.yaw !== 0 || punch.back !== 0)) {
+      this.camera.rotation.x += punch.pitch;
+      this.camera.rotation.y += punch.yaw;
+      const f = this.camera.getWorldDirection(this.scratchDir);
+      this.camera.position.addScaledVector(f, -punch.back);
+      this.camera.updateMatrixWorld();
+    }
     // The ear rides the *render* camera, not the sim eye: it is the only place the smoothed head
     // orientation exists, and half a tick of lag in a pan is audible as a swim.
     {
@@ -407,6 +565,18 @@ class App {
     this.markers.setViewport(buffer.x, buffer.y);
     this.markers.setProjScale(projScale);
 
+    /*
+     * The flash frame. The truth geometry — the same instanced boxes the `L` debug view uses —
+     * is switched on for exactly as long as the light burns, and the cube shadow map is
+     * re-rendered exactly once per shot. Nothing about this is on by default: with no flash in
+     * flight the scene is the same black nothing it was in M1.
+     */
+    const envelope = this.flash.sample(renderTime);
+    this.setFlashReveal(envelope > 0);
+    this.renderer.shadowMap.needsUpdate = this.flash.takeShadowUpdate();
+
+    if (this.spiders !== null) this.spiderOverlay.sync(this.spiders);
+
     const renderStart = performance.now();
     this.renderer.render(this.scene, camera);
     this.perf.renderMs = performance.now() - renderStart;
@@ -415,6 +585,24 @@ class App {
     this.frameTimes.push(this.perf.frameMs);
     if (this.frameTimes.length > 240) this.frameTimes.shift();
     this.updateHud();
+  }
+
+  /**
+   * Shows or hides the lit truth of the hall for the duration of a flash.
+   *
+   * There is no second, prettier hall to light: these are the collider boxes themselves, so the
+   * one frame you see really is the room you are about to walk into. While the debug lights are
+   * on this does nothing — the geometry is already up and the flash simply adds to it.
+   */
+  private setFlashReveal(on: boolean): void {
+    if (this.lightsOn || on === this.flashRevealed) return;
+    this.flashRevealed = on;
+    this.hall.reveal.visible = on;
+    this.propReveal?.setVisible(on);
+    // A spider caught in the muzzle flash is the whole point of the muzzle flash.
+    this.spiderOverlay.setBodiesVisible(on);
+    // Props move; the flash is an instant. Sync once, as the light comes up.
+    if (on) this.propReveal?.sync();
   }
 
   private activeCamera(): THREE.PerspectiveCamera {
@@ -453,6 +641,7 @@ class App {
     const counts = this.bus.countsBySource();
     const marks = this.markers.getStats();
     const audio = this.audio.getStats();
+    const rifle = this.rifle?.getStats() ?? null;
     if (this.time - this.rateAt >= 1) {
       this.eventRate = (this.bus.emitted - this.rateSeq) / Math.max(0.001, this.time - this.rateAt);
       this.rateAt = this.time;
@@ -466,8 +655,30 @@ class App {
       ['gate', `${gate.toFixed(1)} m`],
       ['lidar', st.ready ? `ready ${st.charge.toFixed(2)}` : `charging ${(st.progress * 100) | 0}%`],
       ['pings', `${st.fired}${st.queued > 0 ? ` (+${st.queued})` : ''}`],
-      ['sound', `${this.bus.emitted} ev · step ${counts.get('player-step') ?? 0} · prop ${counts.get('prop-impact') ?? 0}`],
+      ['sound', `${this.bus.emitted} ev · step ${counts.get('player-step') ?? 0} · prop ${counts.get('prop-impact') ?? 0} · shot ${counts.get('gunshot') ?? 0} · hit ${counts.get('bullet-hit') ?? 0}`],
       ['view', this.lightsOn ? `${this.view} + lights` : this.view],
+      [
+        'rifle',
+        rifle === null
+          ? 'off'
+          : `${this.rifle!.tunables.mode} · ${rifle.shots} shot / ${rifle.hits} hit · spread ${rifle.spreadDeg.toFixed(2)}°`,
+      ],
+      [
+        'recoil',
+        rifle === null
+          ? '-'
+          : `pitch ${rifle.risePitchDeg.toFixed(2)}° yaw ${rifle.riseYawDeg.toFixed(2)}°`,
+      ],
+      [
+        'pack',
+        this.spiders === null
+          ? 'off'
+          : `${this.spiders.mode} · ${this.spiders.getStats().count} · courage ${this.spiders.getStats().meanCourage.toFixed(2)} · ${this.spiders.getStats().chatter.toFixed(1)} click/s`,
+      ],
+      [
+        'flash',
+        `${this.flash.count} · ${(this.flash.envelope * 100) | 0}%${this.flash.holding ? ' · HELD' : ''}${this.tracers.visible ? ` · ${this.tracers.count} tracers` : ''}`,
+      ],
     ]);
 
     this.hud.setPerf([
@@ -485,6 +696,12 @@ class App {
       ['prop pts', dyn === null ? '-' : `${dyn.revealed} / ${dyn.points}`],
       ['marks', `${marks.alive} live · ${this.eventRate.toFixed(1)} ev/s`],
       ['audio', audio.state === 'off' ? 'off (press a key)' : `${audio.state} · ${audio.active}/${this.audio.tunables.voices} voices · ${audio.dropped} dropped`],
+      [
+        'spiders',
+        this.spiders === null
+          ? 'off'
+          : `${this.spiders.getStats().updateMs.toFixed(2)} ms · ${this.spiders.getStats().decisions} dec/tick`,
+      ],
       ['calls', `${this.renderer.info.render.calls}`],
     ]);
 
@@ -510,12 +727,16 @@ class App {
 
   setLights(on: boolean): void {
     this.lightsOn = on;
+    // The flash borrows the same meshes, so the two owners of "is the truth visible" have to
+    // agree on the answer when the debug switch moves.
+    this.flashRevealed = on;
     this.hall.reveal.visible = on;
     this.lights.visible = on;
     this.paint.setActive(!on);
     this.dyn?.setActive(!on);
     this.touch.setVisible(!on);
     this.propReveal?.setVisible(on);
+    this.spiderOverlay.setBodiesVisible(on);
     if (on) this.propReveal?.sync();
   }
 
@@ -541,6 +762,9 @@ class App {
     this.dyn?.clear();
     this.touch.clear();
     this.markers.clear();
+    // The tracer overlay is a memory of where rounds went, so "forget the map" has to forget it
+    // too — otherwise a wiped hall still has last minute's burst drawn across it.
+    this.tracers.clear();
   }
 
   private toggleGui(): void {
@@ -552,28 +776,17 @@ class App {
     const gui = new GUI({ title: 'lidar / perf' });
     this.gui = gui;
     /*
-     * lil-gui calls stopPropagation() on keydown/keyup inside every one of its controllers, so
-     * once a slider has focus the window never sees WASD again — and, worse, never sees the
-     * *keyup* either, so a key held while you reach for the GUI stays down for ever. Catch those
-     * events on the way in (capture phase, before lil-gui's own bubble handler) and re-issue them
-     * on the window, unless the focus really is in a field being typed into.
+     * The GUI needs no key relay of its own any more.
+     *
+     * It used to re-dispatch key events on the window, because lil-gui calls stopPropagation()
+     * inside its controllers — but that only ever fixed half of the reported bug ("когда
+     * настройки трогаешь, если не кликать ещё юай, то видимо перехват WASD отрубается"): a
+     * number widget is a real <input> that keeps focus after you drag its slider, and the relay
+     * deliberately bailed out on fields being typed into, so WASD went on being typed into the
+     * box. The fix now lives one level down, in `Input`: it listens in the capture phase (so
+     * stopPropagation cannot reach it) and blurs a focused field the moment a *game* key
+     * arrives, while digits and arrows still reach the box. See src/core/input.ts.
      */
-    const isTyping = (el: HTMLElement | null): boolean => {
-      if (el === null) return false;
-      if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
-      if (el.tagName !== 'INPUT') return false;
-      const type = (el as HTMLInputElement).type;
-      return type === 'text' || type === 'number' || type === 'search';
-    };
-    const relay = (e: Event): void => {
-      const el = e.target as HTMLElement | null;
-      if (isTyping(el)) return;
-      // A checkbox or a dropdown has no business holding the keyboard once it has been used.
-      el?.blur?.();
-      window.dispatchEvent(new KeyboardEvent(e.type, e as KeyboardEvent));
-    };
-    gui.domElement.addEventListener('keydown', relay, true);
-    gui.domElement.addEventListener('keyup', relay, true);
     const t = this.paint.tunables;
     const lidar = this.lidar.tunables;
 
@@ -627,6 +840,36 @@ class App {
     sound.add(m, 'brightness', 0, 2, 0.05).onChange(() => this.markers.applyLook());
     sound.open();
 
+    /*
+     * The rifle and the flash. The human asked for two of these knobs by name: the flash's
+     * lifetime ("вынеси в настройки да, тут надо прочувствовать" — the difference between two
+     * and six frames is the difference between a blink and reading the room) and the fire mode
+     * ("хз, тоже в настройки давай"). Both ranges are deliberately wider than any sane value.
+     */
+    const gun = gui.addFolder('rifle / flash');
+    const r = this.rifle?.tunables ?? defaultRifleTunables();
+    const fl = this.flash.tunables;
+    gun.add(r, 'mode', FIRE_MODES as unknown as string[]);
+    gun.add(r, 'rpm', 120, 1100, 10);
+    gun.add(fl, 'life', 0.008, 0.5, 0.002);
+    gun.add(fl, 'intensity', 20, 2000, 5);
+    gun.add(fl, 'range', 8, 120, 1);
+    gun.add(fl, 'decay', 0.5, 6, 0.1);
+    gun.add(fl, 'shadows');
+    gun.add(fl, 'shadowSize', [128, 256, 512, 1024]).onChange(() => this.flash.applyShadowSize());
+    gun.add(fl, 'flareSize', 0, 2, 0.05);
+    gun.add(fl, 'flareGain', 0, 4, 0.05);
+    gun.add(r, 'risePitchDeg', 0, 3, 0.02);
+    gun.add(r, 'riseYawDeg', 0, 2, 0.02);
+    gun.add(r, 'recoverRate', 1, 40, 0.5);
+    gun.add(r, 'recoverFraction', 0, 1, 0.02);
+    gun.add(r, 'punchPitchDeg', 0, 6, 0.1);
+    gun.add(r, 'punchDecay', 2, 40, 0.5);
+    gun.add(r, 'spreadPerShot', 0, 2, 0.02);
+    gun.add(r, 'gunshotLoudness', 10, 200, 1);
+    gun.add(r, 'hitImpulse', 0, 30, 0.5);
+    gun.open();
+
     const ear = gui.addFolder('audio');
     ear.add(this.audio.tunables, 'volume', 0, 1, 0.02).onChange((v: number) => this.audio.setVolume(v));
     ear.add(this.audio.tunables, 'maxLatency', 0.05, 1, 0.05);
@@ -673,10 +916,79 @@ class App {
         for (let i = 0; i < n; i++) this.fixedUpdate(this.loop.stepSeconds);
       },
       draw: () => this.render(0),
+      /**
+       * The *lidar* ping. Kept under this name on purpose: every M1/M2 scenario in the frame
+       * generator already calls `bs.fire()` meaning "ping", and quietly turning that into a
+       * gunshot would rewrite the meaning of a dozen existing keyframes. The rifle is `shoot()`.
+       */
       fire: () => {
         this.pendingFire = true;
       },
+      /** One round, right now, from wherever the player is pointing. Returns the trace. */
+      shoot: () => {
+        const rifle = this.rifle;
+        if (rifle === null) return null;
+        const eye = this.player.eye;
+        const cp = Math.cos(this.player.pitch);
+        const fx = -Math.sin(this.player.yaw) * cp;
+        const fy = Math.sin(this.player.pitch);
+        const fz = -Math.cos(this.player.yaw) * cp;
+        this.shotBuf.length = 0;
+        // The edge and the hold are both asserted, and the cooldown is cleared, so a scenario
+        // gets exactly one round per call in either fire mode regardless of the cyclic rate.
+        rifle.forceReady();
+        rifle.update(
+          this.loop.stepSeconds, true, true,
+          eye.x + fx * MUZZLE_AHEAD, eye.y + fy * MUZZLE_AHEAD - MUZZLE_DROP, eye.z + fz * MUZZLE_AHEAD,
+          fx, fy, fz,
+          this.time,
+          this.shotBuf,
+        );
+        const kick = rifle.consumeAimKick();
+        this.player.pitch += kick.pitch;
+        this.player.yaw += kick.yaw;
+        for (const shot of this.shotBuf) {
+          this.flash.trigger(shot.ox, shot.oy, shot.oz, shot.time);
+          this.tracers.add(shot);
+        }
+        return this.shotBuf.length > 0 ? { ...this.shotBuf[0]! } : null;
+      },
+      /** Holds the trigger down / lets it go, so a scenario can fire an honest burst. */
+      trigger: (on: boolean) => {
+        window.dispatchEvent(new KeyboardEvent(on ? 'keydown' : 'keyup', { code: 'KeyE' }));
+      },
+      fireMode: (mode?: FireMode) => {
+        const rifle = this.rifle;
+        if (rifle === null) return 'auto';
+        if (mode !== undefined) rifle.tunables.mode = mode;
+        return rifle.tunables.mode;
+      },
+      /** Debug: freeze the flash at full so a three-frame event can be photographed. */
+      flashHold: (on: boolean) => {
+        this.flash.setHold(on);
+        return this.flash.holding;
+      },
+      /** Live flash knobs — the keyframe pass measures what the expensive ones cost. */
+      flashTune: (patch: Partial<Record<string, number | boolean>>) => {
+        Object.assign(this.flash.tunables, patch);
+        if ('shadowSize' in patch) this.flash.applyShadowSize();
+        return { ...this.flash.tunables };
+      },
+      rifleTune: (patch: Partial<Record<string, number | string>>) => {
+        if (this.rifle === null) return null;
+        Object.assign(this.rifle.tunables, patch);
+        return { ...this.rifle.tunables };
+      },
+      tracers: (on: boolean) => {
+        this.tracers.setVisible(on);
+        return this.tracers.visible;
+      },
+      /** Every recent trace, muzzle → impact, for scenarios that check where rounds landed. */
+      shotList: () => this.rifle?.recentShots.map((sh) => ({ ...sh })) ?? [],
       pose: (x: number, z: number, yawDeg: number) => {
+        // A teleport is not a shooting stance: drop the climb the last burst left in the body,
+        // or every scenario inherits the drift of the one before it.
+        this.rifle?.resetRecoil();
         this.player.setSpawn(new THREE.Vector3(x, 0, z), yawDeg);
         // The ping direction is read off the camera, so the camera has to already be there.
         this.player.applyToCamera(this.camera, 0);
@@ -728,6 +1040,28 @@ class App {
         }
         return out;
       },
+      /** The pack, for the M4 scenarios: look at it, move it, hurt it, switch the overlay. */
+      spiders: {
+        list: () => this.spiders?.list() ?? [],
+        stats: () => this.spiders?.getStats() ?? null,
+        mode: () => this.spiders?.mode ?? 'off',
+        spawn: (n?: number) => {
+          this.spiders?.spawn(n, this.player.position);
+          return this.spiders?.getStats().count ?? 0;
+        },
+        place: (i: number, x: number, z: number, y?: number) =>
+          this.spiders?.place(i, x, z, y) ?? false,
+        hurt: (i: number) => this.spiders?.hurt(i) ?? false,
+        overlay: (on: boolean) => {
+          this.spiderOverlay.setVisible(on);
+          return this.spiderOverlay.visible;
+        },
+        tune: (patch: Partial<Record<string, number>>) => {
+          if (this.spiders === null) return null;
+          Object.assign(this.spiders.tunables, patch);
+          return { ...this.spiders.tunables };
+        },
+      },
       clear: () => this.clearMap(),
       refill: () => this.lidar.refill(),
       hud: (on: boolean) => this.hudVisible(on),
@@ -745,7 +1079,18 @@ class App {
         marks: this.markers.getStats(),
         audio: this.audio.getStats(),
         props: this.props?.getStats() ?? null,
+        rifle: this.rifle?.getStats() ?? null,
+        flash: {
+          count: this.flash.count,
+          envelope: this.flash.envelope,
+          lit: this.flash.lit,
+          held: this.flash.holding,
+          life: this.flash.tunables.life,
+          shadows: this.flash.tunables.shadows,
+        },
+        aim: { yawDeg: (this.player.yaw * 180) / Math.PI, pitchDeg: (this.player.pitch * 180) / Math.PI },
         dyn: this.dyn?.getStats() ?? null,
+        spiders: this.spiders?.getStats() ?? null,
         propsMs: this.propsMs,
         sound: {
           emitted: this.bus.emitted,

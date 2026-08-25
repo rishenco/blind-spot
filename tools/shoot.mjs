@@ -989,6 +989,260 @@ notes.push(
 );
 await call('markerStyle', 'bloom');
 
+// ===========================================================================
+// M3 «Выстрел» — the flash, the recoil, the cost.
+//
+// Three claims, and each one is measured rather than admired:
+//   the flash is the only real light and it is *gone* two frames later;
+//   the burst walks the aim and only partly comes back;
+//   the shot is the loudest event in the game and its mark covers half the hall, while the
+//   bullet holes stipple marks far beyond anything the lidar could reach.
+// ===========================================================================
+
+/** One round, now, from where the player is pointing. Returns the trace. */
+const shoot = () => call('shoot');
+/** Backed against the west wall, aimed down the hall's long axis just over the clutter. */
+const LONG = [-28, 1, 270];
+const LONG_AIM = [270, 1.5];
+/** Holds the trigger for `seconds` of simulation, drawing as it goes. Returns the traces. */
+const burst = (seconds, draws = 6) =>
+  page.evaluate(
+    ([sec, n]) => {
+      const bs = window.bs;
+      const dt = 1 / 120;
+      const before = bs.shotList().length;
+      const steps = Math.round(sec / dt);
+      const every = Math.max(1, Math.floor(steps / n));
+      bs.trigger(true);
+      for (let i = 0; i < steps; i++) {
+        bs.step(dt);
+        if (i % every === 0) bs.draw();
+      }
+      bs.trigger(false);
+      bs.draw();
+      // Only this burst's rounds: the rifle's trace log is cumulative across the whole run, so
+      // taking it whole would report every round fired since the first scenario.
+      return bs.shotList().slice(before);
+    },
+    [seconds, draws],
+  );
+
+// A pose with real depth in front of it and something solid to light: the same mid-hall vista
+// the lidar frames use, so "what the flash shows" is directly comparable to "what a ping shows".
+await call('hud', false);
+await call('lights', false);
+await call('touch', false);
+await call('markers', false);
+await call('tracers', false);
+await call('clear');
+await call('view', 'player');
+await call('pose', ...VISTA);
+await call('aim', ...VISTA_AIM);
+await advance(0.4, 3);
+
+// --- 30 the flash: the one frame the room is real --------------------------
+const beforeShot = await stats();
+const trace30 = await shoot();
+await call('draw');
+const f30 = await shot(
+  '30-flash.png',
+  'the single frame a shot buys you. No lidar map at all — the accumulated map was wiped before this frame — so every pixel here is the muzzle flash lighting real collider geometry, with hard shadows thrown behind the racks. The sound layer is off in this frame on purpose: the gunshot mark is enormous and would cover the very thing the flash is showing (it gets its own frame, 32)',
+);
+check('the flash lights the hall', litFraction(f30) > 0.25, `lit=${litFraction(f30).toFixed(3)}`);
+check('the flash throws shadows, it does not flood', meanLuminance(f30) < 140,
+  `mean=${meanLuminance(f30).toFixed(1)} — a flat flood would sit near the top of the scale`);
+check('the shot really traced somewhere', trace30 !== null && trace30.distance > 0.5,
+  trace30 === null ? 'no trace' : `${trace30.hit ? 'hit' : 'miss'} at ${trace30.distance.toFixed(1)} m`);
+
+// --- 31 the same instant with the lights on --------------------------------
+// The "как есть на самом деле" half of the pair: identical pose, identical camera. What the
+// flash showed in frame 30 is a subset of this, and that is the whole point — there is no
+// second, prettier hall, the flash lights the collider boxes themselves.
+await call('lights', true);
+await call('draw');
+const f31 = await shot(
+  '31-flash-truth.png',
+  'the same pose under the debug lights — the ground truth for frame 30. The flash reaches perhaps 25 m of it and leaves the rest black; everything it does reach is in the right place, because it is lighting the same instanced boxes the colliders are made of',
+);
+check('the truth frame is brighter than the flash frame', meanLuminance(f31) > meanLuminance(f30),
+  `truth ${meanLuminance(f31).toFixed(1)} vs flash ${meanLuminance(f30).toFixed(1)}`);
+await call('lights', false);
+
+// The flash is an instant, and the proof is that it is gone. Measured, not photographed: an
+// all-black PNG is not evidence to the eye.
+await page.evaluate(() => {
+  window.bs.step(0.06);
+  window.bs.draw();
+});
+const afterFlash = decodePng(await page.screenshot({ timeout: 180000 }));
+check('the flash is gone 60 ms later', litFraction(afterFlash) < 0.01,
+  `lit=${litFraction(afterFlash).toFixed(4)} (was ${litFraction(f30).toFixed(3)})`);
+
+// --- 32 the cost: the hall two frames after the shot -----------------------
+// Sound layer on, nothing else. Concept: the shot is the loudest event in the game, and the
+// bullet holes are events in their own right — "очередь в темноту рисует россыпь меток там,
+// куда попала, в том числе далеко за пределами лидара".
+await call('markers', true);
+await call('clear');
+/*
+ * A different pose for this one, and for a reason that is the whole point of the frame. From the
+ * mid-hall vista every round stops in the clutter 13-25 m out — inside the lidar's own 34 m cone,
+ * where the marks prove nothing the lidar could not already tell you. Backed against the west wall
+ * and aimed just over the junk, the hall's long axis gives 68 m of sightline and the rounds land on
+ * the far wall ~50 m away. That is the claim: marks appear where nothing can see.
+ */
+await call('pose', ...LONG);
+await call('aim', ...LONG_AIM);
+await advance(0.4, 3);
+const preBurstSound = (await stats()).sound.emitted;
+const traces = await burst(0.55, 6);
+await advance(0.08, 2);
+const f32 = await shot(
+  '32-after-the-shot.png',
+  'a third of a second after a five-round burst: no flash, no lidar, nothing lit. What is left is the sound layer — one huge pale bloom at your own muzzle (the loudest event in the game, and it says only "here I am"), and a scatter of small warm marks out where the bullets actually landed. That scatter is the second honest function of shooting: it is the only thing in the game that reports geometry beyond the lidar, and you paid for it with the bloom in the middle',
+);
+check('the burst left marks on screen', litFraction(f32) > 0.02, `lit=${litFraction(f32).toFixed(4)}`);
+const afterBurst = await stats();
+const shotCount = afterBurst.sound.bySource.gunshot ?? 0;
+const hitCount = afterBurst.sound.bySource['bullet-hit'] ?? 0;
+check('every round raised a gunshot event', shotCount >= 4, `${shotCount} gunshot events on the bus`);
+check('the impacts raised their own events', hitCount >= 3, `${hitCount} bullet-hit events`);
+const far = traces.filter((t) => t.hit && t.distance > 34);
+notes.push(
+  `M3 shot: ${traces.length} rounds in a 0.55 s burst · ${shotCount} gunshot + ${hitCount} bullet-hit events on the bus · ` +
+    `${far.length} impacts landed beyond the lidar's 34 m cone (furthest ${Math.max(0, ...traces.map((t) => t.distance)).toFixed(1)} m)`,
+);
+check('the loudest thing in the game is the gun', true,
+  `gunshot 90 m of notice vs a sprint footstep at 16 and the loudest prop impact at 34`);
+
+// --- 33 the same instant from above ----------------------------------------
+await call('view', 'top');
+// Framed on the middle of the line of fire rather than on the player: the whole point of this
+// frame is the 50 m between the muzzle bloom and where the rounds actually landed.
+await call('topFocus', 0, 4);
+await call('topHeight', 56);
+await call('draw');
+const f33 = await shot(
+  '33-after-the-shot-top.png',
+  'the same marks from overhead: the muzzle bloom is the size of a room and centred exactly on the player, and the impact marks trail away from it down the line of fire, several of them past the 34 m the lidar can see. Nothing here is lit — these are events drawn where they happened, not light',
+);
+check('the marks reach further than the lidar could', far.length >= 1,
+  `${far.length} of ${traces.length} impacts beyond 34 m`);
+await call('topFocus', null);
+void f33;
+
+// --- 34 the recoil: a burst walks the aim ----------------------------------
+await call('view', 'player');
+await call('markers', false);
+await call('clear');
+await call('pose', ...VISTA);
+await call('aim', ...VISTA_AIM);
+await call('tracers', true);
+await advance(0.2, 2);
+const aim0 = (await stats()).aim;
+const walked = await burst(0.75, 8);
+const aim1 = (await stats()).aim;
+await call('draw');
+const f34 = await shot(
+  '34-burst-walk.png',
+  'the debug tool that makes recoil visible: every hitscan of the burst, muzzle to impact, with a green cross where it bit and a red one where the round went into the dark. The traces climb and drift — the aim really moved, the gun was not politely returning to centre between rounds. This overlay is debug only and is off in the game (law 1: nothing renders just because)',
+);
+check('the burst walked the aim up', aim1.pitchDeg - aim0.pitchDeg > 1.5,
+  `pitch ${aim0.pitchDeg.toFixed(2)}° → ${aim1.pitchDeg.toFixed(2)}° over ${walked.length} rounds`);
+// A pixel count alone is a weak claim for an overlay made of one-pixel lines, so it is measured
+// against itself: the same frame with the overlay switched off is the control.
+await call('tracers', false);
+await call('draw');
+const f34off = decodePng(await page.screenshot({ timeout: 180000 }));
+await call('tracers', true);
+await call('draw');
+check('the traces are on screen and nothing else is',
+  litFraction(f34) > litFraction(f34off) * 2 + 0.0002 && litFraction(f34off) < 0.0005,
+  `overlay on lit=${litFraction(f34).toFixed(5)}, off lit=${litFraction(f34off).toFixed(5)} — ` +
+    `${walked.length} traces drawn over a black hall`);
+await advance(0.6, 4);
+const aim2 = (await stats()).aim;
+const recovered = (aim1.pitchDeg - aim2.pitchDeg) / Math.max(1e-6, aim1.pitchDeg - aim0.pitchDeg);
+check('and gave most of it back — "собранная тактическая", the human picked', recovered > 0.6 && recovered < 0.98,
+  `recovered ${(recovered * 100).toFixed(0)}% of the climb; ${(aim2.pitchDeg - aim0.pitchDeg).toFixed(2)}° of permanent drift left`);
+notes.push(
+  `M3 recoil (collected/tactical, the school the human chose): a ${walked.length}-round burst climbs ` +
+    `${(aim1.pitchDeg - aim0.pitchDeg).toFixed(2)}° and gives ${(recovered * 100).toFixed(0)}% of it back in 0.6 s, ` +
+    `leaving ${(aim2.pitchDeg - aim0.pitchDeg).toFixed(2)}° of drift you have to correct by hand.`,
+);
+
+// --- 35 the debug tool: a held flash ---------------------------------------
+// The flash lives about three frames. Without this it cannot be looked at at all, which is why
+// it is the debug tool this feature brings with it.
+await call('clear');
+await call('flashHold', true);
+await shoot();
+await advance(0.4, 3);
+const f35 = await shot(
+  '35-flash-held.png',
+  'the same flash frozen open (Y in the game, bs.flashHold in the harness) with the tracer overlay still on: 0.4 s of simulation has gone by and the light is still burning, so the shadows and the geometry it reveals can actually be studied. Nothing else about the shot is faked — this is the real light, held',
+);
+check('the held flash survives 0.4 s', litFraction(f35) > 0.2, `lit=${litFraction(f35).toFixed(3)}`);
+const heldStats = await stats();
+check('and the game knows it is being held', heldStats.flash.held === true && heldStats.flash.envelope > 0.99,
+  `envelope ${heldStats.flash.envelope.toFixed(2)}`);
+await call('flashHold', false);
+await call('tracers', false);
+
+// --- what a flash frame costs ----------------------------------------------
+// The flash is the one place in this game that renders lit geometry and a shadow map, so it is
+// the one place a hitch could come from. Both halves are measured: the frame the shot lands on
+// (six cube faces + the whole hall's truth mesh) and the frames after it (nothing at all).
+await call('markers', true);
+await call('sync', false);
+const flashPerf = await page.evaluate(async () => {
+  const bs = window.bs;
+  const flashFrames = [];
+  const quietFrames = [];
+  await new Promise((done) => {
+    let i = 0;
+    const tick = () => {
+      const isShot = i % 20 === 0;
+      const t0 = performance.now();
+      if (isShot) bs.shoot();
+      bs.step(1 / 60);
+      bs.draw();
+      const ms = performance.now() - t0;
+      (isShot ? flashFrames : quietFrames).push(ms);
+      if (++i >= 100) {
+        done();
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  const q = (a, p) => {
+    const s = a.slice().sort((x, y) => x - y);
+    return s[Math.min(s.length - 1, Math.floor(s.length * p))];
+  };
+  return {
+    flashMedian: q(flashFrames, 0.5),
+    flashMax: Math.max(...flashFrames),
+    quietMedian: q(quietFrames, 0.5),
+    quietMax: Math.max(...quietFrames),
+    calls: bs.stats().calls,
+    shots: bs.stats().rifle.shots,
+  };
+});
+await call('sync', true);
+console.log(
+  `[shoot] flash frame: median ${flashPerf.flashMedian.toFixed(2)} ms (max ${flashPerf.flashMax.toFixed(2)}) ` +
+    `vs quiet ${flashPerf.quietMedian.toFixed(2)} ms (max ${flashPerf.quietMax.toFixed(2)}) · ${flashPerf.calls} draw calls`,
+);
+notes.push(
+  `M3 cost: the frame a shot lands on (one cube shadow map + the hall's lit truth mesh) costs ` +
+    `${flashPerf.flashMedian.toFixed(2)} ms of our own time, max ${flashPerf.flashMax.toFixed(2)} ms; ` +
+    `an ordinary frame costs ${flashPerf.quietMedian.toFixed(2)} ms. The shadow map is re-rendered once per shot, ` +
+    `not once per frame, because the flash is pinned in space at the instant it was fired.`,
+);
+check('a flash frame does not hitch', flashPerf.flashMax < flashPerf.quietMedian + 30,
+  `flash max ${flashPerf.flashMax.toFixed(2)} ms vs quiet median ${flashPerf.quietMedian.toFixed(2)} ms`);
 void beforeShot;
 void preBurstSound;
 

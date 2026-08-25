@@ -12,7 +12,7 @@
 export type LookMode = 'pointerlock' | 'drag';
 
 /** Logical actions, decoupled from physical keys. */
-export type Action = 'forward' | 'back' | 'left' | 'right' | 'jump' | 'sprint' | 'crouch';
+export type Action = 'forward' | 'back' | 'left' | 'right' | 'jump' | 'sprint' | 'crouch' | 'fire';
 
 const KEY_BINDINGS: Record<string, Action> = {
   KeyW: 'forward',
@@ -29,7 +29,32 @@ const KEY_BINDINGS: Record<string, Action> = {
   KeyC: 'crouch',
   ControlLeft: 'crouch',
   ControlRight: 'crouch',
+  // The trigger also lives on a key, and not only on the mouse: the left button is the
+  // drag-look fallback (and the click that asks for pointer lock), so in those two situations
+  // a mouse-only trigger would either fire when you meant to look or not fire at all.
+  KeyE: 'fire',
 };
+
+/**
+ * Keys that belong to the game rather than to a text field. When one of these arrives while a
+ * lil-gui number box has focus, the panel has plainly been abandoned and the player is trying
+ * to walk: the field is blurred and the key handled normally.
+ *
+ * Digits, arrows, Enter/Escape/Tab and the editing keys are deliberately absent — those are how
+ * you actually type a value into a slider's box, and stealing them would trade one broken input
+ * for another.
+ */
+function isGameKey(code: string): boolean {
+  return /^Key[A-Z]$/.test(code) || code === 'Space' || code.startsWith('Shift');
+}
+
+function editingTarget(): HTMLElement | null {
+  const el = document.activeElement as HTMLElement | null;
+  if (el === null) return null;
+  const tag = el.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable) return el;
+  return null;
+}
 
 export class Input {
   /** Accumulated look delta in pixels since the last consumeLook(). */
@@ -51,8 +76,18 @@ export class Input {
   private readonly disposers: Array<() => void> = [];
 
   constructor(private readonly target: HTMLElement) {
-    this.on(window, 'keydown', this.onKeyDown as EventListener);
-    this.on(window, 'keyup', this.onKeyUp as EventListener);
+    /*
+     * Capture phase, on the window, deliberately.
+     *
+     * The reported bug — "когда настройки трогаешь, если не кликать ещё юай, то видимо перехват
+     * WASD отрубается" — has two halves. lil-gui calls stopPropagation() on the key events inside
+     * its controllers, so a bubble-phase listener never sees them at all; and a number widget is
+     * a real <input> that keeps focus after you drag its slider, so the W you press next is
+     * *typed into the box*. Capturing at the window beats the first half (capture runs before any
+     * handler further down can stop anything), and `editingTarget()` below beats the second.
+     */
+    this.on(window, 'keydown', this.onKeyDown as EventListener, true);
+    this.on(window, 'keyup', this.onKeyUp as EventListener, true);
     this.on(window, 'blur', this.onBlur);
     this.on(target, 'mousedown', this.onMouseDown as EventListener);
     this.on(window, 'mouseup', this.onMouseUp as EventListener);
@@ -62,9 +97,9 @@ export class Input {
     this.on(target, 'contextmenu', (e) => e.preventDefault());
   }
 
-  private on(el: EventTarget, type: string, fn: EventListener): void {
-    el.addEventListener(type, fn);
-    this.disposers.push(() => el.removeEventListener(type, fn));
+  private on(el: EventTarget, type: string, fn: EventListener, capture = false): void {
+    el.addEventListener(type, fn, capture);
+    this.disposers.push(() => el.removeEventListener(type, fn, capture));
   }
 
   // ---- state queries -------------------------------------------------------
@@ -135,6 +170,13 @@ export class Input {
 
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.repeat) return;
+    const editing = editingTarget();
+    if (editing !== null) {
+      // Typing a number into the tuning panel: leave the field alone.
+      if (!isGameKey(e.code)) return;
+      // Anything else means the player is done with the panel and wants to move.
+      editing.blur();
+    }
     this.codesPressedThisTick.add(e.code);
     const action = KEY_BINDINGS[e.code];
     if (action === undefined) return;
@@ -145,18 +187,29 @@ export class Input {
   };
 
   private onKeyUp = (e: KeyboardEvent): void => {
+    // No focus check here on purpose: a key that went *down* as a game key must come back up as
+    // one, or it stays held for ever — which is the second, nastier half of the same bug.
     const action = KEY_BINDINGS[e.code];
     if (action !== undefined) this.down.delete(action);
   };
 
   private onBlur = (): void => {
+    // Losing the window with the trigger held would otherwise leave it held.
     this.down.clear();
     this.dragging = false;
   };
 
   private onMouseDown = (e: MouseEvent): void => {
     if (e.button !== 0) return;
-    if (this.lockMode === 'pointerlock' && !this.isLocked) this.requestLock();
+    /*
+     * The trigger, but only once the mouse is actually captured. The click that *asks* for
+     * pointer lock must not also fire a round — clicking into the window to start playing would
+     * announce your position to the whole hall before you had touched anything.
+     */
+    if (this.isLocked) {
+      this.down.add('fire');
+      this.pressedThisTick.add('fire');
+    } else if (this.lockMode === 'pointerlock') this.requestLock();
     // Track the drag regardless of mode: if the lock request is denied part-way through
     // this gesture we keep looking around instead of eating the player's input.
     this.dragging = true;
@@ -166,7 +219,10 @@ export class Input {
   };
 
   private onMouseUp = (e: MouseEvent): void => {
-    if (e.button === 0) this.dragging = false;
+    if (e.button === 0) {
+      this.dragging = false;
+      this.down.delete('fire');
+    }
   };
 
   private onMouseMove = (e: MouseEvent): void => {

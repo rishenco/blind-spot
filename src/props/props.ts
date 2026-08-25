@@ -617,6 +617,78 @@ export class PropWorld {
     this.queue.clear();
   }
 
+
+  /**
+   * A hitscan against everything solid in the hall, for the rifle (M3).
+   *
+   * The rifle does not get its own geometry query. Rapier's world here already holds the whole
+   * truth — the hall's static boxes, the ground plane, and every one of the ~1100 dynamic props —
+   * so a bullet asking "what is in front of me" and a prop asking "what am I resting on" are the
+   * same question asked of the same structure. A second, parallel raycaster over the AABB world
+   * would have been a second truth, and the two would have drifted the first time a crate was
+   * knocked over.
+   *
+   * The player's own capsule and the rifle's barrel box sit in that world too, and both are
+   * inside the muzzle. They are filtered out by predicate rather than by nudging the ray origin
+   * forward: an origin far enough ahead to clear the barrel is also far enough to shoot through
+   * a shelf the muzzle is pressed against.
+   *
+   * Returns the impact point in world space, the surface normal, the distance travelled and the
+   * prop index if a prop was hit (undefined for hall geometry — walls do not fly away).
+   */
+  raycast(
+    ox: number, oy: number, oz: number,
+    dx: number, dy: number, dz: number,
+    maxDistance: number,
+  ): { x: number; y: number; z: number; nx: number; ny: number; nz: number; distance: number; prop: number } | null {
+    const R = this.R;
+    const ray = new R.Ray({ x: ox, y: oy, z: oz }, { x: dx, y: dy, z: dz });
+    const playerHandle = this.player === null ? -1 : this.player.handle;
+    const rifleHandle = this.rifle === null ? -1 : this.rifle.handle;
+    const hit = this.world.castRayAndGetNormal(
+      ray, maxDistance, true, undefined, undefined, undefined, undefined,
+      (c: RAPIER.Collider) => {
+        const parent = c.parent();
+        if (parent === null) return true;
+        return parent.handle !== playerHandle && parent.handle !== rifleHandle;
+      },
+    );
+    if (hit === null) return null;
+    const d = hit.timeOfImpact;
+    const prop = this.byCollider.get(hit.collider.handle) ?? -1;
+    return {
+      x: ox + dx * d,
+      y: oy + dy * d,
+      z: oz + dz * d,
+      nx: hit.normal.x,
+      ny: hit.normal.y,
+      nz: hit.normal.z,
+      distance: d,
+      prop,
+    };
+  }
+
+  /**
+   * Concept: "пули расшвыривают лёгкие предметы". An impulse at a point, so a can takes the hit
+   * on its rim and spins, rather than sliding away flat — the shot has to *look* like it landed.
+   *
+   * Impulse, not force: the bullet is gone within the tick, and the prop's own mass decides what
+   * that means. The same round throws a plastic bottle across the aisle and barely rocks a steel
+   * drum, out of the densities the archetypes already carry, with no per-object tuning.
+   */
+  pushProp(i: number, x: number, y: number, z: number, ix: number, iy: number, iz: number): void {
+    if (i < 0 || i >= this.count) return;
+    const b = this.bodies[i]!;
+    b.wakeUp();
+    b.applyImpulseAtPoint({ x: ix, y: iy, z: iz }, { x, y, z }, true);
+  }
+
+  /** Material name of a prop, so a bullet hit can be reported as hitting steel rather than air. */
+  materialOf(i: number): string | undefined {
+    if (i < 0 || i >= this.count) return undefined;
+    return MATERIALS[ARCHETYPES[this.arch[i]!]!.material].name;
+  }
+
   /** Debug: shove everything inside a radius, which is how the "spilled stack" frames happen. */
   disturb(x: number, y: number, z: number, radius: number, impulse: number): number {
     let hit = 0;
