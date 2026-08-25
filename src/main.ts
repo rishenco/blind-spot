@@ -790,6 +790,7 @@ class App {
       const f = c.getWorldDirection(this.scratchDir);
       this.audio.setEar(c.position.x, c.position.y, c.position.z);
       this.audio.setListener(c.position.x, c.position.y, c.position.z, f.x, f.y, f.z);
+      this.radio.setListener(c.position.x, c.position.y, c.position.z, f.x, f.y, f.z);
     }
 
     const renderTime = this.time + alpha * this.loop.stepSeconds;
@@ -1735,6 +1736,8 @@ class App {
         /** Clarity as a pure function of a world point — for the "gate vs. far corner" numbers,
          *  without having to actually walk the player there first. */
         clarityAt: (x: number, z: number) => this.radio.clarity(new THREE.Vector3(x, 0, z)),
+        /** Continuous ground-radio gain at a point, for the distance regression check. */
+        groundGainAt: (x: number, z: number) => this.radio.groundGainAt(x, z),
         toggle: () => {
           this.radio.toggle(this.time);
           return this.radio.powered;

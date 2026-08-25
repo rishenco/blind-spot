@@ -160,7 +160,7 @@ notes.push(
 );
 
 // ===========================================================================
-// 1. The ground unit: pinging before anyone has touched it, readable from across the hall.
+// 1. The ground unit: pinging before anyone has touched it, but only as a local sound search.
 // ===========================================================================
 await call('pose', spawn[0] ?? -30, spawn[2] ?? -20, 40);
 await call('clear');
@@ -181,10 +181,23 @@ check(
   (soundBefore.radio ?? 0) > 0,
   `${soundBefore.radio ?? 0} radio event(s) heard with nobody near it`,
 );
+const groundAudio = await page.evaluate(() => {
+  const bs = window.bs;
+  return [0, 10, 24, 29].map((m) => ({ m, gain: bs.radio.groundGainAt(m, 0) }));
+});
+check(
+  'floor radio fades from a nearby cue into silence instead of filling the map',
+  groundAudio[0].gain === 1 && groundAudio[1].gain > 0.5 && groundAudio[2].gain > 0 && groundAudio[3].gain === 0,
+  groundAudio.map(({ m, gain }) => `${m} m=${gain.toFixed(3)}`).join(', '),
+);
+notes.push(
+  `floor-radio continuous audio is positional and bounded: gain ${groundAudio.map(({ m, gain }) => `${m} m=${gain.toFixed(3)}`).join(', ')}. ` +
+    'The 10 m reading remains easy to follow; it is silent beyond 28.8 m.',
+);
 await shot(
   '01-ground-ping-from-afar.png',
   `the radio, ${Math.hypot(spawn[0] - groundPos.x, spawn[2] - groundPos.z).toFixed(0)} m away in the middle of the hall, ` +
-    'pinging on its own before the player has ever gone near it — the mark is a fact ("a sound happened there"), ' +
+    'pinging on its own before the player has ever gone near it — but its actual audio is a local search cue, not a hall-wide beacon. The mark is a fact ("a sound happened there"), ' +
     'not a light: the hall around it stays black. This one mark is the entire tutorial for what a round is now about.',
 );
 

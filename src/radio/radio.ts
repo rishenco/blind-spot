@@ -37,7 +37,11 @@ export interface RadioTunables {
   captureSeconds: number;
   /** Seconds between bus pings while active — must stay well under the marker layer's life. */
   pingInterval: number;
-  /** Loudness (metres of audibility) of the ground unit's unconditional ping. */
+  /**
+   * Loudness (metres of audibility) of the ground unit's unconditional ping.
+   * It is deliberately a local search radius, not "the whole hall": the radio is a thing to
+   * stumble upon by listening, not an always-on waypoint.
+   */
   groundLoudness: number;
   /** Loudness of the carried unit while switched on — the loudest thing in the hall. */
   carryLoudness: number;
@@ -58,7 +62,7 @@ export function defaultRadioTunables(): RadioTunables {
     pickupRadius: 0.9,
     captureSeconds: 2.2,
     pingInterval: 0.6,
-    groundLoudness: 42,
+    groundLoudness: 24,
     carryLoudness: 70,
     clarityNear: 6,
     clarityFar: 58,
@@ -91,6 +95,8 @@ export class Radio {
   private noiseGainNode: GainNode | null = null;
   private melodyOsc: OscillatorNode | null = null;
   private melodyGainNode: GainNode | null = null;
+  /** The continuous radio is spatial too; it must never bypass the listener as a UI sound. */
+  private synthPanner: PannerNode | null = null;
 
   constructor(tunables: RadioTunables = defaultRadioTunables()) {
     this.tunables = tunables;
@@ -158,6 +164,21 @@ export class Radio {
     return this.lastClarity;
   }
 
+  /**
+   * The floor unit's continuous-sound falloff, exposed for the text-only radio check.
+   * This is the Web Audio linear panner curve: full at the radio, smoothly down to silence just
+   * beyond its audible radius. The carried unit lives on the player, so it intentionally has no
+   * distance penalty.
+   */
+  groundGainAt(x: number, z: number): number {
+    const radius = this.tunables.groundLoudness * 1.2;
+    const ref = Math.min(3, Math.max(0.7, this.tunables.groundLoudness / 15));
+    const d = Math.hypot(x - RADIO_GROUND_POS.x, z - RADIO_GROUND_POS.z);
+    if (d <= ref) return 1;
+    if (d >= radius) return 0;
+    return 1 - (d - ref) / (radius - ref);
+  }
+
   update(_dt: number, now: number, bus: SoundBus, playerPos: THREE.Vector3): void {
     const t = this.tunables;
     if (!this._carried) {
@@ -179,6 +200,7 @@ export class Radio {
     }
 
     this.lastClarity = this.clarity(pos);
+    this.placeSynth(pos, !this._carried);
     this.syncSynth(active);
   }
 
@@ -213,7 +235,15 @@ export class Radio {
     noiseSrc.loop = true;
     const noiseGain = ctx.createGain();
     noiseGain.gain.value = 0;
-    noiseSrc.connect(noiseGain).connect(ctx.destination);
+    const panner = ctx.createPanner();
+    panner.panningModel = 'HRTF';
+    // Linear is intentional here: it reaches actual silence at the search radius, unlike the
+    // inverse model's non-zero tail. HRTF still provides the directional cue while moving.
+    panner.distanceModel = 'linear';
+    panner.refDistance = Math.min(3, Math.max(0.7, this.tunables.groundLoudness / 15));
+    panner.maxDistance = this.tunables.groundLoudness * 1.2;
+    panner.rolloffFactor = 1;
+    noiseSrc.connect(noiseGain).connect(panner);
     noiseSrc.start();
 
     const melodyOsc = ctx.createOscillator();
@@ -221,12 +251,60 @@ export class Radio {
     melodyOsc.frequency.value = 440;
     const melodyGain = ctx.createGain();
     melodyGain.gain.value = 0;
-    melodyOsc.connect(melodyGain).connect(ctx.destination);
+    melodyOsc.connect(melodyGain).connect(panner);
+    panner.connect(ctx.destination);
     melodyOsc.start();
 
     this.noiseGainNode = noiseGain;
     this.melodyOsc = melodyOsc;
     this.melodyGainNode = melodyGain;
+    this.synthPanner = panner;
+  }
+
+  /** The same render camera drives the radio's private AudioContext listener. */
+  setListener(px: number, py: number, pz: number, fx: number, fy: number, fz: number): void {
+    const ctx = this.ctx;
+    if (ctx === null) return;
+    const l = ctx.listener;
+    const t = ctx.currentTime;
+    if (l.positionX !== undefined) {
+      l.positionX.setValueAtTime(px, t);
+      l.positionY.setValueAtTime(py, t);
+      l.positionZ.setValueAtTime(pz, t);
+      l.forwardX.setValueAtTime(fx, t);
+      l.forwardY.setValueAtTime(fy, t);
+      l.forwardZ.setValueAtTime(fz, t);
+      l.upX.setValueAtTime(0, t);
+      l.upY.setValueAtTime(1, t);
+      l.upZ.setValueAtTime(0, t);
+    } else {
+      const legacy = l as unknown as {
+        setPosition(x: number, y: number, z: number): void;
+        setOrientation(fx: number, fy: number, fz: number, ux: number, uy: number, uz: number): void;
+      };
+      legacy.setPosition(px, py, pz);
+      legacy.setOrientation(fx, fy, fz, 0, 1, 0);
+    }
+  }
+
+  private placeSynth(pos: THREE.Vector3, onFloor: boolean): void {
+    const panner = this.synthPanner;
+    const ctx = this.ctx;
+    if (panner === null || ctx === null) return;
+    const radius = this.tunables.groundLoudness * 1.2;
+    panner.refDistance = Math.min(3, Math.max(0.7, this.tunables.groundLoudness / 15));
+    // A carried radio is next to the listener. Keep its loudness fixed; only the floor unit
+    // needs the bounded search radius.
+    panner.maxDistance = onFloor ? radius : 4;
+    const t = ctx.currentTime;
+    if (panner.positionX !== undefined) {
+      panner.positionX.setValueAtTime(pos.x, t);
+      panner.positionY.setValueAtTime(onFloor ? 0.9 : pos.y + 1.1, t);
+      panner.positionZ.setValueAtTime(pos.z, t);
+    } else {
+      (panner as unknown as { setPosition(x: number, y: number, z: number): void })
+        .setPosition(pos.x, onFloor ? 0.9 : pos.y + 1.1, pos.z);
+    }
   }
 
   private syncSynth(active: boolean): void {
@@ -255,5 +333,6 @@ export class Radio {
     }
     if (this.ctx) void this.ctx.close().catch(() => undefined);
     this.ctx = null;
+    this.synthPanner = null;
   }
 }
