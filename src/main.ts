@@ -42,6 +42,9 @@ import { MuzzleFlash, defaultFlashTunables } from './weapon/flash';
 import { ShotTracers } from './weapon/tracers';
 import { Swarm, defaultSpiderTunables } from './spiders/swarm';
 import { SpiderOverlay } from './spiders/overlay';
+import { PlayerVitals, defaultVitalsTunables } from './hud/vitals';
+import { NoiseCompass, defaultCompassTunables } from './hud/compass';
+import { PlayerHudLayer, defaultHudLayerTunables, screenAngle, type CompassNotch } from './hud/overlay';
 
 type ViewMode = 'player' | 'third' | 'top';
 
@@ -63,12 +66,15 @@ const HELP: HelpRow[] = [
   { keys: 'B', action: 'debug: shove the clutter in front of you (make a mess)' },
   { keys: 'J', action: 'debug: refill the lidar' },
   { keys: 'G', action: 'debug: tuning panel' },
+  { keys: 'O', action: 'noise compass on/off — bearings to noises you cannot see' },
+  { keys: 'I', action: 'debug: damage feedback (wedge, flinch, dark edge) on/off' },
+  { keys: 'Z', action: 'debug: take a bite — from the nearest spider, else from behind' },
   { keys: 'R', action: 'respawn' },
   { keys: 'H', action: 'this help' },
 ];
 
 const HINT =
-  'WASD move · Shift run · Ctrl crouch · F lidar ping · E/LMB shoot · X fire mode · Y hold flash · U tracers · L lights · V view · G tuning · H help';
+  'WASD move · Shift run · Ctrl crouch · F lidar ping · E/LMB shoot · X fire mode · O compass · Y hold flash · U tracers · L lights · V view · G tuning · H help';
 
 /** Where the muzzle is relative to the eye, metres — matches the rifle's collider box. */
 const MUZZLE_AHEAD = 0.55;
@@ -150,6 +156,19 @@ class App {
   private readonly spiderOverlay = new SpiderOverlay();
   /** True while the truth geometry is on screen because the flash is burning. */
   private flashRevealed = false;
+
+  /**
+   * The player's body and his own HUD (M5). The pack bites; this is what a bite costs and how
+   * the player is told about it. All three parts switch off independently — the human judges
+   * this by hand, with and without.
+   */
+  private readonly vitals = new PlayerVitals(defaultVitalsTunables());
+  /** Fourth bus subscriber: bearings to noises whose marks are off-screen. Off by default. */
+  private readonly compass = new NoiseCompass(this.bus, defaultCompassTunables());
+  private readonly playerHud = new PlayerHudLayer(defaultHudLayerTunables());
+  /** Rebuilt per frame from the live blips. Never grows past the compass's own capacity. */
+  private readonly notches: CompassNotch[] = [];
+  private readonly scratchProject = new THREE.Vector3();
 
   /** Simulation clock, seconds. Never wall-clock: the keyframe generator depends on it. */
   private time = 0;
@@ -311,6 +330,15 @@ class App {
     // The pack. Its own seed stream, so how long you survive cannot perturb the layout RNG.
     this.spiders = new Swarm(this.hall.world, this.bus, this.seed, defaultSpiderTunables());
     this.spiders.setProps(this.props);
+    /*
+     * The contract with the pack, and the whole of it: a spider that lands a bite says so, with
+     * where it was standing. Everything about health, direction and feedback is decided here,
+     * outside the AI, so the swarm has no idea whether damage exists at all.
+     */
+    this.spiders.onStrike((strike) => {
+      const p = this.player.position;
+      this.vitals.bite(strike.x, strike.z, p.x, p.z, this.player.yaw);
+    });
     this.scene.add(this.spiderOverlay.object, this.spiderOverlay.bodies);
 
     // Let the pile settle before anyone looks at it: laid-out props start a few millimetres
@@ -355,7 +383,28 @@ class App {
     if (this.spiders !== null) {
       const p = this.player.position;
       this.spiders.setPlayer(p.x, p.y, p.z);
+      this.spiders.setPlayerAlive(this.vitals.alive);
       this.spiders.update(dt, this.time);
+    }
+
+    /*
+     * The body. Its aim kick and its tremor move the *real* heading — being bitten costs you
+     * your aim, not just a shake — so they are applied here, in the simulation, and clamped
+     * exactly like mouse look. The flinch itself is render-only and lives in `render`.
+     */
+    this.vitals.update(dt, this.time);
+    {
+      const kick = this.vitals.consumeAimKick();
+      const breath = this.vitals.tremor(dt);
+      const dPitch = kick.pitch + breath.pitch;
+      const dYaw = kick.yaw + breath.yaw;
+      if (dPitch !== 0 || dYaw !== 0) {
+        this.player.pitch += dPitch;
+        this.player.yaw += dYaw;
+        const clamp = (defaultCameraTunables().pitchClampDeg * Math.PI) / 180;
+        if (this.player.pitch > clamp) this.player.pitch = clamp;
+        if (this.player.pitch < -clamp) this.player.pitch = -clamp;
+      }
     }
 
     this.touch.update(eye.x, eye.y, eye.z);
@@ -385,11 +434,16 @@ class App {
     if (i.wasKeyPressed('KeyR')) {
       this.player.respawn();
       this.rifle?.resetRecoil();
+      this.vitals.reset();
+      this.compass.clear();
     }
     if (i.wasKeyPressed('KeyX')) this.cycleFireMode();
     if (i.wasKeyPressed('KeyY')) this.flash.setHold(!this.flash.holding);
     if (i.wasKeyPressed('KeyU')) this.tracers.setVisible(!this.tracers.visible);
     if (i.wasKeyPressed('KeyP')) this.spiderOverlay.setVisible(!this.spiderOverlay.visible);
+    if (i.wasKeyPressed('KeyO')) this.compass.enabled = !this.compass.enabled;
+    if (i.wasKeyPressed('KeyI')) this.playerHud.showDamage = !this.playerHud.showDamage;
+    if (i.wasKeyPressed('KeyZ')) this.biteMe();
   }
 
   /**
@@ -524,6 +578,20 @@ class App {
       this.camera.position.addScaledVector(f, -punch.back);
       this.camera.updateMatrixWorld();
     }
+    /*
+     * The flinch from a bite. Same split as the rifle's punch and for the same reason: the aim
+     * kick has already moved where you are *pointing* (in the simulation, a tick ago), and this
+     * is only the head snapping round. Roll is included — a hit from the side turns the
+     * shoulder, and it is the cheapest thing on screen that reads as a body rather than a
+     * camera.
+     */
+    const hurt = this.vitals.viewPunch;
+    if (hurt.pitch !== 0 || hurt.yaw !== 0 || hurt.roll !== 0) {
+      this.camera.rotation.x += hurt.pitch;
+      this.camera.rotation.y += hurt.yaw;
+      this.camera.rotation.z += hurt.roll;
+      this.camera.updateMatrixWorld();
+    }
     // The ear rides the *render* camera, not the sim eye: it is the only place the smoothed head
     // orientation exists, and half a tick of lag in a pan is audible as a swim.
     {
@@ -581,10 +649,73 @@ class App {
     this.renderer.render(this.scene, camera);
     this.perf.renderMs = performance.now() - renderStart;
 
+    this.drawPlayerHud(renderTime, camera);
+
     this.perf.frameMs = performance.now() - frameStart;
     this.frameTimes.push(this.perf.frameMs);
     if (this.frameTimes.length > 240) this.frameTimes.shift();
     this.updateHud();
+  }
+
+  /**
+   * The player's own HUD: bite wedges and the noise ring, drawn on a 2D canvas over the frame.
+   *
+   * The off-screen test is done here rather than inside the compass because this is the only
+   * place that knows what the camera can see: every live blip is projected with the *active*
+   * camera, and one whose mark is already in frame is dropped. The compass therefore never
+   * repeats information the sound layer has already given — it only refuses to lose the half of
+   * the room behind your head.
+   */
+  private drawPlayerHud(renderTime: number, camera: THREE.PerspectiveCamera): void {
+    this.compass.setTime(renderTime);
+    const c = this.compass.tunables;
+    const notches = this.notches;
+    notches.length = 0;
+    if (this.compass.enabled) {
+      const p = this.player.position;
+      const yaw = this.camera.rotation.y;
+      for (const b of this.compass.live) {
+        const v = this.scratchProject.set(b.x, b.y, b.z).project(camera);
+        const onScreen = v.z < 1 && Math.abs(v.x) < 0.95 && Math.abs(v.y) < 0.95;
+        if (c.offscreenOnly && onScreen) continue;
+        // Loudness sets brightness and nothing sets distance: the set can honestly tell a bang
+        // from a scratch, and it cannot tell you how far away either of them was.
+        const loud = Math.min(1, b.loudness / Math.max(1, c.loudRef));
+        const strength = this.compass.age(b) * (0.35 + 0.65 * loud);
+        if (strength <= 0.02) continue;
+        notches.push({
+          angle: screenAngle(Math.atan2(b.x - p.x, b.z - p.z), yaw),
+          strength,
+          seq: b.seq,
+          color: NoiseCompass.color(b.source),
+        });
+      }
+    }
+    this.playerHud.draw(this.vitals, this.camera.rotation.y, renderTime, notches, {
+      radius: c.radius,
+      widthDeg: c.widthDeg,
+      thickness: c.thickness,
+      brightness: c.brightness,
+    });
+  }
+
+  /** Debug: bite yourself. The nearest spider if there is one within earshot, else from behind. */
+  private biteMe(): number {
+    const p = this.player.position;
+    // Two metres behind the head, in the camera's convention (forward is -Z at yaw 0).
+    let fx = p.x + Math.sin(this.player.yaw) * 2;
+    let fz = p.z + Math.cos(this.player.yaw) * 2;
+    let best = Infinity;
+    for (const s of this.spiders?.list() ?? []) {
+      const d = Math.hypot(s.x - p.x, s.z - p.z);
+      if (d < best) {
+        best = d;
+        fx = s.x;
+        fz = s.z;
+      }
+    }
+    this.vitals.bite(fx, fz, p.x, p.z, this.player.yaw);
+    return this.vitals.health;
   }
 
   /**
@@ -674,6 +805,14 @@ class App {
         this.spiders === null
           ? 'off'
           : `${this.spiders.mode} · ${this.spiders.getStats().count} · courage ${this.spiders.getStats().meanCourage.toFixed(2)} · ${this.spiders.getStats().chatter.toFixed(1)} click/s`,
+      ],
+      [
+        'vitals',
+        !this.vitals.enabled
+          ? 'immortal'
+          : `${this.vitals.alive ? `${Math.ceil(this.vitals.health)} hp` : 'DOWN'} · ${this.vitals.bites} bites` +
+            `${this.vitals.degrade > 0 ? ` · set ${(this.vitals.degrade * 100) | 0}% failing` : ''}` +
+            `${this.compass.enabled ? ` · compass ${this.notches.length}/${this.compass.count}` : ' · compass off'}`,
       ],
       [
         'flash',
@@ -870,6 +1009,48 @@ class App {
     gun.add(r, 'hitImpulse', 0, 30, 0.5);
     gun.open();
 
+    /*
+     * The player's own HUD. Everything here is a switch because the human judges it by hand and
+     * has to be able to see the frame with and without: `damage` makes him immortal again,
+     * `compass` is the argument of the milestone, and `health` is a slider so the degraded set
+     * can be looked at without being bitten seven times first.
+     */
+    const me = gui.addFolder('player / hud');
+    const vt = this.vitals.tunables;
+    me.add(this.vitals, 'enabled').name('damage');
+    me.add(this.vitals, 'effects').name('flinch');
+    me.add(this.playerHud, 'showDamage').name('wedge + dark edge');
+    me.add({ health: this.vitals.health }, 'health', 0, vt.maxHealth, 1)
+      .listen()
+      .onChange((v: number) => this.vitals.setHealth(v));
+    me.add({ bite: () => this.biteMe() }, 'bite').name('bite me (Z)');
+    me.add({ heal: () => this.vitals.reset() }, 'heal').name('patch up');
+    me.add(vt, 'biteDamage', 1, 50, 1);
+    me.add(vt, 'regenRate', 0, 10, 0.1);
+    me.add(vt, 'punchPitchDeg', 0, 12, 0.1);
+    me.add(vt, 'punchRollDeg', 0, 12, 0.1);
+    me.add(vt, 'kickDeg', 0, 8, 0.1);
+    me.add(vt, 'tremorDeg', 0, 4, 0.05);
+    me.add(vt, 'lowHealth', 0, 1, 0.05);
+    me.add(vt, 'markLife', 0.4, 8, 0.1);
+    me.add(this.playerHud.tunables, 'wedgeRadius', 0.15, 1, 0.01);
+    me.add(this.playerHud.tunables, 'stingDark', 0, 1, 0.02);
+    me.add(this.playerHud.tunables, 'lowDark', 0, 1, 0.02);
+    me.open();
+
+    const cp = gui.addFolder('noise compass');
+    const ct = this.compass.tunables;
+    cp.add(this.compass, 'enabled').name('compass (O)');
+    cp.add(ct, 'offscreenOnly').name('off-screen only');
+    cp.add(ct, 'life', 0.3, 8, 0.1);
+    cp.add(ct, 'loudRef', 3, 60, 1);
+    cp.add(ct, 'minLoudness', 0, 12, 0.5);
+    cp.add(ct, 'radius', 0.3, 1.1, 0.01);
+    cp.add(ct, 'widthDeg', 2, 40, 1);
+    cp.add(ct, 'thickness', 1, 12, 0.5);
+    cp.add(ct, 'brightness', 0, 2, 0.05);
+    cp.open();
+
     const ear = gui.addFolder('audio');
     ear.add(this.audio.tunables, 'volume', 0, 1, 0.02).onChange((v: number) => this.audio.setVolume(v));
     ear.add(this.audio.tunables, 'maxLatency', 0.05, 1, 0.05);
@@ -897,6 +1078,7 @@ class App {
     this.camera.updateProjectionMatrix();
     this.topCamera.aspect = w / h;
     this.topCamera.updateProjectionMatrix();
+    this.playerHud.resize();
   }
 
   // ---- keyframe-generator surface -----------------------------------------
@@ -1061,6 +1243,66 @@ class App {
           Object.assign(this.spiders.tunables, patch);
           return { ...this.spiders.tunables };
         },
+      },
+      /** The body and the player's own HUD, for the M5 scenarios. */
+      vitals: {
+        state: () => ({
+          health: this.vitals.health,
+          frac: this.vitals.healthFrac,
+          alive: this.vitals.alive,
+          bites: this.vitals.bites,
+          damage: this.vitals.damage,
+          degrade: this.vitals.degrade,
+          sting: this.vitals.sting,
+          lastHitAgo: this.vitals.lastHitAgo,
+          marks: this.vitals.marks.map((m) => ({ ...m })),
+          punch: { ...this.vitals.viewPunch },
+          compass: { enabled: this.compass.enabled, blips: this.compass.count, drawn: this.notches.length },
+        }),
+        /** A bite from a world point, exactly as a spider would land it. */
+        bite: (x: number, z: number, amount?: number) => {
+          const p = this.player.position;
+          return this.vitals.bite(x, z, p.x, p.z, this.player.yaw, amount);
+        },
+        /** A bite from a bearing in degrees, 0 = straight ahead, +90 = your right. */
+        biteFrom: (deg: number, amount?: number) => {
+          const p = this.player.position;
+          const a = this.player.yaw - (deg * Math.PI) / 180 + Math.PI;
+          return this.vitals.bite(p.x + Math.sin(a) * 2, p.z + Math.cos(a) * 2, p.x, p.z, this.player.yaw, amount);
+        },
+        health: (v: number) => {
+          this.vitals.setHealth(v);
+          return this.vitals.health;
+        },
+        reset: () => this.vitals.reset(),
+        damage: (on: boolean) => {
+          this.vitals.enabled = on;
+          return this.vitals.enabled;
+        },
+        effects: (on: boolean) => {
+          this.vitals.effects = on;
+          this.playerHud.showDamage = on;
+          return on;
+        },
+        layer: (on: boolean) => {
+          this.playerHud.setVisible(on);
+          return this.playerHud.visible;
+        },
+        compass: (on: boolean) => {
+          this.compass.enabled = on;
+          return this.compass.enabled;
+        },
+        compassTune: (patch: Partial<Record<string, number | boolean>>) => {
+          Object.assign(this.compass.tunables, patch);
+          return { ...this.compass.tunables };
+        },
+        tune: (patch: Partial<Record<string, number>>) => {
+          Object.assign(this.vitals.tunables, patch);
+          return { ...this.vitals.tunables };
+        },
+        /** Every notch the compass drew on the last frame — bearing in screen degrees. */
+        notches: () =>
+          this.notches.map((n) => ({ deg: (n.angle * 180) / Math.PI, strength: n.strength, seq: n.seq })),
       },
       clear: () => this.clearMap(),
       refill: () => this.lidar.refill(),

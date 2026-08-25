@@ -305,6 +305,23 @@ export interface SwarmStats {
   decisions: number;
 }
 
+/**
+ * A landed bite, handed to whoever cares (M5's player vitals). The swarm itself has no opinion
+ * about damage: it reports where the bite came from and moves on, so the health model can live
+ * entirely outside this file and be switched off without the pack noticing.
+ */
+export interface StrikeEvent {
+  /** Which spider. */
+  readonly id: number;
+  /** Where it was standing when it bit — the direction the player was hit from. */
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly time: number;
+}
+
+export type StrikeListener = (strike: StrikeEvent) => void;
+
 /** Just enough of `PropWorld` for a panicking spider to wreck the place. */
 export interface Smashable {
   disturb(x: number, y: number, z: number, radius: number, impulse: number): number;
@@ -367,6 +384,7 @@ export class Swarm {
   private readonly shape: BodyShape;
   private readonly unsubscribe: () => void;
   private props: Smashable | null = null;
+  private readonly strikeListeners = new Set<StrikeListener>();
 
   private time = 0;
   private tick = 0;
@@ -411,6 +429,22 @@ export class Swarm {
     // The third bus consumer, and it knows nothing about the other two. A spider hears exactly
     // what the marker layer draws and what the synth voices — no private channel, no cheat.
     this.unsubscribe = bus.subscribe((event) => this.hear(event));
+  }
+
+  /** Tells `listener` about every landed bite. Returns the unsubscribe. */
+  onStrike(listener: StrikeListener): () => void {
+    this.strikeListeners.add(listener);
+    return () => {
+      this.strikeListeners.delete(listener);
+    };
+  }
+
+  /**
+   * A downed player stops being felt at arm's length — he is still heard like anything else,
+   * he is simply no longer a body the pack can locate by touch.
+   */
+  setPlayerAlive(alive: boolean): void {
+    this.playerAlive = alive;
   }
 
   /** Lets a panicking spider throw the clutter about. Optional: the pack works without it. */
@@ -1055,8 +1089,9 @@ export class Swarm {
   /**
    * The strike. It is not a kill: a spider that reaches the player bites, screeches — which is
    * the loudest thing it ever does, and gives away the whole pack — and bounces off. «Мелкие,
-   * им страшно, поэтому просто не раздерут сразу.» Damage is M5's problem; the recoil is the
-   * behaviour the milestone is about.
+   * им страшно, поэтому просто не раздерут сразу.» How much that bite *hurts* is not decided
+   * here: the strike is announced through `onStrike` and the health model outside owns the
+   * answer. The recoil is the behaviour this milestone is about.
    */
   private contact(s: Spider): void {
     if (s.state !== 'commit') return;
@@ -1072,6 +1107,9 @@ export class Swarm {
       loudness: t.strikeLoudness,
     });
     this.stats.strikes++;
+    for (const listener of this.strikeListeners) {
+      listener({ id: s.id, x: s.pos.x, y: s.pos.y, z: s.pos.z, time: this.time });
+    }
     s.courage *= 0.3;
     this.enter(s, 'recoil');
   }
@@ -1149,6 +1187,7 @@ export class Swarm {
 
   dispose(): void {
     this.unsubscribe();
+    this.strikeListeners.clear();
   }
 }
 
