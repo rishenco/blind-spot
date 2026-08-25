@@ -33,19 +33,31 @@ import type { SoundBus, SoundEvent, SoundSource } from '../events/bus';
 const SELF: ReadonlySet<SoundSource> = new Set<SoundSource>(['player-step', 'player-land', 'gunshot']);
 
 /**
- * Stroke colour per source. A deliberate near-echo of the marker layer's thermal palette — same
- * instrument, same warm language — but the compass draws thin cold-struck notches rather than
- * blobs, so the two can never be mistaken for each other. Local numbers on purpose: the marker
- * layer is free to re-style itself without dragging the compass with it.
+ * Colour is identity, not quantity — the one rule this palette has.
+ *
+ * The channel used to be colourless on principle ("в игре нет цвета"), and the compass paid for
+ * it: six near-identical warm hues that said nothing, because they were all shades of the same
+ * "a noise happened". The human's call of 2026-08-25 changes what colour is *for*: it now
+ * answers "who made that", and nothing else. Never how loud, never how far — those are already
+ * brightness, and a second encoding of them would only make the ring harder to read.
+ *
+ * So the palette is two entries wide and stays that way:
+ *
+ *  - **alien** — something alive that is not you: red, and it is the only red on the ring.
+ *  - **neutral** — everything else the world does: a cold bone grey with no hue worth the name.
+ *
+ * That is the same law "echo" already draws marks by (`src/sound/markers.ts`), which is the
+ * point: one glance at the ring and one glance at a mark have to agree about who is out there.
+ * Do not add a third colour without a reason as strong as "it is alive".
+ *
+ * Loudness still sets brightness, so a loud neutral event is a bright grey notch and a faint
+ * spider is a dim red one — you can always tell the two apart by hue at any brightness.
  */
-const LOOK: Record<SoundSource, [number, number, number]> = {
-  'player-step': [255, 132, 56],
-  'player-land': [255, 122, 40],
-  'prop-impact': [255, 196, 106],
-  gunshot: [255, 240, 192],
-  'bullet-hit': [255, 216, 144],
-  spider: [255, 158, 192],
-};
+const ALIEN: readonly [number, number, number] = [255, 62, 46];
+const NEUTRAL: readonly [number, number, number] = [214, 222, 216];
+
+/** Sources that are something alive and not you. Extended, never guessed at by hue. */
+const ALIVE: ReadonlySet<SoundSource> = new Set<SoundSource>(['spider']);
 
 export interface CompassTunables {
   /** Seconds a notch lives. Must stay well under the marker layer's own life. */
@@ -93,8 +105,13 @@ export interface Blip {
 
 export class NoiseCompass {
   readonly tunables: CompassTunables;
-  /** Off by default — law 1, and because the whole point is comparing with and without it. */
-  enabled = false;
+  /**
+   * On by default since 2026-08-25. It shipped off because it looked too strong on paper; the
+   * human played with it and decided the opposite — without it the half of the room behind your
+   * head is simply not in the game. `O` still switches it off, which is how the with/without
+   * comparison is made now.
+   */
+  enabled = true;
 
   private readonly blips: Blip[] = [];
   private readonly unsubscribe: () => void;
@@ -146,9 +163,15 @@ export class NoiseCompass {
     return 1 - Math.min(1, Math.max(0, (this.time - b.at) / this.tunables.life));
   }
 
-  /** Stroke colour for a source, as an `rgb` triple. */
+  /** True when the noise was made by something alive that is not the player. */
+  static alien(source: SoundSource): boolean {
+    return ALIVE.has(source);
+  }
+
+  /** Stroke colour for a source, as an `rgb` triple. Two entries wide, on purpose — see above. */
   static color(source: SoundSource): [number, number, number] {
-    return LOOK[source] ?? [255, 200, 150];
+    const c = ALIVE.has(source) ? ALIEN : NEUTRAL;
+    return [c[0], c[1], c[2]];
   }
 
   clear(): void {

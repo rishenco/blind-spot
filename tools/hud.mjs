@@ -20,6 +20,23 @@ import { pathToFileURL } from 'node:url';
 import { decodePng, meanLuminance as meanRect, litFraction as litRect } from './png.mjs';
 
 const whole = (img) => ({ x: 0, y: 0, w: img.width, h: img.height });
+/**
+ * Fraction of the frame that is unmistakably *red* — red at least 30/255 above both other
+ * channels. This is the only way to check the "colour is identity" rule as a number: a spider
+ * on the ring has to come back red and a falling crate must not, at any brightness.
+ */
+const redFraction = (img) => {
+  const { data, channels } = img;
+  const px = img.width * img.height;
+  let red = 0;
+  for (let i = 0; i < px; i++) {
+    const r = data[i * channels];
+    const g = data[i * channels + 1];
+    const b = data[i * channels + 2];
+    if (r > 40 && r - Math.max(g, b) > 30) red++;
+  }
+  return red / px;
+};
 const litFraction = (img) => litRect(img, whole(img)).fraction;
 const meanLuminance = (img) => meanRect(img, whole(img)).mean;
 
@@ -111,6 +128,16 @@ async function truthCam(x, z, height = 22) {
 async function playerCam(yawDeg = 0, pitchDeg = 0) {
   await call('spiders.overlay', false);
   await call('hud', false);
+  /*
+   * The touch channel is off in every frame this generator takes, and it is not a cosmetic
+   * choice. It draws the tactile contour of the rifle in your own hands, it *accumulates* felt
+   * points as the frame is drawn, and two consecutive redraws of one simulation tick therefore
+   * differ — which destroys the A/B pairs this whole file is built on (the wedge frame and its
+   * twin without the wedge would differ by the gun, not by the wedge) and puts a lit object in
+   * the corner of the "sound layer off ⇒ black" proof that has nothing to do with the sound
+   * layer. It belongs to another channel and to another generator.
+   */
+  await call('touch', false);
   await call('lights', false);
   await call('view', 'player');
   if (yawDeg !== null) await call('aim', yawDeg, pitchDeg);
@@ -124,9 +151,28 @@ await page.goto(url);
 await page.waitForFunction(() => window.bs !== undefined, null, { timeout: 30000 });
 await call('audio', false);
 await call('hud', false);
+/*
+ * Two channels that are not the subject of this file are switched off before the first tick.
+ *
+ * The touch layer paints what the player's hand has felt into the *shared* point cloud, so it
+ * has to go off before anything is simulated rather than before the first screenshot — switch
+ * it off later and it hides the layer while leaving everything it already painted.
+ *
+ * The rifle in his own hands (another agent's viewmodel, M4d) is drawn in the bottom-right of
+ * every first-person frame whether or not a noise has ever happened, and its felt contour
+ * resamples on every draw. Left on, it makes each A/B pair here differ by the gun instead of by
+ * the switch under test, and it makes "the sound layer off ⇒ the frame is black" unprovable —
+ * there would always be a rifle in it. It is a real part of his screen and it is somebody
+ * else's proof; it is not evidence about the HUD.
+ */
+await call('touch', false);
+await call('rifleMesh', false);
 // Read before anything is switched: the style the game boots with is itself a deliverable.
 const bootMarkerStyle = await call('markerStyle');
 const bootHudStyle = await page.evaluate(() => window.bs.vitals.hudStyles()[0]);
+// Whether the noise compass is on when the game opens is itself a decision the human made, so
+// it is read here — before any scenario touches the switch — and checked in section 8.
+const bootCompass = (await page.evaluate(() => window.bs.vitals.state())).compass.enabled;
 await advance(3, 8);
 notes.push(
   'seed 20260824, fixed 120 Hz step, damage model: 100 hp, 14 hp a bite, 0.35 s of grace ' +
@@ -494,7 +540,11 @@ check(
   looks.bone.mean <= meanLuminance(lookOff) + 0.01,
   `bone mean ${looks.bone.mean.toFixed(2)} against ${meanLuminance(lookOff).toFixed(2)} with the layer off`,
 );
-check('and the HUD look the game boots with is offered first', bootHudStyle === 'visor', `boots as ${bootHudStyle}`);
+check(
+  'and the HUD look the game boots with is the one he picked',
+  bootHudStyle === 'sonar',
+  `boots as ${bootHudStyle}`,
+);
 notes.push(
   'what broke the immersion in the M5 HUD, named rather than tuned: perfect circles (the only Euclidean object in a game made of ' +
     'boxes, dots and blobs), a look that never changes and never lags, being pinned to the pixel grid while the head is knocked, and ' +
@@ -587,6 +637,110 @@ await call('vitals.layer', true);
 notes.push(
   'law 2 checked as a number, not as an opinion: frame 18 is the same simulation tick as 15-17 with the sound layer switched off, ' +
     'and it is black to the last pixel.',
+);
+
+// ===========================================================================
+// 8. The colour of a sound. Red is "something alive that is not you" and it is
+//    the only hue on the ring; everything else the world does is one neutral
+//    bone grey. Colour answers *who*, never *how loud* and never *how far* —
+//    those are already brightness, and encoding them twice only makes the ring
+//    harder to read. The section shoots the two side by side and then measures
+//    the red as a number, because "it looks reddish" is not a proof.
+// ===========================================================================
+await call('vitals.reset');
+await call('markerStyle', 'echo');
+await call('pose', HOME.x, HOME.z, 0);
+await call('clear');
+await call('vitals.compass', true);
+await call('vitals.hudStyle', 'sonar');
+await playerCam(0, 0);
+
+// A crate goes over behind his left shoulder: the neutral half of the palette, and a real
+// physical event rather than a poked bus.
+const CRATE = await propInArc(110, 175, 5, 14);
+check('a crate to knock over behind him', CRATE !== null, CRATE ? `${CRATE.d.toFixed(1)} m away at ${CRATE.deg.toFixed(0)}°` : 'none found');
+if (CRATE !== null) await call('disturb', CRATE.x, CRATE.y + 0.2, CRATE.z, 2.6, 6);
+await advance(0.3, 3);
+const crateOnly = await shot(
+  '19-colour-crate.png',
+  'sonar, the look he picked, with the noise compass on — which is now the default. A stack of clutter has just gone over behind ' +
+    'his right shoulder and the ring reports it as a neutral bone-grey tick: a bearing, a brightness, and no claim about what it was',
+);
+const crateNotches = await call('vitals.notches');
+
+// Now the other half: live spiders behind him, at his back where the sound layer cannot draw
+// them, making their own real noises on the same bus.
+await call('spiders.spawn', 6);
+await page.evaluate(([cx, cz]) => {
+  const bs = window.bs;
+  const n = bs.spiders.list().length;
+  for (let i = 0; i < n; i++) {
+    // A fan behind his head, 6-9 m out: off-screen, so the compass is the only channel that can
+    // report them at all — which is the whole reason it exists.
+    const a = Math.PI + (i - (n - 1) / 2) * 0.26;
+    const r = 6 + (i % 3);
+    bs.spiders.place(i, cx + Math.sin(a) * r, cz + Math.cos(a) * r);
+  }
+}, [HOME.x, HOME.z]);
+await advance(1.6, 4);
+const spiderNotches = await call('vitals.notches');
+const spiderShot = await shot(
+  '20-colour-spiders.png',
+  'the same look, the same ring, one second later: six spiders are fanned out behind him and every noise they make comes back red. ' +
+    'Nothing else in the game draws red on this layer, so the reading is unambiguous at a glance and in the corner of the eye — ' +
+    'and it says who, not how close: a faint spider is a dim red tick, a loud one a bright red tick',
+);
+
+const alienDrawn = spiderNotches.filter((n) => n.alien).length;
+const neutralDrawn = spiderNotches.filter((n) => !n.alien).length;
+check(
+  'the pack behind him is on the ring at all',
+  alienDrawn > 0,
+  `${alienDrawn} living notch(es) of ${spiderNotches.length} drawn, none of them visible in frame`,
+);
+check(
+  'and the ring says who, not how loud',
+  crateNotches.length > 0 && crateNotches.every((n) => !n.alien),
+  `the crate drew ${crateNotches.length} neutral notch(es) and 0 red ones; the pack drew ${alienDrawn} red and ${neutralDrawn} neutral`,
+);
+check(
+  'red on screen is exactly the living half',
+  redFraction(spiderShot) > 0 && redFraction(crateOnly) < redFraction(spiderShot) * 0.25,
+  `spiders ${(redFraction(spiderShot) * 100).toFixed(3)}% of the frame is red, the crate alone ${(redFraction(crateOnly) * 100).toFixed(3)}%`,
+);
+check('the noise compass is on when the game opens', bootCompass === true, `boots ${bootCompass ? 'on' : 'off'}`);
+
+// The same instant in `visor`, because the human kept it alive ("мб потом все таки визор
+// заюзаем") and it has to carry the same law: heat off a living thing is red heat.
+await call('vitals.hudStyle', 'visor');
+await redraw();
+await shot(
+  '21-colour-visor.png',
+  'the identical tick in `visor` — kept in the set at his request. Same rule, different physics: the ring is gone and what is left is ' +
+    'red heat soaking into the glass from the bearing the pack is on, with the crate a colourless smudge on the other side',
+);
+
+// And the law, once more, on the coloured layer: colour is not permission to light the room.
+await call('vitals.hudStyle', 'sonar');
+await call('vitals.layer', false);
+await call('markers', false);
+await redraw();
+const colourDark = await shot(
+  '22-colour-off-black.png',
+  'the same tick with the sound layer and the HUD layer both off. Black to the last pixel: six spiders are moving eight metres behind ' +
+    'him and colour has not lit one photon of the hall. Red is a reading about who made a noise, not a light source',
+);
+check(
+  'colour did not turn the layer into a lamp',
+  litFraction(colourDark) === 0,
+  `lit ${litFraction(colourDark).toFixed(6)}, mean ${meanLuminance(colourDark).toFixed(4)}`,
+);
+await call('markers', true);
+await call('vitals.layer', true);
+await call('spiders.spawn', 0);
+notes.push(
+  'colour now means one thing and only one thing: who made the noise. Red = something alive that is not you, one neutral grey = ' +
+    'everything else. Loudness stays brightness and distance stays unsaid, so the palette is two entries wide and does not grow.',
 );
 
 // ===========================================================================

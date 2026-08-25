@@ -63,7 +63,12 @@ import type { PlayerVitals, DamageMark } from './vitals';
 /** The four theories. See the file header for what each one is arguing. */
 export type HudStyle = 'visor' | 'sonar' | 'bone' | 'ring';
 
-export const HUD_STYLES: readonly HudStyle[] = ['visor', 'sonar', 'bone', 'ring'];
+/**
+ * Boot order — first entry is what the game starts in. `sonar` since 2026-08-25: the human
+ * played all four and picked it, with "мб потом все таки визор заюзаем", so `visor` stays in
+ * the set and stays finished rather than being deleted as the runner-up.
+ */
+export const HUD_STYLES: readonly HudStyle[] = ['sonar', 'visor', 'bone', 'ring'];
 
 export interface HudLayerTunables {
   /** Which look. Undecided on purpose — the human picks by eye, as with the marker styles. */
@@ -94,7 +99,7 @@ export interface HudLayerTunables {
 
 export function defaultHudLayerTunables(): HudLayerTunables {
   return {
-    style: 'visor',
+    style: 'sonar',
     wedgeRadius: 0.42,
     wedgeSpreadDeg: 26,
     wedgeThickness: 7,
@@ -113,6 +118,12 @@ export interface CompassNotch {
   angle: number;
   /** 0..1 — fade times loudness. */
   strength: number;
+  /**
+   * Something alive that is not you made this noise. The *only* thing colour is allowed to say
+   * on this layer — see the palette note in `src/hud/compass.ts`. Styles that cannot use hue
+   * (`bone` draws with darkness alone) use it as weight instead, never as brightness.
+   */
+  alien: boolean;
   /** Event id, for the deterministic low-health flicker. */
   seq: number;
   color: [number, number, number];
@@ -434,9 +445,23 @@ export class PlayerHudLayer {
       }
       if (s <= 0.01) continue;
       const a = snap(n.angle);
-      // Colourless. The only hue in this style is the faint green cast of a phosphor readout,
-      // and it is nowhere near the amber the flash owns.
-      this.tick(f.cx, f.cy, rn, a, 7 + 5 * s, 2, `rgba(176,204,186,${(s * 0.5 * t.brightness).toFixed(3)})`);
+      /*
+       * Hue is the source and nothing else (2026-08-25). The readout stays a phosphor readout
+       * — one dim green-grey for everything the world does — and the single exception is a
+       * living thing that is not you, which comes back red. A device with two lamps, not a
+       * palette: a red tick means "that was alive", never "that was loud" or "that was close",
+       * both of which are already brightness and length.
+       *
+       * The alien tick is also longer and drawn brighter, because it has to be legible at a
+       * glance in the corner of the eye — it is the one reading in the game worth turning for.
+       */
+      const [cr, cg, cb] = n.color;
+      const gain = n.alien ? 0.9 : 0.5;
+      this.tick(
+        f.cx, f.cy, rn, a,
+        (n.alien ? 11 : 7) + 5 * s, 2,
+        `rgba(${cr | 0},${cg | 0},${cb | 0},${(s * gain * t.brightness).toFixed(3)})`,
+      );
     }
 
     // The damage readout: a stack of three ticks at the sector the bite came from, which is
@@ -520,7 +545,9 @@ export class PlayerHudLayer {
       }
       if (s <= 0.02) continue;
       s = Math.min(1, s);
-      this.lobe(f, n.angle, f.half * 0.95, 0.4 * s);
+      // `bone` has no hue to spend, so identity is spent as weight: something alive leans the
+      // dark in harder and wider than a falling crate does. Still pure subtraction (law 2).
+      this.lobe(f, n.angle, f.half * (n.alien ? 1.08 : 0.95), (n.alien ? 0.62 : 0.4) * s);
     }
   }
 

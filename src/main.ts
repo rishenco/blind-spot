@@ -737,6 +737,12 @@ class App {
           angle: screenAngle(Math.atan2(b.x - p.x, b.z - p.z), yaw),
           strength,
           seq: b.seq,
+          // Colour is identity, not quantity: red is "something alive that is not you", and it
+          // is the compass's only hue. Keyed off the event's `source`, which is the field the
+          // bus has always had; the swarm's newer `kind` ('chatter' | 'step' | 'bite' | 'death')
+          // splits *spider* noises further and is deliberately not used here — every one of
+          // them is still a spider, and that is the whole of what the ring is allowed to say.
+          alien: NoiseCompass.alien(b.source),
           color: NoiseCompass.color(b.source),
         });
       }
@@ -1303,6 +1309,17 @@ class App {
       solids: () =>
         this.hall.world.boxes.map((b) => [b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ]),
       touch: (on: boolean) => this.touch.setVisible(on),
+      /*
+       * The rifle in his own hands, on/off. A measuring switch for the keyframe generators, not
+       * a play switch: the gun is drawn in the bottom-right corner of every first-person frame,
+       * it is the *touch* channel and not the sound layer, and its felt contour resamples every
+       * draw — so any photometric A/B pair ("with the wedge / without it", "sound layer off ⇒
+       * black") differs by the gun unless it can be taken out of the picture.
+       */
+      rifleMesh: (on: boolean) => {
+        this.rifleView.tunables.visible = on;
+        return on;
+      },
       audio: (on: boolean) => this.audio.setEnabled(on),
       /**
        * Offline proof of the mixer: renders the fixed audio scenes through the same synthesis
@@ -1429,7 +1446,13 @@ class App {
         },
         /** Every notch the compass drew on the last frame — bearing in screen degrees. */
         notches: () =>
-          this.notches.map((n) => ({ deg: (n.angle * 180) / Math.PI, strength: n.strength, seq: n.seq })),
+          this.notches.map((n) => ({
+            deg: (n.angle * 180) / Math.PI,
+            strength: n.strength,
+            seq: n.seq,
+            alien: n.alien,
+            color: n.color,
+          })),
       },
       clear: () => this.clearMap(),
       refill: () => this.lidar.refill(),
