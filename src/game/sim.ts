@@ -41,6 +41,7 @@ import {
 } from '../player/controller';
 import {
   LANDING_MIN_IMPACT,
+  PLAYER_EMITTER_ID,
   SoundBus,
   defaultSoundTunables,
   type SoundClass,
@@ -170,7 +171,14 @@ export class GameSim {
     if (event.type === 'footstep') {
       const cls: SoundClass =
         event.tier === 'crouch' ? 'crouch-step' : event.tier === 'sprint' ? 'sprint-step' : 'walk-step';
-      this.bus.emit({ class: cls, x: event.x, y: event.y + STEP_HEIGHT, z: event.z });
+      this.bus.emit({
+        class: cls,
+        source: 'player',
+        emitter: PLAYER_EMITTER_ID,
+        x: event.x,
+        y: event.y + STEP_HEIGHT,
+        z: event.z,
+      });
       return;
     }
     // §3.3 only gives landings above a 2 m drop a paint radius; stepping off a kerb is not a
@@ -179,6 +187,8 @@ export class GameSim {
     const radius = SoundBus.landingRadius(event.impactSpeed);
     this.bus.emit({
       class: 'landing',
+      source: 'player',
+      emitter: PLAYER_EMITTER_ID,
       x: event.x,
       y: event.y + STEP_HEIGHT,
       z: event.z,
@@ -191,7 +201,14 @@ export class GameSim {
   firePing(kind: 'q-ping' | 'e-ping'): void {
     const p = this.player.position;
     if (kind === 'q-ping') {
-      this.bus.emit({ class: 'q-ping', x: p.x, y: p.y + Q_PING_HEIGHT, z: p.z });
+      this.bus.emit({
+        class: 'q-ping',
+        source: 'player',
+        emitter: PLAYER_EMITTER_ID,
+        x: p.x,
+        y: p.y + Q_PING_HEIGHT,
+        z: p.z,
+      });
     } else {
       const cp = Math.cos(this.player.pitch);
       this.aim.set(
@@ -201,6 +218,8 @@ export class GameSim {
       );
       this.bus.emit({
         class: 'e-ping',
+        source: 'player',
+        emitter: PLAYER_EMITTER_ID,
         x: p.x,
         y: p.y + E_PING_HEIGHT,
         z: p.z,

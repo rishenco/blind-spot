@@ -14,6 +14,9 @@
  *  - `hearingRadius`— how far away a listener can notice the event at all (§3.3, right
  *                     column). Nothing consumes it yet; the robo-dogs will.
  *
+ * It also carries who made it — `source` and `emitter` — and that pair is deliberately *not* a
+ * viewer's reading of it. See `SoundSource` and `eventTint`.
+ *
  * The bus itself is inert: it stamps, validates and fans out. All interpretation belongs to
  * subscribers. Two rules make that fan-out something a growing cast of emitters can rely on:
  *
@@ -42,6 +45,64 @@ export type SoundClass =
   | 'landing'
   | 'q-ping'
   | 'e-ping';
+
+/**
+ * Who made a noise — the *kind* of thing, never a viewer's relationship to it.
+ *
+ * There is deliberately no `'self'` here. Self is not a property of an event: it is a
+ * relationship between an event and whoever is looking at it, and two players hearing the same
+ * footstep have to be able to disagree about it (§3.2 paints one of them amber and the other
+ * green). Resolving that at emit time would bake one viewer's perspective into data that every
+ * viewer shares, and the bug it produces — a teammate's step rendered as your own on their
+ * screen — is invisible in solo play and very hard to see in co-op. So the bus records what a
+ * thing *is* (`'player'`) plus which one (`emitter`), and the renderer and the audio director
+ * ask `eventTint` who that is to them.
+ *
+ * `'world'` is the level itself: machinery, hoists, a dispatch hatch — audible things with no
+ * entity behind them. `'prop'` is a thing that was knocked, thrown or rattled (§8), which does
+ * have one.
+ */
+export type SoundSource = 'player' | 'prop' | 'spider' | 'world';
+
+/**
+ * The local player's entity id.
+ *
+ * A constant rather than a lookup because there is exactly one body in the game today. Co-op
+ * (§10) hands the other three rigs their own ids and nothing here changes: `emitter` is already
+ * the field that tells them apart, and `eventTint` is already the only place that compares it
+ * against the viewer.
+ */
+export const PLAYER_EMITTER_ID = 0;
+
+/** The emitter id of a sound no entity made — `'world'` events, and an unattributed emit. */
+export const NO_EMITTER = -1;
+
+/**
+ * How the event layer of §3.2 should colour an event, from the point of view of one listener:
+ * self = amber, teammate = green, spider = red-orange, prop = pale yellow. Machinery shares the
+ * prop tint, which is why `'world'` and `'prop'` answer alike — §3.2 names one colour for both.
+ */
+export type EventTint = 'self' | 'teammate' | 'spider' | 'prop';
+
+/**
+ * The amber-vs-green rule of §3.2, in one function.
+ *
+ * The source decides the family and `emitter` only ever splits `'player'` in two, so an event
+ * that merely happens to carry the viewer's id — a prop with entity id 0, machinery emitting
+ * with the default — can never come back as `'self'`. Getting that backwards (comparing ids
+ * first and asking what made the noise second) is the mistake this function exists to make
+ * unavailable.
+ */
+export function eventTint(event: SoundEvent, localEmitter: number): EventTint {
+  switch (event.source) {
+    case 'player':
+      return event.emitter === localEmitter ? 'self' : 'teammate';
+    case 'spider':
+      return 'spider';
+    default:
+      return 'prop';
+  }
+}
 
 /**
  * Which wavefront speed a class travels at. Three groups rather than a number per class:
@@ -141,6 +202,15 @@ export const LANDING_MAX_RADIUS = 14;
 
 export interface SoundEvent {
   readonly class: SoundClass;
+  /** What kind of thing made this noise (§3.2). Never a viewer's relationship to it. */
+  readonly source: SoundSource;
+  /**
+   * Which one of them — the entity id, `NO_EMITTER` for a sound with no entity behind it.
+   *
+   * Paired with `source` rather than sufficient alone: `eventTint` splits `'player'` into self
+   * and teammate with it, and the spider will use it to tell one set of footfalls from another.
+   */
+  readonly emitter: number;
   /** Origin — the place the sound was made, which is what the paint spreads from. */
   readonly x: number;
   readonly y: number;
@@ -171,6 +241,14 @@ export interface SoundEmitSpec {
   x: number;
   y: number;
   z: number;
+  /**
+   * Who is making it. Defaults to `'world'` with `NO_EMITTER`, which is the honest answer for an
+   * emit that does not say: a noise the level made, belonging to nobody. It is deliberately not
+   * `'player'` — defaulting to a player would hand every unattributed sound an identity it never
+   * claimed, and `eventTint` would then colour it as somebody.
+   */
+  source?: SoundSource;
+  emitter?: number;
   /** Overrides the class profile (landings, and chip-modified pings later). */
   paintRadius?: number;
   hearingRadius?: number;
@@ -307,6 +385,8 @@ export class SoundBus {
     const cone = spec.coneAngleDeg ?? profile.coneAngleDeg;
     const event: SoundEvent = {
       class: spec.class,
+      source: spec.source ?? 'world',
+      emitter: spec.emitter ?? NO_EMITTER,
       x: spec.x,
       y: spec.y,
       z: spec.z,

@@ -18,7 +18,7 @@
 import { describe, expect, it } from 'vitest';
 import { StaticWorld } from '../src/core/collision';
 import { PaintSystem } from '../src/paint/paintSystem';
-import { SoundBus, type SoundClass } from '../src/paint/soundEvents';
+import { PLAYER_EMITTER_ID, SoundBus, type SoundClass } from '../src/paint/soundEvents';
 import {
   PlayerController,
   defaultCameraTunables,
@@ -106,12 +106,22 @@ function runSimulation(withPaint: boolean, seconds = SECONDS): RunResult {
   const events: string[] = [];
   const sounds: string[] = [];
   bus.subscribe((e) => {
-    sounds.push(`${e.seq} ${e.class} ${e.time.toFixed(9)} ${e.x.toFixed(9)} ${e.z.toFixed(9)} r=${e.paintRadius.toFixed(9)}`);
+    sounds.push(
+      `${e.seq} ${e.class} ${e.source}#${e.emitter} ${e.time.toFixed(9)} ` +
+        `${e.x.toFixed(9)} ${e.z.toFixed(9)} r=${e.paintRadius.toFixed(9)}`,
+    );
   });
   player.onEvent((e) => {
     if (e.type === 'footstep') {
       events.push(`step ${e.tier} ${e.foot} ${e.speed.toFixed(9)} ${e.x.toFixed(9)} ${e.y.toFixed(9)} ${e.z.toFixed(9)}`);
-      bus.emit({ class: classFor(e.tier), x: e.x, y: e.y + STEP_SOUND_HEIGHT, z: e.z });
+      bus.emit({
+        class: classFor(e.tier),
+        source: 'player',
+        emitter: PLAYER_EMITTER_ID,
+        x: e.x,
+        y: e.y + STEP_SOUND_HEIGHT,
+        z: e.z,
+      });
       return;
     }
     events.push(`land ${e.stance} ${e.impactSpeed.toFixed(9)} ${e.x.toFixed(9)} ${e.z.toFixed(9)}`);

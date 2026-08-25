@@ -203,7 +203,8 @@ function scriptedRun(seed: number): Run {
   const sounds: string[] = [];
   game.sim.bus.subscribe((e) => {
     sounds.push(
-      `${e.seq} ${e.class} ${e.time.toFixed(9)} ${e.x.toFixed(9)} ${e.z.toFixed(9)} r=${e.paintRadius.toFixed(9)}`,
+      `${e.seq} ${e.class} ${e.source}#${e.emitter} ${e.time.toFixed(9)} ` +
+        `${e.x.toFixed(9)} ${e.z.toFixed(9)} r=${e.paintRadius.toFixed(9)}`,
     );
   });
 

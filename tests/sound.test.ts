@@ -12,11 +12,15 @@ import {
   LANDING_FULL_IMPACT,
   LANDING_MAX_RADIUS,
   LANDING_MIN_IMPACT,
+  NO_EMITTER,
+  PLAYER_EMITTER_ID,
   SOUND_CLASSES,
   SoundBus,
   WAVE_SPEEDS,
+  eventTint,
   type SoundClass,
   type SoundEvent,
+  type SoundSource,
 } from '../src/paint/soundEvents';
 
 describe('the class table', () => {
@@ -142,6 +146,10 @@ describe('SoundBus.emit', () => {
     bus.setTime(2);
     expect(bus.emit({ class: 'walk-step', x: 1, y: 2, z: 3 })).toEqual({
       class: 'walk-step',
+      // An emit that does not say who made it is the world's, belonging to no entity — never a
+      // player, which would hand an anonymous noise an identity `eventTint` would then colour.
+      source: 'world',
+      emitter: NO_EMITTER,
       x: 1, y: 2, z: 3,
       paintRadius: 4,
       hearingRadius: 11,
@@ -416,5 +424,79 @@ describe('every class round-trips through emit', () => {
     expect(e.waveSpeed).toBe(WAVE_SPEEDS[profile.wave]);
     // No aim was given, so every class comes out omnidirectional regardless of its profile cone.
     expect(e.coneAngleDeg).toBe(360);
+  });
+});
+
+describe('who made the noise (§3.2)', () => {
+  it('carries source and emitter through the bus unchanged, to the listener and the caller', () => {
+    const bus = new SoundBus();
+    let heard: SoundEvent | null = null;
+    bus.subscribe((e) => {
+      heard = e;
+    });
+    const e = bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0, source: 'spider', emitter: 42 });
+    expect(e.source).toBe('spider');
+    expect(e.emitter).toBe(42);
+    expect(heard).toBe(e);
+  });
+
+  it('takes every source, and an emitter of any shape, without interpreting either', () => {
+    // The bus stamps; it does not decide. A spider with the player's id is a strange world and
+    // the bus's job is to report it faithfully, not to correct it.
+    const bus = new SoundBus();
+    const sources: SoundSource[] = ['player', 'prop', 'spider', 'world'];
+    for (const source of sources) {
+      const e = bus.emit({ class: 'q-ping', x: 0, y: 0, z: 0, source, emitter: PLAYER_EMITTER_ID });
+      expect(e.source).toBe(source);
+      expect(e.emitter).toBe(PLAYER_EMITTER_ID);
+    }
+  });
+
+  it('defaults each half of the pair independently', () => {
+    // Naming one and not the other is a mistake worth being able to see, so neither field
+    // reaches for the other's value.
+    const bus = new SoundBus();
+    expect(bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0, source: 'spider' }).emitter)
+      .toBe(NO_EMITTER);
+    expect(bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0, emitter: 7 }).source).toBe('world');
+  });
+
+  it('pins the two emitter ids', () => {
+    expect(PLAYER_EMITTER_ID).toBe(0);
+    expect(NO_EMITTER).toBe(-1);
+    expect(NO_EMITTER).not.toBe(PLAYER_EMITTER_ID);
+  });
+});
+
+describe('eventTint — amber vs green (§3.2)', () => {
+  const bus = new SoundBus();
+  const step = (source: SoundSource, emitter: number): SoundEvent =>
+    bus.emit({ class: 'walk-step', x: 0, y: 0, z: 0, source, emitter });
+
+  it('is a relationship, not a property: one event, two viewers, two answers', () => {
+    // The whole reason the bus has no `'self'` source. This event was emitted once, by player 0,
+    // and it must read amber on that player's screen and green on their teammate's.
+    const mine = step('player', PLAYER_EMITTER_ID);
+    expect(eventTint(mine, PLAYER_EMITTER_ID)).toBe('self');
+    expect(eventTint(mine, 1)).toBe('teammate');
+  });
+
+  it('a teammate is anybody else with a player source', () => {
+    expect(eventTint(step('player', 1), PLAYER_EMITTER_ID)).toBe('teammate');
+    expect(eventTint(step('player', 3), PLAYER_EMITTER_ID)).toBe('teammate');
+    expect(eventTint(step('player', NO_EMITTER), PLAYER_EMITTER_ID)).toBe('teammate');
+  });
+
+  it('the spider is the spider to everyone, whatever id it carries', () => {
+    expect(eventTint(step('spider', 9), PLAYER_EMITTER_ID)).toBe('spider');
+    expect(eventTint(step('spider', PLAYER_EMITTER_ID), PLAYER_EMITTER_ID)).toBe('spider');
+  });
+
+  it('source decides the family first, so a matching id never smuggles in `self`', () => {
+    // The mutation this exists to catch: comparing emitters before asking what made the noise.
+    // A knocked can and a hoist both carry §3.2's prop colour, and neither is ever you.
+    expect(eventTint(step('prop', PLAYER_EMITTER_ID), PLAYER_EMITTER_ID)).toBe('prop');
+    expect(eventTint(step('world', PLAYER_EMITTER_ID), PLAYER_EMITTER_ID)).toBe('prop');
+    expect(eventTint(step('world', NO_EMITTER), NO_EMITTER)).toBe('prop');
   });
 });
