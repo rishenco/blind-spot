@@ -31,8 +31,34 @@ if (!existsSync(htmlPath)) {
   console.error(`[spiders] build not found: ${htmlPath} (run \`npm run build\` first)`);
   process.exit(2);
 }
+/*
+ * Scene filter. `SPIDERS_SHOTS=21,23,25,26 node tools/spiders.mjs` shoots only the frames whose
+ * names start with one of those prefixes and ends the run as soon as the last of them is on
+ * disk — the whole scenario no longer fits in one ten-minute slot, and re-shooting one feature's
+ * four frames should not cost the other thirty.
+ *
+ * The simulation itself is NOT skipped: everything before a wanted frame still runs, tick for
+ * tick, so a filtered frame is exactly the frame the full run would have produced. What is
+ * skipped is the screenshot and the pixel analysis, which is where the wall clock goes.
+ * Consequence: in a filtered run the text checks are not evidence (the ones that measure a frame
+ * are reading a stub), so they are printed but never counted as failures. Numbers come from an
+ * unfiltered run.
+ */
+const ONLY = (process.env.SPIDERS_SHOTS ?? '')
+  .split(',')
+  .map((p) => p.trim())
+  .filter(Boolean);
+const filtered = ONLY.length > 0;
+const wantedShot = (name) => !filtered || ONLY.some((p) => name.startsWith(p));
+const stillWanted = new Set(ONLY);
+/** A 1x1 black frame, so the callers that measure what they shot keep working while filtered. */
+const STUB = { width: 1, height: 1, data: new Uint8Array([0, 0, 0, 255]) };
+
 await mkdir(outDir, { recursive: true });
 for (const f of await readdir(outDir)) {
+  // A filtered run replaces only the frames it shoots: the rest of the sheet belongs to the
+  // scenes it is not running, and wiping them would delete evidence it is not going to remake.
+  if (filtered) break;
   if (f.endsWith('.png')) await unlink(join(outDir, f));
 }
 
@@ -56,17 +82,30 @@ page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 function check(label, ok, detail = '') {
   const line = `${ok ? 'ok  ' : 'FAIL'} ${label}${detail ? ` — ${detail}` : ''}`;
   console.log(`[spiders] ${line}`);
-  if (!ok) failures.push(line);
+  // A filtered run only proves the frames it was asked for; everything else is reading a stub.
+  if (!ok && !filtered) failures.push(line);
 }
 
 const shots = [];
 async function shot(name, note) {
+  if (!wantedShot(name)) {
+    console.log(`[spiders] skip ${name} (SPIDERS_SHOTS filter)`);
+    return STUB;
+  }
   const buf = await page.screenshot({ path: join(outDir, name), timeout: 180000 });
   const img = decodePng(buf);
   shots.push({ name, note, lit: litFraction(img), mean: meanLuminance(img) });
   console.log(
     `[spiders] shot ${name}  lit=${litFraction(img).toFixed(4)} mean=${meanLuminance(img).toFixed(2)}`,
   );
+  if (filtered) {
+    for (const p of [...stillWanted]) if (name.startsWith(p)) stillWanted.delete(p);
+    if (stillWanted.size === 0) {
+      console.log(`[spiders] filtered run: all requested frames taken (${ONLY.join(', ')}), stopping`);
+      await browser.close();
+      process.exit(0);
+    }
+  }
   return img;
 }
 
