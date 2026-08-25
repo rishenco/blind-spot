@@ -274,6 +274,18 @@ export class Belief {
     const dt = this.cfg.dt;
     this.now = frame.match.t;
 
+    // The team-mate is not tracked from evidence any more — see `PerceptionFrame.mates`. This is
+    // proprioception's twin, not a sound to be reasoned about, so it is copied straight in, every
+    // tick, exact. The point track (`fresh`, decayed on silence) stays wired up below purely as
+    // the fallback for a frame that predates `mates` (an old replay); with a live frame this
+    // simply overwrites it before anything else runs.
+    if (this.mate && frame.mates.length > 0) {
+      const m = frame.mates.find((x) => x.id === this.mate!.id) ?? frame.mates[0]!;
+      this.mate.pos = { x: m.pos.x, y: m.pos.y };
+      this.mate.t = this.now;
+      this.mate.fresh = true;
+    }
+
     this.tracker.observe(frame.emitters.find((e) => e.kind === 'ball') ?? null, this.now);
     this.ball = this.tracker.estimate();
 

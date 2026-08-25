@@ -63,6 +63,13 @@ export interface Features {
   /** True when this body wears the gloves: it may stand in its own crease and nothing else may. */
   keeper: boolean;
   /**
+   * A defender's body is holding my ground for me right now (proprioception, `SelfState.pinned`).
+   * The honest signal for "a corridor just closed": there is no referee to call a foul on the man
+   * mugging a carrier's arms, so the only recourse is physical, and this is how the carrier feels
+   * it happening without needing to have heard the man doing it.
+   */
+  pinned: boolean;
+  /**
    * Where the keeper belongs: on the line from the believed ball to the centre of his own goal.
    *
    * That line is the whole of goalkeeping in a game with no sight. He cannot know which corner
@@ -100,6 +107,7 @@ export function deriveFeatures(
   field: FieldInfo,
   cfg: SimConfigView,
   isKeeper = false,
+  pinned = false,
 ): Features {
   const goal = field.goalCentre[team === 0 ? 1 : 0]!;
   const ownGoal = field.goalCentre[team === 0 ? 0 : 1]!;
@@ -228,6 +236,7 @@ export function deriveFeatures(
       ? clamp((belief.now - belief.possessionT - cfg.ball.voice.quietSec) / Math.max(1e-6, cfg.ball.voice.rampSec), 0, 1)
       : 0,
     keeper: isKeeper && cfg.keeper.enabled,
+    pinned,
     keeperPost,
     guardPost,
     coverPost,

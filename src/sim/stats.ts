@@ -76,6 +76,22 @@ export interface ShapeStats {
   keeperSaves: number;
   /** The longest anybody held the ball, seconds — the check that carrying has a real price. */
   holdMax: number;
+  /**
+   * Positional-play metrics — added 2026-08-25, against the human's own complaint: "four bodies
+   * in one spot" and "either they bomb it in the first second or it's a scrum until somebody
+   * wins the ball". These are the literal picture, turned into numbers.
+   */
+  /** Ticks in which three or more bodies (from either team) sit inside a 3 m circle. */
+  scrumTicks: number;
+  /** Ticks counted for the scrum share — one per player-tick sampled, for the denominator. */
+  positionTicks: number;
+  /** Sum, over every pair of bodies every tick, of the distance between them — for the average. */
+  pairDistanceSum: number;
+  pairSamples: number;
+  /** Player-ticks spent within 2 m of at least one opponent. */
+  nearOpponentTicks: number;
+  /** Turnovers forced by the passivity clock rather than by a rule anybody actively lost to. */
+  passivityTurnovers: number;
 }
 
 export function emptyShapeStats(): ShapeStats {
@@ -93,6 +109,12 @@ export function emptyShapeStats(): ShapeStats {
     possessionTimeSum: 0,
     keeperSaves: 0,
     holdMax: 0,
+    scrumTicks: 0,
+    positionTicks: 0,
+    pairDistanceSum: 0,
+    pairSamples: 0,
+    nearOpponentTicks: 0,
+    passivityTurnovers: 0,
   };
 }
 

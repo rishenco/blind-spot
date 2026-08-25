@@ -385,7 +385,7 @@ export const AI_SCENARIOS: AiScenario[] = [
 // ===========================================================================
 
 /** A clean 2×2 with no spawn jitter, so a scripted collision lands in the same place every time. */
-function riggedConfig(only: 'steal' | 'tackle' | 'collision' | 'block'): SimConfig {
+function riggedConfig(only: 'steal' | 'tackle' | 'collision' | 'block' | 'none'): SimConfig {
   const c = configFromPreset('default');
   c.match.spawnJitter = 0;
   c.match.kickoffTeam = 'fixed';
@@ -421,23 +421,23 @@ MECHANIC_SCENARIOS.push(
   {
     name: 'mech-steal',
     suite: 'mechanic',
-    note: 'the steal: the carrier walks it up, a hunter runs him down and then stays on his shoulder for a full second',
-    expect: 'one steal; the ball changes teams and the slap is heard',
+    // Rewritten 2026-08-25: touch never takes the ball off a carrier any more (concept, "убери
+    // все способы забрать мяч из рук соперника прикосновением"). This scenario used to prove the
+    // proximity steal worked; it now proves the opposite on purpose — the exact same script that
+    // used to strip the ball leaves it alone, because there is nothing left in the rules that
+    // reads "stood next to him long enough".
+    note: 'the steal, retired: a hunter runs the carrier down and stays glued to his shoulder for six seconds straight',
+    expect: 'zero steals, zero possession changes — proximity alone does not take the ball off anybody any more',
     seed: 101,
     ticks: 220,
     eyes: 0,
     build: () => {
-      const config = riggedConfig('steal');
+      const config = riggedConfig('none');
       const carrier = scripted([{ for: 6, walk: [1, 0], aim: [1, 0], label: 'walking it up' }], 'carrier');
-      // He has to *stay* with the carrier, not run through him: the ball is taken by half a
-      // second of company, and a hunter at a sprint is inside the radius for a third of that.
-      // He has to *stay* with the carrier, not run through him: the ball is taken by a full
-      // second of company at a metre, and a hunter at a sprint is inside that for a third of it.
-      // So: close at a run, then turn and walk at his shoulder.
       const hunter = scripted(
         [
           { for: 1.25, run: [-1, 0], aim: [-1, 0], label: 'closing him down' },
-          { for: 6, walk: [1, 0], label: 'and staying on his shoulder' },
+          { for: 6, walk: [1, 0], label: 'and staying on his shoulder — and doing nothing else' },
         ],
         'hunter',
       );
@@ -453,19 +453,24 @@ MECHANIC_SCENARIOS.push(
   {
     name: 'mech-tackle',
     suite: 'mechanic',
-    note: 'the dive tackle: a body thrown at where the carrier is going to be, not where he is',
-    expect: 'one tackle; the victim is on the floor and the ball is off him',
+    // Rewritten 2026-08-25: the dive stopped being an attack. It is a bet on where somebody is
+    // GOING to walk, laid down as an obstacle ahead of time — so this scenario now has the
+    // defender commit to lying down first, off to the side of the carrier's line, and the
+    // carrier (scripted, blind to the trap exactly like a human would be) simply keeps running
+    // his own line and finds it.
+    note: 'the trap, sprung: the defender lies down ahead of the carrier’s line; the carrier runs it, blind, and finds him',
+    expect: 'one tackle; the carrier is the one who goes down, and the ball comes off him — the trapper never moved towards him',
     seed: 102,
-    ticks: 200,
+    ticks: 220,
     eyes: 3,
     build: () => {
       const config = riggedConfig('tackle');
-      const carrier = scripted([{ for: 6, run: [1, 0], aim: [1, 0], label: 'driving forward' }], 'carrier');
+      const carrier = scripted([{ for: 6, run: [1, 0], aim: [1, 0], label: 'driving forward, straight down his line' }], 'carrier');
       const tackler = scripted(
         [
-          { for: 1.05, run: [-1, 0], aim: [-1, 0], label: 'closing' },
-          { dive: true, label: 'the bet' },
-          { for: 4, label: 'and the landing' },
+          { for: 0.3, run: [-1, 0], aim: [-1, 0], label: 'stepping onto the line' },
+          { dive: true, label: 'lying down across it' },
+          { for: 4, label: 'and waiting — this body is not attacking anybody' },
         ],
         'tackler',
       );
@@ -483,19 +488,24 @@ MECHANIC_SCENARIOS.push(
   {
     name: 'mech-tackle-miss',
     suite: 'mechanic',
-    note: 'the same bet, lost: the dive goes in too early and the carrier walks past a man on the floor',
-    expect: 'no tackle, one tackle-miss; the diver is the one lying there',
+    // Rewritten 2026-08-25 to match: a trap that catches nobody, because it was laid somewhere
+    // the carrier's line never crosses. There is no "too early" or "too late" any more — the
+    // dive always pays the same cost (`dive.durationSec + lieSec + getUpSec`) whether or not
+    // anybody ever walks into it, which is the whole point of turning it from a bet on timing
+    // into a bet on geography.
+    note: 'the trap, empty: the defender guesses wrong and lies down off the carrier’s line entirely',
+    expect: 'no tackle, one tackle-miss; the same dive, the same floor time, paid for nothing',
     seed: 103,
-    ticks: 200,
+    ticks: 220,
     eyes: 3,
     build: () => {
       const config = riggedConfig('tackle');
-      const carrier = scripted([{ for: 6, walk: [1, 0], aim: [1, 0], label: 'walking it up' }], 'carrier');
+      const carrier = scripted([{ for: 6, walk: [1, 0], aim: [1, 0], label: 'walking it up, dead straight' }], 'carrier');
       const tackler = scripted(
         [
-          { for: 0.2, run: [-1, 0], aim: [-1, 0], label: 'closing' },
-          { dive: true, label: 'too early' },
-          { for: 5, label: 'flat on the floor' },
+          { for: 0.2, run: [0, 1], aim: [0, 1], label: 'reading it wrong' },
+          { dive: true, label: 'lying down off the line' },
+          { for: 5, label: 'waiting for a carrier who is nowhere near' },
         ],
         'tackler',
       );
@@ -510,8 +520,13 @@ MECHANIC_SCENARIOS.push(
   {
     name: 'mech-screen',
     suite: 'mechanic',
-    note: 'the screen: a silent body in the corridor is a wall, and running into it costs momentum and silence',
-    expect: 'one collision, the runner staggered and audible — and he keeps the ball, because contact that also spills it turns the pitch into a fumble machine',
+    // Rewritten 2026-08-25: this was always a carrier running into a silent body, but the
+    // physics used to split the bump 50/50 — which let a carrier simply barge a defender aside a
+    // few centimetres at a time and walk through him. The corridor is now asymmetric: the
+    // defender holds almost all of the ground, and it is the carrier who gets walked backwards
+    // for as long as the defender keeps the spot (`carrierYieldShare`, concept item 2).
+    note: 'the screen, and who loses the ground: a silent body plants itself in the corridor, and the carrier — not the defender — is the one shoved backwards',
+    expect: 'one collision, the runner staggered and audible, and he keeps the ball — but he ends the run barely past where he met the wall, nowhere near a free 5.5 m/s sprint',
     seed: 104,
     ticks: 200,
     eyes: 3,
@@ -526,6 +541,10 @@ MECHANIC_SCENARIOS.push(
       stillHasIt: m.sim.state.ball.carrier === 0 ? 1 : 0,
       // He was silent up to the moment of contact and is the loudest thing on the pitch after it.
       thuds: m.log.filter((e) => e.kind === 'brake').length,
+      // The corridor: how far the carrier actually got in 200 ticks against how far a free
+      // 5.5 m/s sprint would have covered (over 3.33 s, ~18.3 m). A screen that works reads as a
+      // small fraction here; the old symmetric bump used to let him creep most of the way through.
+      runnerAdvance: m.sim.state.players[0]!.pos.x - -6.8,
     }),
   },
   {

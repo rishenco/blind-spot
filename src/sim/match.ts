@@ -232,6 +232,7 @@ export class Match {
       st.distanceToBallSum += dist2(p.pos, s.ball.pos);
       st.distanceRun += Math.sqrt(p.vel.x * p.vel.x + p.vel.y * p.vel.y) * dt;
     }
+    this.trackPositions(s.players);
 
     for (const ev of out.events) {
       const st: PlayerStats | undefined = this.stats.players[ev.sourceId];
@@ -309,6 +310,7 @@ export class Match {
     }
 
     for (const turnover of out.turnovers) {
+      if (turnover.reason === 'passivity') this.stats.shape.passivityTurnovers += 1;
       this.push(
         s.tick, turnover.t, 'restart', null, turnover.team,
         turnover.reason === 'crease'
@@ -329,6 +331,42 @@ export class Match {
     }
   }
 
+
+  /**
+   * The picture the человек actually sent a screenshot of: four bodies in one spot. This reads
+   * that off every tick, team-agnostic — a scrum is a scrum whether it is a real fight for a
+   * loose ball or four players who simply have nothing better to do than stand next to it.
+   */
+  private trackPositions(players: readonly { pos: Vec2; team: TeamId }[]): void {
+    const shape = this.stats.shape;
+    const n = players.length;
+    if (n < 2) return;
+    shape.positionTicks += 1;
+    // A body counts into the scrum if two OTHER bodies are within 3 m of it — the cheapest proxy
+    // for "there is a cluster of three or more here" that does not require enumerating cliques.
+    let scrummed = false;
+    for (let i = 0; i < n; i++) {
+      let near = 0;
+      let nearOpp = false;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const d = dist2(players[i]!.pos, players[j]!.pos);
+        if (d <= 3) near += 1;
+        if (players[j]!.team !== players[i]!.team && d <= 2) nearOpp = true;
+      }
+      if (near >= 2) scrummed = true;
+      // Per PLAYER-tick, not per pair: a body within 2 m of any one opponent counts once, however
+      // many opponents happen to be that close (matters once teamSize > 1).
+      if (nearOpp) shape.nearOpponentTicks += 1;
+    }
+    if (scrummed) shape.scrumTicks += 1;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        shape.pairDistanceSum += dist2(players[i]!.pos, players[j]!.pos);
+        shape.pairSamples += 1;
+      }
+    }
+  }
 
   /**
    * The shape of the play: how an attack was built, not who won it.

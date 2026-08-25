@@ -188,6 +188,10 @@ export class Perceiver {
       sonar,
       teammates: this.teammates,
       opponents: this.opponents,
+      mates: this.teammates.map((id) => {
+        const mate = view.players[id]!;
+        return { id, pos: { x: mate.pos.x, y: mate.pos.y }, vel: { x: mate.vel.x, y: mate.vel.y } };
+      }),
     };
   }
 
@@ -282,11 +286,16 @@ export class Perceiver {
       pingCooldown: me.pingCd,
       diving: me.diveT > 0,
       recovering: me.recoverT > 0,
-      down: me.downT > 0,
+      // Either flavour of "on the ground and unable to do anything": tripped over somebody
+      // else's trap (`downT`), or lying down as one of our own (`lieT`). A blind body knows
+      // perfectly well which one it is, but the policy layer only ever needed to know "can I
+      // act", so the two collapse into one proprioceptive bit, as they always have.
+      down: me.downT > 0 || me.lieT > 0,
       reaching: me.reachT > 0,
       keeper: me.keeper,
       callCooldown: me.callCd,
       stealPressure: pressure,
+      pinned: me.pinned,
       carrySeconds: me.hasBall ? view.ball.carryT : 0,
       lastCatchFail: me.lastCatchFail,
       lastCatchFailT: me.lastCatchFailT,

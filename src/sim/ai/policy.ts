@@ -257,10 +257,17 @@ export function generateCandidates(input: PolicyInput): Action[] {
   // ball goes into the net behind him. His dive is for the ball and it is a reflex, not a plan.
   if (cfg.contest.tackle.enabled && f.role !== 'keeper') {
     const reach = cfg.dive.speed * cfg.dive.durationSec;
+    // A dive that lands where the body already is buys nothing the ordinary screen does not give
+    // for free: standing there already blocks the corridor (`collision.carrierYieldShare`), with
+    // no fixed floor-time bill and no window spent immobile. So the bet is only offered when it
+    // actually closes ground — inside marking range (contact plus a little), diving is strictly
+    // worse than simply staying on your feet, and offering it anyway was measured to be most of
+    // where the new "everyone just stands on the carrier" scrum came from.
+    const tooClose = cfg.player.radius * 2 + cfg.contest.tackle.radius * 0.5;
     for (let i = 0; i < f.oppMode.length; i++) {
       const lead = leadPoint(f, i, cfg.dive.durationSec * 0.6);
       const d = dist2(f.me, lead);
-      if (d > reach + 1 || d < 0.4) continue;
+      if (d > reach + 1 || d < tooClose) continue;
       out.push({ kind: 'tackle', tag: `tackle${i}`, dir: norm2(sub2(lead, f.me), { x: 1, y: 0 }), to: lead, track: i });
     }
   }
@@ -297,13 +304,13 @@ export function generateCandidates(input: PolicyInput): Action[] {
     }
   }
 
-  // Asking for it. A pass can only be thrown at somebody the thrower can place, and a body that
-  // has been standing still is by definition unplaceable — so somebody has to speak. The cost is
-  // real and symmetric (9 m, exactly where I stand), which is why it is a scored option and not
-  // a reflex, and why it wins only when the ball is near, my man has it, and I am open.
-  if (f.role === 'support' && input.callCooldown <= 1e-6) {
-    out.push({ kind: 'call', tag: 'call' });
-  }
+  // The shout used to be the only way a thrower could place a silent team-mate, which made it a
+  // real, scored trade-off (9 m of noise for a placeable pass target). It is retired as a live
+  // option since 2026-08-25: a team-mate is now known exactly and always (`PerceptionFrame.mates`,
+  // the человек's decision — this game's tension is about the opponent, not about finding your
+  // own man), so shouting buys nothing a bot does not already have for free. The sound, the
+  // intent flag and the cooldown all still exist in the simulation for a human who presses the
+  // now-unbound key by habit; the policy simply never reaches for it.
 
   if (f.role === 'support' || f.role === 'guard') {
     // Receiving spots: spread across the attacking half at the crease's shooting radius.
@@ -462,7 +469,18 @@ function score(action: Action, input: PolicyInput): ScoredAction {
       const reach = cfg.dive.speed * cfg.dive.durationSec;
       dest = { x: f.me.x + action.dir!.x * reach, y: f.me.y + action.dir!.y * reach };
       noiseRadius = cfg.loudness.dive;
-      travelT = cfg.dive.durationSec + cfg.dive.recoverySec;
+      // Any dive ends in the lying-down tail once the trap mechanic is on — the simulation does
+      // not distinguish "I meant that as an interception" from "I meant that as a trap" (see
+      // `Simulation.stepPlayer`), so neither should the estimate of how long it costs. This used
+      // to read `dive.recoverySec` unconditionally, which was still the PRE-REDESIGN number
+      // (0.6 s) after the redesign made the real cost `lieSec + getUpSec` (2.0 s) — the bot was
+      // pricing every dive about a second and a half cheaper than it actually is, and scoring it
+      // accordingly too high too often. That arithmetic error, not the belief being too good, was
+      // most of where the "diving on cooldown constantly" scrum came from.
+      const tail = cfg.contest.tackle.enabled
+        ? cfg.contest.tackle.lieSec + cfg.contest.tackle.getUpSec
+        : cfg.dive.recoverySec;
+      travelT = cfg.dive.durationSec + tail;
       break;
     }
   }
@@ -583,7 +601,13 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
     // silent. Getting quiet again is a reason to pass, and it is the reason the человек asked
     // for — "пас… становится способом снова стать невидимым".
     const relief = 0.6 + 0.9 * f.carryNoise;
-    return clamp(0.8 * complete * (0.3 + 0.7 * after) * gain * trust * relief, 0.02, 1);
+    // A closed corridor is the clearest reason there is to get rid of the ball: nobody can take
+    // it off me by standing in front of me, so the only way out of a stalemate that is not the
+    // clock is a pass. Without this a carrier pinned against a wall has no reason to prefer
+    // passing over shoving, and the stand-off resolves by `carryTimeoutSec` instead — a rule
+    // doing a decision's job, exactly the failure mode the human asked to avoid.
+    const escape = f.pinned ? 1.6 : 1;
+    return clamp(0.8 * complete * (0.3 + 0.7 * after) * gain * trust * relief * escape, 0.02, 1);
   }
   if (action.kind === 'dive') {
     if (!f.intercept) return 0.05;
@@ -614,9 +638,14 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
     const isCarrier =
       belief.possession === 'opponent' && f.ballPos ? clamp(1 - dist2(endPos, f.ballPos) / 3, 0, 1) : 0;
     const worth = 0.35 + 0.65 * isCarrier;
-    // A miss is 0.4 s of dive plus a full recovery flat on the floor. That cost is not on the
-    // safety axis (nobody has to be near me for it to hurt), so it is priced here.
-    return clamp(hit * worth + (1 - hit) * 0.03, 0.02, 1);
+    // The floor time is not on the safety axis (nobody has to be near me for it to hurt), so it
+    // is priced here, through the same `arrival` discount every other plan pays — and it has to
+    // be, now that a dive costs `dive.durationSec + lieSec + getUpSec` (2.4 s at the numbers this
+    // shipped with) rather than the old `dive.durationSec + dive.recoverySec` (1.0 s). Without
+    // this the bot was pricing a nearly-two-and-a-half-second commitment as if it were a one-
+    // second one, and it dove essentially every time the cooldown allowed — which measured out to
+    // MORE dives a minute than the attacking version of the mechanic it replaced, not fewer.
+    return clamp(arrival * (hit * worth + (1 - hit) * 0.03), 0.02, 1);
   }
   if (action.kind === 'call') {
     // Worth exactly what a pass to me would be worth, times how badly the man with the ball

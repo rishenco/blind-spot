@@ -126,6 +126,7 @@ export class Bot implements Controller {
         frame.field,
         cfg,
         frame.self.keeper,
+        frame.self.pinned,
       );
       this.pick();
       this.sinceDecision = 0;
@@ -134,11 +135,14 @@ export class Bot implements Controller {
     const f = this.features;
     if (!f) return intent;
     // Between decisions the plan stands, but the body and the ball have moved: steering and the
-    // catch reflex run at 60 Hz off these three fields and nothing else.
+    // catch reflex run at 60 Hz off these fields and nothing else. `pinned` rides along too — it
+    // is proprioception, free every tick, and a carrier who just got shoved cannot wait for the
+    // next scheduled decision to notice.
     f.me = frame.self.pos;
     f.mySpeed = frame.self.speed;
     f.ball = ball;
     f.ballPos = ball ? ball.pos : null;
+    f.pinned = frame.self.pinned;
 
     const chosen = this.chosen;
     if (!chosen) return intent;

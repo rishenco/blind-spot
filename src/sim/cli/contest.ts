@@ -286,6 +286,8 @@ interface Job {
   /** true = the advantaged side plays as team 1 instead of team 0. */
   swap: boolean;
   secs: number;
+  /** Players per team. Defaults to 2×2; `--team 3` runs the same tournament at 3×3. */
+  team: number;
 }
 
 interface JobResult extends Job {
@@ -311,6 +313,7 @@ function buildConfig(job: Job): { config: SimConfig; a: string; b: string } {
   if (!variant) throw new Error(`unknown variant: ${job.variant}`);
   const config = cloneConfig(defaultConfig());
   variant.apply(config);
+  config.teamSize = job.team;
   // Fixed length, never "first to N": a race to five goals turns the scoreline into a clock.
   config.match.durationSec = job.secs;
   config.match.goalsToWin = 1e9;
@@ -492,6 +495,7 @@ async function main(): Promise<void> {
   const variants = VARIANTS.filter((v) => !only || only.includes(v.name));
   const seeds = parseSeeds(args.seeds ?? '1-8');
   const secs = Number(args.secs ?? 90);
+  const team = Number(args.team ?? 2);
   const tests: Job['test'][] = (args.tests ?? 'truth,omni,ping,play').split(',') as Job['test'][];
   const workers = Number(args.workers ?? Math.max(1, Math.min(cpus().length, 8)));
 
@@ -501,8 +505,8 @@ async function main(): Promise<void> {
       for (const seed of seeds) {
         // Both role assignments, always: the kickoff is worth real goals and it must not land
         // on the same side as the advantage.
-        jobs.push({ variant: v.name, test, seed, swap: false, secs });
-        if (test !== 'play') jobs.push({ variant: v.name, test, seed, swap: true, secs });
+        jobs.push({ variant: v.name, test, seed, swap: false, secs, team });
+        if (test !== 'play') jobs.push({ variant: v.name, test, seed, swap: true, secs, team });
       }
     }
   }

@@ -417,16 +417,38 @@ export interface StealConfig {
   graceSec: number;
 }
 
+/**
+ * The trap — rewritten 2026-08-25 from an attack into an obstacle, on the человек's own
+ * diagnosis after watching bots play: a dive that catches whoever it touches is a mugging by
+ * another name, so it got spammed (twenty a minute) exactly like the steal it replaced. The
+ * fix is not a cooldown, it is a different verb. A dive still covers ground (`dive.durationSec`
+ * at `dive.speed`, unchanged — it is still the concept's one athletic tool), but it no longer
+ * ends in a hit. It ends on the floor: the diver lies there for `lieSec`, an obstacle nobody
+ * chose to be near, and it is an opponent's OWN legs that turn that into a fall — running into
+ * a body that did not move is what trips you. Nobody presses a button to trip somebody; only to
+ * lie down where he might.
+ *
+ * That is also why there is no `missPenalty` any more: the old action had a cheap outcome (hit)
+ * and an expensive one (miss) to price a bet against. This one has one outcome, always paid in
+ * full — `dive.durationSec + lieSec + getUpSec` of being unable to do anything else — whether or
+ * not anybody ever walks into it. Spamming it is not "usually free, sometimes costly", it is
+ * "always costly, sometimes profitable", which is the shape that makes a bot (and a human) ration
+ * it on its own.
+ */
 export interface TackleConfig {
-  /** A dive that passes close to a body knocks it down. Extends the existing `dive`. */
   enabled: boolean;
-  /** Centre-to-centre distance at which a diving body catches an opponent. */
+  /** Centre-to-centre distance at which a body stumbles over one lying on the ground. */
   radius: number;
-  /** How long the victim lies there: noisy, helpless, and out of the play. */
-  stunSec: number;
-  /** A diver who hit nothing lies there for `dive.recoverySec * missPenalty`. */
-  missPenalty: number;
-  /** A tackled carrier loses the ball. */
+  /**
+   * Seconds spent flat on the ground after the dash: the trap's live window. An opponent's own
+   * legs, not the trapper's aim, are what turns proximity into a fall during this window.
+   */
+  lieSec: number;
+  /** Seconds spent getting back up: no longer an obstacle, still unable to act. */
+  getUpSec: number;
+  /** Seconds the tripped body lies stunned — noisy, helpless, out of the play. */
+  stumbleSec: number;
+  /** A tripped carrier drops the ball. */
   dropsBall: boolean;
 }
 
@@ -440,6 +462,18 @@ export interface CollisionConfig {
   staggerSec: number;
   /** A carrier in a hard collision loses the ball. */
   dropsBall: boolean;
+  /**
+   * Asymmetric contact — the человек's fix for the invincible carrier, added 2026-08-25. There is
+   * no referee to whistle a defender off a carrier's arms, so the block has to be physical: when a
+   * carrier and an empty-handed opponent overlap, this share of the overlap (and of the stopping
+   * impulse) is resolved on the CARRIER's side only. A defender who plants himself in the corridor
+   * does not move; a carrier who runs into him does, backwards, for exactly as long as the
+   * defender holds the spot. 1 = the defender is a wall for the carrier and feels nothing back;
+   * 0 = the old symmetric bump both bodies used to share. Two empty-handed bodies (or two bodies
+   * already on the ground) still split the overlap down the middle — this only fires when the
+   * fight is over a ball one of them is holding.
+   */
+  carrierYieldShare: number;
 }
 
 /**
@@ -757,8 +791,13 @@ export function defaultConfig(): SimConfig {
       tackle: {
         enabled: true,
         radius: 0.9,
-        stunSec: 1,
-        missPenalty: 1,
+        // 1.6 s flat on the ground, then 0.4 s getting up: 2.4 s an opponent can walk you round,
+        // on top of the 0.4 s dash and the 1.2 s cooldown that follows — 4 s minimum between two
+        // attempts by the same body, which is what turned twenty dives a minute (the old, always-
+        // hits version) into something a bot has to actually want. See `doc` for the measurement.
+        lieSec: 1.6,
+        getUpSec: 0.4,
+        stumbleSec: 1,
         dropsBall: true,
       },
       collision: {
@@ -772,6 +811,13 @@ export function defaultConfig(): SimConfig {
         loudSpeed: 4.5,
         staggerSec: 0.25,
         dropsBall: false,
+        // The screen used to split 50/50 like any other bump, which let a carrier simply barge
+        // through: shove into the defender, both give an equal half-step, repeat, arrive. Even
+        // 0.92 still let a carrier walk a 3 m/s corridor — most of a free 5.5 m/s sprint — because
+        // the 8% the defender gives up compounds every tick he is leant on. 0.985 measured
+        // (`mech-screen`, 3.33 s of leaning) at a 0.45 m/s creep: the defender is not literally
+        // welded to the floor, but a carrier is not walking through him either.
+        carrierYieldShare: 0.985,
       },
       block: {
         mode: 'speed',

@@ -225,29 +225,48 @@ describe('the fight for the ball', () => {
     expect(sim.state.ball.carrier).toBe(0);
   });
 
-  it('puts a body on the floor when a dive connects, and the diver on the floor when it does not', () => {
+  it('lies down as a trap rather than attacking, and it is the other body\'s own legs that fall', () => {
     const sim = rigged((c) => {
       c.contest.tackle.enabled = true;
     });
-    place(sim, { x: 0, y: 0 }, { x: 2.5, y: 0 });
+    // Player 1 dives away from player 0 — nowhere near him — and commits to lying down there,
+    // roughly at x = 5 - 3.2 = 1.8.
+    place(sim, { x: 0, y: 0 }, { x: 5, y: 0 });
     const dive = idleFor(2);
     dive[1]!.dive = true;
     dive[1]!.move = { x: -1, y: 0 };
     dive[1]!.aim = { x: -1, y: 0 };
     sim.step(dive);
-    let hit = false;
-    for (let i = 0; i < 40; i++) {
+    // While the dash is still in flight, and once it has landed, the two bodies are nowhere near
+    // each other: no contest of any kind, and the man lying down has not so much as looked at
+    // his opponent.
+    for (let i = 0; i < 30; i++) {
       const out = sim.step(idleFor(2));
+      expect(out.contests ?? []).toEqual([]);
+    }
+    expect(sim.state.players[1]!.lieT).toBeGreaterThan(0);
+    expect(sim.state.players[0]!.downT).toBe(0);
+
+    // Now walk the ball-carrier straight over the spot the trap is lying on. He does the running;
+    // the trap does nothing at all.
+    let hit = false;
+    for (let i = 0; i < 200 && sim.state.players[1]!.lieT > 0; i++) {
+      const walk = idleFor(2);
+      walk[0]!.move = { x: 1, y: 0 };
+      walk[0]!.moveMode = 'run';
+      walk[0]!.aim = { x: 1, y: 0 };
+      const out = sim.step(walk);
       if ((out.contests ?? []).some((c) => c.kind === 'tackle')) hit = true;
     }
     expect(hit).toBe(true);
     expect(sim.state.players[0]!.downT).toBeGreaterThan(0);
-    // The tackled carrier loses the ball, loudly.
+    // The carrier who stumbled into it drops the ball, loudly.
     expect(sim.state.ball.carrier).toBeNull();
+  });
 
+  it('pays the full cost of a dive whether or not the trap ever catches anybody', () => {
     const missSim = rigged((c) => {
       c.contest.tackle.enabled = true;
-      c.contest.tackle.missPenalty = 2;
     });
     place(missSim, { x: 0, y: 0 }, { x: 9, y: 0 });
     const wild = idleFor(2);
@@ -256,13 +275,26 @@ describe('the fight for the ball', () => {
     wild[1]!.aim = { x: 0, y: 1 };
     missSim.step(wild);
     let missed = false;
-    for (let i = 0; i < 40; i++) {
+    let sawLying = false;
+    let recoverAtStandUp = -1;
+    let wasLying = false;
+    for (let i = 0; i < 300; i++) {
       const out = missSim.step(idleFor(2));
+      const p1 = missSim.state.players[1]!;
+      if (p1.lieT > 0) {
+        sawLying = true;
+        wasLying = true;
+      } else if (wasLying && recoverAtStandUp < 0) {
+        recoverAtStandUp = p1.recoverT;
+      }
       if ((out.contests ?? []).some((c) => c.kind === 'tackle-miss')) missed = true;
     }
+    expect(sawLying).toBe(true);
     expect(missed).toBe(true);
     expect(missSim.state.ball.carrier).toBe(0);
-    expect(missSim.state.players[1]!.recoverT).toBeGreaterThan(missSim.config.dive.recoverySec);
+    // The floor time is fixed — `lieSec + getUpSec` — whatever the outcome; there is no cheaper
+    // "it worked" branch any more, which is the whole point of the redesign.
+    expect(recoverAtStandUp).toBeCloseTo(missSim.config.contest.tackle.getUpSec, 5);
   });
 
   it('stops bodies passing through each other once contact is on, and rings out when it is hard', () => {

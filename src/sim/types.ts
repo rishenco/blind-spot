@@ -228,7 +228,10 @@ export interface SelfState {
   pingCooldown: number;
   diving: boolean;
   recovering: boolean;
-  /** Flat on the floor after being tackled: no movement, no actions, and everybody heard it. */
+  /**
+   * Flat on the floor: no movement, no actions, and everybody heard it. True whether this body
+   * tripped over somebody else's trap or is lying down as one of its own.
+   */
   down: boolean;
   /** > 0 while the hands are open: the catch button was pressed and the reach has not lapsed. */
   reaching: boolean;
@@ -251,6 +254,13 @@ export interface SelfState {
    * the mechanic would be a lottery rather than a contest.
    */
   stealPressure: number;
+  /**
+   * A defender is holding my ground for me this tick — I ran into him, or he into me, and the
+   * ball is in my hands. Proprioception, from the arms rather than the ears: it says nothing
+   * about who or where, only that a corridor has closed, which is the honest signal for "this is
+   * the moment to pass, not to shove".
+   */
+  pinned: boolean;
   /** Seconds this body has held the ball. The passivity clock, from the inside. */
   carrySeconds: number;
   /**
@@ -316,6 +326,15 @@ export interface PerceptionFrame {
   /** Team-mates' ids (excluding self) — knowing who is on your team is not intel about where. */
   teammates: readonly EntityId[];
   opponents: readonly EntityId[];
+  /**
+   * Where every team-mate is, always, exactly — a decision of the человек's, not a perception
+   * mechanic: "напарника видно постоянно и точно, без всяких условий" (2026-08-25). The tension
+   * this game is built on is about the OPPONENT, who stays entirely behind the sound model; a
+   * team-mate you cannot find is not a second unknown worth having, it is just friction on top of
+   * the one that matters. This is proprioception's twin rather than hearing — it costs nothing to
+   * receive and gives away nothing to the other side, so it does not touch law 4 at all.
+   */
+  mates: readonly { id: EntityId; pos: Vec2; vel: Vec2 }[];
 }
 
 export type MoveMode = 'walk' | 'run';

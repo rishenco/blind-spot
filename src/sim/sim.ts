@@ -76,8 +76,14 @@ export interface PlayerState {
   dirRef: Vec2;
   dirRefNext: Vec2;
   dirRefAge: number;
-  /** > 0 while this body is on the ground after being tackled: silent-less, helpless, visible. */
+  /** > 0 while this body is on the ground after tripping over a trap: silent-less, helpless, visible. */
   downT: number;
+  /**
+   * > 0 while this body is lying down AS a trap — a dive that has finished its dash. Not the same
+   * state as `downT`: this body chose to be here and is what somebody else trips over, `downT` is
+   * what happens to the somebody else. See `TackleConfig`.
+   */
+  lieT: number;
   /** > 0 while a hard collision has taken the body's control away. */
   staggerT: number;
   /** Seconds spent contesting the current carrier, and who that carrier is. */
@@ -85,8 +91,14 @@ export interface PlayerState {
   contestTarget: EntityId | null;
   /** Grace after a steal: this body can neither be robbed nor rob again until it expires. */
   robbedCd: number;
-  /** Whether the dive in progress has already connected with somebody. */
-  tackleHit: boolean;
+  /** Whether the current lying-down instance has already tripped somebody. */
+  trapSprung: boolean;
+  /**
+   * True for this tick if a body contact is holding this carrier's ground for him — the arms'-
+   * length proprioception a blind carrier gets for free from being shoved, published so the
+   * decision layer does not have to infer "I am being marked" from stale sound alone.
+   */
+  pinned: boolean;
   /** > 0 while the hands are open after a catch press. */
   reachT: number;
   /** Cooldown before the hands can be opened again. */
@@ -296,11 +308,13 @@ export class Simulation {
         dirRefNext: v2(1, 0),
         dirRefAge: 0,
         downT: 0,
+        lieT: 0,
         staggerT: 0,
         contestT: 0,
         contestTarget: null,
         robbedCd: 0,
-        tackleHit: false,
+        trapSprung: false,
+        pinned: false,
         reachT: 0,
         reachCd: 0,
         reachSawBall: false,
@@ -377,11 +391,13 @@ export class Simulation {
       p.dirRefNext = clone2(p.dirRef);
       p.dirRefAge = 0;
       p.downT = 0;
+      p.lieT = 0;
       p.staggerT = 0;
       p.contestT = 0;
       p.contestTarget = null;
       p.robbedCd = 0;
-      p.tackleHit = false;
+      p.trapSprung = false;
+      p.pinned = false;
       p.reachT = 0;
       p.reachCd = 0;
       p.reachSawBall = false;
@@ -465,11 +481,12 @@ export class Simulation {
       const intent = intents[i] ?? idleIntentInternal();
       const prev = this.prevIntents[i] ?? idleIntentInternal();
       p.loudness = 0;
+      p.pinned = false;
       this.stepPlayer(p, intent, prev, dt);
     }
 
     this.resolveCollisions();
-    this.resolveTackles();
+    this.resolveTraps();
     this.stepBall(dt);
     this.resolveBallContacts(intents);
     this.resolveSteals(intents, dt);
@@ -659,7 +676,7 @@ export class Simulation {
     const aimLen = len2(intent.aim);
     if (aimLen > 1e-6) p.aim = norm2(intent.aim, p.aim);
 
-    // --- flat on the ground: the price of being tackled, and of tackling nothing -----------
+    // --- tripped: the price of walking into somebody's trap -----------------
     // A body on the floor does not move, cannot ping, cannot throw and cannot dive. It is not
     // silent either: the fall itself rang out, and its position is now common knowledge.
     if (p.downT > 0) {
@@ -675,22 +692,51 @@ export class Simulation {
       return;
     }
 
-    // --- dive: a committed burst, then a helpless recovery -------------------
+    // --- lying down: the trap itself, live -----------------------------------
+    // Not attacking anybody — `resolveTraps` is what turns somebody else's own legs into a fall.
+    // This body simply cannot do anything else while it commits to being an obstacle.
+    if (p.lieT > 0) {
+      p.lieT -= dt;
+      p.vel = v2();
+      p.move = 'stand';
+      p.charging = false;
+      p.chargeT = 0;
+      p.strideAcc = 0;
+      p.peakSpeed = 0;
+      p.peakAge = 0;
+      if (p.lieT <= 0) {
+        const gloves = this.keeping(p) ? cfg.keeper.diveRecoveryMul : 1;
+        p.recoverT = cfg.contest.tackle.getUpSec * gloves;
+        // The trap's whole life is over — nothing more will walk into it. `trapSprung` already
+        // holds its final value (every tick it was still lying got one `resolveTraps` check), so
+        // this is the one moment that knows for certain whether the bet paid off.
+        if (!p.trapSprung) {
+          this.contests.push({ kind: 'tackle-miss', player: p.id, victim: null, t: this.state.t });
+        }
+      }
+      if (p.hasBall) this.placeCarriedBall(this.state, p);
+      return;
+    }
+
+    // --- dive: a committed burst, then either lying down or an ordinary recovery ---
     if (p.diveT > 0) {
       p.diveT -= dt;
       p.vel = { x: p.diveDir.x * cfg.dive.speed, y: p.diveDir.y * cfg.dive.speed };
       if (p.diveT <= 0) {
-        // A dive that hit nobody leaves you lying there longer — that is the bet the tackle is:
-        // you spent your body on a prediction, and a wrong prediction costs time on the floor.
-        const miss = p.tackleHit ? 1 : cfg.contest.tackle.enabled ? cfg.contest.tackle.missPenalty : 1;
-        // A keeper's dive along his own line is his one athletic tool, so it costs him less to
-        // get back up. Outside his crease he is an ordinary body with ordinary consequences.
-        const gloves = this.keeping(p) ? cfg.keeper.diveRecoveryMul : 1;
-        p.recoverT = cfg.dive.recoverySec * miss * gloves;
-        if (!p.tackleHit && cfg.contest.tackle.enabled) {
-          this.contests.push({ kind: 'tackle-miss', player: p.id, victim: null, t: this.state.t });
-        }
         p.vel = v2();
+        // The keeper is exempt from the trap, always — the concept is explicit that his dive is
+        // a reflex for the ball, never a plan against a body ("никогда вратарю"), and a keeper
+        // who spent the next 2 s lying on his own goal line after every save would make the save
+        // worse than the shot: the rebound just walks in behind him. He gets the plain, short
+        // recovery the mechanic used to give everybody, scaled by his own gloves knob.
+        if (cfg.contest.tackle.enabled && !this.keeping(p)) {
+          // The dash is over; the trap begins. Whether anybody ever walks into it is not decided
+          // here — see `resolveTraps`, run once a tick for as long as `lieT` stays positive.
+          p.lieT = cfg.contest.tackle.lieSec;
+        } else {
+          const gloves = this.keeping(p) ? cfg.keeper.diveRecoveryMul : 1;
+          p.recoverT = cfg.dive.recoverySec * gloves;
+        }
       }
     } else if (p.recoverT > 0) {
       p.recoverT -= dt;
@@ -698,13 +744,20 @@ export class Simulation {
     } else {
       if (intent.dive && !prev.dive && p.diveCd <= 0) {
         p.diveT = cfg.dive.durationSec;
-        p.tackleHit = false;
+        p.trapSprung = false;
+        const tail = cfg.contest.tackle.enabled
+          ? cfg.contest.tackle.lieSec + cfg.contest.tackle.getUpSec
+          : cfg.dive.recoverySec;
         p.diveCd = this.keeping(p)
           ? cfg.dive.cooldownSec * cfg.keeper.diveCooldownMul + cfg.dive.durationSec
-          : cfg.dive.cooldownSec + cfg.dive.durationSec + cfg.dive.recoverySec;
+          : cfg.dive.cooldownSec + cfg.dive.durationSec + tail;
         const dir = len2(intent.move) > 1e-6 ? norm2(intent.move, p.aim) : clone2(p.aim);
         p.diveDir = dir;
         p.vel = { x: dir.x * cfg.dive.speed, y: dir.y * cfg.dive.speed };
+        // The one sound a trap makes: committing to the dive. It is heard exactly like the old
+        // attacking dive was — 11 m, the loudness table's row for it — and it is the whole of the
+        // symmetry law's price here: the mark fades in a few seconds, so an opponent who was not
+        // listening right then has to trust a stale memory of where it happened, not a live view.
         this.emit('dive', p.pos, p.id);
       } else {
         this.applyMovement(p, intent, dt);
@@ -915,7 +968,16 @@ export class Simulation {
    * Two bodies stop occupying the same point, which is the whole mechanic: a silent defender
    * standing in a corridor is now a wall rather than a rumour, and that is the cheapest way to
    * make "where is he" a question worth paying for. A hard bump is loud (both bodies ring out
-   * where they touched), staggers both, and knocks the ball out of a carrier's hands.
+   * where they touched) and staggers both — but it does NOT decide who keeps the ball
+   * (`col.dropsBall` stays off by default; taking the ball off a carrier by touching him is not a
+   * thing this game does, see `TackleConfig`'s comment).
+   *
+   * What it does decide, since 2026-08-25, is who keeps the GROUND. `carrierYieldShare` splits
+   * the overlap and the stopping impulse unevenly whenever exactly one of the two bodies is
+   * holding the ball: the carrier absorbs almost all of it, the defender almost none. Plant
+   * yourself in a corridor and a carrier who walks into you does not push you aside — he is the
+   * one who gets pushed, for as long as you hold the spot. That is the без-судьи version of a
+   * foul: nobody can rule it, so the physics itself never lets the carrier win the exchange.
    */
   private resolveCollisions(): void {
     const col = this.config.contest.collision;
@@ -927,7 +989,9 @@ export class Simulation {
       const a = s.players[i]!;
       for (let j = i + 1; j < s.players.length; j++) {
         const b = s.players[j]!;
-        if (a.downT > 0 && b.downT > 0) continue;
+        const aImmobile = a.downT > 0 || a.lieT > 0;
+        const bImmobile = b.downT > 0 || b.lieT > 0;
+        if (aImmobile && bImmobile) continue;
         let dx = b.pos.x - a.pos.x;
         let dy = b.pos.y - a.pos.y;
         let d = Math.sqrt(dx * dx + dy * dy);
@@ -942,28 +1006,47 @@ export class Simulation {
         const nx = dx / d;
         const ny = dy / d;
         const overlap = minGap - d;
-        // A body on the floor is furniture: it gets pushed by nobody and pushes nobody aside.
-        const aMoves = a.downT <= 0;
-        const bMoves = b.downT <= 0;
-        const share = aMoves && bMoves ? 0.5 : 1;
+        // A body on the floor (down or lying as a trap) is furniture: it gets pushed by nobody
+        // and pushes nobody aside. Otherwise, unless this is a fight over a ball one side is
+        // holding, the two split the overlap evenly, same as always.
+        const aMoves = !aImmobile;
+        const bMoves = !bImmobile;
+        let shareA = 0.5;
+        let shareB = 0.5;
+        if (!aMoves) {
+          shareA = 0;
+          shareB = 1;
+        } else if (!bMoves) {
+          shareA = 1;
+          shareB = 0;
+        } else if (a.hasBall !== b.hasBall) {
+          const yield_ = clamp(col.carrierYieldShare, 0, 1);
+          shareA = a.hasBall ? yield_ : 1 - yield_;
+          shareB = b.hasBall ? yield_ : 1 - yield_;
+          // "Somebody is holding my ground for me" — felt through the arms, not the ears, so it
+          // is proprioception and can be published honestly regardless of whether either body
+          // could actually place the other by sound right now.
+          if (a.hasBall) a.pinned = true;
+          else b.pinned = true;
+        }
         if (aMoves) {
-          a.pos.x -= nx * overlap * share;
-          a.pos.y -= ny * overlap * share;
+          a.pos.x -= nx * overlap * shareA;
+          a.pos.y -= ny * overlap * shareA;
         }
         if (bMoves) {
-          b.pos.x += nx * overlap * share;
-          b.pos.y += ny * overlap * share;
+          b.pos.x += nx * overlap * shareB;
+          b.pos.y += ny * overlap * shareB;
         }
         const closing = (a.vel.x - b.vel.x) * nx + (a.vel.y - b.vel.y) * ny;
         if (closing > 0) {
-          const imp = closing * (1 + col.restitution) * share;
+          const impBase = closing * (1 + col.restitution);
           if (aMoves) {
-            a.vel.x -= nx * imp;
-            a.vel.y -= ny * imp;
+            a.vel.x -= nx * impBase * shareA;
+            a.vel.y -= ny * impBase * shareA;
           }
           if (bMoves) {
-            b.vel.x += nx * imp;
-            b.vel.y += ny * imp;
+            b.vel.x += nx * impBase * shareB;
+            b.vel.y += ny * impBase * shareB;
           }
         }
         confineBody(this.field, a.pos, a.vel, R, this.creaseAccess(a));
@@ -985,35 +1068,36 @@ export class Simulation {
   }
 
   /**
-   * The dive tackle: a bet on where somebody is going to be.
+   * The trap: a bet on where somebody is going to run, not on where he is now.
    *
-   * This is the mechanic the whole information economy hangs on. Hearing where an opponent *is*
-   * is worth little; a dive has to be aimed where he *will be* 0.4 s from now, which is the only
-   * question in the game whose answer has to be predicted rather than observed. Hit and he is on
-   * the floor for a second, noisy and useless. Miss and it is you.
+   * This is the mechanic the whole information economy hangs on, and it changed shape on
+   * 2026-08-25 without changing its point: hearing where an opponent *is* is worth little, and a
+   * dive has to be aimed where he *will be* 0.4 s from now, which is the only question in the game
+   * whose answer has to be predicted rather than observed. What changed is who does the hitting.
+   * A lying body (`lieT > 0`) does not reach for anybody — it is `resolveCollisions`, run first
+   * every tick, that already stops another body walking through it. This function only asks: did
+   * an opponent's own legs carry him into a body that was not going to move? If so, it is his
+   * fall, not the trapper's blow, and the ball goes with him if he was holding it.
    */
-  private resolveTackles(): void {
+  private resolveTraps(): void {
     const tk = this.config.contest.tackle;
     if (!tk.enabled) return;
     const s = this.state;
-    for (const diver of s.players) {
-      if (diver.diveT <= 0 || diver.tackleHit) continue;
+    const R = this.config.player.radius;
+    for (const trap of s.players) {
+      if (trap.lieT <= 0) continue;
       for (const other of s.players) {
-        if (other.team === diver.team || other.downT > 0) continue;
-        if (dist2(diver.pos, other.pos) > tk.radius + this.config.player.radius) continue;
-        diver.tackleHit = true;
-        diver.diveT = 0;
-        diver.recoverT = this.config.dive.recoverySec;
-        diver.vel = v2();
-        other.downT = tk.stunSec;
+        if (other.team === trap.team || other.downT > 0 || other.lieT > 0) continue;
+        if (dist2(trap.pos, other.pos) > tk.radius + R) continue;
+        trap.trapSprung = true;
+        other.downT = tk.stumbleSec;
         other.staggerT = 0;
-        const away = norm2({ x: other.pos.x - diver.pos.x, y: other.pos.y - diver.pos.y }, other.aim);
+        const away = norm2({ x: other.pos.x - trap.pos.x, y: other.pos.y - trap.pos.y }, other.aim);
         // The thud, from the man who went down. Louder than a run, quieter than the fumble that
-        // follows if he was carrying — a mistake still costs more than a hit.
+        // follows if he was carrying — a mistake still costs more than a stumble.
         this.emit('brake', other.pos, other.id);
         if (other.hasBall && tk.dropsBall) this.knockBallLoose(other, away);
-        this.contests.push({ kind: 'tackle', player: diver.id, victim: other.id, t: s.t });
-        break;
+        this.contests.push({ kind: 'tackle', player: trap.id, victim: other.id, t: s.t });
       }
     }
   }
@@ -1653,9 +1737,9 @@ export class Simulation {
         p.id, p.team, p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.aim.x, p.aim.y,
         p.hasBall ? 1 : 0, p.charging ? 1 : 0, p.chargeT, p.diveT, p.recoverT, p.diveCd,
         p.pingCd, p.ballCd, p.callCd, p.strideAcc, p.brakeCd, p.peakSpeed, p.peakAge, p.loudness,
-        p.dirRef.x, p.dirRef.y, p.dirRefNext.x, p.dirRefNext.y, p.dirRefAge, p.downT, p.staggerT, p.contestT,
-        p.contestTarget ?? -99, p.robbedCd, p.tackleHit ? 1 : 0, p.reachT, p.reachCd,
-        p.keeper ? 1 : 0,
+        p.dirRef.x, p.dirRef.y, p.dirRefNext.x, p.dirRefNext.y, p.dirRefAge, p.downT, p.lieT, p.staggerT, p.contestT,
+        p.contestTarget ?? -99, p.robbedCd, p.trapSprung ? 1 : 0, p.reachT, p.reachCd,
+        p.keeper ? 1 : 0, p.pinned ? 1 : 0,
       );
     }
     const b = s.ball;

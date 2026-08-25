@@ -531,57 +531,83 @@ async function mechPair(index, name, tick, truthNote, eyesNote) {
   return { state: at, truth, eyes };
 }
 
-// --- 30/31 the steal --------------------------------------------------------
+// --- 30/31 the steal, retired ------------------------------------------------
+// 2026-08-25: contact never takes the ball off a carrier any more. The same script that used to
+// prove the steal worked (a hunter closes and stays glued to his shoulder) now proves the rule
+// is gone — six seconds of company and the ball has not moved.
 const steal = await mechPair(
   '30',
   'mech-steal',
-  144,
-  'the steal, truth: the carrier (cyan, left) walked it up, the hunter (orange) ran him down and then simply stayed with him. A full second inside a metre and the ball changes hands',
-  'and the same instant from the man it was taken off: the hum that was in his hands is now a metre away and moving the other way. The scuffle carries 9 m, so a change of possession is never silent — but the far side of the pitch still only learns it from the hum moving',
+  210,
+  'the steal, retired, truth: the hunter (orange) has been glued to the carrier’s shoulder for the better part of six seconds. Under the old rule this alone took the ball; under this one it does nothing at all',
+  'the same instant from the man it was taken off — except nobody took anything off him: the hum is still in his own hands, exactly where it has been the whole time',
 );
 check(
-  'steal: the ball changed hands',
-  steal.state.ball.carrier === 2,
+  'steal, retired: the ball never changed hands',
+  steal.state.ball.carrier === 0,
   `carrier ${steal.state.ball.carrier}`,
 );
 
-// --- 32/33 the tackle -------------------------------------------------------
+// --- 32/33 the trap, sprung ---------------------------------------------------
 const tackle = await mechPair(
   '32',
   'mech-tackle',
-  66,
-  'the dive tackle, truth: the defender bet his body on where the carrier would be, not on where he was. The carrier is flat on the floor and the ball is loose',
-  'the same moment from the far side of the pitch: the thud and the fumble are both loud, so a tackle is one of the few things in this game that everybody hears',
+  100,
+  'the trap, sprung, truth: the defender laid himself down across the carrier’s line a moment ago and has not moved since — this body is not attacking anybody. The carrier, running blind, found him with his own legs and is now on the floor with the ball loose',
+  'the same moment from the far side of the pitch: the thud and the fumble are both loud, so a sprung trap is one of the few things in this game that everybody hears',
 );
 check(
-  'tackle: the carrier lost the ball',
+  'trap: the carrier lost the ball',
   tackle.state.ball.carrier !== 0,
   `carrier ${tackle.state.ball.carrier}`,
 );
 
-// --- 34/35 the tackle that missed -------------------------------------------
+// --- 34/35 the trap that caught nobody ----------------------------------------
 const missed = await mechPair(
   '34',
   'mech-tackle-miss',
-  45,
-  'the same bet, lost: the dive went in a second early. The diver is the one lying there now, and the carrier walks past him',
-  'and this is what the bet cost him in information: he made the loudest ordinary sound in the game, from a position he no longer holds, and learned nothing',
+  150,
+  'the trap, empty, truth: the defender read the carrier wrong and lay down well off his line. The carrier walked straight past, never close enough to trip on him',
+  'and this is what the bet cost regardless: the loudest ordinary sound in the game, from a spot the carrier never visited, and the same floor time whether or not the bet ever pays off',
 );
 check(
-  'tackle-miss: the carrier still has it',
+  'trap, empty: the carrier still has it',
   missed.state.ball.carrier === 0,
   `carrier ${missed.state.ball.carrier}`,
 );
 
-// --- 36/37 the screen -------------------------------------------------------
+// --- 36/37 the screen, and who loses the ground -------------------------------
 const screen = await mechPair(
   '36',
   'mech-screen',
-  124,
-  'the screen, truth: a body that has made no sound at all is standing in the corridor, and the carrier has just run into it at full speed. Bodies no longer pass through each other, so a silent defender is a wall',
-  'the thud, heard: a screen is invisible right up to the moment somebody hits it — and then both bodies are the loudest thing on the pitch. The carrier keeps the ball; contact that also spilled it measured at sixteen fumbles a minute, which is a brawl and not a game',
+  190,
+  'the screen, truth: a body that has made no sound at all planted itself in the corridor over three seconds ago. The carrier has been driving into him ever since — bodies no longer pass through each other, so a silent defender is a wall',
+  'the thud, heard: a screen is invisible right up to the moment somebody hits it — and then both bodies are the loudest thing on the pitch. The carrier keeps the ball, but he has gone almost nowhere: the corridor holds its ground and it is HE who gets walked backwards, not the man blocking him',
 );
 check('screen: the runner was stopped but kept the ball', screen.state.ball.carrier === 0);
+{
+  // Most of the "advance" is the free run before contact even happens (11 m of open pitch) —
+  // comparing it to a free sprint proves nothing about the corridor itself. What proves the
+  // corridor is: is the defender still essentially where he planted himself, and is the runner
+  // still pressed up against him rather than through him?
+  const runnerX = screen.state.players[0].x;
+  const defenderX = screen.state.players[2].x;
+  const defenderDrift = defenderX - 4.2;
+  // The runner closes from the left (negative x), so "touching" is runnerX ≈ defenderX - 0.7 —
+  // a gap of -0.7, not 0. Anything close to that says he is pressed up against the defender;
+  // anything near 0 or positive would mean he walked through him.
+  const gap = runnerX - defenderX;
+  check(
+    'screen: the defender has barely been pushed off his spot',
+    Math.abs(defenderDrift) < 1,
+    `defender drift ${defenderDrift.toFixed(2)} m`,
+  );
+  check(
+    'screen: the runner is still pressed against him, not past him',
+    gap < -0.55 && gap > -0.85,
+    `gap ${gap.toFixed(2)} m (touching is ~-0.7 m)`,
+  );
+}
 
 // --- 38/39 the block that is no longer absolute -----------------------------
 const block = await mechPair(

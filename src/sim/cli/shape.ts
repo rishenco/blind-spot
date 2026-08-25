@@ -214,6 +214,8 @@ interface Job {
   secs: number;
   a: string;
   b: string;
+  /** Players per team. Defaults to the concept's 2×2; `--team 3` runs the 3×3 comparison. */
+  team: number;
 }
 
 interface JobResult extends Job {
@@ -225,6 +227,7 @@ function buildConfig(job: Job): SimConfig {
   if (!row) throw new Error(`unknown row: ${job.row}`);
   const config = cloneConfig(defaultConfig());
   row.apply(config);
+  config.teamSize = job.team;
   config.match.durationSec = job.secs;
   config.match.goalsToWin = 1e9;
   config.match.kickoffTeam = 'alternate';
@@ -317,16 +320,22 @@ async function main(): Promise<void> {
   const secs = Number(args.secs ?? 90);
   const a = args.a ?? 'bot';
   const b = args.b ?? 'bot';
+  const team = Number(args.team ?? 2);
   const workers = Number(args.workers ?? Math.max(1, Math.min(cpus().length, 8)));
 
   const jobs: Job[] = [];
-  for (const r of rows) for (const seed of seeds) jobs.push({ row: r.name, seed, secs, a, b });
+  for (const r of rows) for (const seed of seeds) jobs.push({ row: r.name, seed, secs, a, b, team });
 
   const t0 = process.hrtime.bigint();
   const results = await runAll(jobs, workers);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
 
-  const head = ['row', 'goals/min', 'pass/poss', 'pass/goal', 'passes', 'hold→shot', 'hold→throw', 'shots/min', 'shot d p25', 'p50', 'p75', 'direct%', 'poss/min', 'hold max', 'saves/min', 'silent%', 'ping/min'];
+  const head = [
+    'row', 'goals/min', 'pass/poss', 'pass/goal', 'passes', 'hold→shot', 'hold→throw', 'shots/min',
+    'shot d p25', 'p50', 'p75', 'direct%', 'poss/min', 'hold max', 'saves/min', 'silent%', 'ping/min',
+    // The positional-play columns — added for the "either they bomb it or it's a scrum" pass.
+    'scrum%', 'avg pair d', 'near-opp%', 'pat/min',
+  ];
   const body: string[][] = [];
   for (const r of rows) {
     const stats = results.filter((x) => x.row === r.name).map((x) => x.stats);
@@ -353,11 +362,15 @@ async function main(): Promise<void> {
       (sh.keeperSaves / mins).toFixed(2),
       ((agg.players.length ? sum((p) => p.silentShare) / agg.players.length : 0) * 100).toFixed(0),
       sum((p) => p.pingsPerMinute).toFixed(2),
+      ((sh.scrumTicks / Math.max(1, sh.positionTicks)) * 100).toFixed(1),
+      (sh.pairDistanceSum / Math.max(1, sh.pairSamples)).toFixed(2),
+      ((sh.nearOpponentTicks / Math.max(1, sh.positionTicks * team * 2)) * 100).toFixed(1),
+      (sh.passivityTurnovers / mins).toFixed(2),
     ]);
   }
   const widths = head.map((h, i) => Math.max(h.length, ...body.map((x) => x[i]!.length)));
   const line = (cells: string[]) => cells.map((c, i) => c.padStart(widths[i]!)).join('  ');
-  console.log(`\nshape of the play — ${seeds.length} seeds × ${secs}s, ${a} vs ${b}\n`);
+  console.log(`\nshape of the play — ${seeds.length} seeds × ${secs}s, ${a} vs ${b}, ${team}×${team}\n`);
   console.log(line(head));
   for (const x of body) console.log(line(x));
   console.log('\nrows:');
