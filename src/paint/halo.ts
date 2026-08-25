@@ -35,7 +35,7 @@
  */
 
 import { maxMaterialLoudness } from './materials';
-import { SOUND_CLASSES } from './soundEvents';
+import { SOUND_CLASSES, isContactClass, type SoundClass } from './soundEvents';
 
 /**
  * The radius the pitch map is referenced to, metres — §3.8's `55·√(r/1.5)`.
@@ -54,18 +54,32 @@ export const HALO_REFERENCE_M = 1.5;
 export const HALO_REFERENCE_HZ = 55;
 
 /**
- * The loudest reading, metres: a sprint-step on the loudest surface the game has.
+ * The loudest reading, metres: the loudest single noise the player can make.
  *
- * 24 m × 1.5 = 36 today. Derived from the two tables rather than written down, so a louder
- * material or a louder sprint raises the ceiling instead of silently saturating against it —
- * a readout that pegs is a readout that has stopped answering.
+ * A landing on steel, 28 m × 1.5 = 42 today — not a sprint-step's 36, which is what this said
+ * while the readout could only see the gait ladder. The ceiling has to be the top of what the
+ * ring is asked to draw, and the ring is now asked to draw every noise the body makes: a landing
+ * is louder than a sprint and an e-ping (30 m, unscaled — it strikes nothing) is louder than a
+ * walk. A dial whose top is below its loudest input saturates on exactly the readings the player
+ * most needs graded.
+ *
+ * Derived by sweeping the two tables rather than written down, so a louder material, a louder
+ * landing or a new class raises the ceiling instead of silently pegging against it. Contact
+ * classes take §3.9's loudest voice; the pings strike nothing, so they take themselves.
  *
  * Read from the *frozen* class table and not from a simulation's tunable copy, because the
  * ceiling is the scale the ring is drawn against and a scale that moved while a dev-panel slider
  * was dragged would make two frames incomparable. The reading itself does follow the sliders (see
  * `SoundBus.carryRadius`); only the top of the dial is fixed.
  */
-export const HALO_MAX_RADIUS_M = SOUND_CLASSES['sprint-step'].hearingRadius * maxMaterialLoudness();
+export const HALO_MAX_RADIUS_M = (Object.keys(SOUND_CLASSES) as SoundClass[]).reduce(
+  (loudest, cls) =>
+    Math.max(
+      loudest,
+      SOUND_CLASSES[cls].hearingRadius * (isContactClass(cls) ? maxMaterialLoudness() : 1),
+    ),
+  0,
+);
 
 /**
  * The glide's time constant, seconds — how fast the readout catches up with the body.
@@ -77,6 +91,29 @@ export const HALO_MAX_RADIUS_M = SOUND_CLASSES['sprint-step'].hearingRadius * ma
  * of audible sweep — about one stride at full speed.
  */
 export const HALO_GLIDE_SEC = 0.18;
+
+/**
+ * How long a noise stays on the readout after the body has stopped making it, seconds.
+ *
+ * The gait ladder is a *state* — you are walking, and while you are walking you are an 11 m
+ * noise. A ping and a landing are *acts*: they are over in a frame, and a readout that only
+ * knows about states never shows them at all. Before this, firing an e-ping — the loudest
+ * deliberate thing in the game at 30 m — moved the ring and the hum by exactly nothing, which
+ * is the failure §3.8 calls non-negotiable ("I can't tell when I'm detectable") happening at
+ * the precise moment the player most wants the answer.
+ *
+ * So the readout is a level meter: it takes the loudest thing the body is putting into the
+ * world *including what is still ringing out*, and lets it fall. The decay is not decoration —
+ * it is roughly how long the sound is still travelling. The wave groups move at 25-45 m/s
+ * (`WAVE_SPEEDS`), so a 30 m ping is genuinely still in flight, still arriving at ears that have
+ * not heard it yet, for about a second after you press the key. A ring that snapped to dark the
+ * frame after would be claiming you were silent while your loudest noise was still crossing the
+ * room.
+ *
+ * Exponential, so it is frame-rate independent like the glide, and short enough that the flare
+ * has cleared before the next ping is off cooldown (0.75 s, §3.5).
+ */
+export const HALO_HOLD_SEC = 0.45;
 
 /**
  * The radius, clamped into the range the readout can express.
@@ -131,6 +168,7 @@ export function haloBrightness(radiusM: number): number {
 export class Halo {
   private glided = 0;
   private wanted = 0;
+  private held = 0;
 
   /**
    * Takes a new target and advances the glide by `dt` seconds.
@@ -140,15 +178,54 @@ export class Halo {
    * so the readout is the same at 60 Hz and at 120.
    */
   advance(targetRadiusM: number, dt: number): void {
-    this.wanted = Number.isFinite(targetRadiusM) && targetRadiusM > 0 ? targetRadiusM : 0;
+    const gait = Number.isFinite(targetRadiusM) && targetRadiusM > 0 ? targetRadiusM : 0;
+    if (dt > 0) {
+      this.held *= Math.exp(-dt / HALO_HOLD_SEC);
+      /*
+       * The tail is cut at the floor rather than left to approach zero forever.
+       *
+       * An exponential never arrives, and "nothing can hear you" is the single most important
+       * reading the Halo gives (§3.8) — it has to be a reading the readout can actually reach,
+       * not one it converges on. Below the reference radius every value paints the same pixel
+       * and sounds the same note anyway, so the last stretch of the decay carries no information
+       * and cutting it costs nothing. What it buys is a *silence* the instrument can state.
+       */
+      if (this.held < HALO_REFERENCE_M) this.held = 0;
+    }
+    /*
+     * The louder of the two, not their sum. They are two readings of the same body and often the
+     * same noise counted twice — a walk-step is both the gait you are in and the event you just
+     * emitted — so adding them would double the ring on every stride.
+     */
+    this.wanted = gait > this.held ? gait : this.held;
     if (!(dt > 0)) return;
     this.glided += (this.wanted - this.glided) * (1 - Math.exp(-dt / HALO_GLIDE_SEC));
+    // Same cut, same reason: the glide has to be able to land on silence, not approach it.
+    if (this.wanted === 0 && this.glided < HALO_REFERENCE_M) this.glided = 0;
+  }
+
+  /**
+   * A noise the body just made, at the radius it is heard at.
+   *
+   * Fed from the bus, so the readout and the world are quoting the same number: the ring cannot
+   * claim a loudness the event did not carry, because it is handed the event's own
+   * `hearingRadius` (§3.3's right-hand column, already through §3.9's voice) rather than
+   * recomputing one. That is the same discipline `audibleRadius` follows for the gait.
+   *
+   * Louder wins and quieter is ignored: a crouch-step during the tail of a landing does not
+   * *quieten* the landing, which is still crossing the room whatever the body does next.
+   */
+  mark(radiusM: number): void {
+    if (!(Number.isFinite(radiusM) && radiusM > this.held)) return;
+    this.held = radiusM;
   }
 
   /** Jumps straight to a radius, skipping the glide — for a respawn or a fresh run. */
   reset(radiusM = 0): void {
     this.wanted = Number.isFinite(radiusM) && radiusM > 0 ? radiusM : 0;
     this.glided = this.wanted;
+    // A respawn does not get to keep the ping it fired before it died.
+    this.held = 0;
   }
 
   /** The reading: how far away the body can be heard, as the readout currently says it. */
@@ -169,5 +246,24 @@ export class Halo {
   /** The ring's brightness for this reading, 0–1. */
   get brightness(): number {
     return haloBrightness(this.glided);
+  }
+
+  /**
+   * Nothing anywhere can hear you — a state, not a small number.
+   *
+   * The readout's bottom end is otherwise ambiguous in a way that matters: `humPitch` floors at
+   * the reference radius, so a standstill and a crouch on dust (1.2 m) both read 55 Hz and both
+   * light the ring at zero brightness. Those are not two shades of quiet, they are different in
+   * kind — one is inaudible to everything in the world, the other is a noise somebody standing
+   * next to you hears — and §3.9 built the dust apron precisely so that the second one is a
+   * route the player chooses. An instrument that cannot separate "quiet" from "silent" cannot
+   * report whether that choice bought anything.
+   *
+   * So the distinction is carried where there is room for it rather than crushed into the
+   * bottom pixel of the ring: the hum stops. Silence is the absence of the tone, which is the
+   * one encoding that needs no resolution at all to read.
+   */
+  get silent(): boolean {
+    return this.glided === 0;
   }
 }

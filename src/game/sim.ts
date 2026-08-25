@@ -46,6 +46,7 @@ import {
   SoundBus,
   defaultSoundTunables,
   type SoundClass,
+  type SoundEvent,
   type SoundTunables,
 } from '../paint/soundEvents';
 import {
@@ -137,6 +138,7 @@ export class GameSim {
   readonly halo = new Halo();
 
   private readonly unsubscribeBus: () => void;
+  private readonly unsubscribeHalo: () => void;
   private readonly unsubscribePlayer: () => void;
 
   private paintTime = 0;
@@ -182,12 +184,31 @@ export class GameSim {
       dustSeed: streamSeed(this.seed, STREAM_DUST),
     });
     this.unsubscribeBus = this.bus.subscribe(this.paint.handle);
+    this.unsubscribeHalo = this.bus.subscribe(this.onOwnNoise);
     this.unsubscribePlayer = this.player.onEvent(this.onPlayerEvent);
 
     this.syncListener();
   }
 
   // ---- sound ---------------------------------------------------------------
+
+  /**
+   * Every noise *this* body makes, onto the Halo's peak-hold.
+   *
+   * A third subscriber to the same stream, which is the only honest way to do it: the readout
+   * quotes the event's own `hearingRadius` rather than recomputing one, so §3.8's ring cannot
+   * claim a loudness the world did not carry. Recomputing it here is the bug this exists to
+   * avoid — there would then be two answers to "how far is that heard", and §3.9's material
+   * voice would have to be remembered in a second place.
+   *
+   * Filtered to the local player, not to `'player'`: in co-op a teammate's sprint is on this bus
+   * too and it is *their* lantern, not yours. The Halo answers "how loud am I", and a ring that
+   * flared at somebody else's footsteps would answer a question nobody asked.
+   */
+  private onOwnNoise = (event: SoundEvent): void => {
+    if (event.emitter !== PLAYER_EMITTER_ID) return;
+    this.halo.mark(event.hearingRadius);
+  };
 
   private onPlayerEvent = (event: PlayerEvent): void => {
     if (event.type === 'footstep') {
@@ -484,6 +505,7 @@ export class GameSim {
 
   dispose(): void {
     this.unsubscribeBus();
+    this.unsubscribeHalo();
     this.unsubscribePlayer();
     this.bus.dispose();
     this.paint.dispose();

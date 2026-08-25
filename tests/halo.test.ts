@@ -28,7 +28,14 @@ import {
   humPitch,
 } from '../src/paint/halo';
 import { MAT_CONCRETE, MAT_DUST, MAT_METAL, MAT_STONE, materialLoudness } from '../src/paint/materials';
-import { SOUND_CLASSES, SoundBus, type SoundClass, type SoundEvent } from '../src/paint/soundEvents';
+import {
+  PLAYER_EMITTER_ID,
+  SOUND_CLASSES,
+  SoundBus,
+  isContactClass,
+  type SoundClass,
+  type SoundEvent,
+} from '../src/paint/soundEvents';
 import { createHeadlessGame, type HeadlessGame } from '../src/game/headless';
 import { TIME_SCALES, stepClassOf } from '../src/game/sim';
 import { HALO_RING_MIN_ALPHA, haloRingAlpha } from '../src/ui/hud';
@@ -114,9 +121,9 @@ describe('two readouts, one quantity (§3.8)', () => {
       expect(haloBrightness(r)).toBeCloseTo((humPitch(r) - HALO_REFERENCE_HZ) / span, 12);
     }
     // Named checkpoint, so the identity above is also legible as a claim about the game: a walk
-    // on concrete sits 0.44 of the way up *both* dials, where `r / max` would put it at 0.31.
-    expect(haloBrightness(11)).toBeCloseTo(0.438, 3);
-    expect(11 / HALO_MAX_RADIUS_M).toBeCloseTo(0.306, 3);
+    // on concrete sits 40 % of the way up *both* dials, where `r / max` would put it at 26 %.
+    expect(haloBrightness(11)).toBeCloseTo(0.398, 3);
+    expect(11 / HALO_MAX_RADIUS_M).toBeCloseTo(0.262, 3);
   });
 
   it('never orders two radii differently on the two dials', () => {
@@ -132,22 +139,35 @@ describe('two readouts, one quantity (§3.8)', () => {
 });
 
 describe('the ceiling covers the game (§3.3, §3.9)', () => {
-  it('is the loudest stride the world can actually produce, with nothing to spare', () => {
-    // Derived from the two tables rather than written down as 36, so that a louder material or
-    // a louder sprint raises the top of the dial instead of silently saturating against it.
-    // Both directions matter: a ceiling below the loudest stride pegs the readout exactly where
-    // the player most needs resolution, and a ceiling far above it wastes the dial.
+  it('is the loudest noise the body can make, with nothing to spare', () => {
+    // Derived by sweeping the tables rather than written down, so that a louder material, a
+    // louder landing or a new class raises the top of the dial instead of silently saturating
+    // against it. Both directions matter: a ceiling below the loudest noise pegs the readout
+    // exactly where the player most needs resolution, and one far above it wastes the dial.
+    //
+    // The sweep is over *every* class and not just the strides, which is the correction this
+    // test carries. While the readout could only see the gait ladder, the ceiling was a sprint
+    // on steel (36 m) and that was consistent. Now that a ping and a landing reach the ring, a
+    // 36 m ceiling would peg on a landing (28 m, and 42 on steel) — §3.4's loud class, the one
+    // that bleeds through floors, flattened against the top of its own dial.
     const bus = new SoundBus();
     let loudest = 0;
-    for (const cls of STEP_CLASSES) {
-      for (const mat of MATERIALS) {
+    for (const cls of Object.keys(SOUND_CLASSES) as SoundClass[]) {
+      // Contact classes take a surface, the pings strike nothing — the same split §3.9 makes,
+      // asked of the shipped predicate rather than restated as a list. A landing is a contact
+      // class and is not in STEP_CLASSES, which is exactly the row this test is here to cover.
+      const mats = isContactClass(cls) ? MATERIALS : [undefined];
+      for (const mat of mats) {
         const r = bus.carryRadius(cls, mat);
         expect(r).toBeLessThanOrEqual(HALO_MAX_RADIUS_M);
         if (r > loudest) loudest = r;
       }
     }
     expect(loudest).toBeCloseTo(HALO_MAX_RADIUS_M, 10);
-    expect(HALO_MAX_RADIUS_M).toBeCloseTo(24 * 1.5, 10);
+    expect(HALO_MAX_RADIUS_M).toBeCloseTo(28 * 1.5, 10);
+    // And a sprint on steel, the old ceiling, now has real dial above it.
+    expect(haloBrightness(24 * 1.5)).toBeLessThan(1);
+    expect(haloBrightness(24 * 1.5)).toBeGreaterThan(0.85);
   });
 
   it('reads the material voice, so dust and steel are different readings of one stride', () => {
@@ -157,9 +177,12 @@ describe('the ceiling covers the game (§3.3, §3.9)', () => {
     const walkOn = (mat: number): number => bus.carryRadius('walk-step', mat);
     expect(walkOn(MAT_DUST) / walkOn(MAT_CONCRETE)).toBeCloseTo(materialLoudness(MAT_DUST), 10);
     expect(walkOn(MAT_METAL) / walkOn(MAT_CONCRETE)).toBeCloseTo(materialLoudness(MAT_METAL), 10);
-    // And the readout follows it: the same stride is nearly a fifth of the dial apart.
+    // And the readout follows it: the same stride is more than a quarter of the dial apart.
+    // (0.28 today. It was 0.35 while the ceiling was a sprint's 36 m — raising the top to cover
+    // landings stretches the dial, and every existing reading pays a little of that. Worth it:
+    // a reading that is compressed is still a reading, and one that is pegged is not.)
     expect(haloBrightness(walkOn(MAT_METAL)) - haloBrightness(walkOn(MAT_DUST))).toBeGreaterThan(
-      0.3,
+      0.25,
     );
   });
 });
@@ -361,12 +384,31 @@ describe('the readout is the bus\'s own number (§3.1, §3.9)', () => {
     // or read the tier a tick late, and this fails.
     const steps = scriptedRun().filter(isStep);
     expect(steps.length).toBeGreaterThan(12);
+    let exact = 0;
     for (const step of steps) {
-      expect(step.target).toBeCloseTo(step.event.hearingRadius, 10);
+      /*
+       * The readout never under-reports the noise the world just heard.
+       *
+       * This used to be an equality, and the peak-hold is what loosened it in one direction and
+       * only one: the reading is `max(gait, the tail of anything louder)`, so a crouch-step
+       * taken half a second after a walk-step reads the walk's tail, not the crouch. That is the
+       * intended answer — the walk-step is genuinely still crossing the room at 25-45 m/s — but
+       * it means equality no longer holds on every step.
+       *
+       * What must still hold exactly is the direction: the ring may read *louder* than this
+       * stride because of a louder one still ringing out, and it may never read quieter than a
+       * noise the bus has just emitted. A readout wired to the paint column, or reading the tier
+       * a tick late, breaks this immediately — both fail low.
+       */
+      expect(step.target).toBeGreaterThanOrEqual(step.event.hearingRadius - 1e-9);
+      if (Math.abs(step.target - step.event.hearingRadius) < 1e-9) exact += 1;
       // Explicitly *not* the paint radius. The two differ by more than 2x on every step class,
       // so a readout wired to the wrong column would be caught here even without the pin above.
       expect(step.event.hearingRadius).not.toBeCloseTo(step.event.paintRadius, 3);
     }
+    // And the bound is not vacuous: on most steps nothing louder is ringing out, and there the
+    // reading is still exactly the event's own number rather than merely above it.
+    expect(exact).toBeGreaterThan(steps.length / 2);
   });
 
   it('covers every step class — an invariant checked at one point is a coincidence', () => {
@@ -456,16 +498,98 @@ describe('the readout is the bus\'s own number (§3.1, §3.9)', () => {
     }
   });
 
-  it('is not moved by pings — the Halo answers for the gait, not for events', () => {
-    // A ping is loud (18 m, 30 m) and it is *not* a state. If it entered the readout the ring
-    // would spike on a keypress and the number would stop meaning "how loud am I being".
+  /**
+   * This used to assert the opposite — "is not moved by pings, the Halo answers for the gait,
+   * not for events" — on the reasoning that a ping is not a *state*, so letting it in would make
+   * the ring spike on a keypress and stop meaning "how loud am I being".
+   *
+   * That reasoning is wrong, and the way it is wrong is worth keeping written down. How loud am
+   * I being, at the instant I fire an e-ping, is 30 m: further than any gait, further than a
+   * sprint on steel. §3.8 does not exist to report the gait ladder, it exists because the
+   * genre's most-repeated complaint is "I can't tell when I'm detectable" — and the old readout
+   * answered that complaint with silence at the exact moment the player had made themselves the
+   * loudest thing in the building. "It would spike on a keypress" is a description of the ring
+   * working, not an argument: the player pressed the key, and the spike is the consequence they
+   * authored.
+   *
+   * It also had a gameplay cost. §3.5 gives the e-ping its whole character as a *bait tool, not
+   * a free telescope* — the price is that it wakes both ends of the beam. A price the loudness
+   * instrument does not show is not a price, it is a surprise arriving later.
+   */
+  it('is moved by pings — an e-ping is the loudest thing the body can do on purpose', () => {
     const game = createHeadlessGame({ seed: 7 });
     game.run(1);
-    expect(game.sim.audibleRadius()).toBe(0);
+    expect(game.sim.audibleRadius()).toBe(0); // standing still: the gait says nothing
+    expect(game.sim.halo.silent).toBe(true);
+
     game.input.tapKey('KeyE');
     game.step(2);
+    // The gait still says nothing, and that is correct — the readout is no longer only the gait.
     expect(game.sim.audibleRadius()).toBe(0);
+    // Bounded rather than pinned: the hold starts decaying the tick it is set, so the exact
+    // reading depends on how many ticks have passed. That it never *exceeds* what the bus
+    // carried is the half that matters — the ring may not claim a loudness the world did not.
+    const e = SOUND_CLASSES['e-ping'].hearingRadius;
+    expect(game.sim.halo.targetRadius).toBeLessThanOrEqual(e);
+    expect(game.sim.halo.targetRadius).toBeGreaterThan(e * 0.9);
+    expect(game.sim.halo.silent).toBe(false);
+  });
+
+  it('a ping outranks the stride it was fired mid-way through, and then gives it back', () => {
+    const game = createHeadlessGame({ seed: 7 });
+    game.input.hold('forward');
+    game.run(2);
+    const walking = game.sim.halo.targetRadius;
+    expect(walking).toBeGreaterThan(5);
+
+    game.input.tapKey('KeyE');
+    game.step(2);
+    const pinging = game.sim.halo.targetRadius;
+    expect(pinging).toBeGreaterThan(walking * 1.5);
+
+    // ...and the hold decays back to the gait rather than latching there.
+    game.run(2);
+    expect(game.sim.halo.targetRadius).toBeCloseTo(walking, 6);
+    game.input.release('forward');
+  });
+
+  it('a landing reaches the readout, and the ceiling is high enough to grade it', () => {
+    // §3.4 makes landings the loud class that bleeds through floors; §3.3 hears one at 28 m,
+    // and 42 on steel. A dial topping out at a sprint's 36 would peg on exactly that.
+    const game = createHeadlessGame({ seed: 7 });
+    game.run(1);
+    const before = game.sim.halo.targetRadius;
+    game.sim.bus.emit({
+      class: 'landing',
+      x: 0,
+      y: 0,
+      z: 0,
+      emitter: PLAYER_EMITTER_ID,
+      source: 'player',
+    });
+    game.step();
+    const land = SOUND_CLASSES.landing.hearingRadius;
+    expect(game.sim.halo.targetRadius).toBeGreaterThan(before);
+    expect(game.sim.halo.targetRadius).toBeLessThanOrEqual(land);
+    expect(game.sim.halo.targetRadius).toBeGreaterThan(land * 0.95);
+    expect(haloBrightness(SOUND_CLASSES.landing.hearingRadius * 1.5)).toBeCloseTo(1, 10);
+  });
+
+  it('does not flare at a teammate — the Halo answers "how loud am I", not "who is near"', () => {
+    const game = createHeadlessGame({ seed: 7 });
+    game.run(1);
+    expect(game.sim.halo.silent).toBe(true);
+    game.sim.bus.emit({
+      class: 'sprint-step',
+      x: 0,
+      y: 0,
+      z: 0,
+      source: 'player',
+      emitter: PLAYER_EMITTER_ID + 1,
+    });
+    game.step(2);
     expect(game.sim.halo.targetRadius).toBe(0);
+    expect(game.sim.halo.silent).toBe(true);
   });
 
   it('the sim answers with the bus\'s carry radius for the tier it is in', () => {
