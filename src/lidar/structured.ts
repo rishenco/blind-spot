@@ -387,7 +387,13 @@ const DOT_VERTEX = /* glsl */ `
       // Flat over most of the reach, fading only at its rim. The earlier curve started dimming
       // at 45% of the range, which made a felt patch read as three bright dots and a smudge —
       // technically honest, visually unreadable.
-      float prox = 1.0 - smoothstep(uTouchRange * 0.8, uTouchRange * 1.25, td);
+      // Flat over the inner half, then a *hard* rim: the edge of the reach has to be a readable
+      // circle, because the floor under your feet is the only surface always in reach and it is
+      // the only place the player can ever learn how far the hand goes. The rim is brightened
+      // instead of merely ending, so the disc reads as a ring rather than as a smudge that runs
+      // out of dots.
+      float prox = 1.0 - smoothstep(uTouchRange * 0.92, uTouchRange * 1.02, td);
+      prox *= 1.0 + 1.0 * smoothstep(uTouchRange * 0.5, uTouchRange * 0.9, td);
       /*
        * The trail behind the hand fades on the same ramp as the lidar map — m2 §6, "упрощаем
        * там, где нет резона делать сложно". It used to be a flat constant, which meant a wall
@@ -397,7 +403,7 @@ const DOT_VERTEX = /* glsl */ `
       vec3 memCol;
       float memAlpha;
       ageRamp(uTime - aTouch, memCol, memAlpha);
-      float ta = max(prox * uTouchNear, uTouchMemory * memAlpha);
+      float ta = min(1.6, max(prox * uTouchNear, uTouchMemory * memAlpha));
       if (ta < 0.004) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         gl_PointSize = 0.0;
@@ -606,11 +612,17 @@ const EDGE_VERTEX = /* glsl */ `
       vec3 hd = position - uHand;
       hd.y -= clamp(hd.y, 0.0, uHandSpan);
       float td = length(hd);
-      float prox = 1.0 - smoothstep(uTouchRange * 0.8, uTouchRange * 1.25, td);
+      // Flat over the inner half, then a *hard* rim: the edge of the reach has to be a readable
+      // circle, because the floor under your feet is the only surface always in reach and it is
+      // the only place the player can ever learn how far the hand goes. The rim is brightened
+      // instead of merely ending, so the disc reads as a ring rather than as a smudge that runs
+      // out of dots.
+      float prox = 1.0 - smoothstep(uTouchRange * 0.92, uTouchRange * 1.02, td);
+      prox *= 1.0 + 1.0 * smoothstep(uTouchRange * 0.5, uTouchRange * 0.9, td);
       vec3 memCol;
       float memAlpha;
       ageRamp(uTime - aTouch, memCol, memAlpha);
-      float ta = max(prox * uTouchNear, uTouchMemory * memAlpha) * uTouchEdge;
+      float ta = min(1.6, max(prox * uTouchNear, uTouchMemory * memAlpha)) * uTouchEdge;
       if (ta < 0.004) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;

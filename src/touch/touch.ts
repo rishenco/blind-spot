@@ -55,7 +55,7 @@ export interface TouchTunables {
 export function defaultTouchTunables(): TouchTunables {
   return {
     range: 0.55,
-    drop: 1.5,
+    drop: 1.75,
     nearAlpha: 1,
     memoryAlpha: 0.22,
     rebuildStep: 0.08,
