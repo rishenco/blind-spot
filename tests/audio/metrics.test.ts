@@ -34,7 +34,7 @@ import {
   toDb,
 } from '../support/audioMetrics';
 import { TEST_SAMPLE_RATE, bufferOf } from '../support/audioRender';
-import { mulberry32 } from '../support/probeVoices';
+import { makeRng } from '../../src/core/rng';
 
 const SR = TEST_SAMPLE_RATE;
 
@@ -58,10 +58,10 @@ function sines(parts: readonly { hz: number; amplitude: number }[], seconds = 1)
   return out;
 }
 
-/** Uniform white noise from the project's seeded generator. Deterministic across machines. */
+/** Uniform white noise from the game's own seeded generator. Deterministic across machines. */
 function noise(seed: number, amplitude = 1, seconds = 1): Float32Array {
   const n = Math.round(seconds * SR);
-  const rnd = mulberry32(seed);
+  const rnd = makeRng(seed);
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) out[i] = (rnd() * 2 - 1) * amplitude;
   return out;

@@ -46,7 +46,7 @@ export const TEST_MASTER_GAIN = 0.85;
  *
  * The render is *fully deterministic* — same graph in, bit-identical buffer out — which is the
  * property the whole phonometric approach stands on. Any randomness a voice needs must come from
- * a seeded generator baked into an `AudioBuffer` (see `probeVoices.noiseBurst`), never from
+ * a seeded generator baked into an `AudioBuffer` (see `voices.ts`'s noise bank), never from
  * `Math.random`: a test that pins a spectral centroid against an unseeded noise burst pins a
  * number that was true once.
  */

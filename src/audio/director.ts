@@ -76,7 +76,7 @@ export interface VoiceSpec {
   /**
    * Seed for whatever noise the voice needs, taken from the event's sequence number.
    *
-   * From the event rather than from `Math.random` for the same reason `probeVoices` is seeded:
+   * From the event rather than from `Math.random` for the same reason the noise bank is seeded:
    * a render nobody can reproduce is a render no test can pin. From `seq` rather than a counter
    * of our own so two subscribers to the same bus make the same noise, and so a footstep sounds
    * a little different from the one before it instead of being a loop.

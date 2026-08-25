@@ -30,7 +30,7 @@ import {
   MAX_PEAK_DBFS,
 } from '../support/audioSpec';
 import { renderOffline } from '../support/audioRender';
-import { haloHum, humPitch } from '../support/probeVoices';
+import { haloHum, humPitch } from '../support/haloProbe';
 
 /**
  * Crouch → walk → sprint → quiet, with a plateau at each tier.

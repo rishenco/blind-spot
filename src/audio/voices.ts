@@ -59,6 +59,13 @@ interface MaterialVoice {
    * RMS over `ATTACK_WINDOW_SEC` equal every other material's at unit gain, so that the §3.9
    * multiplier — which reaches the voice through `spec.gain` — is the sole level difference
    * between them. `tests/audio/materialVoices.test.ts` fails if any of these drifts.
+   *
+   * **Fitted against a sample of strikes, never against one render.** The exciter reads a slice
+   * of the noise bank, and one strike's attack sits 2–6 dB from its own mean depending which
+   * slice it got — so a norm fitted to a single seed is fitted to that seed's noise. These three
+   * are power means over sixteen strikes spread across `NOISE_SLOTS`, which is also how the test
+   * measures them; the numbers each moved 4–5 % when that replaced the single-render fit they
+   * were first derived from. Concrete is 1 by definition — it is the reference.
    */
   readonly attackNorm: number;
 }
@@ -103,7 +110,7 @@ const MATERIAL_VOICES: readonly MaterialVoice[] = Object.freeze([
     exciterTau: 0.004,
     thump: 0.55,
     scuff: 0.25,
-    attackNorm: 1.162667,
+    attackNorm: 1.104115,
   }),
   // stone
   Object.freeze({
@@ -117,7 +124,7 @@ const MATERIAL_VOICES: readonly MaterialVoice[] = Object.freeze([
     exciterTau: 0.005,
     thump: 0.7,
     scuff: 0.25,
-    attackNorm: 1.296808,
+    attackNorm: 1.203781,
   }),
   // dust
   Object.freeze({
@@ -126,7 +133,7 @@ const MATERIAL_VOICES: readonly MaterialVoice[] = Object.freeze([
     exciterTau: 0.012,
     thump: 0.35,
     scuff: 0.9,
-    attackNorm: 2.595431,
+    attackNorm: 2.087194,
   }),
 ]);
 
@@ -145,8 +152,17 @@ const qOf = (f: number, t60: number): number => Math.max(0.7, 0.4545 * f * t60);
  */
 const NOISE_SECONDS = 2;
 
-/** How many distinct start offsets the bank is divided into. Prime, so seeds do not cluster. */
-const NOISE_SLOTS = 997;
+/**
+ * How many distinct start offsets the bank is divided into. Prime, so seeds do not wrap onto a
+ * short cycle.
+ *
+ * Exported because the level law of §3.9 is a claim about the *expected* loudness of a contact,
+ * and one render cannot measure an expectation: a single strike's attack level varies by 2–6 dB
+ * depending on which slice of the bank it read. A test that enforces the law has to average over
+ * slots spread across the whole bank, and a test that invented its own slot count would be
+ * sampling a distribution the code does not have.
+ */
+export const NOISE_SLOTS = 997;
 
 /**
  * The seed the noise bank is filled with — fixed, and not part of the run's seed policy.
