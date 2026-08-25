@@ -1,6 +1,7 @@
 node_modules/
 dist/
 out/
+out-world/
 
 # Ad-hoc probe scripts (must live in the repo root so node resolves node_modules).
 .probe.*
