@@ -2,6 +2,7 @@ node_modules/
 dist/
 out/
 out-world/
+.DS_Store
 
 # Ad-hoc probe scripts (must live in the repo root so node resolves node_modules).
 .probe.*
