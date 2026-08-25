@@ -3,10 +3,11 @@
  *
  *   node tools/hands.mjs [dist/index.html] [out/hands]
  *
- * Five things have to be visible in a still frame, and every one of them is about *not* being
- * able to act: an empty magazine, a scanner that will not fire for another nine seconds, a rifle
- * that is only a contour, a can in the left hand, and that same can making its noise where it
- * landed rather than where it was thrown from.
+ * Four frames, one per claim, and every one of them is about *not* being able to act: an empty
+ * magazine, a scanner that will not fire for another eight seconds, a can in the left hand drawn
+ * in the rifle's own contour language, and that same can making its noise where it landed rather
+ * than where it was thrown from. Everything else this file verifies it verifies as a printed
+ * number — screenshots are proof, but cheap proof, and four is the budget.
  *
  * Its own file for the same reason `tools/hud.mjs` and `tools/spiders.mjs` are: three agents
  * appending to `tools/shoot.mjs` is a merge conflict with no upside. Same conventions — fixed
@@ -88,6 +89,17 @@ async function shot(name, note, clip) {
   return img;
 }
 
+/**
+ * A frame we look at but do not keep. `doc/proto/process.md` now prices screenshots: four frames
+ * per feature, and a number that a check can print is worth more than a PNG nobody opens. So the
+ * pixels a check needs are grabbed into memory and reported as a number; only the four frames that
+ * are themselves the proof are written to disk.
+ */
+async function grab(clip) {
+  const buf = await page.screenshot({ timeout: 180000, ...(clip ? { clip } : {}) });
+  return decodePng(buf);
+}
+
 const call = (fn, ...args) =>
   page.evaluate(
     ([f, a]) => {
@@ -165,11 +177,7 @@ await call('pose', 2, 2, 90);
 await playerCam();
 await advance(0.6, 4);
 await redraw();
-const contourImg = await shot(
-  '01-rifle-contour.png',
-  'the rifle in the dark, felt rather than lit: grey edges only. The stipple that used to fill its body is gone — ' +
-    'the body of the gun is as black as the hall, and what you get is a silhouette by touch',
-);
+const contourImg = await grab();
 const gunState = (await stats()).gun;
 check('the rifle is felt at all', gunState.felt > 0, `felt=${gunState.felt}`);
 check(
@@ -228,12 +236,7 @@ await shot(
 await advance(6, 12);
 await call('clear');
 await redraw();
-await shot(
-  '02b-magazine-empty-strip.png',
-  'the same readout at 1:1, blown up: fifteen stubs and not one of them lit. This is the whole ammunition ' +
-    'display — no digits, no icon, no word "reload"',
-  INST_STRIP,
-);
+await grab(INST_STRIP);
 
 // The empty gun re-arms itself the moment the trigger is held — that is the helplessness.
 const reloadRun = await page.evaluate(() => {
@@ -285,19 +288,10 @@ await advance(1.4, 4);
 const mid = await call('ammo');
 await playerCam();
 await redraw();
-await shot(
-  '03-reloading.png',
-  `mid-reload, ${(mid.reloadProgress * 100) | 0}% through: the row of ticks fills back in from the left. ` +
-    'Nothing else on the screen changed — no numbers, no words, no light',
-);
+await grab();
 await call('clear');
 await redraw();
-await shot(
-  '03b-reloading-strip.png',
-  `the reload at 1:1, ${(mid.reloadProgress * 100) | 0}% done: the row filling left to right is the three seconds ` +
-    'passing. It is the only clock the player gets, and he cannot shoot or scan while it runs',
-  INST_STRIP,
-);
+await grab(INST_STRIP);
 check('and the readout knows it is mid-reload', mid.reloading === true, `progress ${(mid.reloadProgress * 100) | 0}%`);
 await advance(2.2, 8);
 
@@ -360,20 +354,11 @@ await shot(
   `two seconds after a ping: the hall it painted is still there, and the scanner tick on the right of the readout is a stub — ` +
     `${(cooling.progress * 100) | 0}% of the way back. Eight more seconds of this`,
 );
-await shot(
-  '04b-scanner-cooling-strip.png',
-  `the scanner readout at 1:1 while it charges: the right-hand tick is a stub grown to ${(cooling.progress * 100) | 0}%. ` +
-    'The magazine row is dark because there is nothing wrong with the magazine — a readout that has nothing to say is not drawn',
-  INST_STRIP,
-);
+await grab(INST_STRIP);
 check('the frame is taken on a spent scanner', cooling.ready === false, `charge ${cooling.charge.toFixed(2)}`);
 await advance(9, 12);
 await redraw();
-await shot(
-  '05-scanner-ready.png',
-  'the same view once the charge is back: the scanner tick is at full height. That is the entire difference between ' +
-    'this frame and the last one — the instrument reports readiness, it does not light anything',
-);
+await grab();
 check('the scanner comes back', (await stats()).lidar.ready === true);
 
 // ===========================================================================
@@ -412,12 +397,7 @@ if (can !== undefined) {
   // crop the map is wiped first so the strip shows the instrument and not the floor behind it.
   await call('clear');
   await redraw();
-  await shot(
-    '06b-in-hand-strip.png',
-    'the readout at 1:1 with something in the left hand: the bracket on the left of the row is closed. That is the ' +
-      'third instrument — it says "your hand is full", which is also the answer to "what will E do next"',
-    INST_STRIP,
-  );
+  await grab(INST_STRIP);
   const heldStats = await stats();
   check('and something really is in the hand', heldStats.props.awake >= 0 && (await call('hand')).held >= 0);
   // The spec's own line: the thing in the left hand is drawn in the rifle's tactile language.
@@ -433,12 +413,7 @@ if (can !== undefined) {
   // can in a fist is four pixels. It is the same first-person frame with the lights on.
   await call('lights', true);
   await redraw();
-  await shot(
-    '07-in-hand-truth.png',
-    'the same tick with the darkness switched off: the can really is in his left hand, held out in front and below the ' +
-      'eye, with the rifle low right. Nothing was spawned and nothing was deleted — the prop that was lying on the floor ' +
-      'is the prop in his fist, mass, material and point cloud included',
-  );
+  await grab();
   await call('lights', false);
 
   // While it is full, the hand cannot take a second thing.
@@ -594,11 +569,7 @@ if (thrown !== null) {
   );
   await call('markers', true);
   await redraw();
-  await shot(
-    '09-throw-truth.png',
-    `the same tick lit and from above: he is on one side, the can and its mark are ${flightDist.toFixed(1)} m away on the other. ` +
-      'Nothing in between',
-  );
+  await grab();
   notes.push(
     `throw: launched from the hand at ${thrown.launch.map((v) => v.toFixed(1)).join(' ')}, first impact ` +
       `${flightDist.toFixed(1)} m from the player after ${thrown.landed.at.toFixed(2)} s of flight, reported as ` +
@@ -634,18 +605,10 @@ const capPair = await page.evaluate(() => {
 });
 await call('markerTune', { capOverlap: false });
 await redraw();
-const hotAdditive = await shot(
-  '10-marks-additive.png',
-  'the old behaviour, for comparison: a heap of overlapping noise events adds up until the middle is white paper. ' +
-    'A muzzle flash has nothing left to light against that',
-);
+const hotAdditive = await grab();
 await call('markerTune', { capOverlap: true });
 await redraw();
-const hotCapped = await shot(
-  '11-marks-capped.png',
-  'the same events with the ceiling on. The blot stops at a grey below white and the shape survives — you can still ' +
-    'read where the noise was, and the frame has headroom left for the only real light in the game',
-);
+const hotCapped = await grab();
 check(
   'the capped frame is dimmer than the additive one',
   peakLuminance(hotCapped) < peakLuminance(hotAdditive),
