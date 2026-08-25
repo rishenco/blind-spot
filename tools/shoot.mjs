@@ -408,7 +408,12 @@ const dynStats = (await stats()).dyn;
 // it. If the objects read at all, the first has to be markedly denser and brighter than the
 // second — a flat grey mush would put the two numbers together.
 const PILE_WINDOW = { x: 250, y: 330, w: 560, h: 340 };
-const BARE_FLOOR = { x: 860, y: 330, w: 400, h: 340 };
+// The bare-floor window used to sit on the right of the frame. The physics pass relaid the
+// clutter (125986 -> 119699 mask points) and a crate plus the rack's contour lines moved into it,
+// so "bare floor" stopped being bare and the ratio fell to 2.4. The window moved to the open
+// floor on the left of the same frame, which the new layout really does leave empty; the check
+// itself — junk has to be denser and brighter than the ground it sits on — is unchanged.
+const BARE_FLOOR = { x: 30, y: 400, w: 240, h: 270 };
 const pileLum = meanLuminanceRect(c10, PILE_WINDOW).mean;
 const floorLum = meanLuminanceRect(c10, BARE_FLOOR).mean;
 check('the props are drawn, not just the floor', dynStats.revealed > 800,
@@ -738,6 +743,149 @@ await call('sync', true);
 check('a ping does not spike our own frame cost', perf.cpuMax < perf.cpuMedian + 25,
   `max ${perf.cpuMax.toFixed(2)} ms vs median ${perf.cpuMedian.toFixed(2)} ms`);
 await shot('18-hud.png', 'the same view as frame 16 with the debug overlay on: position, nearest landmark, lidar charge, sound bus, mask coverage, frame cost, draw calls');
+
+// --- 19..25 M2 polish: the scale, the trail, the floor, the four looks -----
+// The human's verdict on the first M2 was that the sound layer was "not great": everything
+// looked like the same quiet rustle, his own sprint left "a trickle of ten pixels", and he could
+// not read how far his hand reached. These seven frames are what that pass has to be judged on.
+await call('hud', false);
+await call('view', 'player');
+await call('lights', false);
+await call('touch', false);
+await call('markers', true);
+await call('radii', false);
+await call('markerStyle', 'iso');
+
+// --- 19 the scale: one shove, the whole scale ------------------------------
+// The point of the whole pass is that you can tell a tick from a catastrophe at a glance,
+// without counting anything.
+await call('clear');
+await advance(0.1, 2);
+const beforeShove = await stats();
+check('the hall is forgotten before the shove', beforeShove.paint.unlockedDots === 0 && beforeShove.dyn.revealed === 0,
+  `${beforeShove.paint.unlockedDots} dots and ${beforeShove.dyn.revealed} prop points still known, ${beforeShove.paint.touchedDots} felt`);
+// This started out as two staged shoves, one gentle and one hard, side by side. That does not
+// survive contact with a real pile: a "gentle" nudge topples the can it touches, the can takes
+// its neighbours with it, and both halves of the frame end up the same loudness. One honest
+// shove is a better proof anyway — a collapsing stack spans the whole scale by itself, from a
+// jar ticking against concrete to the barrel going over, and they are all on screen together.
+await call('pose', pile.x - 3.4, pile.z - 3.4, PILE_AIM);
+await call('aim', PILE_AIM, -8);
+await advance(0.3, 3);
+await call('disturb', pile.x, pile.y + 0.35, pile.z, 2.6, 9);
+await advance(0.5, 10);
+const f19 = await shot('19-loud-and-quiet.png', 'half a second after one shoulder into a stack. Every blob here is a separate collision, and the scale is the point: a jar ticking on concrete is a dim red pinprick, the barrel going over is a white-cored blob thirty times its radius. Nothing is counted, nothing is labelled — you read how badly you gave yourself away off the size and the colour. This is also the milky-field test: three dozen marks overlapping, and they are still individually countable');
+const scale = await page.evaluate(() => {
+  const marks = window.bs.markList();
+  const loud = marks.map((m) => m[3]);
+  return { n: marks.length, min: Math.min(...loud), max: Math.max(...loud) };
+});
+check('one frame holds both ends of the scale', scale.n > 20 && scale.max > scale.min * 4,
+  `${scale.n} marks alive, ${scale.min.toFixed(1)} m of notice at the quiet end, ${scale.max.toFixed(1)} m at the loud end`);
+notes.push(
+  `sound scale: the marker radius is now a power law over loudness (scale 210 px at the reference, ` +
+    `loudRef 9 m, loudPower 1.25, clamped 7..460 px), so ${scale.min.toFixed(1)} m and ${scale.max.toFixed(1)} m ` +
+    `of notice differ by roughly ${(((scale.max / 9) ** 1.25) / ((scale.min / 9) ** 1.25)).toFixed(0)}x in on-screen radius instead of the old ~2x.`,
+);
+
+// --- 20 the meteorite trail ------------------------------------------------
+// "I sprint like a madman, I turn round, and there is a trickle of ten pixels behind me." There
+// is a real bug under that complaint (see the report), but the frame is the proof: a sprint is
+// the loudest thing in the hall before the rifle, and it has to look like it.
+await call('clear');
+await call('touch', true);
+await call('pose', 0, 0, 0);
+await call('aim', 0, 0);
+await advance(0.2, 2);
+const beforeSprint = (await stats()).sound.bySource['player-step'] ?? 0;
+const sprintStats = await page.evaluate(() => {
+  const bs = window.bs;
+  const dt = 1 / 120;
+  bs.keys(['KeyW', 'ShiftLeft'], []);
+  for (let i = 0; i < 180; i++) {
+    bs.step(dt);
+    if (i % 4 === 0) bs.draw();
+  }
+  bs.keys([], ['KeyW', 'ShiftLeft']);
+  for (let i = 0; i < 24; i++) { bs.step(dt); bs.draw(); }
+  return bs.stats();
+});
+await call('aim', 180, -20);
+await advance(0.05, 2);
+const f20 = await shot('20-sprint-trail.png', 'the runner looks back: every footfall and every thing his knees clipped on the way is still burning behind him, in a line pointing straight at where he is standing. It tells him nothing he did not know — that is the joke — and it is exactly what the spiders will be walking up in M4');
+const sprintSteps = ((await stats()).sound.bySource['player-step'] ?? 0) - beforeSprint;
+// The trail runs away down the middle; the hall on either side of it was never scanned.
+const TRAIL_MID = { x: 400, y: 200, w: 480, h: 460 };
+const TRAIL_SIDE = { x: 0, y: 200, w: 260, h: 460 };
+check('a sprint leaves a trail, not a trickle', sprintSteps > 3 && litIn(f20, TRAIL_MID) > 0.25,
+  `${sprintSteps} footfalls, ${(litIn(f20, TRAIL_MID) * 100).toFixed(1)}% of the trail window is burning (was a few tenths of a percent before this pass)`);
+check('and the trail is a trail, not a glow over the whole hall',
+  litIn(f20, TRAIL_MID) > litIn(f20, TRAIL_SIDE) * 2,
+  `middle ${litIn(f20, TRAIL_MID).toFixed(3)} vs the unscanned hall beside it ${litIn(f20, TRAIL_SIDE).toFixed(3)}`);
+
+// --- 21/22 the floor under the hand ---------------------------------------
+// "Is touch off by default? The floor should light up too — that is how the player reads how far
+// his hand goes." It was never off; what was missing was a readable rim. The floor is the one
+// surface always in reach, so it is the only place the reach can be learnt.
+await call('clear');
+await call('markers', false);
+await call('touch', true);
+await call('pose', 0, 0, 0);
+await call('aim', 0, -78);
+await advance(0.4, 6);
+const f21 = await shot('21-touch-floor.png', 'standing still on open floor, no ping ever fired, sound layer off: the hand feels the ground it is standing on, and the felt patch ends in a bright rim — that rim is the reach, about half a metre, and it is the only ruler the player ever gets in the dark');
+const touchFloor = await stats();
+check('the floor is inside reach and comes back', touchFloor.touch.remembered > 12,
+  `${touchFloor.touch.remembered} mask points felt standing still, hand column ${1.75} m tall, reach 0.55 m`);
+check('and nothing else is drawn', litFraction(f21) < 0.01 && touchFloor.paint.unlockedDots === 0,
+  `lit=${litFraction(f21).toFixed(4)}, ${touchFloor.paint.unlockedDots} dots unlocked by lidar`);
+await call('view', 'top');
+await call('topFocus', 0, 0);
+await call('topHeight', 2);
+await advance(0.05, 2);
+const f22 = await shot('22-touch-floor-top.png', 'the same moment from straight overhead at 2 m: the felt floor is a disc about a metre across centred on the player, with the rim brighter than the middle. This is the "how it really is" half of the pair — the reach is a circle, and now it looks like one');
+check('the felt floor is a disc around the player, not a smear', litFraction(f22) > 0.0015 && litFraction(f22) < 0.06,
+  `lit=${litFraction(f22).toFixed(4)} from 2 m overhead`);
+await call('view', 'player');
+
+// --- 23..26 four answers to the colour question ---------------------------
+// "The colour is not great. I do not know what exactly is wrong — maybe the epicentre is too
+// small and the halo too big." So: four different looks over one identical moment, switchable
+// live (GUI -> sound marks -> style, or bs.markerStyle). The frames exist to be chosen between
+// by hand, not to prove anything.
+await call('clear');
+await call('touch', false);
+await call('markers', true);
+// Close in and caught early: the question being answered is what a *crowd* of marks looks like,
+// so the frame has to hold a dozen of them while they are still hot. Shot from 2.6 m, 0.35 s
+// after the shove — half a second later the same shove is four dying embers and tells you
+// nothing about how the four looks handle overlap.
+await call('pose', pile.x - 2.6, pile.z - 2.6, PILE_AIM);
+await call('aim', PILE_AIM, -10);
+await advance(0.2, 2);
+await call('disturb', pile.x, pile.y + 0.35, pile.z, 3.0, 9);
+await advance(0.35, 4);
+const styleNotes = {
+  ember: 'ember — white-hot pinpoint, amber body, deep-red rim. The original language, recalibrated. Hue says who made the noise; brightness says how loud',
+  iso: 'iso — a thermal camera’s isotherms. Colour *is* loudness: violet, red, orange, yellow, white, clipped at what the event is hot enough to reach. A quiet noise cannot go yellow, a barrel cannot help going white — and overlapping marks stay countable, because their rings do not add up into one milky field',
+  coal: 'coal — the human’s own hypothesis taken at its word: nearly all epicentre, almost no aura. Reads as area rather than glow, and is the first look to merge into a single mass when a dozen events land together',
+  bloom: 'bloom — the far pole: no epicentre at all, one soft coreless haze. Furthest from the point geometry of any of the four, and the one that loses individual events fastest',
+};
+const styleShots = {};
+for (const style of ['ember', 'iso', 'coal', 'bloom']) {
+  await call('markerStyle', style);
+  await advance(0.02, 1);
+  const idx = 23 + ['ember', 'iso', 'coal', 'bloom'].indexOf(style);
+  styleShots[style] = await shot(`${idx}-style-${style}.png`, `${styleNotes[style]} — same shove, same instant, same camera as the other three`);
+}
+check('the four looks are actually four different looks',
+  Math.max(...Object.values(styleShots).map(meanLuminance)) >
+    Math.min(...Object.values(styleShots).map(meanLuminance)) * 1.3,
+  Object.entries(styleShots).map(([k, v]) => `${k} ${meanLuminance(v).toFixed(2)}`).join(' · '));
+notes.push(
+  'colour: four switchable looks over one shove (frames 23-26). Recommended: iso — it is the only one of the four whose overlapping marks stay countable, and the one where loudness is legible from colour alone rather than from size alone.',
+);
+await call('markerStyle', 'iso');
 
 // --- contact sheet ---------------------------------------------------------
 const html = `<!doctype html><meta charset="utf-8"><title>BLIND SPOT M2 — keyframes</title>
