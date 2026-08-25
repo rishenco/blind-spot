@@ -223,6 +223,13 @@ function tally(sounds: readonly string[], cls: string): Record<string, number> {
  * runs back east to the steel bench, steps *onto* it, and drops back off onto concrete. That
  * buys the trace a metal footstep, a metal landing and a concrete landing to compare it with —
  * the loudness law observed from both sides of one boundary, twice.
+ *
+ * The tour then walks the *other* boundary. Steel is the loud end of §3.9 and it was the only
+ * end this run ever visited; dust is the quiet end, and it is the whole reason the table has a
+ * class below concrete. So the body carries on south down the east wall, crosses the door-line
+ * at z = -1.9 onto the apron (`APRON_Z` in `src/world/room.ts`), walks six steps on it, turns
+ * round and comes back onto concrete. Same stride, three surfaces, one run: 6 m of paint on
+ * steel, 4 on concrete, 2.4 on dust.
  */
 function scriptedRun(seed: number): Run {
   const game = createHeadlessGame({ seed });
@@ -236,7 +243,7 @@ function scriptedRun(seed: number): Run {
 
   const trace: number[] = [];
   const p = game.sim.player.position;
-  for (let tick = 0; tick < 1320; tick++) {
+  for (let tick = 0; tick < 1660; tick++) {
     if (tick === 0) game.input.hold('forward');
     if (tick === 40) game.input.look(90, 12);
     if (tick === 60) game.input.tapKey('KeyQ');
@@ -264,6 +271,9 @@ function scriptedRun(seed: number): Run {
     // Off the wall the drop left it pinned against, so the run ends walking on concrete rather
     // than standing still on it — the return half of the boundary crossing, in footsteps.
     if (tick === 1100) game.input.look(-750, 0);
+    // South down the east wall and over the door-line onto the dust apron, then about-face and
+    // back onto concrete — the same round trip the bench leg makes, at the quiet end.
+    if (tick === 1370) game.input.look(1500, 0);
     game.step();
     trace.push(p.x, p.y, p.z);
   }
@@ -313,34 +323,45 @@ describe('the scripted run crosses a material boundary', () => {
    * poured slab it was a law nothing here exercised: every multiplier in the trace was concrete's
    * ×1.0, so deleting the material table would have changed no number in this file. Pinning the
    * mix by name and by count is what makes the tour non-deletable in turn — drop the bench leg
-   * and these go red rather than quietly going back to one material.
+   * or the apron leg and these go red rather than quietly going back to one material.
    */
-  it('walks off concrete onto steel and back, and the trace says which is which', () => {
+  it('walks off concrete onto steel and onto dust, and the trace says which is which', () => {
     const run = scriptedRun(1234);
 
-    expect(tally(run.sounds, 'walk-step')).toEqual({ concrete: 12, metal: 2 });
+    expect(tally(run.sounds, 'walk-step')).toEqual({ concrete: 12, metal: 2, dust: 6 });
     expect(tally(run.sounds, 'sprint-step')).toEqual({ concrete: 6 });
     expect(tally(run.sounds, 'crouch-step')).toEqual({ concrete: 1 });
     // Both directions of the boundary, in the class that costs the most to be wrong about.
+    // Dust has no landing because nothing on the apron is high enough to fall off: the one
+    // thing standing on it is a 2.4 m crate, and mantling stops at 2.2 m.
     expect(tally(run.sounds, 'landing')).toEqual({ metal: 1, concrete: 1 });
 
-    // And it is a *round trip*, not a one-way walk onto steel that the run then ends on: the
-    // footstep series starts on concrete, spends the middle on metal and finishes on concrete.
+    // And each is a *round trip*, not a one-way walk onto a surface that the run then ends on:
+    // the footstep series starts on concrete, visits steel, visits dust, and finishes back on
+    // concrete. A boundary crossed once is a boundary that could be a spawn point.
     const steps = run.sounds.filter((l) => l.split(' ')[1].endsWith('step'));
     const mats = steps.map((l) => l.split(' ').find((w) => w.startsWith('mat='))!.slice(4));
     expect(mats[0]).toBe('concrete');
     expect(mats[mats.length - 1]).toBe('concrete');
-    expect(mats.indexOf('metal')).toBeGreaterThan(0);
-    expect(mats.lastIndexOf('metal')).toBeLessThan(mats.length - 1);
+    for (const mat of ['metal', 'dust']) {
+      expect(mats.indexOf(mat)).toBeGreaterThan(0);
+      expect(mats.lastIndexOf(mat)).toBeLessThan(mats.length - 1);
+    }
+    // Steel first, then dust: the two boundaries are separate legs, not one confused smear.
+    expect(mats.lastIndexOf('metal')).toBeLessThan(mats.indexOf('dust'));
   });
 
   /**
    * The player-facing half of §3.9, in the one place that can state it end to end: the *same*
-   * stride, on two surfaces, one tour apart. Steel is ×1.5, so the walk-step that paints 4 m of
-   * slab paints 6 m of bench — and the enemy's column of the §3.3 table moves with it, because
-   * `SoundBus.emit` scales both from one multiplier.
+   * stride, on three surfaces, one tour apart. Steel is ×1.5, so the walk-step that paints 4 m
+   * of slab paints 6 m of bench; dust is ×0.6, so the same stride paints 2.4 m — and the
+   * enemy's column of the §3.3 table moves with all three, because `SoundBus.emit` scales both
+   * radii from one multiplier.
+   *
+   * The ratio is the assertion that matters. Absolute radii move whenever §3.3 is retuned, and
+   * they should; what may not move is that the surface is the only thing between them.
    */
-  it('and the steel is louder by exactly its multiplier', () => {
+  it('and the steel is louder, and the dust quieter, by exactly their multipliers', () => {
     const run = scriptedRun(1234);
     const radiusOf = (mat: string) =>
       Number(
@@ -350,7 +371,12 @@ describe('the scripted run crosses a material boundary', () => {
       );
     expect(radiusOf('concrete')).toBeCloseTo(4, 9);
     expect(radiusOf('metal')).toBeCloseTo(6, 9);
+    expect(radiusOf('dust')).toBeCloseTo(2.4, 9);
     expect(radiusOf('metal') / radiusOf('concrete')).toBeCloseTo(1.5, 9);
+    expect(radiusOf('dust') / radiusOf('concrete')).toBeCloseTo(0.6, 9);
+    // The quiet end is genuinely the quiet end: 2.4 m is barely past the 2 m contact shell, so
+    // walking the apron is close to moving blind.
+    expect(radiusOf('dust')).toBeLessThan(radiusOf('concrete'));
   });
 
   /**
