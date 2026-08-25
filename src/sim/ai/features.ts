@@ -17,7 +17,7 @@ import type { EntityId, FieldInfo, SimConfigView, Vec2 } from '../types';
 import { pointToSegment, predictBall, solveIntercept, travelTime, type BallEstimate, type InterceptSolution } from './ball';
 import type { Belief } from './belief';
 
-export type Role = 'carrier' | 'support' | 'chase' | 'guard';
+export type Role = 'carrier' | 'support' | 'chase' | 'guard' | 'keeper';
 
 export interface Features {
   now: number;
@@ -50,6 +50,16 @@ export interface Features {
   carrySeconds: number;
   /** The passivity limit, or 0 when the rule is off. */
   carryLimit: number;
+  /** True when this body wears the gloves: it may stand in its own crease and nothing else may. */
+  keeper: boolean;
+  /**
+   * Where the keeper belongs: on the line from the believed ball to the centre of his own goal.
+   *
+   * That line is the whole of goalkeeping in a game with no sight. He cannot know which corner
+   * the shot is going to — nothing he can hear says so — so the only thing he can do is stand
+   * where the angle is smallest and spend his reach on the half he guessed.
+   */
+  keeperPost: Vec2;
   /** The post a defender should hold, derived from the believed ball and my own goal. */
   guardPost: Vec2;
   /** The post the second defender should hold: between the *unknown* opponent and my goal. */
@@ -79,6 +89,7 @@ export function deriveFeatures(
   selfId: EntityId,
   field: FieldInfo,
   cfg: SimConfigView,
+  isKeeper = false,
 ): Features {
   const goal = field.goalCentre[team === 0 ? 1 : 0]!;
   const ownGoal = field.goalCentre[team === 0 ? 0 : 1]!;
@@ -148,6 +159,7 @@ export function deriveFeatures(
 
   let role: Role;
   if (hasBall) role = 'carrier';
+  else if (isKeeper && cfg.keeper.enabled) role = 'keeper';
   else if (belief.possession === 'mate') role = 'support';
   else if (belief.possession === 'opponent') role = 'guard';
   else role = primary ? 'chase' : 'guard';
@@ -168,6 +180,14 @@ export function deriveFeatures(
     x: ownGoal.x + (ghost.x - ownGoal.x) * 0.55,
     y: ownGoal.y + (ghost.y - ownGoal.y) * 0.55,
   };
+
+  // The keeper's line. When his own side has the ball he steps up to the edge of his crease —
+  // he is the outlet, and a keeper glued to his line in attack is a man his team-mate cannot use
+  // — and he drops back onto the goal the moment the ball belongs to anybody else.
+  const attacking = belief.possession === 'self' || belief.possession === 'mate';
+  const depth = attacking ? cfg.keeper.attackDepth : cfg.keeper.depth;
+  const line = norm2(sub2(anchor, ownGoal), { x: team === 0 ? 1 : -1, y: 0 });
+  const keeperPost = { x: ownGoal.x + line.x * depth, y: ownGoal.y + line.y * depth };
 
   const f: Features = {
     now: belief.now,
@@ -192,6 +212,8 @@ export function deriveFeatures(
     mirrorCentre,
     carrySeconds: hasBall ? clamp(belief.now - belief.possessionT, 0, 99) : 0,
     carryLimit: cfg.match.carryTimeoutSec,
+    keeper: isKeeper && cfg.keeper.enabled,
+    keeperPost,
     guardPost,
     coverPost,
     oppMode,
@@ -320,13 +342,19 @@ export function advance(from: Vec2, to: Vec2, speed: number, t: number): Vec2 {
   return { x: from.x + (d.x / l) * travel, y: from.y + (d.y / l) * travel };
 }
 
-/** Keeps a candidate point on the pitch and out of both creases. */
-export function legalPoint(field: FieldInfo, p: Vec2, bodyRadius: number): Vec2 {
+/**
+ * Keeps a candidate point on the pitch and out of both creases — except the one crease this body
+ * is allowed inside. `creaseAccess` mirrors the simulation's own rule and has to: a keeper whose
+ * candidate points are all pushed out of his crease can never plan to stand in it.
+ */
+export function legalPoint(field: FieldInfo, p: Vec2, bodyRadius: number, creaseAccess = -1): Vec2 {
   const maxX = field.halfWidth - bodyRadius - 0.1;
   const maxY = field.halfHeight - bodyRadius - 0.1;
   let x = clamp(p.x, -maxX, maxX);
   let y = clamp(p.y, -maxY, maxY);
-  for (const g of field.goalCentre) {
+  for (let gi = 0; gi < field.goalCentre.length; gi++) {
+    if (gi === creaseAccess) continue;
+    const g = field.goalCentre[gi]!;
     const dx = x - g.x;
     const dy = y - g.y;
     const r = field.creaseRadius + bodyRadius + 0.2;

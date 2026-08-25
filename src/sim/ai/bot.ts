@@ -125,6 +125,7 @@ export class Bot implements Controller {
         this.ctx.self,
         frame.field,
         cfg,
+        frame.self.keeper,
       );
       this.pick();
       this.sinceDecision = 0;
@@ -144,6 +145,7 @@ export class Bot implements Controller {
     chosen.phaseT += dt;
     this.execute(chosen, frame, intent, f);
     this.catchReflex(frame, intent, f);
+    this.keeperReflex(frame, intent, f);
     return intent;
   }
 
@@ -279,12 +281,13 @@ export class Bot implements Controller {
   private catchReflex(frame: PerceptionFrame, intent: Intent, f: Features): void {
     if (frame.self.hasBall || this.catchLock > 0 || frame.self.reaching || !f.ball) return;
     const cfg = this.ctx.config.catching;
+    const reach = this.reach(frame);
     const rel = sub2(f.ball.pos, f.me);
     const d = len2(rel);
     const relVel = sub2(f.ball.vel, frame.self.vel);
     const relSpeed = len2(relVel);
     if (relSpeed < cfg.slowBallSpeed) {
-      if (d > cfg.radius * 0.85) return;
+      if (d > reach * 0.85) return;
       intent.catch = true;
       this.catchLock = 0.25;
       return;
@@ -295,11 +298,52 @@ export class Bot implements Controller {
     // to the decision tick, and it has to survive being a frame or two late.
     const closing = -(rel.x * relVel.x + rel.y * relVel.y) / Math.max(1e-6, d);
     if (closing <= 0) return;
-    const arrival = (d - cfg.radius * 0.5) / Math.max(1e-6, closing);
+    const arrival = (d - reach * 0.5) / Math.max(1e-6, closing);
     if (arrival <= cfg.reachSec * 0.6) {
       intent.catch = true;
       this.catchLock = 0.25;
     }
+  }
+
+  /** How far this body's hands reach right now — wider for a keeper standing in his crease. */
+  private reach(frame: PerceptionFrame): number {
+    const cfg = this.ctx.config;
+    return frame.self.keeper && cfg.keeper.enabled ? cfg.catching.radius * cfg.keeper.reachMul : cfg.catching.radius;
+  }
+
+  /**
+   * The save.
+   *
+   * A blind keeper has exactly two things: the line he is standing on, and the sound of the
+   * release. He cannot know the corner — nothing he can hear says which one — so when the hum
+   * says the ball is coming past him out of reach, his only answer is to throw his body at where
+   * it will cross his own line, on the strength of an estimate that is often wrong.
+   *
+   * That is a reflex and not a plan, so it lives here rather than in the chooser: by the time a
+   * 10 Hz decision noticed the shot, the ball would already be behind him.
+   */
+  private keeperReflex(frame: PerceptionFrame, intent: Intent, f: Features): void {
+    const cfg = this.ctx.config;
+    if (!frame.self.keeper || !cfg.keeper.enabled) return;
+    if (frame.self.hasBall || frame.self.down || frame.self.diving || frame.self.recovering) return;
+    if (this.diveLock > 0 || !f.ball) return;
+    const rel = sub2(f.ball.pos, f.me);
+    const d = len2(rel);
+    const relVel = sub2(f.ball.vel, frame.self.vel);
+    const closing = -(rel.x * relVel.x + rel.y * relVel.y) / Math.max(1e-6, d);
+    // Only a real shot: a slow ball is walked to, and a ball going away is not a shot at all.
+    if (closing < cfg.catching.slowBallSpeed * 2) return;
+    const eta = d / Math.max(1e-6, closing);
+    if (eta > cfg.dive.durationSec * 1.6 || eta < 0.04) return;
+    // Where it will be when a dive could reach it, and how far off my line that is.
+    const lead = { x: f.ball.pos.x + f.ball.vel.x * eta, y: f.ball.pos.y + f.ball.vel.y * eta };
+    const miss = dist2(lead, f.me);
+    const reach = this.reach(frame) * 0.9;
+    const diveReach = cfg.dive.speed * cfg.dive.durationSec + cfg.contest.tackle.radius;
+    if (miss <= reach || miss > diveReach) return;
+    intent.dive = true;
+    intent.move = norm2(sub2(lead, f.me), { x: 1, y: 0 });
+    this.diveLock = cfg.dive.durationSec + cfg.dive.recoverySec;
   }
 
   // -- the overlay ---------------------------------------------------------

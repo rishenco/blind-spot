@@ -39,6 +39,13 @@ export type SoundKind =
   | 'throw'
   | 'ball-hum'
   | 'ball-wall'
+  /**
+   * The carried ball giving its holder away: silent for a moment after it changes hands, then
+   * beeping faster and louder the longer one man keeps it. The concept's "мяч звучит всегда"
+   * with "всегда" replaced by "периодически" — the человек's own revision, and the reason a pass
+   * is now worth making.
+   */
+  | 'ball-carry'
   /** A ball that went past a body nobody had timed: quiet, but never nothing. */
   | 'ball-near'
   /** The ball changing hands in a scuffle. Every change of possession has to be audible. */
@@ -217,6 +224,14 @@ export interface SelfState {
   /** > 0 while the hands are open: the catch button was pressed and the reach has not lapsed. */
   reaching: boolean;
   /**
+   * This body wears the gloves: it may stand inside its own crease, and nothing else may.
+   *
+   * Proprioception, not intel — a blind keeper knows he is the keeper. It says nothing about
+   * where anybody is, and the role is assigned by the rules rather than chosen, so publishing it
+   * gives away nothing that is not already public.
+   */
+  keeper: boolean;
+  /**
    * How far along an opponent is towards taking the ball off this body, 0..1.
    *
    * Proprioception, not intel: it says somebody is grabbing at *me*, which is a thing a blind
@@ -230,12 +245,13 @@ export interface SelfState {
   /**
    * Why the last attempt on the ball failed, and when.
    *
-   * `early` — the hands closed before the ball arrived. `late` — the ball reached the body with
-   * the hands shut, which is a fumble. `past` — a hard throw went straight through a body that
-   * was not reaching. Published because reconstructing it from the sign of a time-to-closest-
+   * `sprint` — you tried to take a hard ball at a full sprint, which is the only way left to
+   * drop a catch. `late` — the ball hit the body too fast to hold and was deflected. `past` — it
+   * went straight past a body whose reach, at that speed, was smaller than the miss. `early` —
+   * the legacy timing failure, now only reachable by a controller that presses catch itself. Published because reconstructing it from the sign of a time-to-closest-
    * approach is guesswork, and a player who is told nothing learns nothing.
    */
-  lastCatchFail: 'early' | 'late' | 'past' | null;
+  lastCatchFail: 'early' | 'late' | 'past' | 'sprint' | null;
   lastCatchFailT: number;
   /** Audible radius of the noise this body is making right now — the concept's "am I loud" readout. */
   ownLoudness: number;

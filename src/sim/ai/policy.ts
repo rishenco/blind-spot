@@ -100,12 +100,16 @@ const WEIGHTS: Record<Role, PolicyWeights> = {
   support: { pos: 2.2, safe: 0.9, quiet: 1.9, info: 0.35, deceive: 0.7, team: 0.9, commit: 0.8 },
   chase: { pos: 3.2, safe: 0.4, quiet: 0.45, info: 0.25, deceive: 0.2, team: 1.1, commit: 0.7 },
   guard: { pos: 2.2, safe: 0.6, quiet: 1.2, info: 1.0, deceive: 0.5, team: 0.9, commit: 0.8 },
+  // The keeper has one job and no secrets worth keeping: he is standing in the one place on the
+  // pitch everybody already knows about. Position dominates, deception is meaningless, and being
+  // heard costs him almost nothing — which is why he is the one body that can afford to ask.
+  keeper: { pos: 3.4, safe: 0.3, quiet: 0.3, info: 1.2, deceive: 0.15, team: 0.5, commit: 0.9 },
 };
 
 /** How much a role cares about being heard. A carrier hums anyway; a shadow lives on silence. */
-const EXPOSURE: Record<Role, number> = { carrier: 0.12, support: 1, chase: 0.5, guard: 0.9 };
+const EXPOSURE: Record<Role, number> = { carrier: 0.12, support: 1, chase: 0.5, guard: 0.9, keeper: 0.15 };
 /** How much a role wants to know where the opponents are. Defenders need it most. */
-const INFO_NEED: Record<Role, number> = { carrier: 0.7, support: 0.4, chase: 0.35, guard: 1 };
+const INFO_NEED: Record<Role, number> = { carrier: 0.7, support: 0.4, chase: 0.35, guard: 1, keeper: 0.8 };
 
 /*
  * `positionDiscount` (below, and in `config.ai`) is how much a *position* is worth compared to
@@ -191,7 +195,10 @@ export function generateCandidates(input: PolicyInput): Action[] {
   const { features: f, cfg } = input;
   const out: Action[] = [];
   const R = cfg.player.radius;
-  const legal = (p: Vec2): Vec2 => legalPoint(f.field, p, R);
+  // The keeper plans inside his own crease; everybody else has it clipped away, exactly as the
+  // simulation would clip it.
+  const access = f.keeper ? f.team : -1;
+  const legal = (p: Vec2): Vec2 => legalPoint(f.field, p, R, access);
 
   out.push({ kind: 'hold', tag: 'hold' });
 
@@ -229,7 +236,7 @@ export function generateCandidates(input: PolicyInput): Action[] {
   // Hunting the carrier. He hums across the whole pitch, so getting to him is never the hard
   // part — but standing on him for half a second while he runs, throws and lies about where he
   // is going, is. This is the candidate that turns "I know where you are" into a ball.
-  if (f.role !== 'carrier' && cfg.contest.steal.enabled && f.ballPos && input.belief.possession === 'opponent') {
+  if (f.role !== 'carrier' && f.role !== 'keeper' && cfg.contest.steal.enabled && f.ballPos && input.belief.possession === 'opponent') {
     const lead = f.ball
       ? { x: f.ballPos.x + f.ball.vel.x * 0.35, y: f.ballPos.y + f.ball.vel.y * 0.35 }
       : f.ballPos;
@@ -238,13 +245,30 @@ export function generateCandidates(input: PolicyInput): Action[] {
 
   // The dive tackle: a bet on where a body will be when the dive lands. Only offered when the
   // believed body is roughly a dive away — the reach is `dive.speed × dive.durationSec`.
-  if (cfg.contest.tackle.enabled) {
+  // Never to the keeper: a keeper who dives at a body is a keeper lying on the floor while the
+  // ball goes into the net behind him. His dive is for the ball and it is a reflex, not a plan.
+  if (cfg.contest.tackle.enabled && f.role !== 'keeper') {
     const reach = cfg.dive.speed * cfg.dive.durationSec;
     for (let i = 0; i < f.oppMode.length; i++) {
       const lead = leadPoint(f, i, cfg.dive.durationSec * 0.6);
       const d = dist2(f.me, lead);
       if (d > reach + 1 || d < 0.4) continue;
       out.push({ kind: 'tackle', tag: `tackle${i}`, dir: norm2(sub2(lead, f.me), { x: 1, y: 0 }), to: lead, track: i });
+    }
+  }
+
+  if (f.role === 'keeper') {
+    // The line, walked to rather than sprinted to: a keeper who arrives at a run has told the
+    // shooter where he is standing, and the shooter is the one man who benefits from knowing.
+    out.push({ kind: 'move', tag: 'keeper-post', to: legal(f.keeperPost), mode: 'walk' });
+    out.push({ kind: 'move', tag: 'keeper-post-run', to: legal(f.keeperPost), mode: 'run' });
+    // A ball loose in his own area is his. Outside it, it is somebody else's problem — a keeper
+    // who chases is a keeper who is not in goal when the shot comes.
+    if (f.ballPos && dist2(f.ballPos, f.ownGoal) < f.field.creaseRadius + 2.5) {
+      out.push({ kind: 'move', tag: 'keeper-collect', to: legal(f.ballPos), mode: 'run' });
+    }
+    if (f.intercept && f.intercept.slack > -0.3 && dist2(f.intercept.point, f.ownGoal) < f.field.creaseRadius + 3) {
+      out.push({ kind: 'move', tag: 'keeper-cut', to: legal(f.intercept.point), mode: 'run' });
     }
   }
 
@@ -275,7 +299,7 @@ export function generateCandidates(input: PolicyInput): Action[] {
   // opponent without a ping is to be near him. Running there is loud, and that is the point —
   // the concept's rule is that a bot which has been fooled has to be *audibly* fooled, or the
   // player never learns that the trick worked.
-  if (f.role !== 'carrier') {
+  if (f.role !== 'carrier' && f.role !== 'keeper') {
     for (let i = 0; i < f.oppAge.length; i++) {
       if (f.oppAge[i]! < 0.9) continue;
       const guess = input.belief.opponents[i]?.grid.mode().pos;
@@ -300,12 +324,19 @@ export function generateCandidates(input: PolicyInput): Action[] {
     const along =
       f.role === 'carrier'
         ? shootSpot
-        : f.role === 'guard'
+        : f.role === 'keeper'
+          ? legal(f.keeperPost)
+          : f.role === 'guard'
           ? legal(f.primary ? f.guardPost : f.coverPost)
           : f.role === 'chase' && f.intercept
             ? legal(f.intercept.point)
             : undefined;
-    out.push({ kind: 'ping', tag: 'ping', to: along, mode: f.role === 'guard' || f.role === 'support' ? 'walk' : 'run' });
+    out.push({
+      kind: 'ping',
+      tag: 'ping',
+      to: along,
+      mode: f.role === 'guard' || f.role === 'support' || f.role === 'keeper' ? 'walk' : 'run',
+    });
   }
 
   // Macros. A one-ply chooser cannot invent "be loud here, then be somewhere else"; offering it
@@ -317,7 +348,7 @@ export function generateCandidates(input: PolicyInput): Action[] {
     out.push({ kind: 'feint', tag: `feint${d.x.toFixed(1)},${d.y.toFixed(1)}`, via, to, mode: 'walk' });
   }
 
-  if (f.ballPos && f.role !== 'carrier') {
+  if (f.ballPos && f.role !== 'carrier' && f.role !== 'keeper') {
     const d = dist2(f.me, f.ballPos);
     if (d < 4 && f.ball && len2(f.ball.vel) > 3) {
       out.push({ kind: 'dive', tag: 'dive', dir: norm2(sub2(f.ballPos, f.me), { x: 1, y: 0 }) });
@@ -592,6 +623,18 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
       // mirror belief knows me. This is where "stay a ghost" becomes a number.
       const known = mirrorAt(belief, endPos);
       return clamp(arrival * base * (0.3 + 0.7 * (1 - known)), 0.02, 1);
+    }
+    case 'keeper': {
+      // Everything is measured against the line from the ball to the middle of my own goal.
+      // There is no cleverer quantity available to a blind keeper: he cannot know the corner,
+      // so the best he can do is stand where the angle is narrowest and keep his feet.
+      const hold = clamp(1 - dist2(endPos, f.keeperPost) / 3.5, 0.05, 1);
+      const collect =
+        f.ballPos && belief.possession !== 'self' && belief.possession !== 'mate' &&
+        dist2(f.ballPos, f.ownGoal) < f.field.creaseRadius + 2.5
+          ? clamp(1 - dist2(endPos, f.ballPos) / 4, 0, 1)
+          : 0;
+      return clamp(arrival * Math.max(hold, collect), 0.02, 1);
     }
     case 'guard': {
       const post = f.primary ? f.guardPost : f.coverPost;

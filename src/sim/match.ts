@@ -23,7 +23,7 @@ import { makeField } from './field';
 import { dist2 } from './math';
 import { Perceiver } from './perception';
 import { Simulation, type StepOutput, type WorldView } from './sim';
-import { emptyPlayerStats, type MatchStats, type PlayerStats } from './stats';
+import { emptyPlayerStats, emptyShapeStats, type MatchStats, type PlayerStats } from './stats';
 import { makeRng } from '../core/rng';
 import {
   idleIntent,
@@ -35,6 +35,7 @@ import {
   type PerceptionFrame,
   type SoundEvent,
   type TeamId,
+  type Vec2,
 } from './types';
 
 export type ControllerFactory = (ctx: ControllerContext) => Controller;
@@ -82,6 +83,12 @@ export class Match {
   private readonly keepLog: boolean;
   /** Which team held the ball last, for the possession-change counter. */
   private lastOwner: TeamId | null = null;
+  /** Who has the ball right now and since when — the clock behind "how long before he threw". */
+  private heldBy: EntityId | null = null;
+  private heldSince = 0;
+  /** Passes completed inside the attack in progress. Zero here is what "гонка к мячу" looks like. */
+  private possessionPasses = 0;
+  private possessionStart = 0;
 
   constructor(opts: MatchOptions) {
     this.config = cloneConfig(opts.config);
@@ -99,6 +106,7 @@ export class Match {
       score: [0, 0],
       players: [],
       possessionChanges: 0,
+      shape: emptyShapeStats(),
     };
     for (let i = 0; i < n; i++) {
       const team: TeamId = i < this.config.teamSize ? 0 : 1;
@@ -126,6 +134,8 @@ export class Match {
     }
     // Everyone gets a frame before deciding anything, so tick 1 is not decided blind.
     this.distributeFrames({ events: [], touches: [], sonar: [], goals: [], turnovers: [] });
+    this.lastOwner = this.sim.state.ball.carrier === null ? null : this.sim.teamOf(this.sim.state.ball.carrier);
+    this.heldBy = this.sim.state.ball.carrier;
   }
 
   get view(): WorldView {
@@ -260,12 +270,7 @@ export class Match {
       }
     }
 
-    const carrier = s.ball.carrier;
-    if (carrier !== null) {
-      const owner: TeamId = carrier < this.config.teamSize ? 0 : 1;
-      if (this.lastOwner !== null && owner !== this.lastOwner) this.stats.possessionChanges += 1;
-      this.lastOwner = owner;
-    }
+    this.trackShape(out);
 
     for (const contest of out.contests ?? []) {
       const st = this.stats.players[contest.player];
@@ -293,6 +298,11 @@ export class Match {
         case 'through':
           if (st) st.ballsThrough += 1;
           break;
+        case 'save':
+          this.stats.shape.keeperSaves += 1;
+          this.push(s.tick, contest.t, 'contest', contest.player, st?.team ?? null,
+            `P${contest.player} saves`);
+          break;
         default:
           break;
       }
@@ -317,6 +327,86 @@ export class Match {
         `GOAL team ${goal.team}${goal.scorer !== null ? ` (P${goal.scorer})` : ''} — ${s.score[0]}:${s.score[1]}`,
       );
     }
+  }
+
+
+  /**
+   * The shape of the play: how an attack was built, not who won it.
+   *
+   * Everything here is read off events the simulation already produces — nothing new is emitted
+   * for the sake of a statistic. A "shot" is decided geometrically (does the released ball's
+   * line reach the opponent's goal mouth) rather than by asking a controller what it meant,
+   * because a bot's intention is not a fact about the game and a human's is not available at all.
+   */
+  private trackShape(out: StepOutput): void {
+    const s = this.sim.state;
+    const shape = this.stats.shape;
+    const f = this.field;
+
+    for (const ev of out.events) {
+      if (ev.kind !== 'throw') continue;
+      const held = this.heldBy === ev.sourceId ? Math.max(0, s.t - this.heldSince) : 0;
+      shape.throws += 1;
+      shape.holdBeforeThrowSum += held;
+      const team: TeamId = ev.sourceId < this.config.teamSize ? 0 : 1;
+      if (this.aimedAtGoal(ev.pos, s.ball.vel, team)) {
+        shape.shots += 1;
+        shape.holdBeforeShotSum += held;
+        const d = dist2(ev.pos, f.goalCentre[team === 0 ? 1 : 0]!);
+        shape.shotDistanceSum += d;
+        shape.shotDistances.push(d);
+      }
+    }
+
+    for (const touch of out.touches) {
+      if (touch.kind !== 'catch' || touch.fromThrower === null) continue;
+      const team: TeamId = touch.player < this.config.teamSize ? 0 : 1;
+      if (touch.fromTeam === team && touch.fromThrower !== touch.player) {
+        this.possessionPasses += 1;
+        shape.passes += 1;
+      }
+    }
+
+    if (out.goals.length > 0) {
+      shape.goals += out.goals.length;
+      if (this.possessionPasses === 0) shape.goalsWithoutPass += out.goals.length;
+    }
+
+    const carrier = s.ball.carrier;
+    if (carrier !== null) {
+      const owner: TeamId = carrier < this.config.teamSize ? 0 : 1;
+      if (this.lastOwner !== null && owner !== this.lastOwner) {
+        this.stats.possessionChanges += 1;
+        shape.possessions += 1;
+        shape.possessionTimeSum += Math.max(0, s.t - this.possessionStart);
+        this.possessionStart = s.t;
+        this.possessionPasses = 0;
+      }
+      this.lastOwner = owner;
+      if (carrier !== this.heldBy) {
+        this.heldBy = carrier;
+        this.heldSince = s.t;
+      }
+    }
+    // A goal ends the attack whoever restarts it — the ball is handed to the conceding team in
+    // the same tick, so without this the scoring possession would be merged into the next one.
+    if (out.goals.length > 0) {
+      shape.possessions += 1;
+      shape.possessionTimeSum += Math.max(0, s.t - this.possessionStart);
+      this.possessionStart = s.t;
+      this.possessionPasses = 0;
+    }
+  }
+
+  /** Would a ball released at `from` with velocity `vel` reach the goal `team` is attacking? */
+  private aimedAtGoal(from: Vec2, vel: Vec2, team: TeamId): boolean {
+    const f = this.field;
+    const line = team === 0 ? f.halfWidth : -f.halfWidth;
+    const dx = line - from.x;
+    if (dx * vel.x <= 0) return false;
+    const u = dx / vel.x;
+    const y = from.y + vel.y * u;
+    return Math.abs(y) <= f.goalWidth / 2;
   }
 
   private push(

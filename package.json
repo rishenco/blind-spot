@@ -17,6 +17,7 @@
     "tune": "tsx src/sim/cli/tune.ts",
     "honesty": "tsx src/sim/cli/honesty.ts",
     "contest": "tsx src/sim/cli/contest.ts",
+    "shape": "tsx src/sim/cli/shape.ts",
     "quality": "tsx src/sim/cli/quality.ts"
   },
   "dependencies": {

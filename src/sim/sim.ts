@@ -11,7 +11,7 @@
  * simulation holds no references to its consumers.
  */
 import type { SimConfig } from './config';
-import { makeField, confineBody, insideCrease, sampleGeometry, inGoalMouth } from './field';
+import { makeField, confineBody, insideCrease, insideCreaseOf, sampleGeometry, inGoalMouth } from './field';
 import {
   clamp,
   clone2,
@@ -92,10 +92,18 @@ export interface PlayerState {
   /** Whether the ball came inside reach during the current open window. */
   reachSawBall: boolean;
   /** Why the last attempt on the ball failed, and when — proprioception, published to the frame. */
-  lastCatchFail: 'early' | 'late' | 'past' | null;
+  lastCatchFail: 'early' | 'late' | 'past' | 'sprint' | null;
   lastCatchFailT: number;
   /** Audible radius of the loudest noise this body made this tick — the "am I loud" readout. */
   loudness: number;
+  /**
+   * The gloves: this body, and only this body, may stand inside its own crease.
+   *
+   * Assigned by the simulation (nearest to his own goal, with hysteresis) and never by a button.
+   * It is proprioception, so it is published to the frame — a blind keeper still knows he is the
+   * keeper — and it is the only asymmetry between two bodies in the game.
+   */
+  keeper: boolean;
 }
 
 export interface BallState {
@@ -111,8 +119,10 @@ export interface BallState {
   goalValid: boolean;
   /** How long this loose ball has been lying inside a crease — see `creaseBallTimeoutSec`. */
   inCreaseT: number;
-  /** How long the current carrier has held it — see `match.carryTimeoutSec`. */
+  /** How long the current carrier has held it — the ramp behind the ball's voice. */
   carryT: number;
+  /** Time since the last beep of a carried ball. */
+  voiceT: number;
 }
 
 /** A ping in flight: the front is still travelling and has not revealed everything yet. */
@@ -174,7 +184,15 @@ export interface StepOutput {
   contests?: ContestEvent[];
 }
 
-export type ContestKind = 'steal' | 'tackle' | 'tackle-miss' | 'collision' | 'block' | 'through';
+export type ContestKind =
+  | 'steal'
+  | 'tackle'
+  | 'tackle-miss'
+  | 'collision'
+  | 'block'
+  | 'through'
+  /** A keeper, inside his own crease, stopping or catching a shot. */
+  | 'save';
 
 /**
  * One moment of contact. `player` is whoever acted (the thief, the diver, the faster body in a
@@ -224,9 +242,16 @@ export class Simulation {
     return id < this.config.teamSize ? 0 : 1;
   }
 
-  /** The continuous sources audible right now. The ball is the only one in v1. */
+  /**
+   * The continuous sources audible right now.
+   *
+   * A LOOSE ball only. In flight it is the loudest continuous thing in the game — that is the
+   * price of a pass and the reason an interception is possible at all — but in a pair of hands
+   * it is not a continuous source any more, it is a beep with a rising rate (`ballVoice`).
+   */
   emitters(): ContinuousEmitter[] {
     const b = this.state.ball;
+    if (b.carrier !== null) return [];
     return [
       {
         id: BALL_ID,
@@ -279,6 +304,7 @@ export class Simulation {
         lastCatchFail: null,
         lastCatchFailT: -99,
         loudness: 0,
+        keeper: false,
       });
     }
     const state: WorldState = {
@@ -298,6 +324,7 @@ export class Simulation {
         goalValid: false,
         inCreaseT: 0,
         carryT: 0,
+        voiceT: 0,
       },
       pings: [],
       nextPingId: 1,
@@ -357,8 +384,12 @@ export class Simulation {
       p.lastCatchFail = null;
       p.lastCatchFailT = -99;
       p.loudness = 0;
+      p.keeper = false;
       confineBody(f, p.pos, p.vel, this.config.player.radius);
     }
+    // Gloves before the whistle: whoever restarts furthest back is his team's keeper, so the
+    // role is settled before the first step rather than flickering into existence during it.
+    this.updateKeepers(state);
     const carrier = state.players.find((p) => p.team === team) ?? state.players[0]!;
     carrier.hasBall = true;
     state.ball.carrier = carrier.id;
@@ -369,6 +400,7 @@ export class Simulation {
     state.ball.goalValid = false;
     state.ball.inCreaseT = 0;
     state.ball.carryT = 0;
+    state.ball.voiceT = 0;
     this.placeCarriedBall(state, carrier);
     state.pings.length = 0;
   }
@@ -406,7 +438,7 @@ export class Simulation {
 
     if (s.phase === 'restart') {
       s.phaseT -= dt;
-      for (const p of s.players) p.loudness = p.hasBall ? cfg.loudness['ball-hum'] : 0;
+      for (const p of s.players) p.loudness = 0;
       // Intents are ignored while everyone walks back to their marks, but they are still
       // *recorded*: otherwise a button held across the freeze would look like a fresh press the
       // moment play resumes, and a button released across it would have its release eaten.
@@ -421,6 +453,8 @@ export class Simulation {
       this.checkClock();
       return this.output();
     }
+
+    this.updateKeepers();
 
     for (let i = 0; i < s.players.length; i++) {
       const p = s.players[i]!;
@@ -437,12 +471,8 @@ export class Simulation {
     this.resolveSteals(intents, dt);
     this.checkCreaseBall(dt);
     this.checkPassivity(dt);
+    this.ballVoice(dt);
     this.advancePings(dt);
-
-    // The carried ball hums from the carrier's hands, so the carrier is as loud as the ball.
-    for (const p of s.players) {
-      if (p.hasBall) p.loudness = Math.max(p.loudness, cfg.loudness['ball-hum']);
-    }
 
     for (let i = 0; i < s.players.length; i++) {
       this.prevIntents[i] = copyIntent(intents[i] ?? idleIntentInternal());
@@ -472,8 +502,109 @@ export class Simulation {
     }
   }
 
+  /**
+   * Who wears the gloves.
+   *
+   * Deepest body of each team, with two rules that keep it from being a nuisance:
+   *
+   *   - hysteresis (`keeper.switchMargin`), because the role is what lets a body stand inside
+   *     the crease, and a role that flickers is a body being teleported out of the crease twice
+   *     a second by the confinement rule;
+   *   - the incumbent cannot be stripped while he is *standing in* his crease. Otherwise the
+   *     moment his team-mate drops behind him the rules would eject him from where he stands,
+   *     which reads as a bug however correct the depth chart is.
+   *
+   * Possession is deliberately NOT part of it. Tying the gloves to who has the ball means the
+   * role changes hands at the noisiest, most crowded moment of the game, and it buys nothing: a
+   * team pressing forward has both bodies far from its own goal anyway, so the keeper of an
+   * attacking team is simply the man who happens to be back — which is exactly what it should be.
+   */
+  private updateKeepers(state: WorldState = this.state): void {
+    const cfg = this.config.keeper;
+    const s = state;
+    if (!cfg.enabled) {
+      for (const p of s.players) p.keeper = false;
+      return;
+    }
+    const carrier = s.ball.carrier === null ? null : s.players[s.ball.carrier] ?? null;
+    for (let team = 0; team < 2; team++) {
+      const own = this.field.goalCentre[team]!;
+      let incumbent: PlayerState | null = null;
+      let best: PlayerState | null = null;
+      let bestD = Infinity;
+      for (const p of s.players) {
+        if (p.team !== team) continue;
+        if (p.keeper) incumbent = p;
+        const d = dist2(p.pos, own);
+        if (d < bestD) {
+          bestD = d;
+          best = p;
+        }
+      }
+      if (!best) continue;
+      // A team with the ball has no keeper. Two bodies attacking against one defender and a
+      // keeper is what makes a pass worth anything; a permanent keeper turns 2×2 into 1×1 with
+      // two spectators, and a pass into a throw at a man standing in his own goal.
+      const attacking = carrier !== null && carrier.team === team;
+      if (attacking) {
+        // But he is not stripped of the gloves *inside* his crease: the rules would eject him
+        // from where he stands the instant his side won the ball, which reads as a bug however
+        // correct the depth chart is. He gives them up on his way out, which is also when a
+        // human would stop thinking of himself as the keeper.
+        if (incumbent && !insideCreaseOf(this.field, team, incumbent.pos, this.config.player.radius)) {
+          incumbent.keeper = false;
+        }
+        continue;
+      }
+      if (!incumbent) {
+        best.keeper = true;
+        continue;
+      }
+      if (incumbent === best) continue;
+      if (insideCreaseOf(this.field, team, incumbent.pos, this.config.player.radius)) continue;
+      if (dist2(incumbent.pos, own) - bestD < cfg.switchMargin) continue;
+      incumbent.keeper = false;
+      best.keeper = true;
+    }
+  }
+
+  /** The crease index this body is allowed inside, or -1. The whole of the keeper's privilege. */
+  private creaseAccess(p: PlayerState): number {
+    return this.config.keeper.enabled && p.keeper ? p.team : -1;
+  }
+
+  /** True while this body is the keeper AND standing in his own crease — where his job is. */
+  private keeping(p: PlayerState): boolean {
+    return (
+      this.config.keeper.enabled &&
+      p.keeper &&
+      insideCreaseOf(this.field, p.team, p.pos, this.config.player.radius)
+    );
+  }
+
+  /**
+   * How far this body's hands reach for a ball closing at `relSpeed`.
+   *
+   * The reach shrinks with the ball's speed, and that single curve is what replaced the catch
+   * button when catching became automatic. A rolling ball is picked up by being near it; a pass
+   * has to be met on its line; a shot has to hit your hands. It is also the whole of what makes
+   * a keeper a keeper — his multiplier is applied before the shrink, so the faster the ball the
+   * bigger the difference between his hands and anybody else's.
+   */
+  private reachRadius(p: PlayerState, relSpeed: number): number {
+    const c = this.config.catching;
+    const base = this.keeping(p) ? c.radius * this.config.keeper.reachMul : c.radius;
+    const over = relSpeed - c.slowBallSpeed;
+    if (over <= 0) return base;
+    return base * clamp(1 - over / Math.max(1e-6, c.catchSpeedSpan), c.minReachFrac, 1);
+  }
+
   private emit(kind: SoundKind, pos: Vec2, sourceId: EntityId): void {
-    const intensity = this.config.loudness[kind];
+    this.emitAt(kind, pos, sourceId, this.config.loudness[kind]);
+  }
+
+  /** The same, with the audible radius decided by the caller — the ball's ramping beep. */
+  private emitAt(kind: SoundKind, pos: Vec2, sourceId: EntityId, intensity: number): void {
     if (intensity <= 0) return;
     this.events.push({
       t: this.state.t,
@@ -547,7 +678,10 @@ export class Simulation {
         // A dive that hit nobody leaves you lying there longer — that is the bet the tackle is:
         // you spent your body on a prediction, and a wrong prediction costs time on the floor.
         const miss = p.tackleHit ? 1 : cfg.contest.tackle.enabled ? cfg.contest.tackle.missPenalty : 1;
-        p.recoverT = cfg.dive.recoverySec * miss;
+        // A keeper's dive along his own line is his one athletic tool, so it costs him less to
+        // get back up. Outside his crease he is an ordinary body with ordinary consequences.
+        const gloves = this.keeping(p) ? cfg.keeper.diveRecoveryMul : 1;
+        p.recoverT = cfg.dive.recoverySec * miss * gloves;
         if (!p.tackleHit && cfg.contest.tackle.enabled) {
           this.contests.push({ kind: 'tackle-miss', player: p.id, victim: null, t: this.state.t });
         }
@@ -560,7 +694,9 @@ export class Simulation {
       if (intent.dive && !prev.dive && p.diveCd <= 0) {
         p.diveT = cfg.dive.durationSec;
         p.tackleHit = false;
-        p.diveCd = cfg.dive.cooldownSec + cfg.dive.durationSec + cfg.dive.recoverySec;
+        p.diveCd = this.keeping(p)
+          ? cfg.dive.cooldownSec * cfg.keeper.diveCooldownMul + cfg.dive.durationSec
+          : cfg.dive.cooldownSec + cfg.dive.durationSec + cfg.dive.recoverySec;
         const dir = len2(intent.move) > 1e-6 ? norm2(intent.move, p.aim) : clone2(p.aim);
         p.diveDir = dir;
         p.vel = { x: dir.x * cfg.dive.speed, y: dir.y * cfg.dive.speed };
@@ -573,7 +709,7 @@ export class Simulation {
     const before = clone2(p.pos);
     p.pos.x += p.vel.x * dt;
     p.pos.y += p.vel.y * dt;
-    confineBody(this.field, p.pos, p.vel, cfg.player.radius);
+    confineBody(this.field, p.pos, p.vel, cfg.player.radius, this.creaseAccess(p));
 
     this.footsteps(p, dist2(before, p.pos), dt);
 
@@ -816,8 +952,8 @@ export class Simulation {
             b.vel.y += ny * imp;
           }
         }
-        confineBody(this.field, a.pos, a.vel, R);
-        confineBody(this.field, b.pos, b.vel, R);
+        confineBody(this.field, a.pos, a.vel, R, this.creaseAccess(a));
+        confineBody(this.field, b.pos, b.vel, R, this.creaseAccess(b));
         if (closing < col.loudSpeed) continue;
         // Hard enough to hear. Both bodies made the noise, so both are drawn on both screens —
         // a collision is the one event in the game that gives away two positions at once.
@@ -932,6 +1068,7 @@ export class Simulation {
       b.lastThrowerTeam = null;
       b.goalValid = false;
       b.carryT = 0;
+      b.voiceT = 0;
       this.placeCarriedBall(s, p);
       // The scuffle of the ball changing hands, and it carries further than a catch does: every
       // change of possession has to be audible, or the pitch's one shared fact — where the ball
@@ -964,6 +1101,7 @@ export class Simulation {
     b.goalValid = !insideCrease(this.field, b.pos);
     b.inCreaseT = 0;
     b.carryT = 0;
+    b.voiceT = 0;
     this.touches.push({ kind: 'fumble', player: p.id, fromThrower: null, fromTeam: null });
     this.emit('fumble', p.pos, p.id);
   }
@@ -1042,6 +1180,43 @@ export class Simulation {
     }
   }
 
+  /**
+   * The carried ball's beep.
+   *
+   * Silent for `voice.quietSec` after it changes hands, then a beep whose period falls and whose
+   * audible radius rises with `ball.carryT`. Nothing else in the game pressures a carrier: he is
+   * not slowed down and the ball has no weight (concept law 5). He is simply, audibly, running
+   * out of anonymity — and so is anybody he passes to, from zero.
+   */
+  private ballVoice(dt: number): void {
+    const s = this.state;
+    const b = s.ball;
+    if (b.carrier === null || s.phase !== 'play') {
+      b.voiceT = 0;
+      return;
+    }
+    const v = this.config.ball.voice;
+    const carrier = s.players[b.carrier];
+    if (!carrier) return;
+    const held = b.carryT;
+    if (held < v.quietSec) {
+      // The window a pass buys. The carrier makes his own footstep noise and nothing else.
+      b.voiceT = 0;
+      return;
+    }
+    const u = clamp((held - v.quietSec) / Math.max(1e-6, v.rampSec), 0, 1);
+    const full = this.config.loudness['ball-carry'];
+    const intensity = lerp(full * v.startLoudFrac, full, u);
+    const interval = lerp(v.intervalStart, v.intervalMin, u);
+    // The carrier's own readout is continuous even though the sound is not: he can feel how
+    // loud the thing in his hands has become, which is the whole point of the mechanic.
+    carrier.loudness = Math.max(carrier.loudness, intensity);
+    b.voiceT += dt;
+    if (b.voiceT < interval) return;
+    b.voiceT -= interval;
+    this.emitAt('ball-carry', b.pos, b.carrier, intensity);
+  }
+
   /** The passivity rule (off unless `match.carryTimeoutSec` is set). See the config comment. */
   private checkPassivity(dt: number): void {
     const limit = this.config.match.carryTimeoutSec;
@@ -1077,6 +1252,7 @@ export class Simulation {
     b.lastThrower = null;
     b.lastThrowerTeam = null;
     b.goalValid = false;
+    b.voiceT = 0;
     this.placeCarriedBall(s, best);
     this.turnovers.push({ team: best.team, reason: 'passivity', t: s.t });
     this.emit('whistle', b.pos, best.id);
@@ -1146,6 +1322,7 @@ export class Simulation {
     b.goalValid = false;
     b.inCreaseT = 0;
     b.carryT = 0;
+    b.voiceT = 0;
     this.placeCarriedBall(s, best);
     this.turnovers.push({ team, reason, t: s.t });
     this.emit('whistle', b.pos, best.id);
@@ -1184,16 +1361,16 @@ export class Simulation {
   }
 
   /**
-   * Catching, fumbling and stealing — all of the ways a body and the ball can meet.
+   * Catching, fumbling and blocking — all of the ways a body and the ball can meet.
    *
-   * A catch is a timed action, and the timing lives in `catching.reachSec`: one press opens the
-   * hands for a fifth of a second, and the ball has to be inside `catching.radius` while they
-   * are open. Press too early and they shut before it arrives; press too late and it hits a shut
-   * body, which is a fumble — the loudest ordinary event in the game. Both halves of that are
-   * reachable, which the previous rule (a window around the moment of closest approach) could
-   * not manage: the ball met the body before the moment it was supposed to be timed against.
+   * Catching is AUTOMATIC (`catching.auto`), which cancels the concept's "ловля — действие с
+   * таймингом". The человек cancelled it himself after playing the build: a timing test on top
+   * of a hearing test spent the game's spare button and its whole difficulty budget on the least
+   * interesting decision in it.
    *
-   * A ball crawling along the floor is not a timing problem and is simply picked up.
+   * What carries the skill instead is `reachRadius`: the reach shrinks with the ball's relative
+   * speed, so being in the right place is what catches a pass, and the only remaining way to
+   * fumble one is to try to take it at a full sprint.
    */
   private resolveBallContacts(intents: readonly Intent[]): void {
     const cfg = this.config;
@@ -1206,6 +1383,8 @@ export class Simulation {
       const p = s.players[i]!;
       if (p.ballCd > 0) continue;
       const intent = intents[i] ?? idleIntentInternal();
+      // Flat on the floor you are out of the play entirely: the ball goes over you, and that is
+      // the price of a dive that missed.
       if (p.downT > 0) continue;
       const prev = this.prevIntents[i] ?? idleIntentInternal();
       const rel = { x: b.pos.x - p.pos.x, y: b.pos.y - p.pos.y };
@@ -1213,14 +1392,29 @@ export class Simulation {
 
       const relVel = { x: b.vel.x - p.vel.x, y: b.vel.y - p.vel.y };
       const relSpeed = len2(relVel);
-      const slow = relSpeed < cfg.catching.slowBallSpeed;
+      const reach = this.reachRadius(p, relSpeed);
+      // The press still exists in the contract (a bot may use it to block), but nothing about
+      // catching depends on it any more.
       const pressed = intent.catch && !prev.catch;
       const open = p.reachT > 0;
-      if (open && d <= cfg.catching.radius) p.reachSawBall = true;
+      if (open && d <= reach) p.reachSawBall = true;
 
-      if ((open || (pressed && slow)) && d <= cfg.catching.radius) {
+      if (d <= reach && (cfg.catching.auto || open || pressed)) {
+        // Running through a hard ball does not work, and it is the one failure left in catching:
+        // a fumble you can see coming and prevent by slowing down.
+        const sprinting = len2(p.vel) > cfg.catching.sprintSpeed && relSpeed > cfg.catching.sprintBallSpeed;
+        if (sprinting) {
+          p.lastCatchFail = 'sprint';
+          p.lastCatchFailT = s.t;
+          this.fumble(p, rel, d, 'contact');
+          return;
+        }
         b.carrier = p.id;
         b.lastToucher = p.id;
+        // A new pair of hands starts from silence: this single line is what makes a pass worth
+        // making rather than a rule to be obeyed.
+        b.carryT = 0;
+        b.voiceT = 0;
         p.hasBall = true;
         p.ballCd = 0;
         p.reachT = 0;
@@ -1233,6 +1427,7 @@ export class Simulation {
           fromThrower: b.lastThrower,
           fromTeam: b.lastThrowerTeam,
         });
+        this.noteSave(p, b.lastThrowerTeam, relSpeed);
         b.lastThrower = null;
         b.lastThrowerTeam = null;
         this.emit('catch', p.pos, p.id);
@@ -1241,16 +1436,15 @@ export class Simulation {
 
       if (d <= bodyR && relSpeed >= cfg.catching.contactFumbleMinSpeed) {
         if (this.stopsBall(p, relSpeed)) {
-          // Hit by a ball nobody caught: a deflection, and everyone hears the mistake.
+          this.noteSave(p, b.lastThrowerTeam, relSpeed);
+          // Hit by a ball too fast to hold: a deflection, and everyone hears the mistake.
           p.lastCatchFail = 'late';
           p.lastCatchFailT = s.t;
           this.fumble(p, rel, d, 'contact');
           return;
         }
-        // It went past him. He cannot have a second bite at it — that is what "he did not time
-        // it" has to mean if a block is a decision — but it is NOT silent: a punishment nobody
-        // can perceive is indistinguishable from a bug, and this one lands on a player who just
-        // pressed a button and got nothing. The ball whistles past, quietly, close by.
+        // It went past him — through the gap between his hands, which at this speed is most of
+        // his body. Not silent: a punishment nobody can perceive is indistinguishable from a bug.
         p.ballCd = cfg.catching.cooldownSec;
         p.lastCatchFail = 'past';
         p.lastCatchFailT = s.t;
@@ -1259,6 +1453,18 @@ export class Simulation {
         continue;
       }
     }
+  }
+
+  /**
+   * A shot that died on the keeper. Counted, not simulated: the stop itself already happened
+   * through the ordinary catch/block rules — a keeper has no special power over a ball, only a
+   * place to stand and slightly longer arms.
+   */
+  private noteSave(p: PlayerState, fromTeam: TeamId | null, relSpeed: number): void {
+    if (!this.keeping(p)) return;
+    if (fromTeam === null || fromTeam === p.team) return;
+    if (relSpeed < this.config.catching.slowBallSpeed) return;
+    this.contests.push({ kind: 'save', player: p.id, victim: null, t: this.state.t });
   }
 
   /**
@@ -1435,12 +1641,13 @@ export class Simulation {
         p.pingCd, p.ballCd, p.strideAcc, p.brakeCd, p.peakSpeed, p.peakAge, p.loudness,
         p.dirRef.x, p.dirRef.y, p.dirRefNext.x, p.dirRefNext.y, p.dirRefAge, p.downT, p.staggerT, p.contestT,
         p.contestTarget ?? -99, p.robbedCd, p.tackleHit ? 1 : 0, p.reachT, p.reachCd,
+        p.keeper ? 1 : 0,
       );
     }
     const b = s.ball;
     nums.push(
       b.pos.x, b.pos.y, b.vel.x, b.vel.y, b.carrier ?? -99, b.lastToucher ?? -99,
-      b.lastThrower ?? -99, b.goalValid ? 1 : 0, b.inCreaseT, b.carryT,
+      b.lastThrower ?? -99, b.goalValid ? 1 : 0, b.inCreaseT, b.carryT, b.voiceT,
     );
     return hashNumbers(nums);
   }

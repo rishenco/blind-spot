@@ -44,6 +44,55 @@ export interface PlayerStats {
   ticks: number;
 }
 
+/**
+ * The shape of the play, as opposed to who won it.
+ *
+ * These are the degeneracy metrics: "два бота научились кто первый добежит до мяча и кидает
+ * сразу в ворота" is not visible in a scoreline, in possession or in a turnover count — every
+ * one of those looks healthy while the match is one dominant line repeated forty times. What it
+ * IS visible in is how long the ball stays in a pair of hands before it is thrown, how often it
+ * ever changes hands inside one attack, and from how far the shot is taken.
+ */
+export interface ShapeStats {
+  /** Attacks: a team gaining the ball and keeping it until the other team gets it. */
+  possessions: number;
+  /** Completed passes between team-mates. */
+  passes: number;
+  /** Throws that were aimed into the opponent's goal mouth — a shot, not a pass. */
+  shots: number;
+  shotDistanceSum: number;
+  /** Every shot's distance to goal, for the histogram. One match makes a few dozen entries. */
+  shotDistances: number[];
+  /** Seconds between a body getting the ball and releasing a shot with it, summed over shots. */
+  holdBeforeShotSum: number;
+  /** Same, over every throw (a pass included). */
+  holdBeforeThrowSum: number;
+  throws: number;
+  goals: number;
+  /** Goals scored in a possession in which the ball never changed hands inside the team. */
+  goalsWithoutPass: number;
+  possessionTimeSum: number;
+  /** Saves: a shot stopped by a keeper inside his own crease. */
+  keeperSaves: number;
+}
+
+export function emptyShapeStats(): ShapeStats {
+  return {
+    possessions: 0,
+    passes: 0,
+    shots: 0,
+    shotDistanceSum: 0,
+    shotDistances: [],
+    holdBeforeShotSum: 0,
+    holdBeforeThrowSum: 0,
+    throws: 0,
+    goals: 0,
+    goalsWithoutPass: 0,
+    possessionTimeSum: 0,
+    keeperSaves: 0,
+  };
+}
+
 export interface MatchStats {
   seed: number;
   ticks: number;
@@ -57,6 +106,8 @@ export interface MatchStats {
    * scoreline.
    */
   possessionChanges: number;
+  /** What kind of game this was, not who won it. */
+  shape: ShapeStats;
 }
 
 export function emptyPlayerStats(id: EntityId, team: TeamId, controller: string): PlayerStats {
@@ -116,14 +167,24 @@ export function aggregate(all: MatchStats[]): {
   players: PlayerSummary[];
   possessionChanges: number;
   duration: number;
+  /** Summed, not averaged: the shape metrics are ratios of each other and must divide as totals. */
+  shape: ShapeStats;
 } {
-  if (all.length === 0) return { matches: 0, score: [0, 0], players: [], possessionChanges: 0, duration: 0 };
+  if (all.length === 0) {
+    return { matches: 0, score: [0, 0], players: [], possessionChanges: 0, duration: 0, shape: emptyShapeStats() };
+  }
   const n = all.length;
   const score: [number, number] = [0, 0];
   let possessionChanges = 0;
   let duration = 0;
   const acc = new Map<EntityId, PlayerSummary>();
+  const shape = emptyShapeStats();
   for (const m of all) {
+    for (const key of Object.keys(shape) as (keyof ShapeStats)[]) {
+      if (key === 'shotDistances') continue;
+      (shape[key] as number) += m.shape[key] as number;
+    }
+    shape.shotDistances.push(...m.shape.shotDistances);
     score[0] += m.score[0] / n;
     score[1] += m.score[1] / n;
     possessionChanges += m.possessionChanges / n;
@@ -151,5 +212,5 @@ export function aggregate(all: MatchStats[]): {
       return out;
     })
     .sort((a, b) => a.id - b.id);
-  return { matches: n, score, players, possessionChanges, duration };
+  return { matches: n, score, players, possessionChanges, duration, shape };
 }

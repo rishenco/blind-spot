@@ -43,12 +43,31 @@ export function insideCrease(field: FieldInfo, p: Vec2, margin = 0): boolean {
   return false;
 }
 
+/** True when a point is inside the crease of goal `index` (the goal that team defends). */
+export function insideCreaseOf(field: FieldInfo, index: number, p: Vec2, margin = 0): boolean {
+  const g = field.goalCentre[index];
+  if (!g) return false;
+  const dx = p.x - g.x;
+  const dy = p.y - g.y;
+  const r = field.creaseRadius + margin;
+  return dx * dx + dy * dy < r * r;
+}
+
 /**
  * Keeps a body inside the playable area: the rectangle inset by its radius, minus the two
  * creases. Mutates `pos`/`vel` and reports whether it had to push (so the caller can decide
  * whether that counts as an audible scrape — currently it does not).
+ *
+ * `creaseAccess` is the one exception in the rulebook: the goalkeeper of team N may stand inside
+ * the crease of goal N and nobody else may stand in either. Pass -1 for an ordinary body.
  */
-export function confineBody(field: FieldInfo, pos: Vec2, vel: Vec2, radius: number): boolean {
+export function confineBody(
+  field: FieldInfo,
+  pos: Vec2,
+  vel: Vec2,
+  radius: number,
+  creaseAccess = -1,
+): boolean {
   let touched = false;
   const maxX = field.halfWidth - radius;
   const maxY = field.halfHeight - radius;
@@ -70,7 +89,9 @@ export function confineBody(field: FieldInfo, pos: Vec2, vel: Vec2, radius: numb
     if (vel.y > 0) vel.y = 0;
     touched = true;
   }
-  for (const g of field.goalCentre) {
+  for (let gi = 0; gi < field.goalCentre.length; gi++) {
+    if (gi === creaseAccess) continue;
+    const g = field.goalCentre[gi]!;
     const dx = pos.x - g.x;
     const dy = pos.y - g.y;
     const d2 = dx * dx + dy * dy;

@@ -29,6 +29,46 @@ export interface FieldConfig {
   creaseBallTimeoutSec: number;
 }
 
+/**
+ * The goalkeeper — added 2026-08-25, and it is a rule change, not a tuning number.
+ *
+ * The concept says the crease is forbidden to *everybody*. Real handball says the crease belongs
+ * to the keeper, and the difference is the whole match: with nobody allowed inside four metres
+ * of the goal, the mouth is open by rule, so "get to the ball first and throw it at the empty
+ * net" is not a degenerate bot strategy, it is the correct one. Giving one body per team the
+ * right to stand in there is the smallest change that puts something in the way.
+ *
+ * The role is assigned by the simulation, never by a button: this is 2×2 played on a jam, and a
+ * game whose central mechanic is listening cannot also ask a player to manage a depth chart.
+ */
+export interface KeeperConfig {
+  enabled: boolean;
+  /**
+   * How much nearer his own goal another body has to be before the gloves change hands.
+   *
+   * Hysteresis, and it has to be generous: the role decides who may stand inside the crease, so
+   * a role that flickers is a body being shoved out of the crease by the rules twice a second.
+   */
+  switchMargin: number;
+  /** Multiplier on the catch reach while the keeper is inside his own crease. */
+  reachMul: number;
+  /**
+   * How far from the centre of his goal the keeper stands while defending, metres.
+   *
+   * The one number that decides whether goalkeeping is a guess. Deep on his line he sees the
+   * whole mouth open in front of him and has to pick a half; stepping out closes the angle until
+   * his arms cover everything and the shooter has nothing left to aim at. Real keepers live on
+   * that trade and so does this one.
+   */
+  depth: number;
+  /** And how far out he steps when his own team has the ball: the outlet, not the last man. */
+  attackDepth: number;
+  /** Dive cooldown multiplier inside the crease: a keeper's dive along his line is cheap. */
+  diveCooldownMul: number;
+  /** Dive recovery multiplier inside the crease. */
+  diveRecoveryMul: number;
+}
+
 export interface MatchConfig {
   goalsToWin: number;
   durationSec: number;
@@ -101,6 +141,36 @@ export interface PlayerConfig {
   brakeTurnWindowSec: number;
 }
 
+/**
+ * The ball's voice — the biggest design change in the project, decided by the человек after
+ * playing: *«в руках молчит, но всё же периодически пингует… стоит подумать, как сделать, чтобы
+ * надо было постоянно пасовать»*.
+ *
+ * Before this, the ball hummed across the whole pitch without pause, in flight and in the hands
+ * alike. One line of consequences followed from it and it explains almost every complaint about
+ * the build: the only fact anybody needed was given away for free → everybody converged on the
+ * ball → permanent scrimmage → permanent noise → nothing was ever hidden → silence never
+ * happened → a ping had nothing to ask about → positioning was pointless and running was
+ * everything.
+ *
+ * Now a carried ball is SILENT for a moment and then begins to beep, faster and louder the
+ * longer one pair of hands keeps it. Passing resets it for both men, so a pass is not a duty
+ * imposed by a timer — it is how you become invisible again. Carrying the ball stays legal and
+ * stays fast (concept law 5: no weight, no speed penalty); it just gets audibly more expensive,
+ * and the carrier hears his own price rising before anybody else acts on it.
+ */
+export interface BallVoiceConfig {
+  /** Seconds of complete silence after the ball changes hands. The reward for a pass. */
+  quietSec: number;
+  /** Beep period at the end of the quiet window, and at the end of the ramp. */
+  intervalStart: number;
+  intervalMin: number;
+  /** Seconds of holding over which period and loudness travel from start to full. */
+  rampSec: number;
+  /** First beep's audible radius as a fraction of the `ball-carry` row of the loudness table. */
+  startLoudFrac: number;
+}
+
 export interface BallConfig {
   radius: number;
   /** m/s² of ground friction while loose. */
@@ -110,6 +180,8 @@ export interface BallConfig {
   carryOffset: number;
   /** The ball sings on this period while it exists (loose or carried). */
   humIntervalSec: number;
+  /** How a carried ball gives its holder away. See `BallVoiceConfig`. */
+  voice: BallVoiceConfig;
   /** Whether a throw adds the carrier's velocity. Off: a throw is a throw, not a slingshot. */
   inheritCarrierVelocity: boolean;
   /** Below this speed a loose ball is considered stopped. */
@@ -117,8 +189,34 @@ export interface BallConfig {
 }
 
 export interface CatchConfig {
-  /** How far the hands reach. The ball has to be inside this while the hands are open. */
+  /** How far the hands reach at walking pace, for a ball that is barely moving. */
   radius: number;
+  /**
+   * Catching is automatic — a ball inside the reach is caught, with no button at all.
+   *
+   * This cancels the concept's "ловля — действие с таймингом", and the человек cancelled it
+   * himself after playing: "поймать автоматом, правую кнопку не юзать". The timing was a test of
+   * reaction inside a game that is already a test of hearing, and it spent the game's one spare
+   * mouse button on it.
+   *
+   * What replaces the timing as the skill is `catchSpeedSpan` below: the faster the ball, the
+   * smaller the area it can be taken in. A lob is caught by being roughly there; a 16 m/s shot
+   * has to hit your hands. So receiving a pass is still a thing you can be bad at — it is now a
+   * question of standing in the right place rather than of pressing at the right millisecond.
+   */
+  auto: boolean;
+  /**
+   * Relative speed, above `slowBallSpeed`, at which the reach has shrunk to `minReachFrac`.
+   *
+   * This is the whole difficulty curve of catching and of intercepting, in one number.
+   */
+  catchSpeedSpan: number;
+  /** Floor of the shrinking reach, as a fraction of `radius`. */
+  minReachFrac: number;
+  /** Above this own speed a body is sprinting and cannot take a hard ball cleanly. */
+  sprintSpeed: number;
+  /** Relative ball speed above which a sprinting body fumbles instead of catching. */
+  sprintBallSpeed: number;
   /**
    * How long one press keeps the hands open, seconds — and the whole of what makes a catch an
    * action with a timing rather than a proximity test.
@@ -379,6 +477,7 @@ export interface SimConfig {
   catching: CatchConfig;
   throwing: ThrowConfig;
   dive: DiveConfig;
+  keeper: KeeperConfig;
   ping: PingConfig;
   /**
    * The loudness table — concept, "одна таблица на всю игру". Values are audible radii in
@@ -425,6 +524,10 @@ export const DEFAULT_LOUDNESS: Record<SoundKind, number> = {
   fumble: 14,
   throw: 13,
   'ball-hum': 30,
+  // The carried ball, at the top of its ramp. A man who has held it for five seconds is audible
+  // from most of the pitch; a man who has just taken a pass is audible from nowhere. The row is
+  // the ceiling — `ball.voice` says how fast he climbs it.
+  'ball-carry': 22,
   'ball-wall': 14,
   // A ball whistling past a body that did not react. Quiet on purpose — it is feedback for the
   // man it went past, not an announcement to the pitch — but never silence: a mechanic that
@@ -474,7 +577,11 @@ export function defaultConfig(): SimConfig {
       goalWidth: 2.5,
       creaseRadius: 4,
       wallRestitution: 0.75,
-      creaseBallTimeoutSec: 1,
+      // Two seconds, not one: with a keeper in there, a ball parried into the crease is a
+      // rebound he is supposed to go and pick up, and one second is not enough time to turn
+      // round and do it. It stays as a rule because a ball resting where only one body may
+      // stand is still a match that can stop.
+      creaseBallTimeoutSec: 2,
     },
     match: {
       goalsToWin: 5,
@@ -506,6 +613,13 @@ export function defaultConfig(): SimConfig {
       restitution: 0.75,
       carryOffset: 0.5,
       humIntervalSec: 0.2,
+      voice: {
+        quietSec: 1.2,
+        intervalStart: 1.2,
+        intervalMin: 0.3,
+        rampSec: 5,
+        startLoudFrac: 0.25,
+      },
       inheritCarrierVelocity: false,
       restSpeed: 0.05,
     },
@@ -514,6 +628,18 @@ export function defaultConfig(): SimConfig {
       // is the size of the "too late" half of the timing. Any tighter and the late failure is a
       // coin toss rather than a mistake.
       radius: 1.6,
+      auto: true,
+      // 18 m/s of span puts a 12 m/s pass at 0.75 m of reach and a 16 m/s shot at 0.40 m — just
+      // inside the body's own radius, which is what keeps the soft block alive: a shot that
+      // grazes a defender goes past him rather than sticking to him.
+      catchSpeedSpan: 18,
+      // Below the body's own radius (0.47 m): otherwise a ball that touches a body is always
+      // caught, and the soft block — a hard shot going past a defender who was not in front of
+      // it — becomes unreachable.
+      minReachFrac: 0.2,
+      // Just under a full sprint: you can run to the ball, you cannot run *through* a hard pass.
+      sprintSpeed: 4.6,
+      sprintBallSpeed: 9,
       reachSec: 0.22,
       reachCooldownSec: 0.35,
       cooldownSec: 0.35,
@@ -528,6 +654,21 @@ export function defaultConfig(): SimConfig {
       weakSpeed: 6,
       minSpeed: 12,
       maxSpeed: 16,
+    },
+    keeper: {
+      enabled: true,
+      switchMargin: 1.5,
+      // The keeper is the specialist at the one thing that got hard when catching became
+      // automatic: taking a ball that is moving fast. An ordinary body has 0.6 m of reach
+      // against a 16 m/s shot, the keeper has 1.4 m — enough to own the middle of a 3.2 m mouth
+      // and not enough to own the corners, which is exactly the shape goalkeeping should have.
+      reachMul: 2.4,
+      depth: 1.4,
+      // Past the crease on purpose: walking out to here is what takes the gloves off him, so a
+      // team that wins the ball is a team with two attackers a second and a half later.
+      attackDepth: 5.5,
+      diveCooldownMul: 0.3,
+      diveRecoveryMul: 0.45,
     },
     dive: {
       durationSec: 0.4,
@@ -711,10 +852,11 @@ export function cloneConfig(c: SimConfig): SimConfig {
     field: { ...c.field },
     match: { ...c.match },
     player: { ...c.player },
-    ball: { ...c.ball },
+    ball: { ...c.ball, voice: { ...c.ball.voice } },
     catching: { ...c.catching },
     throwing: { ...c.throwing },
     dive: { ...c.dive },
+    keeper: { ...c.keeper },
     ping: { ...c.ping },
     loudness: { ...c.loudness },
     perception: { ...c.perception, exactKinds: [...c.perception.exactKinds] },

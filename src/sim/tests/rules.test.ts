@@ -305,93 +305,87 @@ describe('the fight for the ball', () => {
       intents[0]!.aim = { x: 1, y: 0 };
       spill.step(intents);
     }
-    expect(spill.state.ball.carrier).toBeNull();
+    // He loses it. Who ends up with it is another matter — catching is automatic now, so the
+    // body he ran into simply picks the loose ball up off the floor.
+    expect(spill.state.ball.carrier).not.toBe(0);
   });
 
-  it('lets a hard throw past a body that did not time it, and never past one that did', () => {
-    // Same throw, same geometry, two block modes. `'always'` is the old rule and has to stay
-    // available: it is the control row of the rule tournament.
-    // `active` presses the catch button once, late, so the hands are open when the ball arrives.
-    // Holding it down does nothing: one press, one window.
-    const shots = (mode: 'always' | 'speed', active: boolean): number => {
-      let through = 0;
-      for (let seed = 1; seed <= 12; seed++) {
-        const cfg = defaultConfig();
-        cfg.teamSize = 1;
-        cfg.match.spawnJitter = 0;
-        cfg.match.carryTimeoutSec = 0;
-        cfg.contest.steal.enabled = false;
-        cfg.contest.tackle.enabled = false;
-        cfg.contest.collision.enabled = false;
-        cfg.contest.block.mode = mode;
-        const sim = new Simulation(cfg, seed);
-        sim.state.players[0]!.pos = { x: -6, y: 0 };
-        sim.state.players[1]!.pos = { x: 2, y: 0 };
-        sim.state.ball.pos = { x: -5.15, y: 0 };
-        const charge = idleFor(2);
-        charge[0]!.charge = true;
-        charge[0]!.aim = { x: 1, y: 0 };
-        run(sim, 45, () => charge);
-        let pressed = false;
-        for (let i = 0; i < 120; i++) {
-          const intents = idleFor(2);
-          intents[0]!.aim = { x: 1, y: 0 };
-          const gap = Math.abs(sim.state.ball.pos.x - sim.state.players[1]!.pos.x);
-          if (active && !pressed && gap < 2) {
-            intents[1]!.catch = true;
-            pressed = true;
-          }
-          const out = sim.step(intents);
-          if ((out.contests ?? []).some((c) => c.kind === 'through')) through++;
-        }
-      }
-      return through;
-    };
-    expect(shots('always', false)).toBe(0);
-    expect(shots('speed', false)).toBeGreaterThan(0);
-    // A defender who is reaching for it stops everything he touches.
-    expect(shots('speed', true)).toBe(0);
-  });
-
-  it('makes both halves of the catch timing reachable, and says which one was missed', () => {
-    // The point of the reach model. Under the old rule ("press within ±windowSec of closest
-    // approach") the late half could not happen at all: the ball meets the body before it
-    // reaches closest approach, so every failure was "too early" and the timing was a fiction.
-    const attempt = (pressAtGap: number): { fail: string | null; caught: boolean } => {
+  it('shrinks the reach as the ball speeds up: a pass is caught off the line, a shot is not', () => {
+    // The rule that replaced the catch button. Catching is automatic, so the skill is no longer
+    // *when* you press but *where you are standing*: the faster the ball, the smaller the area
+    // it can be taken in. Same geometry, same offset, two release speeds.
+    const attempt = (charge: number, offset: number): boolean => {
       const cfg = defaultConfig();
       cfg.teamSize = 1;
       cfg.match.spawnJitter = 0;
-      cfg.contest.block.mode = 'always'; // isolate the catch: no dice in this experiment
-      const sim = new Simulation(cfg, 4);
+      cfg.match.carryTimeoutSec = 0;
+      cfg.contest.steal.enabled = false;
+      cfg.contest.tackle.enabled = false;
+      cfg.contest.collision.enabled = false;
+      const sim = new Simulation(cfg, 7);
       sim.state.players[0]!.pos = { x: -6, y: 0 };
-      sim.state.players[1]!.pos = { x: 4, y: 0 };
+      sim.state.players[1]!.pos = { x: 4, y: offset };
       sim.state.ball.pos = { x: -5.15, y: 0 };
-      const charge = idleFor(2);
-      charge[0]!.charge = true;
-      charge[0]!.aim = { x: 1, y: 0 };
-      run(sim, 45, () => charge);
-      let pressed = false;
+      const hold = idleFor(2);
+      hold[0]!.charge = true;
+      hold[0]!.aim = { x: 1, y: 0 };
+      run(sim, Math.max(2, Math.round(charge * 60)), () => hold);
       for (let i = 0; i < 200; i++) {
         const intents = idleFor(2);
         intents[0]!.aim = { x: 1, y: 0 };
-        const gap = sim.state.players[1]!.pos.x - sim.state.ball.pos.x;
-        if (!pressed && gap <= pressAtGap) {
-          intents[1]!.catch = true;
-          pressed = true;
+        sim.step(intents);
+        if (sim.state.ball.carrier === 1) return true;
+        if (sim.state.players[1]!.lastCatchFail) return false;
+        // Once it is behind him the question is answered: what it does off the far wall a second
+        // later is a different ball.
+        if (sim.state.ball.pos.x > sim.state.players[1]!.pos.x + 1) return false;
+      }
+      return false;
+    };
+    // A lob, taken a metre off its line.
+    expect(attempt(0, 1.0)).toBe(true);
+    // A full-power shot at the same offset: out of reach at that speed.
+    expect(attempt(0.6, 1.0)).toBe(false);
+    // The same shot straight at him is caught — he is in front of it.
+    expect(attempt(0.6, 0)).toBe(true);
+  });
+
+  it('catches with no button at all, and drops it only at a full sprint', () => {
+    const takeIt = (sprint: boolean): { caught: boolean; fail: string | null } => {
+      const cfg = defaultConfig();
+      cfg.teamSize = 1;
+      cfg.match.spawnJitter = 0;
+      cfg.match.carryTimeoutSec = 0;
+      cfg.contest.steal.enabled = false;
+      cfg.contest.tackle.enabled = false;
+      cfg.contest.collision.enabled = false;
+      const sim = new Simulation(cfg, 4);
+      sim.state.players[0]!.pos = { x: -6, y: 0 };
+      sim.state.players[1]!.pos = { x: 6, y: 0 };
+      sim.state.ball.pos = { x: -5.15, y: 0 };
+      const hold = idleFor(2);
+      hold[0]!.charge = true;
+      hold[0]!.aim = { x: 1, y: 0 };
+      run(sim, 30, () => hold);
+      for (let i = 0; i < 200; i++) {
+        const intents = idleFor(2);
+        intents[0]!.aim = { x: 1, y: 0 };
+        if (sprint) {
+          // Running at the ball at full speed: the one way left to drop a catch.
+          intents[1]!.move = { x: -1, y: 0 };
+          intents[1]!.moveMode = 'run';
+          intents[1]!.aim = { x: -1, y: 0 };
         }
         sim.step(intents);
-        if (sim.state.ball.carrier === 1) return { fail: null, caught: true };
+        if (sim.state.ball.carrier === 1) return { caught: true, fail: null };
         const fail = sim.state.players[1]!.lastCatchFail;
-        if (fail) return { fail, caught: false };
+        if (fail) return { caught: false, fail };
       }
-      return { fail: null, caught: false };
+      return { caught: false, fail: null };
     };
-    // Grabbing at it from six metres away: the hands shut long before it arrives.
-    expect(attempt(6).fail).toBe('early');
-    // Grabbing at it a metre before it lands: caught.
-    expect(attempt(1.2).caught).toBe(true);
-    // Never grabbing at all: it hits a shut body, which is the late failure and a fumble.
-    expect(attempt(-99).fail).toBe('late');
+    // Nobody pressed anything, and it is in his hands.
+    expect(takeIt(false).caught).toBe(true);
+    expect(takeIt(true)).toEqual({ caught: false, fail: 'sprint' });
   });
 
   it('never takes the ball or lets it past in silence', () => {
@@ -410,11 +404,16 @@ describe('the fight for the ball', () => {
 
     const past = rigged((c) => {
       c.contest.block.mode = 'speed';
+      // Shrink the reach hard, so there is a band where the ball touches the body and is still
+      // uncatchable — that band is what this sound exists for.
+      c.catching.catchSpeedSpan = 14;
       c.contest.block.minStop = 0; // make the pass-through certain, so the test is about the sound
       c.contest.block.speedSpan = 1;
     });
     past.state.players[0]!.pos = { x: -6, y: 0 };
-    past.state.players[1]!.pos = { x: 4, y: 0 };
+    // Grazing him, not hitting him: at full speed his reach is smaller than his own body, so the
+    // ball touches him without ever being catchable — which is the case this sound exists for.
+    past.state.players[1]!.pos = { x: 4, y: 0.42 };
     past.state.ball.pos = { x: -5.15, y: 0 };
     const charge = idleFor(2);
     charge[0]!.charge = true;
