@@ -120,7 +120,7 @@ export function defaultRifleTunables(): RifleTunables {
     gunshotLoudness: 90,
     hitLoudness: 15,
     hitImpulse: 6.5,
-    magazine: 15,
+    magazine: 30,
     reloadSeconds: 3,
     reloadLoudness: 11,
   };

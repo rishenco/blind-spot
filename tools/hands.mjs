@@ -224,7 +224,7 @@ await playerCam();
 await redraw();
 await shot(
   '02-magazine-empty.png',
-  'the tick the magazine runs out, and the argument for having one at all: fifteen rounds of muzzle flash and ' +
+  `the tick the magazine runs out, and the argument for having one at all: ${beforeMag.magazine} rounds of muzzle flash and ` +
     'blast have left him half-blind, ringing (the concussion channel is another agent\'s, and it is doing its job here) ' +
     'and lit up like a signal fire. This is what "бесконечно себе светить" bought him',
 );
