@@ -47,7 +47,7 @@ import {
   rawColor,
   type StructuredTunables,
 } from './structured';
-import type { PropWorld } from '../props/props';
+import type { PaintBodies } from './bodies';
 
 /** Texels per body in the transform texture: translation+settle, rotation, state. */
 const TEXELS = 3;
@@ -523,7 +523,7 @@ export class DynamicPaint {
   decaySeconds = 3.2;
 
   constructor(
-    private readonly props: PropWorld,
+    private readonly props: PaintBodies,
     statics: StaticWorld,
     ramp: AgeRamp,
     tunables: StructuredTunables,
@@ -759,6 +759,8 @@ export class DynamicPaint {
    */
   update(now: number): void {
     this.time = now;
+    // The body source refreshes itself here, once, before any consumer reads a transform.
+    this.props.sync?.();
     this.material.uniforms.uTime!.value = now;
     this.material.uniforms.uDecaySeconds!.value = this.decaySeconds;
     this.edgeMaterial.uniforms.uTime!.value = now;

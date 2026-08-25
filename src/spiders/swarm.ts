@@ -56,6 +56,7 @@ import type { SoundBus, SoundEvent } from '../events/bus';
  */
 export type SpiderState =
   | 'idle'
+  | 'search'
   | 'stalk'
   | 'creep'
   | 'rally'
@@ -66,6 +67,7 @@ export type SpiderState =
 
 export const SPIDER_STATES: readonly SpiderState[] = [
   'idle',
+  'search',
   'stalk',
   'creep',
   'rally',
@@ -78,6 +80,7 @@ export const SPIDER_STATES: readonly SpiderState[] = [
 /** Debug-overlay colour per state. Kept here so the panel and the gizmos cannot disagree. */
 export const STATE_COLORS: Record<SpiderState, number> = {
   idle: 0x5a6b76,
+  search: 0x9aa7ae,
   stalk: 0x4fb0c6,
   creep: 0x6fd3a0,
   rally: 0xffd166,
@@ -115,6 +118,17 @@ export interface SpiderTunables {
   hearing: number;
   /** Seconds for belief confidence to fall to 1/e with nothing new heard. */
   beliefTau: number;
+  /**
+   * How much slower a belief fades while the spider is still walking towards it.
+   *
+   * This number is why the pack arrives at all. `beliefTau` is tuned for "he was here a moment
+   * ago and I am standing on the spot" — but a gunshot carries ninety metres and a stalker walks
+   * at 2.4 m/s, so a spider that heard one from thirty metres away needs a quarter of a minute
+   * just to get there. With one flat tau it forgets halfway, drops to `idle` and stands in the
+   * dark: exactly the "они где-то далеко чилят" the player saw. A lead is only disproven by
+   * *arriving* and finding nothing, so it is held while the spider is still on its way.
+   */
+  approachPatience: number;
   /** Weight on the confidence a fresh event can install, per source family. */
   weightPlayer: number;
   weightProp: number;
@@ -123,8 +137,19 @@ export interface SpiderTunables {
   pinnedRadius: number;
 
   // --- fear ---------------------------------------------------------------
-  /** Loudness, in metres of notice, at or above which a heard event is frightening, not just informative. */
+  /** Loudness, in metres of notice, below which a noise can never be frightening however close. */
   scareLoudness: number;
+  /**
+   * The distance half of fright: `loudness / distance` at or above this and the spider bolts.
+   *
+   * Fear used to be decided on the event's raw loudness alone, so one shot scattered every
+   * spider in the hall — including the ones seventy metres away, who then spent three seconds
+   * running *further* away from the only clue they had all game. A bang is terrifying next to
+   * you and merely interesting across the warehouse, and that is what this expresses: a gunshot
+   * (90) frightens inside 30 m, a toppling barrel (34) inside 11 m, a running footfall (16)
+   * inside 5 m.
+   */
+  scarePressure: number;
   /** Seconds a startled spider runs before it will even consider stalking again. */
   scareSeconds: number;
   /** Courage burnt by one scare. */
@@ -153,6 +178,42 @@ export interface SpiderTunables {
   commitSeconds: number;
   /** Seconds of running away after a strike lands. */
   recoilSeconds: number;
+  /**
+   * Fraction of its nerve a spider keeps when a commit collapses. The pack is supposed to come
+   * back in waves — burning it all meant one failed rush ended the fight for the next minute.
+   */
+  waveCourageKeep: number;
+  /**
+   * Metres. A spider this close to a belief it is sure of, with a full nerve, bites without
+   * waiting for the pack. This is the answer to "если я их вижу я просто расстреляю их": the
+   * one you are staring at is not a stationary target, it is the one already in range.
+   */
+  lungeRange: number;
+  /** Confidence needed for that solo lunge. */
+  lungeConfidence: number;
+
+  // --- searching ----------------------------------------------------------
+  /**
+   * Seconds a spider keeps combing the area around a spent lead before it gives up and idles.
+   * "Стою N секунд и они пришли" needs this: the player who makes one noise and then freezes
+   * gives them nothing more to home in on, so the last stretch has to be a search.
+   */
+  searchSeconds: number;
+  /** Metres the search sweep widens to around the last belief. */
+  searchRadius: number;
+
+  // --- flesh --------------------------------------------------------------
+  /** Hit points. One rifle round does `bulletDamage`; «пара выстрелов» is the human's brief. */
+  hp: number;
+  bulletDamage: number;
+  /** Loudness of the death screech — the pack hears one of its own die. */
+  deathLoudness: number;
+  /**
+   * Bullet hitbox radius, metres. Deliberately a touch larger than the body: the target is
+   * knee-high, moving and lit for two frames by a muzzle flash, so a hitbox tight to the mesh
+   * would read as "the gun does not work" rather than as difficulty.
+   */
+  hitRadius: number;
 
   // --- geometry of the circling ------------------------------------------
   stalkRadius: number;
@@ -205,6 +266,7 @@ export function defaultSpiderTunables(): SpiderTunables {
 
     hearing: 1,
     beliefTau: 9,
+    approachPatience: 5,
     weightPlayer: 1,
     weightProp: 0.65,
     weightChatter: 0.5,
@@ -214,6 +276,7 @@ export function defaultSpiderTunables(): SpiderTunables {
     // line puts "the world fell over" and "he fired" on the frightening side and leaves ordinary
     // walking on the informative side, which is exactly the split the concept asks for.
     scareLoudness: 20,
+    scarePressure: 3,
     scareSeconds: 3.2,
     scareCost: 0.75,
 
@@ -229,6 +292,17 @@ export function defaultSpiderTunables(): SpiderTunables {
     rallySeconds: 1.6,
     commitSeconds: 6,
     recoilSeconds: 1.8,
+    waveCourageKeep: 0.6,
+    lungeRange: 3.2,
+    lungeConfidence: 0.45,
+
+    searchSeconds: 45,
+    searchRadius: 6,
+
+    hp: 2,
+    bulletDamage: 1,
+    deathLoudness: 26,
+    hitRadius: 0.34,
 
     stalkRadius: 7,
     creepRadius: 3.4,
@@ -285,6 +359,7 @@ export interface SpiderSnapshot {
   /** True while the body is standing on something that is not the concrete. */
   elevated: boolean;
   alive: boolean;
+  hp: number;
 }
 
 export interface SwarmStats {
@@ -299,6 +374,8 @@ export interface SwarmStats {
   clicks: number;
   steps: number;
   strikes: number;
+  /** Spiders shot dead since the swarm was spawned. */
+  kills: number;
   /** Simulation cost of the last update, milliseconds. */
   updateMs: number;
   /** Steering decisions taken in the last update — the sliced work, so this should be small. */
@@ -329,6 +406,7 @@ export interface Smashable {
 
 interface Spider {
   id: number;
+  hp: number;
   pos: THREE.Vector3;
   vel: THREE.Vector3;
   grounded: boolean;
@@ -362,6 +440,12 @@ interface Spider {
   scareZ: number;
   /** Tick offset, so the pack's steering is spread across frames. */
   phase: number;
+  /** Simulation time it last had a belief worth walking to — the clock the search runs on. */
+  ledAt: number;
+  /** Sweep angle of the search pattern, radians. */
+  sweep: number;
+  /** Simulation time it died, or Infinity. A corpse is furniture: it stops moving and stays. */
+  deadAt: number;
 }
 
 const UP_EPS = 0.05;
@@ -405,6 +489,7 @@ export class Swarm {
     clicks: 0,
     steps: 0,
     strikes: 0,
+    kills: 0,
     updateMs: 0,
     decisions: 0,
   };
@@ -508,6 +593,7 @@ export class Swarm {
     const angle = (id / Math.max(1, this.tunables.count)) * Math.PI * 2;
     return {
       id,
+      hp: this.tunables.hp,
       pos: new THREE.Vector3(x, 0.02, z),
       vel: new THREE.Vector3(),
       grounded: false,
@@ -531,6 +617,9 @@ export class Swarm {
       scareX: x,
       scareZ: z,
       phase: id,
+      ledAt: -99,
+      sweep: angle,
+      deadAt: Infinity,
     };
   }
 
@@ -553,7 +642,7 @@ export class Swarm {
     const t = this.tunables;
     const reach = event.loudness * t.hearing;
     if (reach <= 0) return;
-    const scary = event.loudness >= t.scareLoudness;
+    const loudEnough = event.loudness >= t.scareLoudness;
 
     for (const s of this.spiders) {
       if (!s.alive) continue;
@@ -580,14 +669,20 @@ export class Swarm {
       s.heard = `${event.source} ${event.loudness.toFixed(0)}m @${d.toFixed(0)}m`;
       s.heardAt = this.time;
 
-      if (scary) {
+      // Fright is loudness *at the ear*, not loudness at the source. A gunshot across the hall
+      // is the best news a blind hunter ever gets; a gunshot at your feet is a reason to run.
+      const pressure = event.loudness / Math.max(1, d);
+      if (loudEnough && pressure >= t.scarePressure) {
+        const bite = t.scareCost * Math.min(1, pressure / (t.scarePressure * 2));
         // The concept, verbatim: a shot or a falling barrel *scatters* them as well as
         // attracting them. The belief is updated above — they know where the bang was — and
-        // then they get off that spot as fast as they can, which is why shooting is a trade
-        // and not a solution.
-        const bite = (t.scareCost * Math.max(0.3, 1 - d / reach)) / 1;
+        // then they get off that spot as fast as they can, which is why shooting *at close
+        // range* is a trade and not a solution. From across the hall it is a free address.
         s.courage = Math.max(0, s.courage - bite);
-        s.scaredUntil = Math.max(s.scaredUntil, this.time + t.scareSeconds * Math.max(0.35, 1 - d / reach));
+        s.scaredUntil = Math.max(
+          s.scaredUntil,
+          this.time + t.scareSeconds * Math.min(1, pressure / (t.scarePressure * 2)),
+        );
         s.scareX = event.x;
         s.scareZ = event.z;
         this.enter(s, event.source === 'bullet-hit' && d < 1.2 ? 'panic' : 'flee');
@@ -647,8 +742,20 @@ export class Swarm {
   private decay(s: Spider, dt: number): void {
     const t = this.tunables;
     const b = s.belief;
-    b.confidence *= Math.exp(-dt / t.beliefTau);
+    /*
+     * The fix that makes them arrive.
+     *
+     * A belief is a claim about a place, and the only thing that can disprove it is going there.
+     * While the spider is still outside its own stalk ring the claim is untested, so it fades
+     * `approachPatience` times more slowly — the lead survives the walk. Once it is on the spot
+     * the ordinary tau applies and the belief goes stale in seconds, which is what keeps this
+     * "belief" and not "knowledge": standing where the bang was, hearing nothing, it loses him.
+     */
+    const toBelief = Math.hypot(s.pos.x - b.x, s.pos.z - b.z);
+    const enRoute = toBelief > t.stalkRadius;
+    b.confidence *= Math.exp(-dt / (enRoute ? t.beliefTau * t.approachPatience : t.beliefTau));
     if (b.confidence < 0.02) b.confidence = 0;
+    if (b.confidence > 0.1) s.ledAt = this.time;
     b.pinnedFor = b.confidence > 0.1 ? b.pinnedFor + dt : 0;
 
     // Arm's length: a spider that is standing on you does not need to work it out.
@@ -733,7 +840,7 @@ export class Swarm {
       this.packMode = 'hunt';
       for (const s of this.spiders) {
         if (s.state === 'commit' || s.state === 'rally') {
-          s.courage *= 0.35;
+          s.courage *= t.waveCourageKeep;
           this.enter(s, 'stalk');
         }
       }
@@ -759,11 +866,24 @@ export class Swarm {
     } else if (this.time < s.scaredUntil) {
       this.enter(s, 'flee');
     } else if (b.confidence < 0.1) {
-      this.enter(s, 'idle');
+      // Out of belief, but not necessarily out of the hunt: a spider that had a lead recently
+      // combs the place it lost it instead of standing in the dark. This is the last stretch of
+      // "выдал себя, стою — и они пришли": one noise gets them into the room, the search walks
+      // them onto him, and `FEEL_RANGE` closes it.
+      this.enter(s, this.time - s.ledAt < t.searchSeconds ? 'search' : 'idle');
     } else if (this.packMode === 'commit' && s.courage > t.readyCourage * 0.6) {
       this.enter(s, 'commit');
     } else if (this.packMode === 'rally' && s.courage > t.readyCourage * 0.6) {
       this.enter(s, 'rally');
+    } else if (
+      // The solo lunge. The pack still decides the mass attack, but a brave spider that is
+      // already inside biting distance of something it is sure of does not stand there being
+      // shot at while it waits for a quorum.
+      s.courage >= t.readyCourage &&
+      b.confidence >= t.lungeConfidence &&
+      Math.hypot(s.pos.x - b.x, s.pos.z - b.z) < t.lungeRange
+    ) {
+      this.enter(s, 'commit');
     } else if (s.courage > t.creepCourage) {
       this.enter(s, 'creep');
     } else {
@@ -788,6 +908,17 @@ export class Swarm {
           gx = s.pos.x;
           gz = s.pos.z;
         }
+        break;
+      }
+      case 'search': {
+        // A widening sweep about the point the trail went cold. Slow — it is feeling its way,
+        // and a spider that ran the search would be a spider the player can hear coming.
+        speed = t.speedCreep;
+        s.sweep += 1.1 * dt * s.orbitDir;
+        const age = this.time - b.at;
+        const r = Math.min(t.searchRadius, 1.2 + age * 0.25);
+        gx = b.x + Math.cos(s.sweep) * r;
+        gz = b.z + Math.sin(s.sweep) * r;
         break;
       }
       case 'stalk':
@@ -1050,6 +1181,9 @@ export class Swarm {
     if (s.state === 'panic') return 0.85;
     if (s.state === 'flee' || s.state === 'recoil') return 0.45;
     if (s.state === 'idle') return 0.05;
+    // A searching pack talks: it has lost him and is asking the others where he went. It is also
+    // the player's cue that his one noise is still being worked on.
+    if (s.state === 'search') return 0.3;
     // Stalking and creeping: the more it believes and the braver it is, the more it talks.
     // Deliberately low: a stalking pack has to be *almost* silent, or the rally has nothing
     // to contrast with and the player cannot read "now it starts" off the click density.
@@ -1114,17 +1248,147 @@ export class Swarm {
     this.enter(s, 'recoil');
   }
 
+  /**
+   * A bullet, as a segment. `main.ts` hands us every hitscan the rifle resolved this frame; we
+   * test it against the pack ourselves rather than making the weapon know what a spider is —
+   * the rifle stays a ray, the swarm owns its own hitboxes.
+   *
+   * The body is a sphere around the thorax: the shape file draws legs, but a leg-accurate hitbox
+   * on a knee-high, fast, unlit target would make the pack unhittable in the dark, and the
+   * human's yardstick is «пара выстрелов», not «пара выстрелов если попал в грудь».
+   *
+   * Returns the id of the spider hit, or -1. The nearest one along the segment wins, so a
+   * bullet cannot kill two spiders standing in a line — it stops in the first.
+   */
+  shoot(
+    ox: number,
+    oy: number,
+    oz: number,
+    ex: number,
+    ey: number,
+    ez: number,
+    damage = this.tunables.bulletDamage,
+  ): number {
+    const dx = ex - ox;
+    const dy = ey - oy;
+    const dz = ez - oz;
+    const len2 = dx * dx + dy * dy + dz * dz;
+    if (len2 <= 1e-6) return -1;
+    const r = this.tunables.hitRadius;
+    let best: Spider | null = null;
+    let bestT = Infinity;
+    for (const s of this.spiders) {
+      if (!s.alive) continue;
+      const cx = s.pos.x - ox;
+      const cy = s.pos.y + this.tunables.height * 0.5 - oy;
+      const cz = s.pos.z - oz;
+      // Closest approach of the segment to the body centre, clamped to the segment.
+      let u = (cx * dx + cy * dy + cz * dz) / len2;
+      u = u < 0 ? 0 : u > 1 ? 1 : u;
+      const px = cx - dx * u;
+      const py = cy - dy * u;
+      const pz = cz - dz * u;
+      if (px * px + py * py + pz * pz > r * r) continue;
+      if (u < bestT) {
+        bestT = u;
+        best = s;
+      }
+    }
+    if (best === null) return -1;
+    this.damage(best, damage);
+    return best.id;
+  }
+
+  /**
+   * Takes `amount` off a spider. A wound that does not kill throws it into panic — it is a small
+   * frightened animal, and being shot at is the loudest argument in the game for running away and
+   * wrecking whatever is in reach. A wound that kills emits one honest event on the bus at the
+   * body's position: the death is *heard* by the rest of the pack like any other noise, which is
+   * why killing one in the open pulls the others towards the corpse.
+   */
+  private damage(s: Spider, amount: number): void {
+    s.hp -= amount;
+    if (s.hp > 0) {
+      this.scare(s, this.player.x, this.player.z, 2);
+      return;
+    }
+    s.alive = false;
+    s.deadAt = this.time;
+    s.hp = 0;
+    s.vel.set(0, 0, 0);
+    s.state = 'idle';
+    s.belief.confidence = 0;
+    s.courage = 0;
+    this.stats.kills++;
+    this.bus.emit({
+      source: 'spider',
+      x: s.pos.x,
+      y: s.pos.y + 0.1,
+      z: s.pos.z,
+      loudness: this.tunables.deathLoudness,
+    });
+    this.summarise();
+  }
+
+  /** Shared body of «something terrible happened right here»: nerve gone, run, smash things. */
+  private scare(s: Spider, x: number, z: number, scale: number): void {
+    s.courage = 0;
+    s.scaredUntil = this.time + this.tunables.scareSeconds * scale;
+    s.scareX = x;
+    s.scareZ = z;
+    s.smashIn = 0;
+    this.enter(s, 'panic');
+  }
+
   /** Debug/M5 hook: hurt spider `i` — it panics, wrecks the clutter, and takes the pack with it. */
   hurt(i: number): boolean {
     const s = this.spiders[i];
     if (s === undefined || !s.alive) return false;
-    s.courage = 0;
-    s.scaredUntil = this.time + this.tunables.scareSeconds * 2;
-    s.scareX = this.player.x;
-    s.scareZ = this.player.z;
-    s.smashIn = 0;
-    this.enter(s, 'panic');
+    this.scare(s, this.player.x, this.player.z, 2);
     return true;
+  }
+
+  // ---- the swarm as matter -------------------------------------------------
+
+  /**
+   * Writes every spider's world transform into the arrays the lidar's body source hands us.
+   * Deliberately allocation-free and dumb: the lidar must not have to know what a `Spider` is,
+   * and the swarm must not have to know what a point cloud is.
+   *
+   * `moving` is 1 for a living spider and 0 for a corpse, which is the whole behaviour the human
+   * asked for: a spider you scanned crawls out of its own point cloud and the points fade, a
+   * spider you shot stays on the floor as a permanent stamp — the lidar remembers the kill.
+   *
+   * Bodies past `count` are parked far below the hall so a scan can never touch them.
+   */
+  poseInto(pos: Float32Array, quat: Float32Array, moving: Uint8Array, settleAt: Float32Array): void {
+    const cap = moving.length;
+    for (let i = 0; i < cap; i++) {
+      const s = this.spiders[i];
+      if (s === undefined) {
+        pos[i * 3] = 0;
+        pos[i * 3 + 1] = -1000;
+        pos[i * 3 + 2] = 0;
+        quat[i * 4] = 0;
+        quat[i * 4 + 1] = 0;
+        quat[i * 4 + 2] = 0;
+        quat[i * 4 + 3] = 1;
+        moving[i] = 0;
+        settleAt[i] = 0;
+        continue;
+      }
+      pos[i * 3] = s.pos.x;
+      pos[i * 3 + 1] = s.pos.y;
+      pos[i * 3 + 2] = s.pos.z;
+      // Yaw only: the body is flat and the shape is symmetric about its own vertical.
+      const half = Math.atan2(s.headZ, s.headX) * -0.5;
+      quat[i * 4] = 0;
+      quat[i * 4 + 1] = Math.sin(half);
+      quat[i * 4 + 2] = 0;
+      quat[i * 4 + 3] = Math.cos(half);
+      moving[i] = s.alive ? 1 : 0;
+      settleAt[i] = s.alive ? 0 : s.deadAt;
+    }
   }
 
   // ---- reporting ----------------------------------------------------------
@@ -1182,6 +1446,7 @@ export class Swarm {
       heardAgo: this.time - s.heardAt,
       elevated: s.pos.y > UP_EPS,
       alive: s.alive,
+      hp: s.hp,
     }));
   }
 
@@ -1192,7 +1457,7 @@ export class Swarm {
 }
 
 function emptyStateCounts(): Record<SpiderState, number> {
-  return { idle: 0, stalk: 0, creep: 0, rally: 0, commit: 0, recoil: 0, flee: 0, panic: 0 };
+  return { idle: 0, search: 0, stalk: 0, creep: 0, rally: 0, commit: 0, recoil: 0, flee: 0, panic: 0 };
 }
 
 function clamp01(v: number): number {

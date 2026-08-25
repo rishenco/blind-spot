@@ -198,6 +198,41 @@ const ring = (x, z, radius) =>
     [x, z, radius],
   );
 
+
+/**
+ * The headline scenario, in one page call: the player stands *perfectly still* — no keys, no
+ * footfalls, nothing on the bus at all — and the pack is sampled once a second. Returns the
+ * distance track, which is the actual proof: if these numbers do not fall, the milestone failed.
+ */
+const standStill = (sec, hx, hz) =>
+  page.evaluate(
+    ([s, x, z]) => {
+      const bs = window.bs;
+      const track = [];
+      for (let t = 0; t < s; t++) {
+        for (let i = 0; i < 120; i++) {
+          bs.step(1 / 120);
+          if (i % 24 === 0) bs.draw();
+        }
+        const list = bs.spiders.list().filter((sp) => sp.alive);
+        const ds = list.map((sp) => Math.hypot(sp.x - x, sp.z - z)).sort((a, b) => a - b);
+        const st = bs.spiders.stats();
+        track.push({
+          t: t + 1,
+          near: ds[0] ?? Infinity,
+          near3: ds.slice(0, 3).reduce((a, b) => a + b, 0) / Math.min(3, ds.length),
+          mean: ds.reduce((a, b) => a + b, 0) / ds.length,
+          mode: st.mode,
+          courage: st.meanCourage,
+          strikes: st.strikes,
+        });
+      }
+      bs.draw();
+      return track;
+    },
+    [sec, hx, hz],
+  );
+
 /** The lit overhead "as it really is" camera, pinned so two frames are comparable. */
 async function truthCam(x, z, height = 34) {
   await call('lights', true);
@@ -237,9 +272,111 @@ notes.push(
 );
 
 // ===========================================================================
-// 1. The pack circles.
+// 0. «Выдал себя, стою N секунд — и они пришли.»
+//
+// The milestone's headline claim, and the one the human said was broken: he fired, which is the
+// loudest event the game has, and the pack stayed «где-то далеко». So: fourteen spiders on a
+// 20 m ring, one round fired, and then the player does *nothing at all* — no keys, no steps, no
+// further noise — for half a minute. The only thing the pack ever gets is that single bang.
+//
+// The numbers under the frames are the proof, not the pictures.
 // ===========================================================================
 const HOME = { x: 2, z: 2 };
+await call('spiders.spawn', 14);
+await call('pose', HOME.x, HOME.z, 90);
+const RING = 20;
+await ring(HOME.x, HOME.z, RING);
+await advance(0.5, 4);
+const beforeShot = await spiderList();
+const startDists = beforeShot
+  .map((s) => Math.hypot(s.x - HOME.x, s.z - HOME.z))
+  .sort((a, b) => a - b);
+
+await call('aim', 90, 0);
+await call('shoot');
+await truthCam(HOME.x, HOME.z, 40);
+await advance(0.02, 1);
+await shot(
+  '00a-gave-myself-away.png',
+  `t=0. One round, then the player freezes. Fourteen spiders on a ${RING} m ring, nearest ${startDists[0].toFixed(1)} m, furthest ${startDists[13].toFixed(1)} m. The first thing a bang does is scare them — blue-lilac FLEE, goal lines pointing outwards — but every belief sphere has just snapped onto the muzzle`,
+);
+
+const trackA = await standStill(10, HOME.x, HOME.z);
+await truthCam(HOME.x, HOME.z, 40);
+await advance(0.02, 1);
+await shot(
+  '00b-they-are-coming.png',
+  `t=10 s of standing still. The fright has worn off and the leads have not: nearest ${trackA[9].near.toFixed(1)} m, mean ${trackA[9].mean.toFixed(1)} m, pack mode ${trackA[9].mode}. Every goal line points inwards at the same spot. Nobody has heard anything since the shot — they are walking to a memory`,
+);
+
+const trackB = await standStill(20, HOME.x, HOME.z);
+// trackB counts its own seconds from zero; the track is one continuous stand-still, so shift it.
+const track = [...trackA, ...trackB.map((r) => ({ ...r, t: r.t + trackA.length }))];
+await truthCam(HOME.x, HOME.z, 26);
+await advance(0.02, 1);
+await shot(
+  '00c-they-came.png',
+  `t=30 s. Same camera, tighter. Nearest ${track[track.length - 1].near.toFixed(1)} m, mean of the closest three ${track[track.length - 1].near3.toFixed(1)} m, ${track[track.length - 1].strikes} bites landed. He never moved and never made another sound after the shot`,
+);
+
+console.log('[spiders] stand-still track — distance to the player, metres:');
+console.log(`[spiders]   t=0   near ${startDists[0].toFixed(1)}  mean ${(startDists.reduce((a, b) => a + b, 0) / startDists.length).toFixed(1)}`);
+for (const r of track) {
+  if (r.t % 2 !== 0 && r.t !== 1) continue;
+  console.log(
+    `[spiders]   t=${String(r.t).padStart(2)}s near ${r.near.toFixed(1).padStart(5)}  near3 ${r.near3.toFixed(1).padStart(5)}` +
+      `  mean ${r.mean.toFixed(1).padStart(5)}  ${r.mode.padEnd(6)} courage ${r.courage.toFixed(2)} strikes ${r.strikes}`,
+  );
+}
+notes.push(
+  `stand-still track (one shot, then nothing): near ` +
+    [0, 4, 9, 14, 19, 24, 29].map((i) => (i === 0 ? startDists[0] : track[i].near).toFixed(1)).join(' → ') +
+    ` m at t = 0, 5, 10, 15, 20, 25, 30 s.`,
+);
+
+const last = track[track.length - 1];
+check(
+  'the pack closes on a player who only gave himself away once',
+  last.near3 < startDists[2] * 0.4,
+  `nearest three were ${((startDists[0] + startDists[1] + startDists[2]) / 3).toFixed(1)} m at the shot, ${last.near3.toFixed(1)} m thirty seconds later`,
+);
+check(
+  'and it gets all the way in, not to some standoff radius',
+  Math.min(...track.map((r) => r.near)) < 2.5,
+  `closest approach ${Math.min(...track.map((r) => r.near)).toFixed(1)} m, ${last.strikes} bites`,
+);
+
+await playerCam(90, 0);
+await advance(0.02, 1);
+await shot(
+  '00d-they-came-player.png',
+  'the same thirty seconds from inside his head: he fired once and then heard them arrive. Every blob is a click or a footfall that really happened at that point — the pack talking itself into range around a man who is standing perfectly still',
+);
+
+// The control, and the reason this is not just "the aggression was turned up": identical setup,
+// identical thirty seconds, no shot fired. Nothing is ever heard, so nothing ever comes.
+await call('spiders.spawn', 14);
+await call('pose', HOME.x, HOME.z, 90);
+await ring(HOME.x, HOME.z, RING);
+await advance(0.5, 4);
+// Strikes are a lifetime counter for the whole run, so the control is judged on its own delta.
+const strikesAtControl = (await spiderStats()).strikes;
+const silent = await standStill(30, HOME.x, HOME.z);
+await truthCam(HOME.x, HOME.z, 40);
+await advance(0.02, 1);
+await shot(
+  '00e-silent-control.png',
+  `the control: the same ring, the same thirty seconds, but the player never fires and never moves. Nearest ${silent[29].near.toFixed(1)} m, mean ${silent[29].mean.toFixed(1)} m, courage ${silent[29].courage.toFixed(2)}, ${silent[29].strikes - strikesAtControl} bites — they wander where they were. The pack is not attracted to the player, it is attracted to noise`,
+);
+check(
+  'silence is safe — the fix is hearing, not aggression',
+  silent[29].near3 > 8 && silent[29].strikes === strikesAtControl,
+  `no shot fired: nearest three ${silent[29].near3.toFixed(1)} m after 30 s, courage ${silent[29].courage.toFixed(2)}, ${silent[29].strikes - strikesAtControl} bites`,
+);
+
+// ===========================================================================
+// 1. The pack circles.
+// ===========================================================================
 await call('pose', HOME.x, HOME.z, 90);
 await call('spiders.spawn', 14);
 // 8 m: a walking footfall carries 9 m, so the whole ring is inside earshot and the pack
@@ -482,6 +619,238 @@ if (rack !== null) {
     `${climbStats.elevated} of 14 off the concrete at the moment of the shot`,
   );
 }
+
+// ===========================================================================
+// 5. Two rounds kill one.
+//
+// «Пауков должно быть можно убить, пара выстрелов думаю.» The rifle is a plain hitscan and knows
+// nothing about spiders; the swarm tests the bullet segment against its own bodies. So the proof
+// has to be a real shot from the real gun at a real spider, which means the scenario first has to
+// work out how to point the player at a thing — hence the two calibration rounds.
+// ===========================================================================
+await call('spiders.spawn', 14);
+await call('pose', HOME.x, HOME.z, 0);
+const aimCal = await (async () => {
+  const a = await call('shoot');
+  await call('aim', 20, 0);
+  const b = await call('shoot');
+  await call('aim', 0, 10);
+  const c = await call('shoot');
+  const ang = (t) => Math.atan2(t.ez - t.oz, t.ex - t.ox);
+  let d = ang(b) - ang(a);
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return {
+    base: ang(a),
+    yawSign: Math.sign(d) || 1,
+    pitchSign: Math.sign(c.ey - c.oy) || 1,
+  };
+})();
+/** Yaw/pitch in the game's own degrees that puts the muzzle on a world point. */
+const aimAt = (eye, x, y, z) => {
+  let d = Math.atan2(z - eye[2], x - eye[0]) - aimCal.base;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  const flat = Math.hypot(x - eye[0], z - eye[2]);
+  return {
+    yaw: (aimCal.yawSign * d * 180) / Math.PI,
+    pitch: (aimCal.pitchSign * Math.atan2(y - eye[1], flat) * 180) / Math.PI,
+  };
+};
+
+// A fresh pack, everyone parked in a far corner, one volunteer three metres in front.
+await call('spiders.spawn', 14);
+await page.evaluate(() => {
+  for (let i = 1; i < 14; i++) window.bs.spiders.place(i, -30 + (i % 5), -18 + Math.floor(i / 5));
+});
+const eye = (await page.evaluate(() => window.bs.stats().eye));
+await page.evaluate(
+  ([x, z, b]) => window.bs.spiders.place(0, x + Math.cos(b) * 3, z + Math.sin(b) * 3),
+  [HOME.x, HOME.z, aimCal.base],
+);
+await advance(0.2, 2);
+const victim = (await spiderList())[0];
+const look = aimAt(eye, victim.x, victim.y + 0.18, victim.z);
+await call('aim', look.yaw, look.pitch);
+const killsBefore = (await spiderStats()).kills;
+await call('shoot');
+await advance(0.05, 1);
+const wounded = (await spiderList())[0];
+await call('lights', true);
+await call('spiders.overlay', true);
+await call('hud', true);
+await call('view', 'top');
+await call('topFocus', victim.x, victim.z);
+await call('topHeight', 7);
+await advance(0.02, 1);
+await shot(
+  '11-one-hit-panic.png',
+  `one round in it. The label over its head says hp 1 and PANIC: a spider that survives being shot does not keep circling, it bolts and wrecks whatever it can reach, which is loud — a wounded spider lights up half the hall for you`,
+);
+check(
+  'a hit registers and hurts',
+  wounded.hp === 1,
+  `spider #0 hp ${wounded.hp} after one round (state ${wounded.state})`,
+);
+await call('shoot');
+await advance(0.05, 1);
+const afterKill = await spiderStats();
+await advance(0.02, 1);
+await shot(
+  '12-two-shots-dead.png',
+  `and the second round kills it. The corpse stays where it fell — it is still matter, so the lidar can still find it — and its death went out on the bus as a real noise the rest of the pack heard`,
+);
+check(
+  'two rounds kill a spider',
+  afterKill.kills === killsBefore + 1 && afterKill.count === 13,
+  `${afterKill.kills - killsBefore} kill from two rounds, ${afterKill.count} spiders left alive`,
+);
+
+// ===========================================================================
+// 6. The lidar sees them.
+//
+// «Пауков должно быть можно сканить лидаром аналогично мелким объектам.» Not a spider renderer:
+// they are bodies in the same dynamic paint pass as the clutter, with a point cloud sampled by
+// the same `sampleShape`. The proof is a difference measurement — the same ping into the same
+// corner of the same hall, with and without spiders standing in it.
+// ===========================================================================
+await call('spiders.spawn', 14);
+await call('pose', HOME.x, HOME.z, 0);
+await page.evaluate(
+  ([x, z, b]) => {
+    const bs = window.bs;
+    for (let i = 0; i < 14; i++) {
+      if (i < 5) {
+        const off = (i - 2) * 1.1;
+        bs.spiders.place(i, x + Math.cos(b) * (4.5 + (i % 2)) - Math.sin(b) * off, z + Math.sin(b) * (4.5 + (i % 2)) + Math.cos(b) * off);
+      } else {
+        bs.spiders.place(i, -30 + (i % 5), -18 + Math.floor(i / 5));
+      }
+    }
+  },
+  [HOME.x, HOME.z, aimCal.base],
+);
+// Frozen where they stand: this measures the scan, not the walk.
+await call('spiders.tune', { speedIdle: 0, speedStalk: 0, speedCreep: 0, speedCommit: 0, speedFlee: 0 });
+await advance(0.2, 2);
+await playerCam((aimCal.yawSign * 0 * 180) / Math.PI, -4);
+await call('aim', 0, -4);
+await call('clear');
+// Wait for the hall itself to go quiet first: a crate still rocking from the two rounds of
+// section 5 is a real noise the pack is entitled to hear, and it would be dishonest to charge
+// that to the lidar. Once nothing has hit the bus for half a second, the only thing left to
+// blame for a change in belief is the ping.
+const quiet = await page.evaluate(async () => {
+  const bs = window.bs;
+  // Spiders talking to each other is not the hall being noisy, and it is not the lidar either,
+  // so it does not count here.
+  const world = () =>
+    Object.entries(bs.stats().sound.bySource)
+      .filter(([k]) => k !== 'spider')
+      .reduce((a, [, v]) => a + v, 0);
+  let last = world();
+  for (let s = 0; s < 40; s++) {
+    for (let i = 0; i < 60; i++) bs.step(1 / 120);
+    const now = world();
+    if (now === last) return { waited: s * 0.5, emitted: now };
+    last = now;
+  }
+  return { waited: 20, emitted: last };
+});
+const beliefOf = () =>
+  page.evaluate(() => ({
+    belief: window.bs.spiders.list().reduce((a, s) => Math.max(a, s.belief.confidence), 0),
+    emitted: Object.entries(window.bs.stats().sound.bySource)
+      .filter(([k]) => k !== 'spider')
+      .reduce((a, [, v]) => a + v, 0),
+  }));
+const before = await beliefOf();
+const heardBefore = before.belief;
+await call('fire');
+await advance(1.5, 2);
+const after = await beliefOf();
+const heardAfter = after.belief;
+const withSpiders = await page.evaluate(() => window.bs.stats().dyn.revealed);
+const lidarShot = await shot(
+  '13-lidar-sees-them.png',
+  'one lidar ping down the aisle, nothing else on screen. The five knots of points standing clear of the clutter are spiders: same point cloud mechanism, same occlusion, same age fade as a crate — they are matter, so they scan. The lidar is silent, so scanning them does not tell them anything',
+);
+// Same ping, same everything, spiders taken out of the room.
+await page.evaluate(() => {
+  for (let i = 0; i < 14; i++) window.bs.spiders.place(i, -30 + (i % 5), -18 + Math.floor(i / 5));
+});
+await advance(0.2, 2);
+await call('clear');
+await call('fire');
+await advance(1.5, 2);
+const withoutSpiders = await page.evaluate(() => window.bs.stats().dyn.revealed);
+await shot(
+  '14-lidar-without-them.png',
+  'the control: identical ping, identical aisle, spiders moved out of the hall. The difference between this frame and the last one is the pack',
+);
+check(
+  'the lidar paints spiders like it paints clutter',
+  withSpiders > withoutSpiders + 200,
+  `${withSpiders} points revealed with five spiders in the aisle vs ${withoutSpiders} without — ${withSpiders - withoutSpiders} of them are spider`,
+);
+check(
+  'and scanning them tells them nothing',
+  heardAfter <= heardBefore + 1e-6,
+  `hall quiet after ${quiet.waited.toFixed(1)} s; strongest belief in the pack ${heardBefore.toFixed(3)} before the ping, ` +
+    `${heardAfter.toFixed(3)} after, ${after.emitted - before.emitted} world sounds in between — the lidar is not on the sound bus`,
+);
+await call('spiders.tune', { speedIdle: 1.0, speedStalk: 2.4, speedCreep: 1.2, speedCommit: 5.2, speedFlee: 6.0 });
+
+// ===========================================================================
+// 7. The overlay, rebuilt.
+// ===========================================================================
+await call('spiders.spawn', 14);
+await call('pose', HOME.x, HOME.z, 90);
+await ring(HOME.x, HOME.z, 7);
+await advance(0.4, 4);
+await paceUntilHunting(6, 3, 20);
+// The pack is hunting; this puts the half of it that is closing from the front into the frame,
+// because a label you cannot see proves nothing. Nobody's state, belief or goal is touched.
+await page.evaluate(
+  ([x, z, dir]) => {
+    for (let i = 0; i < 6; i++) {
+      const a = dir + (i - 2.5) * 0.22;
+      const d = 4.5 + (i % 3) * 1.6;
+      window.bs.spiders.place(i, x + Math.cos(a) * d, z + Math.sin(a) * d);
+    }
+  },
+  [HOME.x, HOME.z, aimCal.base + aimCal.yawSign * (Math.PI / 2)],
+);
+await advance(0.3, 3);
+await call('lights', false);
+await call('hud', true);
+await call('spiders.overlay', true);
+await call('view', 'third');
+await advance(0.02, 1);
+await shot(
+  '15-overlay.png',
+  'the debug overlay as it is now: each spider carries its own card — id, state and how long it has held it, which way it is walking and how far, its nerve, how far its belief is and how much it trusts it, and the last thing it heard. The table is a 300 px card in the corner that names its own key (SPIDERS [P]) instead of the half-screen block of text it used to be',
+);
+const panel = await page.evaluate(() => {
+  const el = document.querySelector('.bs-spiders');
+  const r = el.getBoundingClientRect();
+  const labels = [...document.querySelectorAll('.bs-sp-label')].filter((n) => n.style.display !== 'none');
+  return {
+    frac: (r.width * r.height) / (window.innerWidth * window.innerHeight),
+    labels: labels.length,
+    sample: labels[0]?.textContent ?? '',
+  };
+});
+check(
+  'the panel does not cover the game any more',
+  panel.frac < 0.09,
+  `${(panel.frac * 100).toFixed(1)}% of the screen (it was up to 46% wide before)`,
+);
+check(
+  'and the state is written in the world over each spider',
+  panel.labels >= 4,
+  `${panel.labels} world labels, e.g. "${panel.sample.replace(/\s+/g, ' ').slice(0, 60)}"`,
+);
 
 // ===========================================================================
 // 5. What it costs.
