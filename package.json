@@ -4,11 +4,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && node tools/build.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "shots": "npm run build && node tools/shoot.mjs",
-    "quiet": "npm run build && node tools/quiet.mjs"
+    "quiet": "npm run build && node tools/quiet.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "batch": "tsx src/sim/cli/batch.ts",
+    "shots:handball": "npm run build && node tools/handball-shots.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",
@@ -16,8 +20,10 @@
     "three": "^0.185.1"
   },
   "devDependencies": {
+    "@types/node": "^26.3.0",
     "@types/three": "^0.185.4",
     "playwright": "^1.62.1",
+    "tsx": "^4.23.12",
     "typescript": "^5.9.2",
     "vite": "^7.1.5",
     "vite-plugin-singlefile": "^2.3.3",

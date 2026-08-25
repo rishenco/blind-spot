@@ -1,8 +1,13 @@
 import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 
-// Single-file build: the keyframe generator opens dist/index.html over file://, and a
-// build split across module chunks cannot be loaded that way.
+// Single-file build: the keyframe generators open dist/*.html over file://, and a build split
+// across module chunks cannot be loaded that way.
+//
+// The project has two pages — index.html (the inherited 3D prototype) and handball.html (the 2D
+// playground) — and vite-plugin-singlefile inlines everything into one document, which rollup
+// only allows for a single input. So they are built one after the other by tools/build.mjs
+// rather than as two inputs of one build.
 const pollEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } })
   .process?.env?.VITE_POLL;
 

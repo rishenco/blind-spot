@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BLIND HANDBALL — debug playground</title>
+    <style>
+      :root { color-scheme: dark; --bg: #05070a; --panel: #0b1017; --line: #1b2735; --ink: #cfe2f2; --dim: #7e93a7; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
+      #app { display: grid; grid-template-rows: auto 1fr auto auto; height: 100%; }
+      header { display: flex; gap: 16px; align-items: center; padding: 6px 12px;
+        background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+      header .big { font-size: 16px; letter-spacing: 0.08em; }
+      button, select { background: #121a24; color: var(--ink); border: 1px solid var(--line);
+        border-radius: 3px; padding: 3px 8px; font: inherit; cursor: pointer; }
+      button:hover { border-color: #35526e; }
+      button.on { background: #1d3348; border-color: #4d80b0; }
+      main { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 6px; min-height: 0; }
+      main.solo-truth { grid-template-columns: 1fr 0; }
+      main.solo-eyes { grid-template-columns: 0 1fr; }
+      .pane { position: relative; min-width: 0; min-height: 0; border: 1px solid var(--line);
+        background: #05070a; overflow: hidden; }
+      .pane h2 { position: absolute; top: 6px; left: 8px; margin: 0; font-size: 11px;
+        font-weight: 400; letter-spacing: 0.14em; color: var(--dim); text-transform: uppercase; z-index: 2; }
+      .pane canvas { display: block; width: 100%; height: 100%; }
+      main.solo-truth .pane:last-child, main.solo-eyes .pane:first-child { display: none; }
+      #timeline { display: flex; align-items: center; gap: 10px; padding: 4px 12px;
+        background: var(--panel); border-top: 1px solid var(--line); }
+      #scrub { flex: 1; }
+      #events { max-height: 74px; overflow: auto; width: 320px; border-left: 1px solid var(--line); padding-left: 8px; }
+      #events div { cursor: pointer; white-space: nowrap; color: var(--dim); }
+      #events div:hover { color: #fff; }
+      #panels { display: flex; gap: 6px; padding: 6px 12px 8px; background: var(--panel);
+        border-top: 1px solid var(--line); overflow-x: auto; }
+      .card { border: 1px solid var(--line); border-radius: 3px; padding: 6px 8px; min-width: 190px; }
+      .card b { color: #fff; }
+      .card .k { color: var(--dim); }
+      .lil-gui { --background-color: #0b1017; --widget-color: #16202c; z-index: 10; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <span class="big" id="score">0 : 0</span>
+        <span id="clock" class="k"></span>
+        <span id="tickinfo" class="k"></span>
+        <button id="playpause">pause</button>
+        <button id="stepone">step ▸</button>
+        <select id="speed">
+          <option value="0.1">0.1×</option>
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+        <button id="live">live</button>
+        <span>eyes:</span><select id="eyes"></select>
+        <button id="layout">both views</button>
+        <button id="save">save match</button>
+        <span id="fps" class="k"></span>
+      </header>
+      <main id="views">
+        <section class="pane"><h2>truth — top-down</h2><canvas id="truth"></canvas></section>
+        <section class="pane"><h2 id="eyes-title">as P0 hears</h2><canvas id="eyes-canvas"></canvas></section>
+      </main>
+      <div id="timeline">
+        <input id="scrub" type="range" min="0" max="1" value="0" step="1" />
+        <span id="scrubinfo" class="k"></span>
+        <div id="events"></div>
+      </div>
+      <section id="panels"></section>
+    </div>
+    <script type="module" src="/src/sim-ui/main.ts"></script>
+  </body>
+</html>

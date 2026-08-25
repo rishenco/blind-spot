@@ -19,6 +19,14 @@ export interface FieldConfig {
   creaseRadius: number;
   /** How much speed a ball keeps when it bounces off a wall. */
   wallRestitution: number;
+  /**
+   * A loose ball that lingers this long inside a crease is handed to the defending team.
+   *
+   * Not in the concept, and unavoidable: nobody may enter a crease, so a ball that stops in
+   * there is a ball nobody can ever reach — the match simply stops. This is the goalkeeper
+   * throw that the concept's "вратаря как роли нет" would otherwise leave a hole where.
+   */
+  creaseBallTimeoutSec: number;
 }
 
 export interface MatchConfig {
@@ -26,6 +34,17 @@ export interface MatchConfig {
   durationSec: number;
   /** Frozen seconds after a goal before play resumes. */
   restartDelaySec: number;
+  /**
+   * Passivity rule: a carrier that holds the ball longer than this loses it to the nearest
+   * opponent. 0 turns it off, which is the concept as written.
+   *
+   * It is off by default because it is an invention, but it exists because there is currently
+   * no way to take the ball off a body — no contact, no tackle — so a strategy that simply
+   * stands still holding the ball cannot be punished. `striker` versus `statue` is decided by
+   * one goal and then stands still for 170 seconds, which makes that pairing useless as a
+   * measurement. Turn it on when you want a benchmark rather than a faithful match.
+   */
+  carryTimeoutSec: number;
 }
 
 export interface PlayerConfig {
@@ -74,6 +93,18 @@ export interface CatchConfig {
   windowSec: number;
   /** A body cannot touch the ball again for this long after releasing or fumbling it. */
   cooldownSec: number;
+  /**
+   * Below this relative speed the ball is not "in flight" and is simply picked up: the timing
+   * window applies to catching a *pass*, not to bending down for a ball at your feet. Without
+   * this, the concept's numbers make a resting ball uncatchable — the ±0.18 s window around
+   * closest approach is narrower than the distance it takes to walk into the ball at all.
+   */
+  slowBallSpeed: number;
+  /**
+   * A body only fumbles a ball that hits it hard enough to be heard as a mistake. A ball
+   * trickling past your ankles is not a 20 m event.
+   */
+  contactFumbleMinSpeed: number;
   /** Speed the ball keeps after a fumble. */
   fumbleSpeed: number;
   /** Random angular scatter of a fumble, radians (deterministic — from the sim's own stream). */
@@ -101,9 +132,20 @@ export interface PingConfig {
   cooldownSec: number;
   /** Snapshot radius, metres. */
   range: number;
+  /**
+   * Speed of the revealing front, m/s. A readable speed, not a physical one: a point lights up
+   * at `t + distance/waveSpeed`. `Infinity` turns the ping back into an instant snapshot.
+   */
+  waveSpeed: number;
+  /** Aperture in degrees, centred on the pinger's aim. 360 = the concept's omni ping. */
+  coneDeg: number;
   /** Wall geometry is returned as points sampled this far apart. */
   wallSampleStep: number;
-  /** How long a return stays legible on screen — a renderer/belief hint, not physics. */
+  /**
+   * How long a return stays legible — a renderer/belief hint, not physics. Unlike the previous
+   * prototype, nothing accumulates into a permanent map: on an empty rectangle a map that never
+   * dies would delete the game. This is a melting snapshot, and it melts to nothing.
+   */
   lifeSec: number;
 }
 
@@ -130,8 +172,20 @@ export interface PerceptionConfig {
   truthLeak: number;
   /** Team channel: teammates share what they heard (already noisy, tagged `relayed`). */
   teamShare: boolean;
+  /**
+   * Kinds heard with no localisation error at all. The concept says a ping is heard by the
+   * whole pitch *with the pinger's exact position* — that is the price that makes the ping a
+   * real decision, so it is spelled out here rather than hidden in the perception code.
+   */
+  exactKinds: SoundKind[];
   /** Sound marks are drawn/decayed over this window — a renderer hint, kept here to stay tunable. */
   markerLifeSec: number;
+  /**
+   * Temporal correlation of a continuous emitter's localisation error, per tick, 0..1.
+   * 0 = fresh independent noise every tick (which a listener could average away for free),
+   * 1 = a constant offset that never changes. 0.97 at 60 Hz is an error that persists ~0.5 s.
+   */
+  emitterNoiseSmoothing: number;
 }
 
 /**
@@ -194,11 +248,13 @@ export function defaultConfig(): SimConfig {
       goalWidth: 3,
       creaseRadius: 4,
       wallRestitution: 0.75,
+      creaseBallTimeoutSec: 1,
     },
     match: {
       goalsToWin: 5,
       durationSec: 180,
       restartDelaySec: 1.2,
+      carryTimeoutSec: 0,
     },
     player: {
       radius: 0.35,
@@ -226,6 +282,8 @@ export function defaultConfig(): SimConfig {
       radius: 1.2,
       windowSec: 0.18,
       cooldownSec: 0.35,
+      slowBallSpeed: 2.5,
+      contactFumbleMinSpeed: 3,
       fumbleSpeed: 4,
       fumbleScatter: 0.6,
     },
@@ -245,6 +303,8 @@ export function defaultConfig(): SimConfig {
     ping: {
       cooldownSec: 1.5,
       range: 14,
+      waveSpeed: 42,
+      coneDeg: 360,
       wallSampleStep: 0.5,
       lifeSec: 1,
     },
@@ -257,7 +317,9 @@ export function defaultConfig(): SimConfig {
       reactionLatencySec: 0,
       truthLeak: 0,
       teamShare: false,
+      exactKinds: ['sonar', 'whistle'],
       markerLifeSec: 2.5,
+      emitterNoiseSmoothing: 0.97,
     },
     ai: {
       beliefDecay: 0.5,
@@ -270,6 +332,13 @@ export function defaultConfig(): SimConfig {
 export const PRESETS: Record<string, () => SimConfig> = {
   /** The concept as written. */
   default: defaultConfig,
+
+  /** The same, with the ping collapsed to an instant snapshot — the A/B of the wavefront. */
+  'instant-ping': () => {
+    const c = defaultConfig();
+    c.ping.waveSpeed = Infinity;
+    return c;
+  },
 
   /** 1v1, for reading a mechanic without traffic. */
   duel: () => {
@@ -292,6 +361,7 @@ export const PRESETS: Record<string, () => SimConfig> = {
     c.perception.anonymousSources = false;
     c.perception.truthLeak = 1;
     c.perception.hearingScale = 10;
+    c.perception.emitterNoiseSmoothing = 0;
     return c;
   },
 
@@ -308,6 +378,7 @@ export const PRESETS: Record<string, () => SimConfig> = {
     const c = defaultConfig();
     c.match.durationSec = 60;
     c.match.goalsToWin = 3;
+    c.match.carryTimeoutSec = 8;
     return c;
   },
 };
@@ -331,7 +402,7 @@ export function cloneConfig(c: SimConfig): SimConfig {
     dive: { ...c.dive },
     ping: { ...c.ping },
     loudness: { ...c.loudness },
-    perception: { ...c.perception },
+    perception: { ...c.perception, exactKinds: [...c.perception.exactKinds] },
     ai: { ...c.ai },
   };
 }

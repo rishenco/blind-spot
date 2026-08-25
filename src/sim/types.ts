@@ -43,6 +43,14 @@ export type SoundKind =
   | 'whistle';
 
 /**
+ * `'ball-hum'` is the odd one out: it is NOT emitted as a discrete event. The ball is a
+ * continuous emitter (see `ContinuousEmitter`) — it sings without pause, so turning it into 60
+ * marks a second would flood every consumer and would misdescribe what an observer actually
+ * gets, which is a running estimate of one position rather than a stream of separate facts. The
+ * row stays in the loudness table because the emitter's audible radius is read from it.
+ */
+
+/**
  * A sound as the world made it: exact position, exact source.
  *
  * `intensity` is the audible radius in metres — the concept's loudness table is a table of
@@ -84,6 +92,40 @@ export interface ObservedEvent {
   relayed: boolean;
 }
 
+/**
+ * A source that never stops sounding. The ball is the only one in v1.
+ *
+ * An observer does not receive marks from it; it receives a continuously updated, noisy
+ * estimate of where it is (`ObservedEmitter`). That is what "мяч слышен всегда" really means:
+ * you always know roughly where the ball is, and never exactly.
+ */
+export interface ContinuousEmitter {
+  id: EntityId;
+  kind: 'ball';
+  pos: Vec2;
+  vel: Vec2;
+  /** Audible radius in metres. */
+  intensity: number;
+}
+
+/**
+ * One continuous emitter as one observer hears it, this tick.
+ *
+ * The error is a *smoothed* random walk, not fresh noise every tick: independent per-tick noise
+ * would let anyone average 60 samples a second and recover the exact position for free, which
+ * would quietly delete the game's uncertainty. `SimConfig.perception.emitterNoiseSmoothing`
+ * controls how long an error persists.
+ */
+export interface ObservedEmitter {
+  id: EntityId | null;
+  kind: 'ball';
+  /** Noisy estimate of the emitter's position. */
+  pos: Vec2;
+  sigma: number;
+  /** Distance from the observer to the reported position. */
+  distance: number;
+}
+
 export type SonarHitKind = 'wall' | 'crease' | 'player' | 'ball';
 
 /** One point returned by an active ping. Geometry and bodies come back in the same list. */
@@ -96,12 +138,30 @@ export interface SonarHit {
   vel: Vec2 | null;
 }
 
-/** The snapshot an own ping brings back. Lives ~1 s on screen; nothing keeps it fresh. */
+/**
+ * What an own ping sends back, one tick's worth.
+ *
+ * A ping is a travelling front, not an instant photograph (inherited from the previous
+ * prototype's lidar, and better for this game): a point lights up at `t + distance/waveSpeed`,
+ * so near geometry resolves before far geometry and a body can physically outrun the front.
+ * `SimConfig.ping.waveSpeed = Infinity` collapses this back to an instant snapshot — both
+ * variants are shot as keyframes so the look can be chosen by eye.
+ *
+ * `hits` are only the points that lit up *this* tick. Consumers accumulate and fade them
+ * themselves; nothing in the simulation keeps a ping alive.
+ */
 export interface SonarReturn {
+  /** Monotonic id of the ping this belongs to — successive frames share it. */
+  pingId: number;
+  /** Sim time at which the ping was fired. */
   t: number;
   origin: Vec2;
   range: number;
+  /** How far the front has travelled by the end of this tick. */
+  waveRadius: number;
   hits: SonarHit[];
+  /** True on the tick the front reaches full range: nothing more will come from this ping. */
+  complete: boolean;
 }
 
 /** Proprioception: what a body knows about itself without hearing anything. Always honest. */
@@ -157,6 +217,8 @@ export interface PerceptionFrame {
   match: MatchInfo;
   field: FieldInfo;
   events: readonly ObservedEvent[];
+  /** Continuous sources audible right now — in v1, the ball and nothing else. */
+  emitters: readonly ObservedEmitter[];
   sonar: readonly SonarReturn[];
   /** Team-mates' ids (excluding self) — knowing who is on your team is not intel about where. */
   teammates: readonly EntityId[];
