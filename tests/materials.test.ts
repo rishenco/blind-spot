@@ -199,6 +199,55 @@ describe('SoundBus.emit applies the voice, once, to both radii (§3.9)', () => {
   });
 });
 
+describe('the event carries the material forward, not only its effect', () => {
+  /**
+   * Why the field exists at all. A radius answers "how far", and that is everything a listener
+   * who only wants reach ever needs — the multiplier is already baked in by the time the event
+   * leaves `emit`. But §3.9's claim is about *timbre*: "a change of timbre mid-stride is a change
+   * of surface" is a promise to the ear, and no amount of metres can carry it. An audio
+   * subscriber has to know it was steel to make the sound of steel, so the event says so.
+   */
+  it('hands a contact class its material back, for every material', () => {
+    for (const mat of [MAT_CONCRETE, MAT_METAL, MAT_STONE, MAT_DUST]) {
+      const e = new SoundBus().emit({ class: 'walk-step', x: 0, y: 0, z: 0, mat });
+      expect(e.mat, MATERIAL_NAMES[mat]).toBe(mat);
+    }
+  });
+
+  it('reads an unstated material as concrete, the same default the radii used', () => {
+    // The two must not disagree: an event scaled by concrete that reports no material would tell
+    // an audio subscriber to pick a voice the radii were never computed for.
+    const e = new SoundBus().emit({ class: 'landing', x: 0, y: 0, z: 0 });
+    expect(e.mat).toBe(MAT_CONCRETE);
+    expect(e.paintRadius).toBe(SOUND_CLASSES.landing.paintRadius);
+  });
+
+  it('reports null for a ping, which is not the same answer as concrete', () => {
+    // `null` rather than 0, because a ping did not strike concrete — it struck nothing. A
+    // subscriber that reads 0 here would give the sonar pulse a footfall's voice.
+    for (const cls of ['q-ping', 'e-ping'] as const) {
+      const e = new SoundBus().emit({ class: cls, x: 0, y: 0, z: 0, dirX: 1, dirY: 0, dirZ: 0 });
+      expect(e.mat, cls).toBeNull();
+      expect(e.mat, cls).not.toBe(MAT_CONCRETE);
+    }
+  });
+
+  it('agrees with the radii it shipped with: the material named is the material applied', () => {
+    // The invariant an audio subscriber depends on — what it is told to *sound* like and what
+    // the world was told to *learn* from are one reading of one sound (law 2, "one bus, two
+    // senses"). Checked over every class that strikes something, so a new contact class cannot
+    // quietly ship a material the radii did not use.
+    const walk = SOUND_CLASSES['walk-step'];
+    for (const mat of [MAT_CONCRETE, MAT_METAL, MAT_STONE, MAT_DUST]) {
+      const e = new SoundBus().emit({ class: 'walk-step', x: 0, y: 0, z: 0, mat });
+      expect(e.paintRadius / walk.paintRadius, MATERIAL_NAMES[mat]).toBeCloseTo(
+        materialLoudness(e.mat ?? MAT_CONCRETE),
+        9,
+      );
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 
 const HZ = 120;

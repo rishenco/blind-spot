@@ -22,6 +22,7 @@ import {
   type SoundEvent,
   type SoundSource,
 } from '../src/paint/soundEvents';
+import { MAT_CONCRETE } from '../src/paint/materials';
 
 describe('the class table', () => {
   it('every class names a wave group that WAVE_SPEEDS defines', () => {
@@ -151,6 +152,10 @@ describe('SoundBus.emit', () => {
       source: 'world',
       emitter: NO_EMITTER,
       x: 1, y: 2, z: 3,
+      // A contact class that names no surface struck the ordinary one — the same default the
+      // radii above were scaled by, so what the event says it hit and what it was priced as are
+      // never two different answers.
+      mat: MAT_CONCRETE,
       paintRadius: 4,
       hearingRadius: 11,
       intensity: 0.9,

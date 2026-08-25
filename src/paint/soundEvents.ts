@@ -251,6 +251,22 @@ export interface SoundEvent {
   readonly x: number;
   readonly y: number;
   readonly z: number;
+  /**
+   * What was struck — an index into `paint/materials` — or `null` for a class that strikes
+   * nothing (either ping).
+   *
+   * Carried on the event rather than left to the emitter, because §3.9's voice is *two* things
+   * and only one of them is a radius. The multiplier is already baked into `paintRadius` and
+   * `hearingRadius` below, so a listener that only wants to know how far the noise reaches never
+   * needs this field. A listener that has to make the *sound* does: metal and concrete at the
+   * same loudness are still not the same noise, and "a change of timbre mid-stride is a change
+   * of surface" (§3.9) is a claim about timbre, which no radius can carry.
+   *
+   * `null` rather than concrete's 0 for a ping, because a ping did not strike concrete — it
+   * struck nothing, and a field that answers `0` there is a lie a reader has no way to detect.
+   * The compiler makes every consumer say what it does about the case.
+   */
+  readonly mat: number | null;
   readonly paintRadius: number;
   readonly hearingRadius: number;
   /** Loudness, ~1 = the class's nominal value. Scales how much the event reveals. */
@@ -432,19 +448,28 @@ export class SoundBus {
      * carry further would be a surface that is loud to the player and quiet to the spider —
      * law 2, and the exact asymmetry `canHear` exists to prevent.
      */
-    if (spec.mat !== undefined && !isContactClass(spec.class)) {
+    const contact = isContactClass(spec.class);
+    if (spec.mat !== undefined && !contact) {
       throw new Error(
         `SoundBus.emit('${spec.class}') was given mat=${spec.mat}, but '${spec.class}' strikes ` +
           'nothing. Only contact classes have a material — see CONTACT_CLASSES.',
       );
     }
     /*
-     * One enforcement point, not two. Past the refusal above, a non-contact class provably
-     * carries no material, so this resolves to concrete's 1.0 for every ping on its own — and a
-     * second `isContactClass` here would be a branch no test could ever reach, which is how an
-     * untested "safety" check ends up being the one that is wrong.
+     * One question, asked once, answering both halves of §3.9.
+     *
+     * `mat` is what the event *records* — the surface, for whoever has to give the noise a voice
+     * — and `loudness` is what the event *spends* it on. They are read from the same `contact`
+     * answer deliberately: an event that recorded a material and then failed to scale by it (or
+     * scaled by one it did not record) is precisely the sight-and-sound disagreement the bus
+     * exists to make impossible.
+     *
+     * A ping records `null` and multiplies by concrete's 1.0, which is not the same statement:
+     * the first says nothing was struck, the second says nothing was struck *and therefore*
+     * nothing changes the reach. Both are true and neither implies the other.
      */
-    const loudness = materialLoudness(spec.mat ?? MAT_CONCRETE);
+    const mat = contact ? spec.mat ?? MAT_CONCRETE : null;
+    const loudness = materialLoudness(mat ?? MAT_CONCRETE);
     let dx = spec.dirX ?? 0;
     let dy = spec.dirY ?? 0;
     let dz = spec.dirZ ?? 0;
@@ -466,6 +491,7 @@ export class SoundBus {
       x: spec.x,
       y: spec.y,
       z: spec.z,
+      mat,
       paintRadius: (spec.paintRadius ?? profile.paintRadius) * loudness,
       hearingRadius: (spec.hearingRadius ?? profile.hearingRadius) * loudness,
       intensity: spec.intensity ?? profile.intensity,

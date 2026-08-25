@@ -16,6 +16,7 @@
 import { describe, expect, it } from 'vitest';
 import { createHeadlessGame } from '../src/game/headless';
 import { E_PING_HEIGHT, GameSim } from '../src/game/sim';
+import { MATERIAL_NAMES } from '../src/paint/materials';
 import { SOUND_CLASSES, WAVE_SPEEDS, type SoundClassProfile } from '../src/paint/soundEvents';
 
 describe('the headless environment', () => {
@@ -183,7 +184,8 @@ describe('a ping, headless', () => {
  * One, today, because the only emitter is one player and the script never lines a ping up with
  * the footfall of the same tick. It is not a ceiling: a ping fires at the top of `GameSim.tick`
  * and a footstep at the bottom of `player.update`, so two in a tick is already reachable, and a
- * landing plus a footstep makes three.
+ * landing plus a footstep makes three. The material tour put two landings into the run and left
+ * this at one, which is the interesting part: no touchdown has yet shared a tick with a footfall.
  */
 const PEAK_PER_TICK = 1;
 
@@ -194,9 +196,33 @@ interface Run {
   peakPerTick: number;
 }
 
+/** A material index as a bus line spells it. `null` is a class that struck nothing — a ping. */
+function matName(mat: number | null): string {
+  return mat === null ? 'none' : (MATERIAL_NAMES[mat] ?? String(mat));
+}
+
+/** Counts the run's bus lines of one class by the material they name: `{ concrete: 18 }`. */
+function tally(sounds: readonly string[], cls: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const line of sounds) {
+    if (line.split(' ')[1] !== cls) continue;
+    const name = line.split(' ').find((w) => w.startsWith('mat='))!.slice(4);
+    out[name] = (out[name] ?? 0) + 1;
+  }
+  return out;
+}
+
 /**
- * One scripted run: walk, look, ping, sprint, jump, beam. Everything a tick can do, in an order
- * that puts a wave in flight while the body is still moving.
+ * One scripted run: walk, look, ping, sprint, jump, beam — everything a tick can do, in an order
+ * that puts a wave in flight while the body is still moving — and then a tour across a material
+ * boundary and back.
+ *
+ * The tour is the second half. The original script walks the poured slab and nothing else, which
+ * means §3.9's multipliers are all ×1.0 for its whole length: the material table could be deleted
+ * and this run would not move a number. So after the original 720 ticks the body turns around,
+ * runs back east to the steel bench, steps *onto* it, and drops back off onto concrete. That
+ * buys the trace a metal footstep, a metal landing and a concrete landing to compare it with —
+ * the loudness law observed from both sides of one boundary, twice.
  */
 function scriptedRun(seed: number): Run {
   const game = createHeadlessGame({ seed });
@@ -204,13 +230,13 @@ function scriptedRun(seed: number): Run {
   game.sim.bus.subscribe((e) => {
     sounds.push(
       `${e.seq} ${e.class} ${e.source}#${e.emitter} ${e.time.toFixed(9)} ` +
-        `${e.x.toFixed(9)} ${e.z.toFixed(9)} r=${e.paintRadius.toFixed(9)}`,
+        `${e.x.toFixed(9)} ${e.z.toFixed(9)} mat=${matName(e.mat)} r=${e.paintRadius.toFixed(9)}`,
     );
   });
 
   const trace: number[] = [];
   const p = game.sim.player.position;
-  for (let tick = 0; tick < 720; tick++) {
+  for (let tick = 0; tick < 1320; tick++) {
     if (tick === 0) game.input.hold('forward');
     if (tick === 40) game.input.look(90, 12);
     if (tick === 60) game.input.tapKey('KeyQ');
@@ -222,6 +248,22 @@ function scriptedRun(seed: number): Run {
       game.input.hold('crouch');
     }
     if (tick === 640) game.input.hold('back');
+    // The material tour. Stand up, turn back east, and walk onto the steel bench.
+    if (tick === 720) {
+      game.input.release('back');
+      game.input.release('crouch');
+      game.input.look(-529.2, 0);
+    }
+    if (tick === 850) game.input.look(439.2, 0);
+    // A short hop up onto the bench top: three taps, because one is cut short by the jump-cut
+    // and lands too softly to be heard at all (`LANDING_MIN_IMPACT`).
+    if (tick >= 875 && tick <= 895 && tick % 5 === 0) game.input.press('jump');
+    // And off the far end again, held long enough that the drop back to concrete is audible.
+    if (tick === 960) game.input.hold('jump');
+    if (tick === 980) game.input.release('jump');
+    // Off the wall the drop left it pinned against, so the run ends walking on concrete rather
+    // than standing still on it — the return half of the boundary crossing, in footsteps.
+    if (tick === 1100) game.input.look(-750, 0);
     game.step();
     trace.push(p.x, p.y, p.z);
   }
@@ -262,6 +304,64 @@ describe('how much the bus is asked to carry', () => {
     expect(later.soundEmittedThisTick).toBe(0);
     expect(later.soundMaxEmittedPerTick).toBe(1);
     game.sim.dispose();
+  });
+});
+
+describe('the scripted run crosses a material boundary', () => {
+  /**
+   * §3.9 is a law about *every* radius a contact event carries, and until this run left the
+   * poured slab it was a law nothing here exercised: every multiplier in the trace was concrete's
+   * ×1.0, so deleting the material table would have changed no number in this file. Pinning the
+   * mix by name and by count is what makes the tour non-deletable in turn — drop the bench leg
+   * and these go red rather than quietly going back to one material.
+   */
+  it('walks off concrete onto steel and back, and the trace says which is which', () => {
+    const run = scriptedRun(1234);
+
+    expect(tally(run.sounds, 'walk-step')).toEqual({ concrete: 12, metal: 2 });
+    expect(tally(run.sounds, 'sprint-step')).toEqual({ concrete: 6 });
+    expect(tally(run.sounds, 'crouch-step')).toEqual({ concrete: 1 });
+    // Both directions of the boundary, in the class that costs the most to be wrong about.
+    expect(tally(run.sounds, 'landing')).toEqual({ metal: 1, concrete: 1 });
+
+    // And it is a *round trip*, not a one-way walk onto steel that the run then ends on: the
+    // footstep series starts on concrete, spends the middle on metal and finishes on concrete.
+    const steps = run.sounds.filter((l) => l.split(' ')[1].endsWith('step'));
+    const mats = steps.map((l) => l.split(' ').find((w) => w.startsWith('mat='))!.slice(4));
+    expect(mats[0]).toBe('concrete');
+    expect(mats[mats.length - 1]).toBe('concrete');
+    expect(mats.indexOf('metal')).toBeGreaterThan(0);
+    expect(mats.lastIndexOf('metal')).toBeLessThan(mats.length - 1);
+  });
+
+  /**
+   * The player-facing half of §3.9, in the one place that can state it end to end: the *same*
+   * stride, on two surfaces, one tour apart. Steel is ×1.5, so the walk-step that paints 4 m of
+   * slab paints 6 m of bench — and the enemy's column of the §3.3 table moves with it, because
+   * `SoundBus.emit` scales both from one multiplier.
+   */
+  it('and the steel is louder by exactly its multiplier', () => {
+    const run = scriptedRun(1234);
+    const radiusOf = (mat: string) =>
+      Number(
+        run.sounds
+          .find((l) => l.split(' ')[1] === 'walk-step' && l.includes(`mat=${mat} `))!
+          .split('r=')[1],
+      );
+    expect(radiusOf('concrete')).toBeCloseTo(4, 9);
+    expect(radiusOf('metal')).toBeCloseTo(6, 9);
+    expect(radiusOf('metal') / radiusOf('concrete')).toBeCloseTo(1.5, 9);
+  });
+
+  /**
+   * A ping strikes nothing, so it has no material to be scaled by — `null`, not concrete's 0,
+   * because "the default material" and "no material at all" are different answers and only one
+   * of them is true of a sonar pulse.
+   */
+  it('and the pings carry no material at all', () => {
+    const run = scriptedRun(1234);
+    expect(tally(run.sounds, 'q-ping')).toEqual({ none: 1 });
+    expect(tally(run.sounds, 'e-ping')).toEqual({ none: 1 });
   });
 });
 
