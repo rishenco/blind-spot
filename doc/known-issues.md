@@ -33,21 +33,6 @@ test, which is also what `raycastWorld` is being built to serve.
 
 ## Live bugs
 
-### `land` fires on every grounded tick, not on landing
-
-`src/core/collision.ts` (~line 347). The vertical pass sets `result.landingSpeed` whenever it
-snaps the body to a surface, which is every tick the body is standing still on the floor —
-not the tick it arrives. A short walk produces ~902 landing events for 18 actual footfalls.
-
-It is invisible today only because `LANDING_MIN_IMPACT` throws away everything below a
-threshold, and a body resting on the floor has `-velocity.y ≈ 0`. So the bug is masked by a
-filter rather than absent. The moment anything downstream cares about landings *before* that
-filter — heat, a dog's hearing, a damped-soles chip that suppresses the sound rather than the
-paint — it gets 50 events a second.
-
-**Owner: M1.** The fix is an edge, not a threshold: `landed` is true on the tick where
-`wasGrounded` was false and `grounded` is true.
-
 ### `SoundBus.landingRadius(NaN)` returns NaN
 
 `src/paint/soundEvents.ts` (~line 264). The clamp is `t < 0 ? 0 : t > 1 ? 1 : t`, and NaN

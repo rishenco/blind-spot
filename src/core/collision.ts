@@ -331,7 +331,17 @@ export interface MoveResult {
   hitWall: boolean;
   /** Metres gained by step-ups this tick (drives camera step smoothing). */
   stepUp: number;
-  /** Downward speed at the moment of landing, 0 when no landing happened. */
+  /**
+   * Downward speed on the tick the body *arrived* on a surface, 0 on every other tick.
+   *
+   * This is an **edge, not a state**: it is non-zero only where `wasGrounded` was false and the
+   * vertical pass then caught a surface. A body already standing on the floor has gravity
+   * re-applied every tick, dips below the floor plane by `g·dt²`, and is snapped back — which
+   * looks exactly like a touchdown to a test that only asks "did we resolve against a surface".
+   * Reporting that as a landing gave every resting body a fresh `g·dt` landing 120 times a
+   * second. The ground-snap and step-up branches leave this at 0 for the same reason: walking
+   * down a stair flight or up a kerb is one continuous stance, not a landing per tread.
+   */
   landingSpeed: number;
 }
 
@@ -407,7 +417,10 @@ export function moveBody(
     }
     if (bestTop > -Infinity) {
       position.y = bestTop;
-      result.landingSpeed = -velocity.y;
+      // Only the airborne→grounded edge is a landing. A body at rest re-enters this branch
+      // every tick (gravity pushes it through the floor plane, the snap pulls it back), so
+      // without the edge test `landingSpeed` reports `g·dt` forever. See `MoveResult`.
+      if (!wasGrounded) result.landingSpeed = -velocity.y;
       velocity.y = 0;
       result.grounded = true;
     }

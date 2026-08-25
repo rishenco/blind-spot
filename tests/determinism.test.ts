@@ -319,26 +319,26 @@ describe('the tunables the run was measured against', () => {
 });
 
 describe('what the run currently does (characterization)', () => {
-  it('SUSPECTED BUG: a `land` event fires on every grounded tick, not on touchdown', () => {
-    // Root cause is in `moveBody` (see moveBody.test.ts): gravity is re-applied every tick, the
-    // feet dip below the floor, and the vertical pass calls that a fresh landing. So a body that
-    // simply walks along a flat floor emits ~120 `land` events per second at `gravity * dt`.
-    // `game.ts` masks it (it discards impacts under LANDING_MIN_IMPACT = 5 m/s), so nothing
-    // reaches the sound bus — but any new consumer of `land` gets the spam, and the run's event
-    // list is dominated by it.
+  it('emits one `land` event per touchdown, not one per grounded tick', () => {
+    // `landingSpeed` is an airborne→grounded edge (see moveBody.test.ts), so the whole 8 s run
+    // contains exactly the two moments the body arrives on a surface:
+    //   1. the spawn settling onto the floor on its first tick — one tick of gravity, 16/120
+    //      m/s, far under LANDING_MIN_IMPACT and therefore inaudible, but a real touchdown;
+    //   2. the scripted jump at tick 540 coming back down at 6.07 m/s, which is audible.
+    // Everything in between — 8 seconds of walking, sprinting and crouch-strafing across a flat
+    // floor — is one continuous stance and rings out not at all.
     const run = runSimulation(false);
     const lands = run.events.filter((e) => e.startsWith('land '));
     const steps = run.events.filter((e) => e.startsWith('step '));
     expect(steps.length).toBe(run.stepCount);
-    expect(lands.length).toBe(902);
-    expect(lands.length).toBeGreaterThan(SECONDS * HZ * 0.8);
-
-    // Almost all of them are the resting-on-the-floor artefact, well under the audible floor:
-    // exactly one landing in the whole run — the scripted jump — is loud enough to be real.
-    const audible = lands.filter((e) => Number(e.split(' ')[2]) >= 5);
-    expect(audible).toHaveLength(1);
-    // ...and the sound bus, which filters exactly like game.ts, therefore only ever sees steps.
     expect(run.events.length).toBe(lands.length + steps.length);
+
+    expect(lands).toHaveLength(2);
+    const impacts = lands.map((e) => Number(e.split(' ')[2]));
+    expect(impacts[0]).toBeCloseTo(16 / HZ, 9); // gravity * dt: the spawn settle
+    expect(impacts[1]).toBeCloseTo(6.073333333, 9); // the jump
+    // One of the two clears the audible floor, which is what the sound bus filters on.
+    expect(impacts.filter((v) => v >= 5)).toHaveLength(1);
   });
 
   it('classifies gaits the way the tier rule says it does', () => {

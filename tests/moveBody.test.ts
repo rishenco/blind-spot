@@ -143,6 +143,9 @@ describe('step-up', () => {
     const first = snapshot(moveBody(w, p, v, DT, SHAPE, true));
     expect(first.stepUp).toBe(0.25);
     expect(first.grounded).toBe(true);
+    // Grounding by step-up is not a touchdown: the body never left the floor, it walked up a
+    // kerb. Only the vertical pass's airborne→grounded edge fills `landingSpeed`.
+    expect(first.landingSpeed).toBe(0);
     // The stepped branch publishes the *lifted* pass's hitWall, and up there nothing was hit.
     expect(first.hitWall).toBe(false);
     expect(p.y).toBe(0.25);
@@ -155,11 +158,14 @@ describe('step-up', () => {
   });
 
   it('never steps while airborne and not previously grounded', () => {
+    // This is also what makes the step-up branch structurally incapable of being a landing:
+    // it only runs when the body was already grounded, or the vertical pass grounded it first.
     const w = riserWorld(0.25);
     const p = new THREE.Vector3(1.63, 0, 0);
     const v = new THREE.Vector3(3.5, 0, 0);
     const r = moveBody(w, p, v, DT, SHAPE, false);
     expect(r.stepUp).toBe(0);
+    expect(r.landingSpeed).toBe(0);
     expect(p.y).toBe(0);
   });
 });
@@ -203,6 +209,74 @@ describe('ground snap', () => {
   });
 });
 
+describe('walking down a flight of stairs', () => {
+  /**
+   * A descending flight in +x: a landing at y = 0 for x <= 0, then twelve 0.5 m treads each
+   * dropping 0.25 m (inside `stepHeight`, so the ground snap carries the body down), then a
+   * floor at y = -3 from x = 6 outward.
+   */
+  function stairsWorld(): StaticWorld {
+    const w = new StaticWorld();
+    w.add(aabbFromBounds(-20, -30, -20, 0, 0, 20));
+    for (let k = 0; k < 12; k++) {
+      w.add(aabbFromBounds(k * 0.5, -30, -20, (k + 1) * 0.5, -0.25 * (k + 1), 20));
+    }
+    w.add(aabbFromBounds(6, -30, -20, 20, -3, 20));
+    return w;
+  }
+
+  /**
+   * The mutation this exists to kill. "One landing per jump" is satisfied by an implementation
+   * that fires a landing every time the *ground snap* reattaches the body — and a stair flight
+   * reattaches it once per tread, all of them below `LANDING_MIN_IMPACT`, so the sound bus stays
+   * silent and every jump-shaped test still passes. Descending three metres is one continuous
+   * stance and must produce exactly zero landings.
+   */
+  it('descends three metres without a single landing', () => {
+    const w = stairsWorld();
+    const p = new THREE.Vector3(-1, 0, 0);
+    const v = new THREE.Vector3(3.5, 0, 0);
+    let grounded = true;
+    let landings = 0;
+    let airborneTicks = 0;
+    for (let i = 0; i < 300; i++) {
+      v.y -= 16 * DT; // gravity, exactly as PlayerController applies it
+      const r = moveBody(w, p, v, DT, SHAPE, grounded);
+      grounded = r.grounded;
+      if (r.landingSpeed !== 0) landings++;
+      if (!grounded) airborneTicks++;
+    }
+    expect(landings).toBe(0);
+    // Guards that make the zero worth something: it really walked the whole flight, and it did
+    // it without ever leaving the ground, so there was never an edge to report.
+    expect(p.x).toBeCloseTo(7.75, 9);
+    expect(p.y).toBe(-3);
+    expect(airborneTicks).toBe(0);
+  });
+
+  it('but stepping off the same flight into open air still lands, exactly once', () => {
+    // The other half of the claim: the edge is suppressed because there is no edge, not because
+    // landings stopped being reported. Same walk, but the far side is a 4 m drop instead of a
+    // flight of treads — far beyond the snap tolerance, so the body genuinely goes airborne.
+    const w = new StaticWorld();
+    w.add(aabbFromBounds(-20, -30, -20, 0, 0, 20));
+    w.add(aabbFromBounds(0, -30, -20, 20, -4, 20));
+    const p = new THREE.Vector3(-1, 0, 0);
+    const v = new THREE.Vector3(3.5, 0, 0);
+    let grounded = true;
+    const impacts: number[] = [];
+    for (let i = 0; i < 300; i++) {
+      v.y -= 16 * DT;
+      const r = moveBody(w, p, v, DT, SHAPE, grounded);
+      grounded = r.grounded;
+      if (r.landingSpeed !== 0) impacts.push(r.landingSpeed);
+    }
+    expect(impacts).toHaveLength(1);
+    expect(impacts[0]).toBeGreaterThan(5); // and loud enough to clear LANDING_MIN_IMPACT
+    expect(p.y).toBe(-4);
+  });
+});
+
 describe('vertical resolution', () => {
   it('lands on the surface, records the impact speed and zeroes vy', () => {
     const w = flatWorld();
@@ -215,12 +289,12 @@ describe('vertical resolution', () => {
     expect(v.y).toBe(0);
   });
 
-  it('SUSPECTED BUG: a body resting on the floor "lands" again every single tick', () => {
-    // Gravity is re-applied every tick, so every tick the feet dip below the floor and the same
-    // vertical pass calls it a fresh landing at `gravity * dt`. `PlayerController.onLanded` — and
-    // therefore its `land` event — fires 120 times a second while simply standing still.
-    // `game.ts` masks it by discarding impacts under LANDING_MIN_IMPACT (5 m/s), so nothing
-    // reaches the sound bus, but any new consumer of `land` gets the spam.
+  it('a body already resting on the floor never lands again', () => {
+    // The pass a resting body takes is bit-for-bit the pass a touchdown takes: gravity dips the
+    // feet through the floor plane, the same branch snaps them back. Only `wasGrounded` tells
+    // the two apart. Without that test this reported `gravity * dt` on every single tick — 120
+    // landings a second for standing still — which `LANDING_MIN_IMPACT` masked downstream
+    // rather than fixed.
     const w = flatWorld();
     const p = new THREE.Vector3(0, 0, 0);
     const v = new THREE.Vector3(0, 0, 0);
@@ -230,7 +304,29 @@ describe('vertical resolution', () => {
       v.y -= gravity * DT; // what PlayerController.simulate does before moveBody
       speeds.push(moveBody(w, p, v, DT, SHAPE, true).landingSpeed);
     }
-    expect(speeds).toEqual([gravity * DT, gravity * DT, gravity * DT]);
+    expect(speeds).toEqual([0, 0, 0]);
+    // ...and it is still standing on the floor, so the resolution itself did happen.
+    expect(p.y).toBe(0);
+    expect(v.y).toBe(0);
+  });
+
+  it('reports the touchdown on the arrival tick only, then 0 while it rests', () => {
+    // The edge, driven the way the controller drives it: gravity every tick, `wasGrounded` fed
+    // back from the previous result. One number, then silence.
+    const w = flatWorld();
+    const p = new THREE.Vector3(0, 0.05, 0);
+    const v = new THREE.Vector3(0, -9, 0);
+    const gravity = 16;
+    const speeds: number[] = [];
+    let grounded = false;
+    for (let i = 0; i < 5; i++) {
+      v.y -= gravity * DT;
+      const r = moveBody(w, p, v, DT, SHAPE, grounded);
+      grounded = r.grounded;
+      speeds.push(r.landingSpeed);
+    }
+    expect(speeds[0]).toBeCloseTo(9 + gravity * DT, 12);
+    expect(speeds.slice(1)).toEqual([0, 0, 0, 0]);
     expect(p.y).toBe(0);
   });
 
