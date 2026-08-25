@@ -106,15 +106,31 @@ gated on it (§3.1). The spider joins that predicate at M4 rather than bringing 
 | Q-ping (360°) | 12 m | 18 m |
 | E-ping (110° cone) | 22 m | 30 m — at **both ends** of the beam |
 | Slide — **unbuilt** | 5 m continuous | 16 m |
-| Prop knock (can, chain, glass) — **unbuilt** | 8–12 m | 25 m |
-| Thrown-object impact (material's voice) — **unbuilt**, M2 | by material | by material |
+| Thrown-object impact (a can landing) — **emitter M2** | 8–12 m by impact speed | 25 m |
+| Prop knock — a can settling, a can lifted — **emitter M2** | 1.5 m | 4 m |
+| Throw wind-up — start, and the full-tension click — **emitter M2** | 0.5 m | 2.5 m |
 | Spider gait cycle: patrol / investigate / chase — **unbuilt**, M4 | 2 / 4 / 8 m around the body | — |
 | Carried artifact hum (every 2 s) — **unbuilt** | 2 m self-halo | 12 m |
 | Voice (open mic) — **unbuilt** | scales with volume | scales with volume |
 
+The three M2 rows replace v1.0's single "prop knock, 8–12 / 25" guess, which conflated three
+different sounds a throwable makes into one. Class and voice shipped ahead of the emitter: each
+is a row in `SOUND_CLASSES` and in `CONTACT_CLASSES` (`src/paint/soundEvents.ts`) and the mixer
+already builds all three, but nothing yet makes them — the throw verb is what turns them on.
+
+The wind-up is the odd one of the three twice over. It is the only one that strikes nothing, so
+it is the only one that answers `false` in `CONTACT_CLASSES` and the only one no material scales.
+And it is, deliberately, the entire charge meter: there is no charge bar anywhere on screen, the
+full-tension click is how you know the arm is wound, and that click is a real sound anything
+within 2.5 m hears. A readout that is also a price is the shape law 1 asks for, and it is why
+the throw costs no energy at all — the arm is a mechanism, not the reactor, and its price is
+already threefold in the game's own currencies: finite cans, the wind-up's noise, and the walk
+back to fetch one.
+
 All contact-made classes (steps, landings, slides, knocks, impacts, spider footfalls) are
-scaled by the surface's material voice (§3.9). The detonation row of v1.0 is gone with the
-kamikaze enemy — its map-paint role is inherited by the hunt itself (core-loop §3.4).
+scaled by the surface's material voice (§3.9) — and where two bodies meet, by the mean of both
+of theirs. The detonation row of v1.0 is gone with the kamikaze enemy — its map-paint role is
+inherited by the hunt itself (core-loop §3.4).
 
 Consequences to protect: sprinting lights your path ~7 m ahead per footfall — moving fast **is**
 scanning; the spider is a walking lantern you track by its own paint; the E-ping wakes the room
@@ -207,6 +223,39 @@ is to lower the multiplier — which shortens its paint radius and the spider's 
 together, which is the honest trade and the one that belongs in this table rather than buried in
 a modal gain nobody reads.
 
+**Two bodies, one contact: the level is the mean of the two multipliers in dB.** A footfall is
+one body meeting one surface, so a single multiplier answers for it. A thrown can is two — the
+can and the slab it lands on — and the table above gives each of them a number. The rule for
+combining them is the **geometric mean**, `√(m_object · m_surface)`, which is the arithmetic
+mean in decibels: metal on dust and dust on metal both land at ×0.95, halfway between ×1.5 and
+×0.6 on the only scale a listener uses.
+
+Three other rules were measured and rejected. The **product** breaks the diagonal — metal on
+metal would be ×2.25, outside the band this table defines, and every single-body contact in the
+game would then have to be special-cased back out of it. The **minimum** flattens the whole dust
+row and the whole dust column onto one value, so a dust can on steel and a dust can on dust
+become the same sound and the surface stops being information. **Asymmetric weights** are a
+second knob with nothing behind them, and the paragraph above exists to say there is only one.
+The geometric mean is closed on [0.6, 1.5], so no pair escapes the band, and it reduces exactly
+to `m` on the diagonal — so a footfall is structurally unchanged by this rule rather than
+coincidentally unchanged by it.
+
+**What the mean throws away is level, not identity.** "Metal struck dust" and "dust struck
+metal" reach the ear at the same loudness and sound nothing alike, because the asymmetry is
+carried entirely by **timbre**: the arriving body is the *attack*, the struck surface is the
+*resonance*. A metal can hitting dust is a bright tick into a dead thud, tailing near 250 Hz; a
+dust clod hitting steel is a soft slap that sets a 0.3 s ring going near 1 kHz. Which of the two
+happened is the information — where the object came from, and what it found — and timbre is
+where a listener actually reads it. A level difference would only be legible to someone who had
+heard the other case to compare it against, which in a black room is nobody.
+
+Status: live. `materialVoiceFor` in `src/paint/soundEvents.ts` is the one place the mean is
+taken, and it is taken for composed classes only — a footfall returns before reaching it.
+`objMat` on the event carries the arriving body's material through to the mixer, which builds
+the two-part voice in `src/audio/voices.ts` with no per-emitter knowledge of what is striking
+what. All sixteen pairs are asserted to arrive at one level, and the timbre split is asserted
+separately, in `tests/audio/composedVoice.test.ts`.
+
 Dust is the quiet end, and it exists so the tower has a floor to reward: without a class below
 concrete, every surface is normal-or-louder and "go slow and stay quiet" has nothing to pay it.
 
@@ -247,6 +296,12 @@ One bar. Capacity 100, regeneration 6 /s.
 - **Chips reserve capacity** (§9): equipping passives lowers max energy. Loadout is the
   energy-allocation game — discrete choices, no sliders.
 - **Empty bar** blocks pings and actives only; it never stops you from moving.
+- **Throwing costs nothing.** The spends above are all *reactor* acts — a rig converting stored
+  energy into a deliberate emission. An arm is a mechanism, and taxing it here would double-charge
+  a verb whose price is already threefold and already in the game's native currencies: a finite
+  supply, the wind-up's noise, and the walk back to fetch what you threw. Charging it in energy
+  as well would push every player back onto pings, which would delete the one thing a throwable
+  can do that nothing else can — put a sound somewhere you are not (§3.3, M2 rows).
 
 ## 5. Movement
 
@@ -349,7 +404,11 @@ funny.
 
 - No weapons. Counterplay verbs: read, avoid, bait, juke, break contact. (Fallback if playtests
   show cornered-helplessness: a loud 12-energy Shove that staggers a pouncing spider — added
-  only on that evidence.)
+  only on that evidence.) **A thrown can is not a weapon and must never become one**: it does no
+  damage, it cannot stagger, and hitting the spider with one is worth exactly what hitting a wall
+  with one is worth — a sound, at that spot. The day a can does damage, every player aims at the
+  enemy instead of past it, and the verb stops being about information. It is a way of asking a
+  question from somewhere you are not standing, and that is all it is.
 - No third-person camera — first person is the only view; third person is a debug affordance
   at most, never a player-facing mode.
 - No sampled audio assets — everything is synthesized (WebAudio), driven by the event bus (§1).
