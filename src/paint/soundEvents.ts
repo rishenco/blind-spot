@@ -98,6 +98,17 @@ export type EventTint = 'self' | 'teammate' | 'spider' | 'prop';
  * with the default — can never come back as `'self'`. Getting that backwards (comparing ids
  * first and asking what made the noise second) is the mistake this function exists to make
  * unavailable.
+ *
+ * **Nothing in `src/` calls this yet, and that is the finding rather than the plumbing.** §3.2's
+ * event layer is what needs it, and `paintSystem.ts`'s `EVENT_COLORS` is a `Record<SoundClass,
+ * number>` — an amber ramp with no source axis at all, which is honest today because every
+ * shipped emitter is the local player. It stops being honest at M2: a thrown can is
+ * `source: 'prop'`, §3.2 says pale yellow, and it would render self-amber. The audio director
+ * used to call this and store the answer on `VoiceSpec`, where nothing read it — a paint concept
+ * parked in the mixer, which looked like wiring and was not.
+ *
+ * Whoever wires it: §3.2 asks for hue *and* a glyph pip for the teammate family — "never hue
+ * alone" — so a palette keyed on this function is half the job, not the whole of it.
  */
 export function eventTint(event: SoundEvent, localEmitter: number): EventTint {
   switch (event.source) {

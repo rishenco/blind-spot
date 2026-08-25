@@ -32,7 +32,6 @@ import {
   materialLoudness,
 } from '../../src/paint/materials';
 import {
-  NO_EMITTER,
   PLAYER_EMITTER_ID,
   SOUND_CLASSES,
   SoundBus,
@@ -307,26 +306,6 @@ describe('what a spec says', () => {
   });
 });
 
-describe('who made it (§3.2), resolved for this listener', () => {
-  it('splits self from teammate by the listener, never by the event', () => {
-    const mine = emit('walk-step', { x: 1 }, { source: 'player', emitter: PLAYER_EMITTER_ID });
-    const theirs = emit('walk-step', { x: 1 }, { source: 'player', emitter: 7 });
-    expect(new AudioDirector(ORIGIN).decide(mine)!.tint).toBe('self');
-    expect(new AudioDirector(ORIGIN).decide(theirs)!.tint).toBe('teammate');
-    // The same event, heard by the other rig, is the other answer — which is the whole reason
-    // `eventTint` takes the listener and the bus does not record 'self'.
-    expect(new AudioDirector({ ...ORIGIN, emitter: 7 }).decide(theirs)!.tint).toBe('self');
-  });
-
-  it('never calls a prop or the world "self", whatever id it carries', () => {
-    const prop = emit('landing', { x: 1 }, { source: 'prop', emitter: PLAYER_EMITTER_ID });
-    const world = emit('landing', { x: 1 }, { source: 'world', emitter: NO_EMITTER });
-    const spider = emit('landing', { x: 1 }, { source: 'spider', emitter: 3 });
-    expect(new AudioDirector(ORIGIN).decide(prop)!.tint).toBe('prop');
-    expect(new AudioDirector(ORIGIN).decide(world)!.tint).toBe('prop');
-    expect(new AudioDirector(ORIGIN).decide(spider)!.tint).toBe('spider');
-  });
-});
 
 describe('the listener is replaced whole, never edited in pieces', () => {
   it('decides against the pose it was given', () => {

@@ -26,9 +26,7 @@
 import {
   SOUND_CLASSES,
   SoundBus,
-  eventTint,
   isContactClass,
-  type EventTint,
   type SoundClass,
   type SoundEvent,
 } from '../paint/soundEvents';
@@ -50,8 +48,6 @@ export interface VoiceSpec {
   readonly gain: number;
   /** Material index (`paint/materials`) for a contact, `null` for a ping. */
   readonly mat: number | null;
-  /** §3.2's event layer, resolved for *this* listener: self, teammate, spider or prop. */
-  readonly tint: EventTint;
   /** Metres from the listener to the origin — the number `gainFor` used, kept for the mixer. */
   readonly distance: number;
   /** Where it happened, world space. Panning input the day spatialization lands. */
@@ -98,7 +94,14 @@ export interface ListenerState {
    * the audio system hands it over every tick.
    */
   readonly range: number;
-  /** Which emitter id is "me" — the only input `eventTint` needs to split self from teammate. */
+  /**
+   * Which emitter id is "me".
+   *
+   * The mixer does not use it today — it is what `eventTint` needs to split self from teammate,
+   * and that split belongs to the *eye* (§3.2), not the ear. Kept on the listener because the
+   * listener is the only thing that knows it, and because the day a teammate's footfall should
+   * sound different from your own, this is the input that decides.
+   */
   readonly emitter: number;
 }
 
@@ -172,8 +175,15 @@ const CLASS_VOICES: Readonly<Record<SoundClass, ClassVoice>> = Object.freeze({
  * The inverse-distance shape is the same claim read the other way. Amplitude ∝ 1/d means a sound
  * is audible out to a distance proportional to its source level, which *is* §3.3's right-hand
  * column: double the loudness, double the carry. It also makes the cutoff quiet rather than
- * abrupt — at exactly `hearingRadius` every event, of every class, on every material, arrives at
- * `EDGE_GAIN`, so the gate closes on a whisper instead of on a click.
+ * abrupt — at exactly `hearingRadius` every event that carries at least as far as `NEAR_FIELD_M`
+ * arrives at `EDGE_GAIN`, so the gate closes on a whisper instead of on a click. That is 23 of
+ * the 24 class/material cells. The twenty-fourth is a crouch-step on dust, which carries 1.2 m
+ * and therefore lives its whole audible life inside the near-field clamp: it is flat across that
+ * life and tops out at 1.2/1.5 of the edge gain. Deliberate rather than an exception to patch —
+ * a sound that dies closer than your own footfall does not get to be as loud as the quietest
+ * thing you can hear at range — and pinned as such in `tests/audio/director.test.ts`, together
+ * with the fact that it is the *only* one, since a second appearing means a class or a
+ * multiplier moved.
  *
  * The class profile's `intensity` is deliberately *not* a factor. §3.1 gives it to the eye —
  * "blip density scales with intensity" — and using it for level too would be a second loudness
@@ -230,7 +240,6 @@ export class AudioDirector {
        * material, and `isContactClass` is asserted against it below so the two can never drift.
        */
       mat: event.mat,
-      tint: eventTint(event, l.emitter),
       distance,
       x: event.x,
       y: event.y,
