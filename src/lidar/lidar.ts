@@ -140,6 +140,19 @@ export class Lidar {
     sink(ping);
   }
 
+  /**
+   * Drops every front that has not been handed to the renderer yet.
+   *
+   * "Forget the map" has to mean the screen goes black and stays black. Without this it did not:
+   * a ping fired a moment earlier is two fronts sitting in this queue, the renderer takes them
+   * one at a time, and they were still handed over *after* the clear — so the hall wiped itself
+   * and then quietly painted several thousand dots back in over the next two frames. Costs no
+   * charge back, deliberately: the shot was fired, the noise was made.
+   */
+  flush(): void {
+    this.queue.length = 0;
+  }
+
   /** Debug affordance only: refills without waiting. */
   refill(): void {
     this.charge = this.tunables.charges;

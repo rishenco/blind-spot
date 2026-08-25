@@ -31,7 +31,12 @@ import { PropWorld, defaultPropTunables, loadRapier } from './props/props';
 import { PropReveal } from './props/reveal';
 import { DynamicPaint } from './lidar/dynamic';
 import { ARCHETYPES } from './props/shapes';
-import { SoundMarkers, defaultMarkerTunables } from './sound/markers';
+import {
+  MARKER_STYLES,
+  SoundMarkers,
+  defaultMarkerTunables,
+  type MarkerStyle,
+} from './sound/markers';
 
 type ViewMode = 'player' | 'third' | 'top';
 
@@ -528,6 +533,8 @@ class App {
   }
 
   clearMap(): void {
+    // Fronts already in flight would land after the wipe and repaint what was just forgotten.
+    this.lidar.flush();
     this.paint.clear();
     // The props hold their own mask, so forgetting the map has to forget them too — otherwise
     // "clear" leaves a hall full of remembered barrels, which is law 1 with extra steps.
@@ -581,13 +588,21 @@ class App {
 
     const sound = gui.addFolder('sound markers');
     const m = this.markers.tunables;
+    // The look is undecided on purpose: four different answers, switched here by hand. See the
+    // header of src/sound/markers.ts for what each one is arguing.
+    sound
+      .add(m, 'style', MARKER_STYLES as unknown as string[])
+      .onChange((v: MarkerStyle) => this.markers.setStyle(v));
     sound.add(m, 'life', 1, 20, 0.5).onChange(() => this.markers.applyLook());
-    sound.add(m, 'pixelsAtOneMetre', 4, 80, 1).onChange(() => this.markers.applyLook());
-    sound.add(m, 'minRadius', 2, 30, 1).onChange(() => this.markers.applyLook());
-    sound.add(m, 'maxRadius', 10, 160, 2).onChange(() => this.markers.applyLook());
+    sound.add(m, 'scale', 40, 600, 5).onChange(() => this.markers.applyLook());
+    sound.add(m, 'loudRef', 3, 26, 0.5).onChange(() => this.markers.applyLook());
+    sound.add(m, 'loudPower', 0.6, 2.4, 0.05).onChange(() => this.markers.applyLook());
+    sound.add(m, 'minRadius', 2, 40, 1).onChange(() => this.markers.applyLook());
+    sound.add(m, 'maxRadius', 40, 900, 10).onChange(() => this.markers.applyLook());
+    sound.add(m, 'spread', 30, 600, 5).onChange(() => this.markers.applyLook());
     sound.add(m, 'softness', 0.6, 6, 0.1).onChange(() => this.markers.applyLook());
     sound.add(m, 'brightness', 0, 2, 0.05).onChange(() => this.markers.applyLook());
-    sound.close();
+    sound.open();
 
     const ear = gui.addFolder('audio');
     ear.add(this.audio.tunables, 'volume', 0, 1, 0.02).onChange((v: number) => this.audio.setVolume(v));
@@ -666,6 +681,13 @@ class App {
       audio: (on: boolean) => this.audio.setEnabled(on),
       markers: (on: boolean) => this.markers.setVisible(on),
       radii: (on: boolean) => this.markers.setRadiusVisible(on),
+      /** Which of the four looks to draw the marks in. Free to switch: it is one uniform. */
+      markerStyle: (name: MarkerStyle) => {
+        this.markers.setStyle(name);
+        return this.markers.style;
+      },
+      markerStyles: () => [...MARKER_STYLES],
+      markList: () => this.markers.list(),
       /** Debug: shove the clutter around a world point. Returns how many bodies woke up. */
       disturb: (x: number, y: number, z: number, radius: number, impulse: number) =>
         this.props?.disturb(x, y, z, radius, impulse) ?? 0,
