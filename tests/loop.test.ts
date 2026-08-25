@@ -8,12 +8,17 @@
  * contract it drives it through. It is checked here rather than only in the browser because
  * "did exactly N ticks run" deserves a faster oracle than a screenshot.
  *
- * Only the stepped path is covered. The wall-clock path needs `requestAnimationFrame` and a real
- * clock, and what it does with them is the thing every other test in this directory already
- * measures through `GameSim`.
+ * Both gears are covered here. The stepped one is the screenshot driver's; the wall-clock one is
+ * every player's, and its numbers — the spiral-of-death clamp, the accumulator's carry, the
+ * interpolation alpha — are measured nowhere else. This file used to say they were "the thing
+ * every other test in this directory already measures through `GameSim`", and that was not true:
+ * the `GameSim` tests advance the simulation by calling `sim.update(dt)` or `loop.step(n)`
+ * directly, and none of them ever lets `frame` run. Replacing the first line of `frame` with a
+ * throw passed the entire suite. `performance.now` and `requestAnimationFrame` are the only two
+ * host facilities it touches, and a test can supply both.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Loop } from '../src/core/loop';
 
 function spy() {
@@ -75,5 +80,91 @@ describe('Loop.step', () => {
     loop.step(2.9);
     expect(calls.fixed).toHaveLength(2);
     expect(loop.ticks).toBe(2);
+  });
+});
+
+/**
+ * The loop's first gear: the display clock.
+ *
+ * Everything below is reachable only by letting `frame` execute, which means standing in for the
+ * two globals it reaches for. The stubs are a clock the test moves by hand and a one-slot frame
+ * queue — enough to make "how much simulated time came out of this much wall-clock time" a
+ * question with an exact answer, which is the whole thing the accumulator exists to guarantee.
+ */
+describe('Loop on the display clock', () => {
+  // Restored here rather than at the end of each test: a stubbed `performance` that outlived a
+  // failing assertion would take the rest of the file down with it, and the second failure would
+  // be the one anyone read.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function driven() {
+    const { loop, calls } = spy();
+    const clock = { t: 0 };
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('performance', { now: () => clock.t });
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => (frames.push(cb), 1));
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+    loop.start();
+    /** Puts the clock at `ms` and delivers the frame that was waiting for it. */
+    const jumpTo = (ms: number): void => {
+      clock.t = ms;
+      frames.pop()!(clock.t);
+    };
+    /** Moves the clock on by `ms` and delivers the frame that was waiting for it. */
+    const advance = (ms: number): void => jumpTo(clock.t + ms);
+    return { loop, calls, advance, jumpTo };
+  }
+
+  it('drops a stalled frame rather than banking it into a catch-up storm', () => {
+    const { loop, advance } = driven();
+    advance(3000); // tab hidden, GC pause, shader compile
+    // 0.25 s of catch-up, not 3 s: 30 ticks at 120 Hz, not 360. Every extra tick would emit its
+    // own footfall onto the sound bus, so an unclamped stall is a paint flash as well as a hitch —
+    // and the flash is the worse half, because law 2 says every blip has a real source and thirty
+    // of those thirty-one footsteps happened nowhere.
+    expect(loop.ticksLastFrame).toBe(Math.floor(0.25 / loop.stepSeconds));
+  });
+
+  it('banks the remainder of a short frame instead of discarding it', () => {
+    const { loop, advance } = driven();
+    advance(5);
+    expect(loop.ticksLastFrame).toBe(0); // 5 ms < one 8.33 ms tick
+    advance(5);
+    expect(loop.ticksLastFrame).toBe(1); // ...and the two halves add up to one
+  });
+
+  it('poses the frame at the leftover fraction of a tick, not at a constant', () => {
+    const { loop, calls, advance } = driven();
+    advance(5);
+    advance(5);
+    const alpha = calls.render.at(-1)!;
+    expect(alpha).toBeGreaterThan(0);
+    expect(alpha).toBeLessThan(1);
+    expect(alpha).toBeCloseTo((0.01 - loop.stepSeconds) / loop.stepSeconds, 6);
+  });
+
+  /**
+   * The reachable half of the frame-time guard.
+   *
+   * `performance.now` is specified monotonic and in practice never returns NaN, so the
+   * `Number.isFinite` half of that line is belt-and-braces and is left untested on purpose —
+   * and it would not survive being reached anyway, because `lastTime` is assigned *before* the
+   * guard runs, so one NaN reading poisons every frame after it. Going backwards is the half
+   * that has actually happened in the wild (clock adjustments, throttled tabs resuming), and it
+   * is the half with a defined right answer.
+   */
+  it('ignores a clock that jumps backwards instead of running the sim in reverse', () => {
+    const { loop, advance, jumpTo } = driven();
+    advance(5); // 5 ms banked, no tick yet
+    jumpTo(1); // ...and now the clock is 4 ms earlier than it was
+    expect(loop.ticksLastFrame).toBe(0);
+    // The banked 5 ms is still banked. A backwards frame is worth zero and never a debit:
+    // unguarded, the accumulator drops to 1 ms and the frame after this one comes up a tick
+    // short, which is the simulation quietly falling behind the world — the one thing a fixed
+    // timestep exists to prevent.
+    jumpTo(6);
+    expect(loop.ticksLastFrame).toBe(1);
   });
 });

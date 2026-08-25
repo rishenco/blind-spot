@@ -326,3 +326,36 @@ describe('the near room is the control group', () => {
     expect(floorAt(world, -12.5, 0)).not.toBe(MATERIAL_NAMES[MAT_DUST]);
   });
 });
+
+describe('the floor is one slab in three bands (§3.9)', () => {
+  /**
+   * "The bands abut exactly — no overlap, no gap — and both halves of that matter."
+   *
+   * `room.ts` says that in its own comment and, until this test, nothing checked either half.
+   * The only things that noticed were the two whole-room golden hashes (`rng.test.ts`,
+   * `raycast.test.ts`), which fail on *any* geometry edit and are therefore regenerated as a
+   * matter of routine whenever the room legitimately changes — i.e. exactly the moment a real
+   * gap would ride through unread. A gap is a hole a body falls through. An overlap is worse:
+   * the apron is "laid first, so `moveBody` resolves the coplanar tie in favour of dust", and
+   * that sentence only means anything while the tie has exactly two sides.
+   */
+  it('tiles the room exactly once, with no gap and no overlap', () => {
+    const bands = room().boxes.filter((b) => b.maxY === 0 && b.minY < 0);
+    expect(bands.length).toBeGreaterThanOrEqual(3);
+    const minX = Math.min(...bands.map((b) => b.minX));
+    const maxX = Math.max(...bands.map((b) => b.maxX));
+    const minZ = Math.min(...bands.map((b) => b.minZ));
+    const maxZ = Math.max(...bands.map((b) => b.maxZ));
+    // Sampled on cell centres, so a probe never lands on a seam and counts both sides of an
+    // honest abutment. The step is small enough to fall inside any hole a body could.
+    const STEP = 0.25;
+    for (let x = minX + STEP / 2; x < maxX; x += STEP) {
+      for (let z = minZ + STEP / 2; z < maxZ; z += STEP) {
+        const covering = bands.filter(
+          (b) => x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ,
+        );
+        expect(covering.length, `(${x.toFixed(2)}, ${z.toFixed(2)})`).toBe(1);
+      }
+    }
+  });
+});
