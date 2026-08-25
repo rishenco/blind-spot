@@ -105,7 +105,21 @@ Do not "fix" this by widening thresholds until two runs agree. The honest fix is
 simulation by tick count rather than by wall clock, which is now possible: `GameSim` runs
 headless and `ScriptedInput` plays a deterministic timeline.
 
-**Owner: unscheduled.** Worth doing before the suite grows much larger.
+The assertion currently closest to the edge is **`a settled drawing is cyan-family (§3.2)`**
+(`tools/shoot.mjs`, ~line 628), which needs `coolFraction > 0.8`. Measured across six runs of
+two byte-identical builds it reads 79.81 / 88.07 / 98.03 and 97.43 / 86.66 / 88.82 — an ~18
+point swing against 7 points of margin, and it has already failed once at 79.81 on code that was
+otherwise 62/62. The mechanism is the same one: the amount of simulated time behind the
+screenshot decides how much of the warm event layer has faded and how many contours are still
+flashing, so an unlucky frame is caught mid-flash and reads warm.
+
+Recorded by name so the next person to see it fail checks this entry before bisecting. It is
+also the reason not to reach for the easy fix — lowering the threshold to 0.75 buys one more
+point of luck and hides the next regression. The frame genuinely is cyan-family; the test just
+cannot say *when* it is looking.
+
+**Owner: unscheduled.** Worth doing before the suite grows much larger — and this assertion is
+the clock on it.
 
 ### `dotGeometry.setDrawRange(0, dots)` with `frustumCulled = false`
 

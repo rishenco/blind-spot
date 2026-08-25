@@ -176,6 +176,25 @@ M4's spider would forget. The consequence is real and intended: a hard landing o
 14 × 1.5 = 21 m of paint, louder than a Q-ping, which makes a steel floor a genuinely dangerous
 thing to drop onto.
 
+**One knob per question: the multiplier is the only thing that makes one material louder than
+another.** A material voice has two independent ways to be loud — the multiplier above, and the
+gains of its own resonant modes — and left alone they disagree. Measured against the M1 probe
+voices, metal lands exactly on its ×1.5, stone misses by 1.23× and dust by 2.05×: dust paints
+0.6× as far while reaching the ear at 0.29×. That is the "one bus, two senses" commitment of §1
+broken in the only way it can be — the blip says one thing and the ear says another — and it
+takes §3.8's Halo down with it, since the ring claims to show an audible radius the sound does
+not have. So every voice is **normalized on its attack** (the first ~85 ms, the part that
+answers "how loud was that") to the same level at unit gain, and the multiplier is then applied
+on top as the sole level difference. Timbre and decay are untouched and are what carry identity —
+metal's 0.3 s ring is metal's whole signature, and normalizing the attack leaves it alone.
+
+The invariant that enforces it: a material's attack-window RMS minus concrete's equals
+`20·log10(multiplier)`, within half a dB, for all four. The consequence to accept is that dust
+gets *louder* than it currently sounds; if ×0.6 then plays as insufficiently stealthy, the fix
+is to lower the multiplier — which shortens its paint radius and the spider's hearing of it
+together, which is the honest trade and the one that belongs in this table rather than buried in
+a modal gain nobody reads.
+
 Dust is the quiet end, and it exists so the tower has a floor to reward: without a class below
 concrete, every surface is normal-or-louder and "go slow and stay quiet" has nothing to pay it.
 
