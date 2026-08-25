@@ -19,6 +19,7 @@
 import type { SoundEvent, SoundSource, SpiderKind } from '../events/bus';
 import { MATERIALS, type MaterialName } from '../props/shapes';
 import { refDistanceFor } from './audio';
+import { applyDeafen, defaultDeafTunables } from './deafen';
 import { buildTimbre, hash01, loudnessGain, makeNoiseBuffer, timbreFor } from './voices';
 
 export interface SceneEvent {
@@ -60,10 +61,15 @@ function clickTrain(): SceneEvent[] {
   const out: SceneEvent[] = [];
   const ranges = [3, 10, 20, 30, 45];
   ranges.forEach((r, i) => {
-    const t0 = 0.15 + i * 0.9;
+    // A phrase now runs up to about 0.7 s and its rhythm is deliberately ragged, so the three
+    // phrases at one range are spaced far enough apart not to overlap each other, and the ranges
+    // far enough apart that one range's tail cannot be measured as the next range's phrase. The
+    // old 0.22/0.9 spacing did exactly that once the phrases got longer, and it read as the cull
+    // failing when what had really happened was that the windows had gone stale.
+    const t0 = 0.15 + i * 1.6;
     for (let k = 0; k < 3; k++) {
       out.push({
-        t: t0 + k * 0.22, source: 'spider', kind: 'chatter',
+        t: t0 + k * 0.45, source: 'spider', kind: 'chatter',
         x: r * 0.7, y: -1.3, z: -r * 0.71, loudness: CLICK,
       });
     }
@@ -94,7 +100,7 @@ export const SCENES: readonly Scene[] = [
   {
     name: 'clicks',
     what: 'chatter at 3, 10, 20, 30 and 45 m - the last set is past even its widened reach',
-    seconds: 5.3,
+    seconds: 8.4,
     events: clickTrain(),
   },
   {
@@ -128,9 +134,9 @@ export const SCENES: readonly Scene[] = [
   {
     name: 'deafened',
     what: 'a pack chattering 6 m away, one shot at 1.0 s - the hall goes muffled and climbs back',
-    seconds: 3.6,
+    seconds: 5.0,
     events: [
-      ...Array.from({ length: 15 }, (_, i): SceneEvent => ({
+      ...Array.from({ length: 21 }, (_, i): SceneEvent => ({
         t: 0.15 + i * 0.22,
         source: 'spider',
         x: 4.2 * (i % 2 === 0 ? 1 : -1),
@@ -140,6 +146,39 @@ export const SCENES: readonly Scene[] = [
         kind: 'chatter',
       })),
       { t: 1.0, source: 'gunshot', x: 0.1, y: -0.1, z: -0.45, loudness: 90 },
+    ],
+  },
+  {
+    /**
+     * The concussion, given room to be seen. One round in an otherwise empty seven seconds, with
+     * a click every second afterwards so the *world's* return is visible against the ring that is
+     * still going. The spectrogram of this is the whole point of the pass: a narrow rough band
+     * outlasting the ducking by three times over, with the hall crawling back underneath it.
+     */
+    name: 'concussion',
+    what: 'one round, then seven seconds of being deaf: the hall falls through the floor and a rough band keeps ringing',
+    seconds: 7,
+    events: [
+      { t: 0.4, source: 'gunshot', x: 0.1, y: -0.1, z: -0.45, loudness: 90 },
+      ...Array.from({ length: 6 }, (_, i): SceneEvent => ({
+        t: 1.0 + i, source: 'spider', kind: 'chatter',
+        x: 3.0 * (i % 2 === 0 ? 1 : -1), y: -1.3, z: -3.4, loudness: CLICK,
+      })),
+    ],
+  },
+  {
+    /**
+     * The three voices of the animal side by side at the same range, in the same order every
+     * time: talk, bite, death. The death cry has to stay the worst thing in the set — making the
+     * chatter wetter must not have quietly promoted it.
+     */
+    name: 'voices',
+    what: 'the same spider at 8 m: chatter, then a bite, then dying',
+    seconds: 4.2,
+    events: [
+      { t: 0.2, source: 'spider', kind: 'chatter', x: 5.6, y: -1.2, z: -5.7, loudness: CLICK },
+      { t: 1.5, source: 'spider', kind: 'bite', x: 5.6, y: -1.2, z: -5.7, loudness: 24 },
+      { t: 2.8, source: 'spider', kind: 'death', x: 5.6, y: -1.2, z: -5.7, loudness: 24 },
     ],
   },
   {
@@ -170,11 +209,13 @@ export interface RenderOptions {
   volume?: number;
   /** Render through a reconstruction of the pre-M4b stage, for the before/after picture. */
   legacy?: boolean;
-  /** Ducking after the blast, live defaults. */
+  /** The concussion after the blast; live defaults when omitted. */
   deafDepth?: number;
   deafSeconds?: number;
   deafCutoff?: number;
   tinnitus?: number;
+  tinnitusSeconds?: number;
+  tinnitusFreq?: number;
   /** Render only these scenes, by name — the main keyframe run takes a two-scene subset. */
   only?: readonly string[];
 }
@@ -342,31 +383,17 @@ export async function renderScene(scene: Scene, opts: RenderOptions = {}): Promi
     } else {
       buildTimbre(ctx, panner, timbre, noise, t0, loudnessGain(ev.loudness, timbre.ref), ev.seq);
       if (blast) {
-        const depth = opts.deafDepth ?? 0.15;
-        const secs = opts.deafSeconds ?? 0.9;
-        const cut = opts.deafCutoff ?? 700;
-        const shut = t0 + 0.02;
-        duck.gain.setValueAtTime(1, t0);
-        duck.gain.linearRampToValueAtTime(Math.max(0.01, depth), shut);
-        duck.gain.setTargetAtTime(1, shut, secs * 0.7);
-        muffle.frequency.setValueAtTime(20000, t0);
-        muffle.frequency.linearRampToValueAtTime(Math.max(120, cut), shut);
-        muffle.frequency.setTargetAtTime(20000, shut, secs * 0.6);
-        const tin = opts.tinnitus ?? 0.03;
-        if (tin > 0) {
-          const osc = ctx.createOscillator();
-          osc.type = 'sine';
-          osc.frequency.setValueAtTime(3900, shut);
-          osc.frequency.exponentialRampToValueAtTime(3300, shut + secs * 1.4);
-          const g = ctx.createGain();
-          g.gain.setValueAtTime(0.0001, t0);
-          g.gain.exponentialRampToValueAtTime(tin, shut);
-          g.gain.exponentialRampToValueAtTime(0.0001, shut + secs * 1.4);
-          osc.connect(g);
-          g.connect(master);
-          osc.start(t0);
-          osc.stop(Math.min(scene.seconds, shut + secs * 1.4 + 0.02));
-        }
+        // The identical concussion the player gets — same module, same numbers. That identity is
+        // the only reason the spectrograms below prove anything about the game.
+        const d = defaultDeafTunables();
+        applyDeafen(ctx, { duck, muffle, master }, noise, t0, {
+          deafDepth: opts.deafDepth ?? d.deafDepth,
+          deafSeconds: opts.deafSeconds ?? d.deafSeconds,
+          deafCutoff: opts.deafCutoff ?? d.deafCutoff,
+          tinnitus: opts.tinnitus ?? d.tinnitus,
+          tinnitusSeconds: opts.tinnitusSeconds ?? d.tinnitusSeconds,
+          tinnitusFreq: opts.tinnitusFreq ?? d.tinnitusFreq,
+        });
       }
     }
     const key = legacy ? `${se.source}` : timbre.name;
@@ -431,6 +458,37 @@ export async function renderAll(opts: RenderOptions = {}): Promise<RenderResult[
   for (const s of SCENES) {
     if (wanted !== undefined && !wanted.includes(s.name)) continue;
     out.push(await renderScene(s, opts));
+  }
+  return out;
+}
+
+/**
+ * The shape of the pack's phrases, as numbers rather than as a sound.
+ *
+ * The complaint the M6c pass answers is "it sounds like a toy bell", and a bell is two things:
+ * one pitch, and one interval. The pitch is visible in the spectrograms; the interval is not —
+ * an even train and a torn one look nearly identical at spectrogram resolution. So the timbre
+ * hands out the onset of every element it schedules (`Timbre.onsets`) and this walks a spread of
+ * seeds and reports them, which lets `tools/audio.mjs` assert irregularity instead of claiming
+ * it. Nothing in the game calls this; it exists for the proof.
+ */
+export function phraseShapes(count = 16): { seq: number; onsets: number[]; gaps: number[] }[] {
+  const out: { seq: number; onsets: number[]; gaps: number[] }[] = [];
+  for (let seq = 0; seq < count; seq++) {
+    const t = timbreFor({
+      source: 'spider',
+      kind: 'chatter',
+      x: 0,
+      y: 0,
+      z: 0,
+      loudness: 12,
+      time: 0,
+      seq,
+    });
+    const onsets = [...(t.onsets ?? [])];
+    const gaps: number[] = [];
+    for (let i = 1; i < onsets.length; i++) gaps.push(onsets[i] - onsets[i - 1]);
+    out.push({ seq, onsets, gaps });
   }
   return out;
 }

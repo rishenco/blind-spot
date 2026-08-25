@@ -14,7 +14,8 @@ import GUI from 'lil-gui';
 import { Input } from './core/input';
 import { Loop } from './core/loop';
 import { AudioStage, defaultAudioTunables } from './audio/audio';
-import { renderAll as renderAudioScenes } from './audio/offline';
+import { renderAll as renderAudioScenes, phraseShapes } from './audio/offline';
+import { Concussion, defaultConcussionTunables } from './fx/concussion';
 import { SoundBus } from './events/bus';
 import { Hud, type HelpRow } from './debug/hud';
 import { Lidar, defaultLidarTunables } from './lidar/lidar';
@@ -138,6 +139,11 @@ class App {
    * opens an AudioContext.
    */
   private readonly audio = new AudioStage(defaultAudioTunables());
+  /**
+   * Being concussed, on screen. A bus subscriber like everything else — the shot is not told
+   * about it, it just happens to be the loudest thing on the bus. See `src/fx/concussion.ts`.
+   */
+  private readonly concussion = new Concussion(defaultConcussionTunables());
   private readonly player: PlayerController;
   /** Built after the wasm is up, so everything that touches them is null-guarded. */
   private props: PropWorld | null = null;
@@ -255,6 +261,9 @@ class App {
     this.markers.applyLook();
     this.bus.subscribe((event) => this.markers.handle(event));
     this.bus.subscribe((event) => this.audio.handle(event));
+    this.bus.subscribe((event) => {
+      if (event.source === 'gunshot') this.concussion.hit(event.time);
+    });
     this.scene.add(this.markers.object);
 
     // Lights-on debug view. Off by default and, being a Group, costs nothing while it is.
@@ -696,7 +705,8 @@ class App {
     if (this.spiders !== null) this.spiderOverlay.sync(this.spiders, camera);
 
     const renderStart = performance.now();
-    this.renderer.render(this.scene, camera);
+    // Through the concussion pass, which is a plain pass-through unless a round has just gone off.
+    this.concussion.render(this.renderer, this.scene, camera, renderTime);
     this.perf.renderMs = performance.now() - renderStart;
 
     this.drawPlayerHud(renderTime, camera);
@@ -1157,7 +1167,24 @@ class App {
     ear.add(this.audio.tunables, 'deafSeconds', 0, 2, 0.05);
     ear.add(this.audio.tunables, 'deafCutoff', 150, 8000, 10);
     ear.add(this.audio.tunables, 'tinnitus', 0, 0.2, 0.005);
+    ear.add(this.audio.tunables, 'tinnitusSeconds', 0.5, 12, 0.5);
+    ear.add(this.audio.tunables, 'tinnitusFreq', 1200, 8000, 50);
     ear.close();
+
+    // The other half of the same concussion: how long the frame stays unwell and how badly.
+    const cc = gui.addFolder('concussion (view)');
+    const ct2 = this.concussion.tunables;
+    cc.add(ct2, 'enabled');
+    cc.add(ct2, 'seconds', 0.5, 12, 0.5);
+    cc.add(ct2, 'strength', 0, 1, 0.02);
+    cc.add(ct2, 'wobble', 0, 0.08, 0.002);
+    cc.add(ct2, 'tear', 0, 0.15, 0.005);
+    cc.add(ct2, 'tearRows', 0, 0.6, 0.02);
+    cc.add(ct2, 'grain', 0, 1, 0.02);
+    cc.add(ct2, 'vignette', 0, 1, 0.02);
+    cc.add(ct2, 'pulse', 0.2, 8, 0.1);
+    cc.add(ct2, 'ghost', 0, 0.5, 0.02);
+    cc.close();
   }
 
   private applyLook(): void {
@@ -1327,6 +1354,26 @@ class App {
        * device and no gesture, and touches nothing in the simulation.
        */
       audioRender: (opts?: Record<string, unknown>) => renderAudioScenes(opts ?? {}),
+      /** Onsets of the pack's phrases, for the rhythm check in `tools/audio.mjs`. */
+      audioPhrases: (count?: number) => phraseShapes(count),
+      /** The visual half of the concussion, for `tools/concussion.mjs` and for tuning by hand. */
+      concussion: {
+        state: () => ({
+          charge: this.concussion.charge,
+          amount: this.concussion.amount(this.time),
+          frames: this.concussion.rendered,
+          ...this.concussion.tunables,
+        }),
+        tune: (patch: Partial<Record<string, number | boolean>>) => {
+          Object.assign(this.concussion.tunables, patch);
+          return { ...this.concussion.tunables };
+        },
+        /** Force a level and hold it there, so a still frame can be photographed. */
+        set: (level: number) => {
+          this.concussion.setLevel(level, this.time);
+          return this.concussion.charge;
+        },
+      },
       audioTune: (patch: Partial<Record<string, number>>) => {
         Object.assign(this.audio.tunables, patch);
         if ('volume' in patch) this.audio.setVolume(this.audio.tunables.volume);

@@ -35,6 +35,7 @@
  * here — audio is a pure sink, so its presence or absence cannot change a frame.
  */
 import type { SoundEvent } from '../events/bus';
+import { applyDeafen, defaultDeafTunables, type DeafTunables } from './deafen';
 import { buildTimbre, loudnessGain, makeNoiseBuffer, timbreFor, type Timbre } from './voices';
 
 /** One voice's fixed chain. Built once; only its parameters change per sound. */
@@ -48,24 +49,13 @@ interface Voice {
   seq: number;
 }
 
-export interface AudioTunables {
+export interface AudioTunables extends DeafTunables {
   /** Simultaneous voices. Each one is an HRTF panner, which is the expensive part. */
   voices: number;
   /** Master gain. */
   volume: number;
   /** Above this age (seconds) an event is stale and is dropped rather than played late. */
   maxLatency: number;
-  /**
-   * How far the world is pushed down while the shot is still in your ears, 0..1. 0.25 means the
-   * hall comes back at a quarter of its level and climbs out of it.
-   */
-  deafDepth: number;
-  /** How long that takes to recover, seconds. */
-  deafSeconds: number;
-  /** Cutoff of the muffling filter at the bottom of the duck, Hz. */
-  deafCutoff: number;
-  /** The ring left in your ears after a shot, 0..1. 0 turns it off. */
-  tinnitus: number;
 }
 
 export function defaultAudioTunables(): AudioTunables {
@@ -73,10 +63,7 @@ export function defaultAudioTunables(): AudioTunables {
     voices: 24,
     volume: 0.7,
     maxLatency: 0.25,
-    deafDepth: 0.15,
-    deafSeconds: 0.9,
-    deafCutoff: 700,
-    tinnitus: 0.03,
+    ...defaultDeafTunables(),
   };
 }
 
@@ -338,48 +325,19 @@ export class AudioStage {
 
   /**
    * «Разрыв пространства.» The blast has already gone past this point in the graph, so what it
-   * shuts is everything *else*: the hall drops to a quarter of its level behind a lowpass and
-   * climbs back out over about three quarters of a second, with a faint ring left on top. For
-   * those few tenths the player is deaf, which is the price the concept keeps talking about,
-   * and it is paid in perception rather than in a number on a HUD.
+   * shuts is everything *else*: the hall drops through the floor behind a low lowpass and takes
+   * seconds to climb back, and a narrow rough band is left ringing in your head for several
+   * seconds more. The mechanics live in `deafen.ts` because the offline renderer has to run the
+   * identical thing for the proof to be worth anything.
    */
   private deafen(t0: number): void {
     const ctx = this.ctx;
     const duck = this.duck;
     const muffle = this.muffle;
     const master = this.master;
-    if (ctx === null || duck === null || muffle === null || master === null) return;
-    const t = this.tunables;
-    // Onset 20 ms after the trigger: the crack of the shot lands first, then the world goes.
-    const shut = t0 + 0.02;
-    const open = shut + t.deafSeconds;
-    duck.gain.cancelScheduledValues(t0);
-    duck.gain.setValueAtTime(duck.gain.value, t0);
-    duck.gain.linearRampToValueAtTime(Math.max(0.01, t.deafDepth), shut);
-    duck.gain.setTargetAtTime(1, shut, t.deafSeconds * 0.7);
-    duck.gain.setValueAtTime(1, open + t.deafSeconds);
-
-    muffle.frequency.cancelScheduledValues(t0);
-    muffle.frequency.setValueAtTime(20000, t0);
-    muffle.frequency.linearRampToValueAtTime(Math.max(120, t.deafCutoff), shut);
-    muffle.frequency.setTargetAtTime(20000, shut, t.deafSeconds * 0.6);
-    muffle.frequency.setValueAtTime(20000, open + t.deafSeconds);
-
-    if (t.tinnitus > 0) {
-      // Not a scripted scare: it is the shot's own after-image, born from the same event.
-      const osc = ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(3900, shut);
-      osc.frequency.exponentialRampToValueAtTime(3300, shut + t.deafSeconds * 1.4);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(t.tinnitus, shut);
-      g.gain.exponentialRampToValueAtTime(0.0001, shut + t.deafSeconds * 1.4);
-      osc.connect(g);
-      g.connect(master);
-      osc.start(t0);
-      osc.stop(shut + t.deafSeconds * 1.4 + 0.02);
-    }
+    const noise = this.noise;
+    if (ctx === null || duck === null || muffle === null || master === null || noise === null) return;
+    applyDeafen(ctx, { duck, muffle, master }, noise, t0, this.tunables);
   }
 
   /**

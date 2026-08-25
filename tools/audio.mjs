@@ -72,6 +72,9 @@ const before = await page.evaluate(() => window.bs.audioRender({ legacy: true })
 const ducked = await page.evaluate(() => window.bs.audioRender({ tinnitus: 0 }));
 const noduck = await page.evaluate(() =>
   window.bs.audioRender({ deafDepth: 1, deafCutoff: 20000, tinnitus: 0 }));
+// Not a render: the phrase skeletons the chatter timbre schedules, so the rhythm can be checked
+// as numbers. A spectrogram cannot tell an even train from a torn one at this time resolution.
+const phrases = await page.evaluate(() => window.bs.audioPhrases(16));
 const renderMs = Date.now() - t0;
 
 
@@ -120,14 +123,14 @@ const win = (s, from, to) => [Math.floor(from * s.rate), Math.floor(to * s.rate)
   const { a, b, r } = scenes.get('clicks');
   const RANGES = [3, 10, 20, 30, 45];
   const at = RANGES.map((m, i) => {
-    const t0 = 0.15 + i * 0.9;
-    const w = win(a, t0 - 0.05, t0 + 0.8);
+    const t0 = 0.15 + i * 1.6;
+    const w = win(a, t0 - 0.05, t0 + 1.45);
     return { m, peak: peakOf(a.mono, ...w), rms: rmsOf(a.mono, ...w) };
   });
   console.log(
     `[audio] chatter by range: ${at.map((x) => `${x.m} m ${db(x.peak).toFixed(1)}`).join('  ')} dBFS peak`,
   );
-  const near = win(a, 0.1, 0.85);
+  const near = win(a, 0.1, 1.55);
   const nowPeak = at[0].peak;
   const oldPeak = peakOf(b.mono, ...near);
   check('the pack at 3 m is unmistakable', db(nowPeak) > -20,
@@ -231,7 +234,121 @@ const win = (s, from, to) => [Math.floor(from * s.rate), Math.floor(to * s.rate)
   check('the player’s own boot is there but quiet', db(boot) > -40 && db(boot) < -10, `${db(boot).toFixed(1)} dBFS`);
 }
 
-// 5. Nothing anywhere is allowed to clip.
+// 5. The pack talks in phrases, not in metronome ticks.
+//    "Ровный ритм" is half of what made the old chatter read as a device rather than an animal,
+//    and it is invisible on a spectrogram — so it is measured here, on the onsets the timbre
+//    actually schedules, and printed as numbers.
+{
+  const all = [];
+  for (const p of phrases) all.push(...p.gaps);
+  all.sort((x, y) => x - y);
+  const mean = all.reduce((s, x) => s + x, 0) / all.length;
+  const sd = Math.sqrt(all.reduce((s, x) => s + (x - mean) ** 2, 0) / all.length);
+  const cv = sd / mean;
+  const lo = all[0];
+  const hi = all[all.length - 1];
+  const lens = phrases.map((p) => p.onsets.length);
+  console.log(
+    `[audio] phrase gaps over ${phrases.length} seeds: n=${all.length}  ` +
+      `min ${(lo * 1000).toFixed(0)} ms  mean ${(mean * 1000).toFixed(0)} ms  max ${(hi * 1000).toFixed(0)} ms  ` +
+      `sd ${(sd * 1000).toFixed(0)} ms  cv ${cv.toFixed(2)}  elements per phrase ${Math.min(...lens)}-${Math.max(...lens)}`,
+  );
+  for (const p of phrases.slice(0, 4)) {
+    console.log(
+      `[audio]   seq ${String(p.seq).padStart(2)}: ${p.gaps.map((g) => `${(g * 1000).toFixed(0)}`).join(' ')} ms`,
+    );
+  }
+  check('the gaps between calls are not one number', cv > 0.4,
+    `spread ${(lo * 1000).toFixed(0)}-${(hi * 1000).toFixed(0)} ms around a ${(mean * 1000).toFixed(0)} ms mean, cv ${cv.toFixed(2)}`);
+  // A phrase whose own gaps are all equal is still a metronome even if the *tempo* wanders
+  // between phrases, so irregularity is required inside each phrase too.
+  // A phrase whose own gaps are all equal is still a metronome even if the *tempo* wanders
+  // between phrases, so irregularity is required inside phrases too. The median and not the
+  // minimum: with the gaps drawn independently, one phrase in a dozen will come out nearly even
+  // by chance, and that is a property of honest randomness rather than a bug to assert away.
+  const swings = phrases
+    .filter((p) => p.gaps.length >= 2)
+    .map((p) => (Math.max(...p.gaps) - Math.min(...p.gaps)) / Math.max(...p.gaps))
+    .sort((x, y) => x - y);
+  const median = swings[swings.length >> 1];
+  check('and they are not one number inside a single phrase either', median > 0.35,
+    `the median phrase swings its own gaps by ${(median * 100).toFixed(0)}%` +
+      ` (flattest ${(swings[0] * 100).toFixed(0)}%, most torn ${(swings[swings.length - 1] * 100).toFixed(0)}%)`);
+  check('and the phrase length itself varies', Math.max(...lens) - Math.min(...lens) >= 2,
+    `${Math.min(...lens)} to ${Math.max(...lens)} calls`);
+}
+
+// 6. The death cry had to survive the chatter pass. The chatter was made a lot louder and moved
+//    into the same register, and the risk was that dying now sounds like talking.
+{
+  const { a } = scenes.get('voices');
+  const talk = win(a, 0.15, 1.4);
+  const bite = win(a, 1.45, 2.7);
+  const death = win(a, 2.75, 4.2);
+  const pTalk = peakOf(a.mono, ...talk);
+  const pBite = peakOf(a.mono, ...bite);
+  const pDeath = peakOf(a.mono, ...death);
+  console.log(
+    `[audio] one spider at 8 m: chatter ${db(pTalk).toFixed(1)}  bite ${db(pBite).toFixed(1)}  ` +
+      `death ${db(pDeath).toFixed(1)} dBFS peak`,
+  );
+  check('dying is still nothing like talking', db(pDeath) - db(pTalk) > 5,
+    `${(db(pDeath) - db(pTalk)).toFixed(1)} dB over a phrase from the same animal at the same range`);
+  // Loudness alone is not the difference — a scream is *long*. The chatter's whole phrase is
+  // under half a second; the death cry has to still be going after that.
+  const tail = db(rmsOf(a.mono, ...win(a, 3.3, 3.9)));
+  const talkTail = db(rmsOf(a.mono, ...win(a, 0.75, 1.35)));
+  check('and it holds on after a phrase would have stopped', tail - talkTail > 10,
+    `${tail.toFixed(1)} against ${talkTail.toFixed(1)} dB half a second in`);
+}
+
+// 7. The concussion. `a` and `d` are the same scene with the ring switched off in `d`, so their
+//    difference *is* the ring — no assumptions, and no second implementation to measure.
+{
+  const { a, d, r } = scenes.get('concussion');
+  const ring = new Float32Array(a.mono.length);
+  for (let i = 0; i < ring.length; i++) ring[i] = a.mono[i] - d.mono[i];
+  const shotAt = 0.4;
+  // Measured *after* the blast has gone, not on top of it: the ring changes what the limiter is
+  // doing while the shot is peaking, so during those first few hundred milliseconds `a - d`
+  // is mostly limiter difference and says nothing about the ring itself.
+  const [w0, w1] = win(a, shotAt + 0.8, shotAt + 1.4);
+  const hi = highFraction(ring, a.rate, w0, w1 - 1, 3000);
+  check('the ring is a narrow band, not a hiss', hi > 0.85,
+    `${(hi * 100).toFixed(0)}% of its energy is over 3 kHz`);
+  // "Держится долго" — the point of the pass. The old whistle was one second of 3.9 kHz sine.
+  const at = (o) => db(rmsOf(ring, ...win(a, shotAt + o, shotAt + o + 0.6)));
+  const early = at(0.8);
+  const late = at(3.4);
+  const gone = db(rmsOf(ring, ...win(a, r.seconds - 0.3, r.seconds - 0.02)));
+  console.log(
+    `[audio] ring after the shot: ${[0.2, 0.8, 1.8, 2.8, 3.4, 4.4]
+      .map((o) => `+${o.toFixed(1)} s ${at(o).toFixed(1)}`)
+      .join('  ')}  end ${gone.toFixed(1)} dB`,
+  );
+  check('and it is still there seconds later', late > early - 14 && late > gone + 10,
+    `${late.toFixed(1)} dB at +3.7 s — ${(early - late).toFixed(1)} dB under its own start, ` +
+      `${(late - gone).toFixed(1)} dB over silence`);
+  // It rings, it does not deafen you a second time: the shot itself must stay far above it, or
+  // the ring stops being an after-effect and becomes the loudest thing in the game.
+  check('and it never competes with the shot that caused it',
+    db(peakOf(ring)) < db(peakOf(a.mono)) - 15,
+    `${db(peakOf(ring)).toFixed(1)} against ${db(peakOf(a.mono)).toFixed(1)} dBFS`);
+  // The other half of the concussion: the hall falls through the floor and then comes back.
+  const { d: dd, n: nn } = scenes.get('concussion');
+  // Over 2 kHz, where the chatter lives: the blast's own low tail bypasses the duck by design
+  // and would otherwise sit in the middle of the measurement in both renders.
+  const under = win(a, 1.0, 1.6);
+  const back = win(a, 5.6, 6.6);
+  const drop = db(highRms(nn.mono, nn.rate, under[0], under[1] - 1, 2000)) -
+    db(highRms(dd.mono, dd.rate, under[0], under[1] - 1, 2000));
+  const rec = db(highRms(nn.mono, nn.rate, back[0], back[1] - 1, 2000)) -
+    db(highRms(dd.mono, dd.rate, back[0], back[1] - 1, 2000));
+  check('the hall drops away under it and comes back', drop > 8 && Math.abs(rec) < 3,
+    `${drop.toFixed(1)} dB down at +0.6 s, ${rec.toFixed(1)} dB apart at +5 s`);
+}
+
+// 8. Nothing anywhere is allowed to clip.
 {
   let worst = 0;
   let worstName = '';

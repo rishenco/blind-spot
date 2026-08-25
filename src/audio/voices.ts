@@ -83,6 +83,13 @@ export interface Timbre {
   readonly blast?: boolean;
   /** Short label for the offline renderer and the debug overlay. */
   readonly name: string;
+  /**
+   * For timbres that are a *phrase* rather than one hit (only the chatter, so far): the onset of
+   * each element, seconds from the start. It exists so the rhythm can be *measured* — the ear's
+   * keyframe run prints these intervals, because "it is not on a grid" is a claim about numbers
+   * and the previous version failed it while sounding fine in a code review.
+   */
+  readonly onsets?: readonly number[];
 }
 
 /** Deterministic 0..1 from an integer. Cheap, well-mixed, and the same in every browser. */
@@ -130,57 +137,88 @@ function gunshot(seq: number): Timbre {
 }
 
 /**
- * The birds. «Переговариваются птичьими щелчками» — read literally.
+ * The pack talking. «Переговариваются птичьими щелчками» — read literally, but read *alive*.
  *
- * The first version of this was a row of 7 ms band-passed noise ticks at a fixed pitch, and the
- * verdict on it was exactly right: it sounded like *equipment*, a Geiger counter in the dark,
- * not like an animal. What separates a bird from a tick generator is not level, it is:
+ * Two verdicts shaped this. The first version was a row of band-passed noise ticks at a fixed
+ * pitch and read as *equipment* — a Geiger counter in the dark. The second one fixed the pitch
+ * by gliding it, and read as a *bell*: still a clean tone, still laid out on an even accelerating
+ * grid, so the ear heard a musical instrument. Pitch + periodicity = instrument; that is the
+ * whole diagnosis.
  *
- *   - a *glide*. Every element sweeps in pitch over its 15-35 ms, up or down, alternating
- *     through the phrase. A static pitch reads as a device; a moving one reads as a throat.
- *   - an inharmonic partial riding above the fundamental (x2.02, not x2), which is what makes
- *     a whistle sound bodied rather than synthesised.
- *   - breath. A little band-passed noise tracking the glide, so the element has air in it.
- *   - phrasing. The elements accelerate through the phrase and their level rises and falls in
- *     an arc, so it is a *call* with a shape, not a metronome.
- *   - a voice per phrase: the base pitch is seeded, so two spiders talking are two spiders and
- *     not one sound played twice.
+ * So this version gives the call a body instead of a note:
  *
- * The band, 2.2-4.4 kHz, still sits where nothing else in the game lives (the rifle's body is
- * under a kilohertz, footsteps under 300 Hz, prop rings top out near 1.6 kHz), so the pack can
+ *   - **no oscillators.** Every element is resonant noise (a bandpass at Q≈14 swept over its
+ *     20 ms) rather than a triangle wave. A filtered hiss with a formant in it is a throat; a
+ *     tone is a tuning fork. This is the single change that stops it sounding like a bell.
+ *   - **no centre of pitch.** Each element lands anywhere across two thirds of an octave around
+ *     the animal's own voice, so nothing in a phrase agrees on a key. The old version drifted
+ *     the pitch up by a fixed 3.5% per element, which is a *scale*.
+ *   - **breath.** A wide low hiss rides under each element, a sip fills every long gap, and the
+ *     phrase ends on an audible exhale. That is the layer you hear *between* the clicks, and it
+ *     is what makes the silence sound like an animal holding still rather than a device idling.
+ *   - **a torn rhythm.** Gaps are drawn from three populations — a stutter (two calls almost on
+ *     top of each other), an ordinary gap, and a pause where the thing stops to listen — so the
+ *     intervals inside one phrase differ by an order of magnitude and never repeat. `onsets`
+ *     records them so `tools/audio.mjs` can print the numbers instead of claiming it.
+ *
+ * The band, roughly 1.5-6 kHz, still sits where nothing else in the game lives (the rifle's body
+ * is under a kilohertz, footsteps under 300 Hz, prop rings top out near 1.6 kHz), so the pack can
  * still be heard *through* a noisy hall — «главный способ их обнаружить».
  */
 function chatter(seq: number): Timbre {
-  const n = 3 + Math.floor(hash01(seq, 3) * 5);
-  const base = lerp(2200, 4400, hash01(seq, 5));
-  // Which way the first element sweeps; the rest alternate around it.
-  const rising = hash01(seq, 11) > 0.45;
+  const n = 3 + Math.floor(hash01(seq, 3) * 4);
+  // The animal's own voice. Wide, because two spiders must not sound like one sound played twice.
+  const base = lerp(1900, 4200, hash01(seq, 5));
   const layers: Layer[] = [];
+  const onsets: number[] = [];
   let t = 0;
   for (let i = 0; i < n; i++) {
     const v = hash01(seq, 7 + i * 3);
     const w = hash01(seq, 8 + i * 3);
+    const u = hash01(seq, 9 + i * 3);
     // The arc: quiet at the edges of the phrase, loudest a third of the way in.
     const arc = 0.55 + 0.45 * Math.sin(Math.PI * Math.min(1, (i + 0.6) / n));
-    const g = arc * lerp(0.8, 1, w);
-    const f0 = base * lerp(0.9, 1.14, v) * (1 + i * 0.035);
-    const up = i % 2 === 0 ? rising : !rising;
-    const span = lerp(1.25, 1.85, w);
-    const f1 = up ? f0 * span : f0 / span;
-    const dur = lerp(0.014, 0.032, v);
-    // The mandible: the hard front edge of the call, gone in four milliseconds.
-    layers.push({ kind: 'noise', delay: t, gain: g * 0.55, attack: 0.0003, decay: 0.004, freq: f0 * 1.5, q: 5, filter: 'bandpass' });
-    // The call itself, gliding.
-    layers.push({ kind: 'tone', delay: t + 0.001, gain: g, attack: 0.0015, decay: dur, freq: f0, freqEnd: f1, wave: 'triangle' });
-    // An inharmonic partial: what makes it a throat and not an oscillator.
-    layers.push({ kind: 'tone', delay: t + 0.001, gain: g * 0.3, attack: 0.002, decay: dur * 0.8, freq: f0 * 2.02, freqEnd: f1 * 2.02, wave: 'sine' });
-    // Breath, tracking the glide.
-    layers.push({ kind: 'noise', delay: t + 0.001, gain: g * 0.22, attack: 0.002, decay: dur * 0.9, freq: f0, freqEnd: f1, q: 6, filter: 'bandpass' });
-    // The phrase accelerates: the last gaps are half the first ones.
-    const pace = lerp(0.085, 0.04, n === 1 ? 0 : i / (n - 1));
-    t += pace * lerp(0.8, 1.3, hash01(seq, 23 + i));
+    const g = arc * lerp(0.75, 1, w);
+    // Each element picks its own formant. No ladder, no key.
+    const f0 = base * lerp(0.66, 1.5, v);
+    const span = lerp(1.3, 2.3, w);
+    const f1 = u > 0.42 ? f0 * span : f0 / span;
+    const dur = lerp(0.012, 0.03, v);
+    onsets.push(t);
+    // The mandible: the hard wet front edge of the call, gone in four milliseconds.
+    layers.push({ kind: 'noise', delay: t, gain: g * 0.5, attack: 0.0003, decay: 0.004, freq: f0 * 1.45, q: 4, filter: 'bandpass' });
+    // The call itself — a formant sweeping through noise. A throat, not an oscillator.
+    layers.push({ kind: 'noise', delay: t + 0.001, gain: g, attack: 0.0012, decay: dur, freq: f0, freqEnd: f1, q: 14, filter: 'bandpass' });
+    // A second, inharmonic resonance riding above it: what gives the sound a size.
+    layers.push({ kind: 'noise', delay: t + 0.0015, gain: g * 0.42, attack: 0.002, decay: dur * 0.8, freq: f0 * 2.02, freqEnd: f1 * 1.94, q: 6, filter: 'bandpass' });
+    // Air moving with the call.
+    layers.push({ kind: 'noise', delay: t + 0.001, gain: g * 0.22, attack: 0.003, decay: dur * 1.7, freq: f0 * 0.72, freqEnd: f1 * 0.66, q: 2.2, filter: 'bandpass' });
+
+    // The gap after this element, from three populations. Nothing about it is a grid.
+    const j = hash01(seq, 23 + i * 5);
+    const k = hash01(seq, 24 + i * 5);
+    let gap: number;
+    if (j < 0.3) gap = lerp(0.017, 0.034, k);        // a stutter, two calls almost on top
+    else if (j > 0.78) gap = lerp(0.13, 0.21, k);    // it stops and listens
+    else gap = lerp(0.045, 0.105, k);
+    // A sip in the long gaps: the breath between calls, which is the half you never heard.
+    if (gap > 0.12) {
+      layers.push({ kind: 'noise', delay: t + dur + 0.012, gain: 0.15, attack: 0.035, decay: gap * 0.4, freq: 2400, freqEnd: 1200, q: 0.9, filter: 'bandpass' });
+    }
+    t += gap;
+    // Phrases stay under about half a second whatever the dice say: a longer one starts
+    // overlapping the next animal and the pack turns into a texture.
+    if (t > 0.42) break;
   }
-  return { name: 'spider-chatter', gain: 0.45, ref: 12, reach: 2.6, dur: t + 0.14, layers };
+  // The exhale that closes the phrase. Slow attack, no transient — it is the opposite of a click,
+  // which is exactly why it reads as a body.
+  layers.push({ kind: 'noise', delay: t + 0.008, gain: 0.26, attack: 0.045, decay: 0.11, freq: 2700, freqEnd: 1250, q: 0.8, filter: 'bandpass' });
+  // The 1.3 is not a loudness change, it is the price of the timbre change: a bandpass at Q=14
+  // hands back a fraction of the energy an oscillator of the same nominal gain did, so without
+  // this the pack would have gone 9 dB quieter for reasons that have nothing to do with design.
+  // The measured peak of a 3 m phrase is back where it was. Range (`loudness`) is untouched —
+  // that number belongs to the spiders.
+  return { name: 'spider-chatter', gain: 1.75, ref: 12, reach: 2.6, dur: t + 0.26, layers, onsets };
 }
 
 /**
@@ -192,7 +230,11 @@ function screech(seq: number, dying: boolean): Timbre {
   if (dying) {
     return {
       name: 'spider-death',
-      gain: 0.9,
+      // Nudged with the chatter's own parity compensation (M6c). The talk got its lost 5 dB
+      // back when it stopped being an oscillator, and the death cry has to stay the same
+      // distance above the talk as it was — otherwise fixing the voice quietly makes dying
+      // sound like a conversation. Range (`ref`, and the event's loudness) is untouched.
+      gain: 1.2,
       ref: 24,
       dur: 0.8,
       layers: [
@@ -205,7 +247,8 @@ function screech(seq: number, dying: boolean): Timbre {
   }
   return {
     name: 'spider-screech',
-    gain: 0.85,
+    // Same parity nudge as the death cry above, for the same reason.
+    gain: 1.1,
     ref: 24,
     dur: 0.42,
     layers: [
