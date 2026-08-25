@@ -54,6 +54,18 @@ export interface Features {
   guardPost: Vec2;
   /** The post the second defender should hold: between the *unknown* opponent and my goal. */
   coverPost: Vec2;
+  /** Peak of each opponent's belief — the single best guess, for aiming a tackle. */
+  oppMode: Vec2[];
+  /** Each opponent's decaying "he was heading this way" estimate, m/s, and its age. */
+  oppDir: Vec2[];
+  oppDirAge: number[];
+  /**
+   * Seconds before the nearest believed opponent could be standing on top of me.
+   *
+   * The whole point of the contest rules, expressed as one number: a carrier who cannot answer
+   * "how long have I got" has no reason to want to know where anybody is.
+   */
+  huntTime: number;
 }
 
 const SAMPLES = 7;
@@ -80,6 +92,15 @@ export function deriveFeatures(
     oppSamples.push(belief.opponentSamples(i, SAMPLES));
     oppArea.push(belief.opponents[i]!.grid.effectiveArea());
     oppAge.push(clamp(belief.now - belief.opponents[i]!.lastSeenT, 0, 99));
+  }
+
+  const oppMode: Vec2[] = [];
+  const oppDir: Vec2[] = [];
+  const oppDirAge: number[] = [];
+  for (const t of belief.opponents) {
+    oppMode.push(t.grid.mode().pos);
+    oppDir.push({ x: t.dir.x, y: t.dir.y });
+    oppDirAge.push(clamp(belief.now - t.dirT, 0, 99));
   }
 
   let mirrorKnown = 0;
@@ -148,7 +169,7 @@ export function deriveFeatures(
     y: ownGoal.y + (ghost.y - ownGoal.y) * 0.55,
   };
 
-  return {
+  const f: Features = {
     now: belief.now,
     me: selfPos,
     mySpeed: selfSpeed,
@@ -173,7 +194,28 @@ export function deriveFeatures(
     carryLimit: cfg.match.carryTimeoutSec,
     guardPost,
     coverPost,
+    oppMode,
+    oppDir,
+    oppDirAge,
+    huntTime: 99,
   };
+  f.huntTime = opponentArrival(f, selfPos, cfg);
+  return f;
+}
+
+/**
+ * Where a believed body will be `t` seconds from now, if it keeps doing what it was last heard
+ * doing. The aiming point of a dive tackle: the mechanic is a bet on prediction, so this is the
+ * only place in the bot where a belief is extrapolated forward rather than merely diffused.
+ */
+export function leadPoint(f: Features, i: number, t: number): Vec2 {
+  const at = f.oppMode[i] ?? f.me;
+  const dir = f.oppDir[i];
+  if (!dir) return { x: at.x, y: at.y };
+  // A heading estimate rots fast: a body heard running two seconds ago has had ample time to
+  // turn, so past a second the lead collapses back onto the last known position.
+  const trust = clamp(1 - (f.oppDirAge[i] ?? 99) / 1.2, 0, 1);
+  return { x: at.x + dir.x * t * trust, y: at.y + dir.y * t * trust };
 }
 
 /**

@@ -28,6 +28,7 @@ import type { Belief } from './belief';
 import {
   advance,
   laneClear,
+  leadPoint,
   legalPoint,
   opponentArrival,
   receiveValue,
@@ -37,7 +38,19 @@ import {
   type Role,
 } from './features';
 
-export type ActionKind = 'hold' | 'move' | 'ping' | 'shoot' | 'pass' | 'feint' | 'dive' | 'investigate';
+export type ActionKind =
+  | 'hold'
+  | 'move'
+  | 'ping'
+  | 'shoot'
+  | 'pass'
+  | 'feint'
+  | 'dive'
+  | 'investigate'
+  /** Close on the believed carrier and stay on him until the ball comes loose. */
+  | 'contest'
+  /** Throw the body at where an opponent is going to be. */
+  | 'tackle';
 
 export interface Action {
   kind: ActionKind;
@@ -77,12 +90,16 @@ export interface PolicyWeights {
 const WEIGHTS: Record<Role, PolicyWeights> = {
   // The carrier is already a beacon — the ball hums in his hands — so silence costs him almost
   // nothing and buys him almost nothing. He is here to shoot or to pass.
-  carrier: { pos: 3.0, safe: 0.7, quiet: 0.25, info: 0.9, deceive: 0.35, team: 0.4, commit: 0.7 },
+  // `safe` used to be an afterthought for the carrier, and correctly so: with no steal and no
+  // tackle, an opponent standing next to him could do precisely nothing. Now proximity is the
+  // way the ball is lost, so "how long have I got" is the carrier's second question after
+  // "where is the goal".
+  carrier: { pos: 3.0, safe: 1.6, quiet: 0.25, info: 1.1, deceive: 0.35, team: 0.5, commit: 0.7 },
   // The shadow is the whole point of the team game: he is useful precisely because nobody knows
   // where he is, so exposure is his dominant cost and staying put is a real option.
   support: { pos: 2.2, safe: 0.9, quiet: 1.9, info: 0.35, deceive: 0.7, team: 0.9, commit: 0.8 },
   chase: { pos: 3.2, safe: 0.4, quiet: 0.45, info: 0.25, deceive: 0.2, team: 1.1, commit: 0.7 },
-  guard: { pos: 2.0, safe: 0.6, quiet: 1.4, info: 0.95, deceive: 0.5, team: 0.9, commit: 0.8 },
+  guard: { pos: 2.2, safe: 0.6, quiet: 1.2, info: 1.0, deceive: 0.5, team: 0.9, commit: 0.8 },
 };
 
 /** How much a role cares about being heard. A carrier hums anyway; a shadow lives on silence. */
@@ -159,6 +176,8 @@ export interface PolicyInput {
   lastTag: string | null;
   /** 0..1: how many of the generated candidates the bot is allowed to look at. */
   decisionQuality: number;
+  /** false removes the ping from the candidate list entirely — the ping test's control group. */
+  allowPing?: boolean;
 }
 
 /**
@@ -199,6 +218,28 @@ export function generateCandidates(input: PolicyInput): Action[] {
         y: f.goal.y + n.y * (f.field.creaseRadius + 1.4),
       });
       out.push({ kind: 'move', tag: `shootspot${k}`, to: spot, mode: 'run' });
+    }
+  }
+
+  // Hunting the carrier. He hums across the whole pitch, so getting to him is never the hard
+  // part — but standing on him for half a second while he runs, throws and lies about where he
+  // is going, is. This is the candidate that turns "I know where you are" into a ball.
+  if (f.role !== 'carrier' && cfg.contest.steal.enabled && f.ballPos && input.belief.possession === 'opponent') {
+    const lead = f.ball
+      ? { x: f.ballPos.x + f.ball.vel.x * 0.35, y: f.ballPos.y + f.ball.vel.y * 0.35 }
+      : f.ballPos;
+    out.push({ kind: 'contest', tag: 'strip', to: legal(lead), mode: 'run' });
+  }
+
+  // The dive tackle: a bet on where a body will be when the dive lands. Only offered when the
+  // believed body is roughly a dive away — the reach is `dive.speed × dive.durationSec`.
+  if (cfg.contest.tackle.enabled) {
+    const reach = cfg.dive.speed * cfg.dive.durationSec;
+    for (let i = 0; i < f.oppMode.length; i++) {
+      const lead = leadPoint(f, i, cfg.dive.durationSec * 0.6);
+      const d = dist2(f.me, lead);
+      if (d > reach + 1 || d < 0.4) continue;
+      out.push({ kind: 'tackle', tag: `tackle${i}`, dir: norm2(sub2(lead, f.me), { x: 1, y: 0 }), to: lead, track: i });
     }
   }
 
@@ -245,7 +286,7 @@ export function generateCandidates(input: PolicyInput): Action[] {
     out.push({ kind: 'move', tag: `r${d.x.toFixed(1)},${d.y.toFixed(1)}`, to: legal({ x: f.me.x + d.x * 5, y: f.me.y + d.y * 5 }), mode: 'run' });
   }
 
-  if (input.pingCooldown <= 1e-6) {
+  if (input.pingCooldown <= 1e-6 && input.allowPing !== false) {
     // Asking a question does not have to mean standing still while you ask it, so the ping
     // candidate carries the destination the role would have moved to anyway.
     // The destination is deliberately the one this role would have chosen anyway, so the two
@@ -328,6 +369,7 @@ function score(action: Action, input: PolicyInput): ScoredAction {
     }
     case 'move':
     case 'investigate':
+    case 'contest':
     case 'ping': {
       if (action.to) {
         dest = action.to;
@@ -355,10 +397,12 @@ function score(action: Action, input: PolicyInput): ScoredAction {
       travelT = 0.45 + travelTime(dist2(action.via!, dest), 0, cfg.player.accel, cfg.player.walkSpeed);
       break;
     }
-    case 'dive': {
-      dest = { x: f.me.x + action.dir!.x * 2.2, y: f.me.y + action.dir!.y * 2.2 };
+    case 'dive':
+    case 'tackle': {
+      const reach = cfg.dive.speed * cfg.dive.durationSec;
+      dest = { x: f.me.x + action.dir!.x * reach, y: f.me.y + action.dir!.y * reach };
       noiseRadius = cfg.loudness.dive;
-      travelT = cfg.dive.durationSec;
+      travelT = cfg.dive.durationSec + cfg.dive.recoverySec;
       break;
     }
   }
@@ -377,7 +421,19 @@ function score(action: Action, input: PolicyInput): ScoredAction {
 
   // --- the axes -----------------------------------------------------------------
   const uPos = positionValue(action, endPos, travelT, arrival, input);
-  const uSafe = 1 - 0.85 * threatAt(f, endPos, cfg);
+  // Danger means "somebody can be standing on me shortly", and that only costs anything while I
+  // still have the ball. Getting rid of it is the answer to being hunted, not another way of
+  // being caught — without this exemption a threatened carrier scores holding still exactly as
+  // well as throwing, and the whole point of knowing where the hunters are evaporates.
+  const releases = action.kind === 'shoot' || action.kind === 'pass';
+  const danger = threatAt(f, endPos, cfg);
+  // Whose danger, though. For a carrier an opponent arriving is the ball gone, and that is worth
+  // being afraid of. For anybody else it is a body walking past: the worst it can do is tackle,
+  // which is rare, telegraphed and survivable. Charging both of them the same price is what kept
+  // the bot from ever hunting a carrier — the one place on the pitch it most wants to stand is
+  // by definition the place with an opponent in it, so `strip` scored 0.15 on safety and never
+  // once won a decision.
+  const uSafe = releases ? 1 : 1 - (f.role === 'carrier' ? 0.85 : 0.25) * danger;
   // Noise only costs what secrecy is still worth. If the opposition already has a fix on me —
   // because I am the one carrying the humming ball, or because somebody just pinged me — then
   // being loud costs nothing and the bot is free to ask questions. That is the mirror belief
@@ -448,6 +504,35 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
   if (action.kind === 'dive') {
     if (!f.intercept) return 0.05;
     return clamp(1 - dist2(endPos, f.intercept.point) / 3, 0.05, 1);
+  }
+  if (action.kind === 'contest') {
+    // Worth exactly what the chance of arriving in time is worth. The carrier is the one body in
+    // the game whose position is not a guess, so this is a race against his legs, not a search.
+    const to = action.to ?? endPos;
+    const mine = travelTime(dist2(f.me, to), f.mySpeed, cfg.player.accel, cfg.player.runSpeed);
+    // Can I get there before he has finished with it, and is he anywhere worth stopping? A
+    // carrier walking it up in his own half is not worth chasing across the pitch; one arriving
+    // at the crease is worth everything a defender has.
+    const reachable = clamp(1 - mine / 3, 0.05, 1);
+    const threat = clamp(1 - (dist2(to, f.ownGoal) - f.field.creaseRadius) / 12, 0.15, 1);
+    return clamp(reachable * (0.35 + 0.65 * threat), 0.02, 1);
+  }
+  if (action.kind === 'tackle') {
+    const i = action.track ?? 0;
+    // The probability the dive connects: how much of the belief about that body actually sits
+    // where the dive will end. A vague belief scores badly all by itself, which is the honest
+    // way for a bot to decline a bet it cannot price.
+    const track = belief.opponents[i];
+    if (!track) return 0.02;
+    const hit = clamp(track.grid.massInCircle(endPos, cfg.contest.tackle.radius + cfg.player.radius), 0, 1);
+    // Flattening a body matters most when it is the one holding the ball, and second-most when
+    // it is between me and my goal.
+    const isCarrier =
+      belief.possession === 'opponent' && f.ballPos ? clamp(1 - dist2(endPos, f.ballPos) / 3, 0, 1) : 0;
+    const worth = 0.35 + 0.65 * isCarrier;
+    // A miss is 0.4 s of dive plus a full recovery flat on the floor. That cost is not on the
+    // safety axis (nobody has to be near me for it to hurt), so it is priced here.
+    return clamp(hit * worth + (1 - hit) * 0.03, 0.02, 1);
   }
   if (action.kind === 'investigate') {
     const i = action.track ?? 0;
@@ -571,7 +656,9 @@ function deceptionValue(action: Action, endPos: Vec2, noisePos: Vec2, pHeard: nu
   const { features: f } = input;
   // A throw is not a manoeuvre: judging it on where it leaves the opposition's picture of me
   // would tax every shot in the game for a benefit that belongs to positioning.
-  if (action.kind === 'shoot' || action.kind === 'pass' || action.kind === 'dive') return 0.5;
+  if (action.kind === 'shoot' || action.kind === 'pass' || action.kind === 'dive' || action.kind === 'tackle') {
+    return 0.5;
+  }
   const believed = pHeard > 0.4 ? noisePos : f.mirrorCentre;
   // Where I will really be a moment after the action has finished making its noise.
   const future = action.kind === 'feint' ? action.to! : endPos;
@@ -589,6 +676,8 @@ function teamValue(endPos: Vec2, input: PolicyInput): number {
 /** Direction to face. The carrier aims where he intends to throw; everyone else at the ball. */
 export function aimFor(action: Action, f: Features): Vec2 {
   if (action.kind === 'shoot' || action.kind === 'pass') return norm2(sub2(action.target!, f.me), { x: 1, y: 0 });
+  if (action.kind === 'tackle') return action.dir!;
+  if (action.kind === 'contest' && action.to) return norm2(sub2(action.to, f.me), { x: 1, y: 0 });
   if (f.role === 'carrier') {
     const target = action.kind === 'move' && action.to ? action.to : f.goal;
     return norm2(sub2(target, f.me), { x: 1, y: 0 });

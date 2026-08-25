@@ -14,7 +14,7 @@
 import type { BeliefCloud, SoundKind, Vec2 } from '../sim/types';
 import type { PlayerState, WorldState } from '../sim/sim';
 import type { FieldInfo } from '../sim/types';
-import type { PerceivedModel } from './perceived';
+import type { Mark, PerceivedModel } from './perceived';
 
 export interface Camera {
   ox: number;
@@ -27,8 +27,13 @@ export interface Camera {
 export const TEAM_COLOR = ['#4dd8ff', '#ff9a52'] as const;
 export const BALL_COLOR = '#ffd166';
 
-/** Warm for sound, per the inherited language. The sonar is white because it is the loud one. */
-export const SOUND_COLOR: Record<SoundKind, string> = {
+/**
+ * Warm for sound, per the inherited language. The sonar is white because it is the loud one.
+ *
+ * Partial by design: the rules layer may invent a sound kind, and a missing row must be a grey
+ * blob rather than a crash or a compile error in the renderer.
+ */
+export const SOUND_COLOR: Partial<Record<SoundKind, string>> = {
   'step-walk': '#5c7fa3',
   'step-run': '#7fb2ff',
   brake: '#ff7a5c',
@@ -42,9 +47,43 @@ export const SOUND_COLOR: Record<SoundKind, string> = {
   whistle: '#ff7ae0',
 };
 
+export const soundColor = (kind: SoundKind): string => SOUND_COLOR[kind] ?? '#8aa0b4';
+
 export function makeCamera(width: number, height: number, field: FieldInfo, pad = 24): Camera {
   const scale = Math.min((width - pad * 2) / field.width, (height - pad * 2) / field.height);
   return { ox: width / 2, oy: height / 2, scale, w: width, h: height };
+}
+
+/**
+ * The play camera: the same projection, zoomed and centred on one body.
+ *
+ * A whole-pitch view is the right tool for debugging and the wrong one for playing — at 24 m
+ * across, a player is four pixels and their own half-metre of touch is invisible, so every
+ * instrument the cockpit draws on the body lands on top of itself. Zooming in also does
+ * something the concept wants: the edges of the pane stop being the edges of the world, so
+ * "somewhere out there" becomes a real feeling instead of a corner of a diagram.
+ *
+ * It never scrolls past the pitch by more than a margin, because a blind player who has lost
+ * the walls has lost the only fixed thing they have.
+ */
+export function makePlayCamera(
+  width: number,
+  height: number,
+  field: FieldInfo,
+  centre: Vec2,
+  zoom: number,
+  shake: Vec2 = { x: 0, y: 0 },
+): Camera {
+  const base = makeCamera(width, height, field);
+  const scale = base.scale * zoom;
+  const margin = 2.5;
+  const halfW = width / 2 / scale;
+  const halfH = height / 2 / scale;
+  const maxX = Math.max(0, field.halfWidth + margin - halfW);
+  const maxY = Math.max(0, field.halfHeight + margin - halfH);
+  const cx = Math.max(-maxX, Math.min(maxX, centre.x));
+  const cy = Math.max(-maxY, Math.min(maxY, centre.y));
+  return { ox: width / 2 - cx * scale + shake.x, oy: height / 2 + cy * scale + shake.y, scale, w: width, h: height };
 }
 
 export const sx = (cam: Camera, p: Vec2): number => cam.ox + p.x * cam.scale;
@@ -225,7 +264,7 @@ export function drawTruth(ctx: CanvasRenderingContext2D, cam: Camera, o: TruthOp
     const age = o.now - m.born;
     const a = Math.max(0, 1 - age / o.markLife);
     if (a <= 0) continue;
-    const color = SOUND_COLOR[m.kind];
+    const color = soundColor(m.kind);
     if (o.showRadii) circle(ctx, cam, m.pos, m.intensity * (1 - a * 0.15), color, a * 0.18);
     blob(ctx, cam, m.pos, Math.min(2.2, 0.5 + m.intensity * 0.06), color, a * 0.5);
   }
@@ -333,6 +372,79 @@ export interface PerceivedOptions {
   beliefFilter?: string;
 }
 
+
+/**
+ * One sound mark, and everything a player has to read off it in a quarter of a second.
+ *
+ * Four separate readings are packed into one shape, and they are the four questions the concept
+ * says a blind player is always asking:
+ *
+ *   * **where** — the blob sits at the reported position, and the dashed cigar around it is the
+ *     honest shape of the error: long along the bearing, short across it;
+ *   * **how loud** — the core's size scales with the event's audible radius, so a fumble is
+ *     visibly a bigger mistake than a footstep;
+ *   * **how fresh** — a mark is born with a single expanding echo ring and a hot core, and once
+ *     it is past half its life it stops being filled at all and becomes a hollow, dotted ghost.
+ *     Information that has gone stale must *look* stale, or a player acts on a two-second-old
+ *     guess believing it to be news;
+ *   * **whose** — a known source (a team-mate, the ball, the player's own body) is drawn cool
+ *     and labelled; an anonymous one gets the warm palette and a question mark. Telling "my
+ *     partner just moved" from "somebody just moved" is the difference between a pass and a
+ *     panic.
+ *
+ * None of it lights the pitch: no gradient reaches the walls, nothing casts, and the geometry
+ * around a mark stays exactly as black as it was (concept, law 1 — and it is checked by pixel
+ * measurement in the keyframe generator).
+ */
+function drawMark(
+  ctx: CanvasRenderingContext2D,
+  cam: Camera,
+  model: PerceivedModel,
+  mark: Mark,
+  o: PerceivedOptions,
+): void {
+  const a = model.markAlpha(mark, o.now);
+  if (a <= 0) return;
+  const colour = soundColor(mark.kind);
+  const age = o.now - mark.born;
+  const known = mark.sourceId !== null;
+  const core = Math.min(2.4, 0.45 + mark.intensity * 0.06);
+
+  // The echo: one ring leaving the point at birth. It is what makes a new mark register in
+  // peripheral vision on a screen that is otherwise almost still.
+  if (age < 0.45) {
+    const k = age / 0.45;
+    circle(ctx, cam, mark.pos, core * (0.5 + k * 2.2), colour, (1 - k) * 0.5 * (mark.self ? 0.5 : 1), [3, 4]);
+  }
+
+  if (o.showRadii && mark.sigma > 0) {
+    ellipse(ctx, cam, mark.pos, mark.sigma, mark.sigmaBearing, mark.bearing, colour, a * 0.45);
+  }
+
+  if (a > 0.5) {
+    // Fresh: a filled reading.
+    blob(ctx, cam, mark.pos, core, colour, (a - 0.5) * 2 * (mark.self ? 0.35 : 0.8));
+  }
+  // Stale: the hollow ghost that outlives the reading, so old news never looks like new news.
+  circle(ctx, cam, mark.pos, core * 0.5, colour, a * 0.5, a > 0.5 ? undefined : [2, 3]);
+
+  if (mark.relayed) circle(ctx, cam, mark.pos, 0.55, '#7dffa8', a * 0.6);
+  // Labels are rationed. A team-mate keeps their name for as long as the mark lives, because
+  // "that was my partner" is a fact worth acting on all the way to the end. An anonymous mark
+  // gets its question mark only while it is fresh: after a second it is not a person any more,
+  // it is a place where somebody was, and a screen full of question marks says nothing.
+  if (!mark.self && (known ? a > 0.15 : a > 0.7)) {
+    label(
+      ctx,
+      known ? `P${mark.sourceId}` : '?',
+      sx(cam, mark.pos) + 7,
+      sy(cam, mark.pos) - 6,
+      known ? '#7dffa8' : colour,
+      known ? 9 : 11,
+    );
+  }
+}
+
 /**
  * The blind pane. Everything here came out of one `PerceptionFrame` stream.
  *
@@ -386,20 +498,18 @@ export function drawPerceived(ctx: CanvasRenderingContext2D, cam: Camera, o: Per
   }
 
   // --- sound marks: warm, soft, at the point where the sound happened -----
-  for (const mark of m.marks) {
-    const a = m.markAlpha(mark, o.now);
-    if (a <= 0) continue;
-    const color = SOUND_COLOR[mark.kind];
-    if (o.showRadii && mark.sigma > 0) {
-      ellipse(ctx, cam, mark.pos, mark.sigma, mark.sigmaBearing, mark.bearing, color, a * 0.5);
-    }
-    blob(ctx, cam, mark.pos, Math.min(2.4, 0.45 + mark.intensity * 0.06), color, a * (mark.self ? 0.35 : 0.75));
-    if (mark.relayed) circle(ctx, cam, mark.pos, 0.5, '#7dffa8', a * 0.6);
-  }
+  for (const mark of m.marks) drawMark(ctx, cam, m, mark, o);
 
   // --- the ball: never silent, never exact --------------------------------
+  // It is the player's only permanent landmark, so it is drawn as an instrument reading and not
+  // as a dot: a steady core, a slow breathing halo that says "this source is still sounding",
+  // the error cigar, and the tail of where it has been. The breath is what stops the ball from
+  // reading as a flicker among the sound marks — the one thing on the pane that is always true
+  // has to look like it.
   if (m.ball) {
     trail(ctx, cam, m.ballTrail, BALL_COLOR);
+    const breath = 0.55 + 0.45 * Math.sin(o.now * 5.5);
+    blob(ctx, cam, m.ball.pos, 0.35 + breath * 0.2, BALL_COLOR, 0.3 + breath * 0.2);
     ellipse(ctx, cam, m.ball.pos, Math.max(0.12, m.ball.sigma), Math.max(0.06, m.ball.sigmaBearing), m.ball.bearing, BALL_COLOR, 0.6);
     ctx.fillStyle = BALL_COLOR;
     ctx.beginPath();

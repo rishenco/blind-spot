@@ -15,7 +15,9 @@
     "shots:handball": "npm run build && node tools/handball-shots.mjs",
     "deception": "tsx src/sim/cli/deception.ts",
     "tune": "tsx src/sim/cli/tune.ts",
-    "honesty": "tsx src/sim/cli/honesty.ts"
+    "honesty": "tsx src/sim/cli/honesty.ts",
+    "contest": "tsx src/sim/cli/contest.ts",
+    "quality": "tsx src/sim/cli/quality.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",

@@ -21,7 +21,7 @@
  *   - its own sonar returns, streaming in as the front travels;
  *   - honest proprioception: where its own body is, how fast, how loud.
  */
-import type { SimConfig } from './config';
+import { perceptionFor, type PerceptionConfig, type SimConfig } from './config';
 import { clamp, dist2, gauss } from './math';
 import { makeRng, type Rng } from '../core/rng';
 import type { WorldView } from './sim';
@@ -64,6 +64,14 @@ export class Perceiver {
   readonly opponents: EntityId[];
 
   private readonly cfg: SimConfig;
+  /**
+   * The perception knobs THIS observer plays with: the globals with its team's overrides on top.
+   *
+   * Resolved once, here, rather than read from `cfg.perception` at every use — because the
+   * concept's headline test ("does a telepath beat an honest bot") is a question about one
+   * side's channel, and there is no way to ask it while both sides share one dial.
+   */
+  private readonly p: PerceptionConfig;
   private readonly rng: Rng;
   private readonly queue: Delayed[] = [];
   /** Smoothed localisation error per continuous emitter, so the noise cannot be averaged out. */
@@ -84,6 +92,7 @@ export class Perceiver {
     }
     // A stream per observer: adding or removing an observer must not shift anyone else's noise,
     // and must never touch the simulation's own stream.
+    this.p = perceptionFor(cfg, this.team);
     this.rng = makeRng((seed ^ 0x9e3779b9) + id * 0x85ebca6b);
   }
 
@@ -95,7 +104,7 @@ export class Perceiver {
     const heard: ObservedEvent[] = [];
     const me = view.players[this.id];
     if (!me) return heard;
-    const p = this.cfg.perception;
+    const p = this.p;
     for (const ev of events) {
       const self = ev.sourceId === this.id;
       const d = dist2(me.pos, ev.pos);
@@ -115,7 +124,7 @@ export class Perceiver {
     for (const ev of observed) {
       if (ev.sourceId === this.id) continue; // no point being told about your own footsteps
       this.queue.push({
-        deliverAt: ev.emittedAt + this.cfg.perception.reactionLatencySec,
+        deliverAt: ev.emittedAt + this.p.reactionLatencySec,
         event: {
           ...ev,
           pos: { x: ev.pos.x, y: ev.pos.y },
@@ -159,6 +168,7 @@ export class Perceiver {
     }
     this.queue.length = w;
 
+    this.emitXray(view, now);
     const sonar = this.sonarInbox.slice();
     this.sonarInbox.length = 0;
 
@@ -181,6 +191,53 @@ export class Perceiver {
     };
   }
 
+  private nextXrayT = 0;
+  private xrayId = -1;
+
+  /**
+   * The cheat channel. Pushes a synthetic sonar return that lights up every other body exactly
+   * where it is, and declares the rest of the pitch swept and empty.
+   *
+   * A sonar return is the right shape for this and not a shortcut: it is the only channel in the
+   * contract that already carries both halves of knowing — where somebody IS, and where nobody
+   * is. A consumer needs no special case, which is the point: the difference between an honest
+   * bot and a telepathic one has to be the input, never the code.
+   */
+  private emitXray(view: WorldView, now: number): void {
+    const hz = this.p.xrayHz;
+    if (hz <= 0) return;
+    if (now + 1e-9 < this.nextXrayT) return;
+    this.nextXrayT = now + 1 / hz;
+    const me = view.players[this.id];
+    if (!me) return;
+    const range = view.players.length > 0 ? this.cfg.field.width + this.cfg.field.height : 0;
+    const hits: SonarHit[] = [];
+    for (const other of view.players) {
+      if (other.id === this.id) continue;
+      hits.push(
+        this.anonymiseHit({
+          pos: { x: other.pos.x, y: other.pos.y },
+          kind: 'player',
+          sourceId: other.id,
+          vel: { x: other.vel.x, y: other.vel.y },
+        }),
+      );
+    }
+    this.sonarInbox.push({
+      pingId: this.xrayId--,
+      t: now,
+      origin: { x: me.pos.x, y: me.pos.y },
+      range,
+      waveRadius: range,
+      sweptFrom: 0,
+      sweptTo: range,
+      aim: { x: me.aim.x, y: me.aim.y },
+      coneCos: -1,
+      hits,
+      complete: true,
+    });
+  }
+
   // -- internals -----------------------------------------------------------
 
   /**
@@ -190,7 +247,7 @@ export class Perceiver {
   private hearingCache: { scale: number; radii: Record<SoundKind, number> } | null = null;
 
   private hearingRadii(): Readonly<Record<SoundKind, number>> {
-    const scale = this.cfg.perception.hearingScale;
+    const scale = this.p.hearingScale;
     if (this.hearingCache && this.hearingCache.scale === scale) return this.hearingCache.radii;
     const radii = {} as Record<SoundKind, number>;
     for (const key of Object.keys(this.cfg.loudness) as SoundKind[]) {
@@ -215,6 +272,7 @@ export class Perceiver {
       pingCooldown: me.pingCd,
       diving: me.diveT > 0,
       recovering: me.recoverT > 0,
+      down: me.downT > 0,
       ownLoudness: me.loudness,
     };
   }
@@ -246,7 +304,7 @@ export class Perceiver {
    * trigonometry — which is not bit-reproducible across engines — out of the perception path.
    */
   private sigmasAt(d: number): { radial: number; tangential: number } {
-    const p = this.cfg.perception;
+    const p = this.p;
     return {
       radial: Math.min(p.localizationSigmaCap, p.localizationSigmaPerMeter * d),
       tangential: d * p.localizationBearingDeg * (Math.PI / 180),
@@ -260,7 +318,7 @@ export class Perceiver {
     self: boolean,
     relayed: boolean,
   ): ObservedEvent {
-    const p = this.cfg.perception;
+    const p = this.p;
     const exact = self || p.exactKinds.includes(ev.kind);
     const sigmas = exact ? { radial: 0, tangential: 0 } : this.sigmasAt(d);
     let x = ev.pos.x;
@@ -295,7 +353,7 @@ export class Perceiver {
    * the listener's problem (data association — the AI brief calls this out by name).
    */
   private identify(source: EntityId): EntityId | null {
-    if (!this.cfg.perception.anonymousSources) return source;
+    if (!this.p.anonymousSources) return source;
     if (source === BALL_ID) return source;
     if (source === this.id) return source;
     const size = this.cfg.teamSize;
@@ -316,7 +374,7 @@ export class Perceiver {
 
   private observeEmitters(view: WorldView, myPos: Vec2): ObservedEmitter[] {
     const out: ObservedEmitter[] = [];
-    const p = this.cfg.perception;
+    const p = this.p;
     for (const em of emittersOf(view, this.cfg)) {
       const d = dist2(myPos, em.pos);
       if (d > em.intensity * p.hearingScale) continue;

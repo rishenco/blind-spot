@@ -14,7 +14,8 @@ import { AI_SCENARIOS } from '../sim/ai/scenarios';
 import { configFromPreset, type SimConfig } from '../sim/config';
 import { makeController, scripted } from '../sim/controllers';
 import type { ControllerFactory, TimelineEntry } from '../sim/match';
-import type { EntityId } from '../sim/types';
+import type { EntityId, Vec2 } from '../sim/types';
+import { CatchHand, LoudHand, PingHand, ThrowHand, type HandScript } from './hands';
 
 export interface ScenarioSetup {
   config: SimConfig;
@@ -22,6 +23,12 @@ export interface ScenarioSetup {
   controllers: { name: string; make: ControllerFactory }[];
   /** Whose ears the right-hand pane listens with. */
   eyes: EntityId;
+}
+
+/** A scripted pair of human hands bound to one slot — see `hands.ts` for why this exists. */
+export interface HandSlot {
+  slot: EntityId;
+  script: HandScript;
 }
 
 export interface Scenario {
@@ -33,6 +40,14 @@ export interface Scenario {
   stopOn?: { kind: TimelineEntry['kind']; lead?: number };
   /** Otherwise: run exactly this many ticks. */
   ticks?: number;
+  /**
+   * Slots driven by a script instead of by a controller. The playground feeds them through
+   * `Match.setExternalIntent`, which is the same door a person at a keyboard goes through, so
+   * the cockpit, the audio and the feedback layer all behave exactly as they would for a human.
+   */
+  hands?: HandSlot[];
+  /** Whose cockpit is drawn — the HUD is only ever shown for a slot a human (or a script) drives. */
+  playerSlot?: EntityId;
 }
 
 const pair = (a: string, b: string, size: number) => [
@@ -209,6 +224,101 @@ export const SCENARIOS: Scenario[] = [
     },
   },
 ];
+
+
+/**
+ * The hands suite: the feel of the four things a person actually does.
+ *
+ * Each one is a storyboard rather than a single frame — the keyframe generator steps them and
+ * shoots several moments of one action — because feel is a thing that happens over 300 ms and a
+ * single screenshot of it proves nothing. `spawnJitter` is zeroed so the geometry of a pass is
+ * the same picture every time; everywhere else the jitter is what makes seeds differ.
+ */
+const RECEIVER: Vec2 = { x: 2.0, y: -1.0 };
+/** The passer stands still long enough for the receiver to have walked into place. */
+const PASS_DELAY = 2.6;
+
+function handsConfig(): SimConfig {
+  const config = configFromPreset('default');
+  config.match.spawnJitter = 0;
+  return config;
+}
+
+const HAND_SCENARIOS: Scenario[] = [
+  {
+    name: 'hands-throw',
+    note: 'the wind-up: hold, commit, release — the one action the concept asks to feel like a punch',
+    ticks: 60,
+    playerSlot: 0,
+    hands: [{ slot: 0, script: new ThrowHand(0.5) }],
+    make: () => ({
+      config: handsConfig(),
+      seed: 20260825,
+      controllers: [makeController('human'), makeController('statue'), makeController('statue'), makeController('statue')],
+      eyes: 0,
+    }),
+  },
+  {
+    name: 'hands-catch',
+    note: 'a pass taken at the moment of closest approach — the catch as it is meant to work',
+    ticks: 240,
+    playerSlot: 2,
+    hands: [
+      { slot: 0, script: new ThrowHand(0.45, 'passer', RECEIVER, PASS_DELAY) },
+      { slot: 2, script: new CatchHand('timed', 3.2, 'receiver', RECEIVER) },
+    ],
+    make: () => ({
+      config: handsConfig(),
+      seed: 20260825,
+      controllers: [makeController('human'), makeController('statue'), makeController('human'), makeController('statue')],
+      eyes: 2,
+    }),
+  },
+  {
+    name: 'hands-catch-early',
+    note: 'the same pass, pressed three metres too soon: a fumble, and a read-out that says why',
+    ticks: 240,
+    playerSlot: 2,
+    hands: [
+      { slot: 0, script: new ThrowHand(0.45, 'passer', RECEIVER, PASS_DELAY) },
+      { slot: 2, script: new CatchHand('early', 3.2, 'receiver', RECEIVER) },
+    ],
+    make: () => ({
+      config: handsConfig(),
+      seed: 20260825,
+      controllers: [makeController('human'), makeController('statue'), makeController('human'), makeController('statue')],
+      eyes: 2,
+    }),
+  },
+  {
+    name: 'hands-loud',
+    note: 'the loudness dial, as the player sees it: sprint, walk, stand still',
+    ticks: 360,
+    playerSlot: 2,
+    hands: [{ slot: 2, script: new LoudHand() }],
+    make: () => ({
+      config: handsConfig(),
+      seed: 20260825,
+      controllers: [makeController('statue'), makeController('statue'), makeController('human'), makeController('statue')],
+      eyes: 2,
+    }),
+  },
+  {
+    name: 'hands-ping',
+    note: 'the scream: one second of sight, bought with your exact position',
+    ticks: 100,
+    playerSlot: 2,
+    hands: [{ slot: 2, script: new PingHand() }],
+    make: () => ({
+      config: handsConfig(),
+      seed: 20260825,
+      controllers: [makeController('statue'), makeController('statue'), makeController('human'), makeController('statue')],
+      eyes: 2,
+    }),
+  },
+];
+
+SCENARIOS.push(...HAND_SCENARIOS);
 
 /**
  * The AI suite, adapted into playground scenarios.

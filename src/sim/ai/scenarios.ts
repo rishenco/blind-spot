@@ -22,6 +22,16 @@ import { Bot } from './bot';
 
 export interface AiScenario {
   name: string;
+  /**
+   * Which suite this belongs to.
+   *
+   * `deception` scenarios measure a bot's *belief* against the truth and are the answer to "can
+   * this bot still be lied to". `mechanic` scenarios measure the *rules*: a steal happened, a
+   * tackle connected, a shot went past a defender. They share this list because they share the
+   * playground dropdown and the keyframe generator, and a mechanic whose picture and whose
+   * number came from two different setups proves nothing.
+   */
+  suite?: 'deception' | 'mechanic';
   /** One line, printed under the keyframe. */
   note: string;
   /** What the numbers should show if the bot is behaving. */
@@ -122,6 +132,20 @@ export function runScenario(
   return { match, log };
 }
 
+/**
+ * Runs a scenario without looking inside anybody's head.
+ *
+ * The mechanic suite does not need a belief log — what it is checking is that the rules produced
+ * the event they promise, which is a fact about the match, not about a bot. Returns the finished
+ * match so `measure` can read the statistics and the timeline.
+ */
+export function runPlain(s: AiScenario): { match: Match; log: SampleLog } {
+  const { config, controllers } = s.build();
+  const match = new Match({ config, seed: s.seed, controllers, keepLog: true });
+  for (let i = 0; i < s.ticks && !match.isOver; i++) match.step();
+  return { match, log: emptyLog() };
+}
+
 const at = (log: SampleLog, t: number): number => {
   let best = 0;
   for (let i = 0; i < log.t.length; i++) if (Math.abs(log.t[i]! - t) < Math.abs(log.t[best]! - t)) best = i;
@@ -157,6 +181,9 @@ function quietConfig(): SimConfig {
   c.match.kickoffTeam = 'fixed';
   return c;
 }
+
+/** The mechanic suite, kept addressable on its own so the deception CLI can skip it. */
+export const MECHANIC_SCENARIOS: AiScenario[] = [];
 
 export const AI_SCENARIOS: AiScenario[] = [
   {
@@ -344,6 +371,201 @@ export const AI_SCENARIOS: AiScenario[] = [
     },
   },
 ];
+
+// ===========================================================================
+// The mechanic suite: proof that the fight for the ball does what it says.
+//
+// These are not about belief. Each one is a fixed, scripted collision between two bodies whose
+// outcome is a rule firing, and each `measure` reads that rule's own counter out of the match
+// statistics. They exist because "steal works" is not a claim anybody should have to take on
+// trust, and because every one of them is also a keyframe.
+// ===========================================================================
+
+/** A clean 2×2 with no spawn jitter, so a scripted collision lands in the same place every time. */
+function riggedConfig(only: 'steal' | 'tackle' | 'collision' | 'block'): SimConfig {
+  const c = configFromPreset('default');
+  c.match.spawnJitter = 0;
+  c.match.kickoffTeam = 'fixed';
+  c.match.carryTimeoutSec = 0;
+  // One mechanic at a time. A frame that proves "the ball came loose" proves nothing if three
+  // different rules could have knocked it loose, so every scenario switches the others off.
+  c.contest.steal.enabled = only === 'steal';
+  c.contest.tackle.enabled = only === 'tackle';
+  c.contest.collision.enabled = only === 'collision';
+  c.contest.block.mode = only === 'block' ? 'speed' : 'always';
+  return c;
+}
+
+/** Kickoff geometry with jitter off: P0 (-6.8,-5) has the ball, P2 (4.2,-5) faces him. */
+function duel(
+  p0: { name: string; make: ControllerFactory },
+  p2: { name: string; make: ControllerFactory },
+): { name: string; make: ControllerFactory }[] {
+  return [p0, makeController('statue'), p2, makeController('statue')];
+}
+
+const contestCount = (m: Match, kind: string): number =>
+  m.timeline.filter((e) => e.kind === 'contest' && e.label.includes(kind)).length;
+
+MECHANIC_SCENARIOS.push(
+  {
+    name: 'mech-steal',
+    suite: 'mechanic',
+    note: 'the steal: the carrier walks, a hunter runs him down and stays on him for half a second',
+    expect: 'one steal; the ball changes teams and the slap is heard',
+    seed: 101,
+    ticks: 200,
+    eyes: 0,
+    build: () => {
+      const config = riggedConfig('steal');
+      const carrier = scripted([{ for: 6, walk: [1, 0], aim: [1, 0], label: 'walking it up' }], 'carrier');
+      // He has to *stay* with the carrier, not run through him: the ball is taken by half a
+      // second of company, and a hunter at a sprint is inside the radius for a third of that.
+      const hunter = scripted(
+        [
+          { for: 1.35, run: [-1, 0], aim: [-1, 0], label: 'closing him down' },
+          { for: 6, stand: true, label: 'and staying on him' },
+        ],
+        'hunter',
+      );
+      return { config, controllers: duel({ name: 'carrier', make: carrier }, { name: 'hunter', make: hunter }) };
+    },
+    measure: (m) => ({
+      steals: m.stats.players.reduce((a, p) => a + p.steals, 0),
+      robbed: m.stats.players.reduce((a, p) => a + p.robbed, 0),
+      carrier: m.sim.state.ball.carrier ?? -1,
+      possessionChanges: m.stats.possessionChanges,
+    }),
+  },
+  {
+    name: 'mech-tackle',
+    suite: 'mechanic',
+    note: 'the dive tackle: a body thrown at where the carrier is going to be, not where he is',
+    expect: 'one tackle; the victim is on the floor and the ball is loose',
+    seed: 102,
+    ticks: 200,
+    eyes: 3,
+    build: () => {
+      const config = riggedConfig('tackle');
+      const carrier = scripted([{ for: 6, run: [1, 0], aim: [1, 0], label: 'driving forward' }], 'carrier');
+      const tackler = scripted(
+        [
+          { for: 1.05, run: [-1, 0], aim: [-1, 0], label: 'closing' },
+          { dive: true, label: 'the bet' },
+          { for: 4, label: 'and the landing' },
+        ],
+        'tackler',
+      );
+      return { config, controllers: duel({ name: 'carrier', make: carrier }, { name: 'tackler', make: tackler }) };
+    },
+    measure: (m) => ({
+      tackles: contestCount(m, 'tackles'),
+      down: m.sim.state.players.filter((p) => p.downT > 0).length,
+      fumbles: m.stats.players.reduce((a, p) => a + p.fumbles, 0),
+      ballLoose: m.sim.state.ball.carrier === null ? 1 : 0,
+    }),
+  },
+  {
+    name: 'mech-tackle-miss',
+    suite: 'mechanic',
+    note: 'the same bet, lost: the dive goes in too early and the carrier walks past a man on the floor',
+    expect: 'no tackle, one tackle-miss; the diver is the one lying there',
+    seed: 103,
+    ticks: 200,
+    eyes: 3,
+    build: () => {
+      const config = riggedConfig('tackle');
+      const carrier = scripted([{ for: 6, walk: [1, 0], aim: [1, 0], label: 'walking it up' }], 'carrier');
+      const tackler = scripted(
+        [
+          { for: 0.2, run: [-1, 0], aim: [-1, 0], label: 'closing' },
+          { dive: true, label: 'too early' },
+          { for: 5, label: 'flat on the floor' },
+        ],
+        'tackler',
+      );
+      return { config, controllers: duel({ name: 'carrier', make: carrier }, { name: 'tackler', make: tackler }) };
+    },
+    measure: (m) => ({
+      tackles: contestCount(m, 'tackles'),
+      misses: m.stats.players.reduce((a, p) => a + p.tackleMisses, 0),
+      carrierStillHasIt: m.sim.state.ball.carrier === 0 ? 1 : 0,
+    }),
+  },
+  {
+    name: 'mech-screen',
+    suite: 'mechanic',
+    note: 'the screen: a silent body in the corridor is now a wall, and running into it costs the ball',
+    expect: 'one collision, one fumble; the runner is staggered and everybody heard the thud',
+    seed: 104,
+    ticks: 200,
+    eyes: 3,
+    build: () => {
+      const config = riggedConfig('collision');
+      const runner = scripted([{ for: 6, run: [1, 0], aim: [1, 0], label: 'straight into him' }], 'runner');
+      return { config, controllers: duel({ name: 'runner', make: runner }, makeController('statue')) };
+    },
+    measure: (m) => ({
+      collisions: m.stats.players.reduce((a, p) => a + p.collisions, 0) / 2,
+      fumbles: m.stats.players.reduce((a, p) => a + p.fumbles, 0),
+      ballLoose: m.sim.state.ball.carrier === null ? 1 : 0,
+    }),
+  },
+  {
+    name: 'mech-block',
+    suite: 'mechanic',
+    note: 'the block that is no longer absolute: a hard throw straight at a parked defender',
+    expect: 'the ball goes past him (ballsThrough ≥ 1) instead of the old guaranteed fumble',
+    seed: 2,
+    ticks: 160,
+    eyes: 2,
+    build: () => {
+      const config = riggedConfig('block');
+      const shooter = scripted(
+        [
+          { for: 0.7, charge: true, aim: [1, 0], label: 'wind-up' },
+          { for: 5, label: 'released' },
+        ],
+        'shooter',
+      );
+      return { config, controllers: duel({ name: 'shooter', make: shooter }, makeController('statue')) };
+    },
+    measure: (m) => ({
+      ballsThrough: m.stats.players.reduce((a, p) => a + p.ballsThrough, 0),
+      fumbles: m.stats.players.reduce((a, p) => a + p.fumbles, 0),
+    }),
+  },
+);
+
+MECHANIC_SCENARIOS.push({
+  name: 'contest-match',
+  suite: 'mechanic',
+  note: 'a real match under the winning rule set: four bots, every contest mechanic live',
+  expect: 'the ball changes hands repeatedly, and nobody is standing still for the whole of it',
+  seed: 7,
+  ticks: 900,
+  eyes: 0,
+  build: () => {
+    const config = configFromPreset('default');
+    config.match.goalsToWin = 1e9;
+    config.match.kickoffTeam = 'fixed';
+    return { config, controllers: [makeController('bot'), makeController('bot'), makeController('bot'), makeController('bot')] };
+  },
+  measure: (m) => ({
+    score: `${m.stats.score[0]}:${m.stats.score[1]}`,
+    possessionChanges: m.stats.possessionChanges,
+    steals: m.stats.players.reduce((a, p) => a + p.steals, 0),
+    tackles: m.stats.players.reduce((a, p) => a + p.tackles, 0),
+    collisions: m.stats.players.reduce((a, p) => a + p.collisions, 0) / 2,
+    ballsThrough: m.stats.players.reduce((a, p) => a + p.ballsThrough, 0),
+    'silent%': +(
+      m.stats.players.reduce((a, p) => a + p.silentTicks / Math.max(1, p.ticks), 0) /
+      Math.max(1, m.stats.players.length)
+    ).toFixed(2),
+  }),
+});
+
+for (const s of MECHANIC_SCENARIOS) AI_SCENARIOS.push(s);
 
 /** The tracked body and the axis of the trick, per scenario. */
 export const SCENARIO_AXES: Record<string, { tracked: EntityId; axis: Vec2 }> = {

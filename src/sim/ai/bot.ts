@@ -26,6 +26,16 @@ import { Belief } from './belief';
 import { deriveFeatures, type Features } from './features';
 import { aimFor, choose, type Action, type ScoredAction } from './policy';
 
+/**
+ * Variant switches. They exist for the rule tournament, which has to be able to run the same
+ * brain with one capability removed — "does a bot that may not ping lose to one that may" is the
+ * concept's second test, and there is no way to ask it with a difficulty dial.
+ */
+export interface BotOptions {
+  /** false = this bot never pings. The control group of the ping test. */
+  allowPing?: boolean;
+}
+
 interface Chosen {
   action: Action;
   /** Sim time the action was picked, for the minimum-hold rule. */
@@ -49,9 +59,13 @@ export class Bot implements Controller {
   private diveLock = 0;
   private lastPossession = 'unknown';
 
-  constructor(ctx: ControllerContext, name = 'bot') {
+  /** Switches that make a *variant* of this bot, for measurement. Not difficulty knobs. */
+  private readonly opts: BotOptions;
+
+  constructor(ctx: ControllerContext, name = 'bot', opts: BotOptions = {}) {
     this.name = name;
     this.ctx = ctx;
+    this.opts = opts;
     this.belief = new Belief(ctx);
   }
 
@@ -77,7 +91,10 @@ export class Bot implements Controller {
     this.catchLock = Math.max(0, this.catchLock - dt);
     this.pingLock = Math.max(0, this.pingLock - dt);
     this.diveLock = Math.max(0, this.diveLock - dt);
-    if (frame.match.phase !== 'play') {
+    if (frame.match.phase !== 'play' || frame.self.down) {
+      // Flat on the floor there is nothing to decide and nothing that would be obeyed. Dropping
+      // the plan also means the bot re-decides the instant it gets up, with a world that has
+      // moved on without it.
       this.chosen = null;
       this.sinceDecision = 99;
       return intent;
@@ -138,7 +155,13 @@ export class Bot implements Controller {
     const f = this.features!;
     const frame = this.frame!;
     const ai = this.ctx.config.ai as Record<string, unknown>;
-    const quality = typeof ai.decisionQuality === 'number' ? ai.decisionQuality : 1;
+    // `decisionQualityTeam`, when present, applies the narrowed candidate list to that team only.
+    // It exists so the width of the search can be played against itself in one match, which is
+    // the only way to ask "does looking at fewer options make this bot better" without comparing
+    // two different tournaments to each other.
+    const only = ai.decisionQualityTeam;
+    const applies = typeof only !== 'number' || only === this.ctx.team;
+    const quality = applies && typeof ai.decisionQuality === 'number' ? ai.decisionQuality : 1;
     this.ranked = choose({
       features: f,
       belief: this.belief,
@@ -146,6 +169,7 @@ export class Bot implements Controller {
       pingCooldown: frame.self.pingCooldown,
       lastTag: this.chosen?.action.tag ?? null,
       decisionQuality: quality,
+      allowPing: this.opts.allowPing !== false,
     });
     const best = this.ranked[0];
     if (!best) return;
@@ -168,7 +192,25 @@ export class Bot implements Controller {
       case 'hold':
         break;
       case 'move':
+      case 'investigate':
         this.steer(intent, f.me, a.to!, a.mode ?? 'walk');
+        break;
+      case 'contest': {
+        // Get on top of him and stay there. Close in at a run, then stop running once inside the
+        // steal radius so the last stride does not carry straight past him.
+        const gap = dist2(f.me, a.to!);
+        const reach = cfg.contest.steal.radius;
+        this.steer(intent, f.me, a.to!, gap > reach * 1.4 ? 'run' : 'walk');
+        // Under `requirePress` the steal is a held action, exactly like a catch.
+        if (gap <= reach * 2 && cfg.contest.steal.requirePress) intent.catch = true;
+        break;
+      }
+      case 'tackle':
+        if (this.diveLock <= 0 && !frame.self.diving && !frame.self.recovering && !frame.self.down) {
+          intent.dive = true;
+          intent.move = a.dir!;
+          this.diveLock = cfg.dive.cooldownSec;
+        }
         break;
       case 'ping':
         if (this.pingLock <= 0 && frame.self.pingCooldown <= 1e-6) {
@@ -205,7 +247,7 @@ export class Bot implements Controller {
         break;
       }
       case 'dive':
-        if (this.diveLock <= 0 && !frame.self.diving && !frame.self.recovering) {
+        if (this.diveLock <= 0 && !frame.self.diving && !frame.self.recovering && !frame.self.down) {
           intent.dive = true;
           intent.move = a.dir!;
           this.diveLock = cfg.dive.cooldownSec;

@@ -22,6 +22,15 @@ export interface PlayerStats {
   throws: number;
   fumbles: number;
   pings: number;
+  /** The fight for the ball, from this body's point of view. */
+  steals: number;
+  robbed: number;
+  tackles: number;
+  tackleMisses: number;
+  tackled: number;
+  collisions: number;
+  /** Balls that went straight past this body because it had not timed them. */
+  ballsThrough: number;
   /** Ticks in which this body made no sound at all (and carried no ball). */
   silentTicks: number;
   /**
@@ -41,6 +50,13 @@ export interface MatchStats {
   duration: number;
   score: [number, number];
   players: PlayerStats[];
+  /**
+   * How many times the ball changed teams. The one playability number that says whether a rule
+   * set produced a game rather than a procession: a match nobody can take the ball in and a
+   * match that is nothing but turnovers are both failures, and they look identical on the
+   * scoreline.
+   */
+  possessionChanges: number;
 }
 
 export function emptyPlayerStats(id: EntityId, team: TeamId, controller: string): PlayerStats {
@@ -56,6 +72,13 @@ export function emptyPlayerStats(id: EntityId, team: TeamId, controller: string)
     throws: 0,
     fumbles: 0,
     pings: 0,
+    steals: 0,
+    robbed: 0,
+    tackles: 0,
+    tackleMisses: 0,
+    tackled: 0,
+    collisions: 0,
+    ballsThrough: 0,
     silentTicks: 0,
     heardEvents: 0,
     distanceToBallSum: 0,
@@ -67,6 +90,7 @@ export function emptyPlayerStats(id: EntityId, team: TeamId, controller: string)
 /** Per-player derived numbers, in the units a human reads. */
 export interface PlayerSummary extends PlayerStats {
   possessionShare: number;
+  stealsPerMinute: number;
   silentShare: number;
   avgDistanceToBall: number;
   pingsPerMinute: number;
@@ -77,6 +101,7 @@ export function summarise(stats: MatchStats): PlayerSummary[] {
   return stats.players.map((p) => ({
     ...p,
     possessionShare: p.ticks ? p.possessionTicks / p.ticks : 0,
+    stealsPerMinute: stats.duration > 0 ? (p.steals * 60) / stats.duration : 0,
     silentShare: p.ticks ? p.silentTicks / p.ticks : 0,
     avgDistanceToBall: p.ticks ? p.distanceToBallSum / p.ticks : 0,
     pingsPerMinute: stats.duration > 0 ? (p.pings * 60) / stats.duration : 0,
@@ -89,14 +114,20 @@ export function aggregate(all: MatchStats[]): {
   matches: number;
   score: [number, number];
   players: PlayerSummary[];
+  possessionChanges: number;
+  duration: number;
 } {
-  if (all.length === 0) return { matches: 0, score: [0, 0], players: [] };
+  if (all.length === 0) return { matches: 0, score: [0, 0], players: [], possessionChanges: 0, duration: 0 };
   const n = all.length;
   const score: [number, number] = [0, 0];
+  let possessionChanges = 0;
+  let duration = 0;
   const acc = new Map<EntityId, PlayerSummary>();
   for (const m of all) {
     score[0] += m.score[0] / n;
     score[1] += m.score[1] / n;
+    possessionChanges += m.possessionChanges / n;
+    duration += m.duration / n;
     for (const p of summarise(m)) {
       const cur = acc.get(p.id);
       if (!cur) {
@@ -120,5 +151,5 @@ export function aggregate(all: MatchStats[]): {
       return out;
     })
     .sort((a, b) => a.id - b.id);
-  return { matches: n, score, players };
+  return { matches: n, score, players, possessionChanges, duration };
 }

@@ -27,6 +27,12 @@ export const CONTROLLERS: Record<string, ControllerFactory> = {
    */
   bot: (ctx: ControllerContext): Controller => new Bot(ctx),
   /**
+   * The same brain with the ping taken away. Not a weaker difficulty setting — a control group:
+   * the concept's second test is "a bot that may not ping must lose to one that may", and that
+   * question can only be asked by removing the capability rather than by discouraging it.
+   */
+  'bot-mute': (ctx: ControllerContext): Controller => new Bot(ctx, 'bot-mute', { allowPing: false }),
+  /**
    * The slot a human drives. It stands still until something calls `Match.setExternalIntent`
    * for it, which is exactly what the playground does — and what a replay does when it plays
    * the recorded keystrokes back.

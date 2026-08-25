@@ -87,6 +87,17 @@ export interface OpponentTrack {
   grid: OccupancyGrid;
   /** Sim time of the last positive evidence about this track. */
   lastSeenT: number;
+  /**
+   * The same, but never written by `attachCarrier`.
+   *
+   * The distinction is load-bearing. `attachCarrier` folds the ball's hum into whichever
+   * opponent track is believed to be carrying, which is correct — a carrier is never a secret.
+   * But if that also counted as "seen", the test that *decides* whether an opponent is carrying
+   * would be reading evidence it had itself invented one tick earlier, and it latched: with the
+   * ball resting on the floor, all four bots concluded an opponent was standing on it, pinned
+   * their beliefs there, re-confirmed themselves next tick, and stood still until the whistle.
+   */
+  lastRealSeenT: number;
   /** Newest positive fix, for the direction hint and for the overlay. */
   lastFix: Vec2 | null;
   lastFixT: number;
@@ -199,6 +210,7 @@ export class Belief {
         id,
         grid: new OccupancyGrid(this.mask),
         lastSeenT: -99,
+        lastRealSeenT: -99,
         lastFix: null,
         lastFixT: -99,
         dir: { x: 0, y: 0 },
@@ -234,6 +246,7 @@ export class Belief {
     for (const t of this.opponents) {
       t.grid.setUniform();
       t.lastSeenT = -99;
+      t.lastRealSeenT = -99;
       t.lastFix = null;
       t.dir = { x: 0, y: 0 };
       t.dirT = -99;
@@ -309,6 +322,24 @@ export class Belief {
           this.mate.pos = { x: ev.pos.x, y: ev.pos.y };
           this.mate.t = this.now;
           this.mate.fresh = true;
+          continue;
+        }
+        // A NAMED OPPONENT. Only ever happens with `perception.anonymousSources` off, which is a
+        // deliberate cheat dial — but the whole point of a cheat dial is that turning it up must
+        // make the bot better. It did the opposite: this branch used to fall through to
+        // `continue`, so a bot told exactly who made every sound threw all of it away and played
+        // blinder than an honest one. It is why the "omniscient" handicap lost every tournament
+        // row it was measured in.
+        if (DISCRETE_BODY_KINDS.includes(ev.kind)) {
+          const idx = this.opponents.findIndex((t) => t.id === ev.sourceId);
+          if (idx >= 0) {
+            const t = this.opponents[idx]!;
+            t.grid.multiplyGaussian(ev.pos, ev.bearing, Math.max(0.25, ev.sigma), Math.max(0.15, ev.sigmaBearing));
+            this.markFix(t, ev.pos);
+            if (ev.kind === 'step-run' || ev.kind === 'brake' || ev.kind === 'dive') this.heardRun = true;
+            if (ev.kind === 'step-walk') this.heardWalk = true;
+            if (ev.kind === 'sonar') this.onOpponentPing(ev, frame);
+          }
         }
         continue;
       }
@@ -395,6 +426,7 @@ export class Belief {
     track.lastFix = { x: at.x, y: at.y };
     track.lastFixT = this.now;
     track.lastSeenT = this.now;
+    track.lastRealSeenT = this.now;
   }
 
   private absorbSonar(frame: PerceptionFrame): void {
@@ -551,7 +583,15 @@ export class Belief {
     // *entered* is the bug that made the bot spend half of every match acting as a support
     // player for a team-mate who had thrown the ball away eight seconds earlier: it heard the
     // catch, and nothing ever told it the ball was on the floor again.
-    if (len2(ball.vel) > carrySpeed * 1.5 || this.now - this.lastThrowT < 0.9) {
+    // The rulebook is information too. Nobody may hold the ball longer than the passivity limit,
+    // and taking it away is whistled — so a hum that has not moved for longer than that, with no
+    // whistle heard, cannot be in anybody's hands. It is a ball on the floor, and somebody has
+    // to go and get it. Without this deduction a stalemate is stable: every bot believes an
+    // opponent is standing on the ball and every bot holds its post.
+    const carryLimit = this.cfg.match.carryTimeoutSec;
+    if (carryLimit > 0 && this.ballStillSince > 0 && this.now - this.ballStillSince > carryLimit + 0.6) {
+      this.setPossession('loose');
+    } else if (len2(ball.vel) > carrySpeed * 1.5 || this.now - this.lastThrowT < 0.9) {
       this.setPossession('loose');
     } else if (this.ballStillSince > 0 && this.now - this.ballStillSince > 0.6) {
       this.setPossession(this.whoIsStandingOn(ball.pos) ?? 'loose');
@@ -584,7 +624,7 @@ export class Belief {
     for (const t of this.opponents) {
       // Only a *confident* track counts: a diffuse belief happens to cover the ball as well as
       // it covers everything else, and reading that as "an opponent has it" would be a fantasy.
-      if (this.now - t.lastSeenT > 1.5) continue;
+      if (this.now - t.lastRealSeenT > 1.5) continue;
       if (t.grid.massInCircle(at, 1.6) > 0.55) return 'opponent';
     }
     return null;
@@ -736,6 +776,7 @@ export class Belief {
       const x = team === restartTeam ? sign * restartX : sign * (f.halfWidth * 0.35);
       t.grid.setPoint({ x, y: spread }, sigma);
       t.lastSeenT = this.now;
+      t.lastRealSeenT = this.now;
       t.lastFix = { x, y: spread };
       t.lastFixT = this.now;
       t.dir = { x: 0, y: 0 };

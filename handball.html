@@ -43,17 +43,57 @@
       .card b { color: #fff; }
       .card .k { color: var(--dim); }
       .lil-gui { --background-color: #0b1017; --widget-color: #16202c; z-index: 10; }
+
+      /* Play mode: the tool gets out of the way. One pane, no timeline, no panel column —
+         a person who has just clicked "play" should see a black rectangle and their own body,
+         not a debugger with a game inside it. */
+      body.playing #app { margin-right: 0; }
+      body.playing .lil-gui { display: none; }
+      body.playing #timeline { display: none; }
+      body.playing #panels { padding: 4px 12px; }
+      body.playing .pane h2 { color: #4d80b0; }
+      body.playing header .debug-only { display: none; }
+
+      /* The start card. It is the whole tutorial a jam player gets before moving, so it is three
+         lines long: what you are, what you always know, what it costs to find out more. */
+      #start-overlay { position: fixed; inset: 0; z-index: 20; background: rgba(3, 5, 8, 0.94);
+        display: flex; align-items: center; justify-content: center; cursor: pointer; }
+      #start-card { max-width: 560px; padding: 28px 32px; border: 1px solid #1b2735; background: #05070a; }
+      #start-card h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: 0.22em; color: #cfe2f2; font-weight: 400; }
+      #start-card .sub { color: #7e93a7; margin-bottom: 18px; letter-spacing: 0.08em; }
+      #start-card ul { margin: 0 0 20px; padding-left: 18px; color: #cfe2f2; }
+      #start-card li { margin-bottom: 7px; }
+      #start-card li b { color: #ffd166; }
+      #start-card .go { color: #7dffa8; letter-spacing: 0.1em; }
+      #start-skip { margin-top: 14px; }
     </style>
   </head>
   <body>
+    <div id="start-overlay">
+      <div id="start-card">
+        <h1>BLIND HANDBALL</h1>
+        <div class="sub">everyone on this pitch is blind. So are you.</div>
+        <ul>
+          <li>The <b>ball never stops singing</b> — the gold mark is always real. Everything else on
+            screen is a sound that already happened, fading.</li>
+          <li><b>Running is loud.</b> Walking is quiet. Standing still makes you invisible —
+            that is a move, not a pause.</li>
+          <li><b>SPACE pings:</b> one second of sight, paid for with your exact position.
+            Everyone hears where you fired it from.</li>
+        </ul>
+        <div class="go">click anywhere to play — WASD move · mouse aim · hold LMB to throw · RMB to catch</div>
+        <button id="start-skip">skip — open the debug playground</button>
+      </div>
+    </div>
     <div id="app">
       <header>
         <span class="big" id="score">0 : 0</span>
         <span id="clock" class="k"></span>
-        <span id="tickinfo" class="k"></span>
-        <button id="playpause">pause</button>
-        <button id="stepone">step ▸</button>
-        <select id="speed">
+        <span id="tickinfo" class="k debug-only"></span>
+        <button id="play">▶ play</button>
+        <button id="playpause" class="debug-only">pause</button>
+        <button id="stepone" class="debug-only">step ▸</button>
+        <select id="speed" class="debug-only">
           <option value="0.1">0.1×</option>
           <option value="0.25">0.25×</option>
           <option value="0.5">0.5×</option>
@@ -61,10 +101,10 @@
           <option value="2">2×</option>
           <option value="4">4×</option>
         </select>
-        <button id="live">live</button>
-        <span>eyes:</span><select id="eyes"></select>
-        <button id="layout">both views</button>
-        <button id="save">save match</button>
+        <button id="live" class="debug-only">live</button>
+        <span class="debug-only">eyes:</span><select id="eyes" class="debug-only"></select>
+        <button id="layout" class="debug-only">both views</button>
+        <button id="save" class="debug-only">save match</button>
         <span id="fps" class="k"></span>
       </header>
       <main id="views">

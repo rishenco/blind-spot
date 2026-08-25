@@ -88,13 +88,17 @@ export interface PlayerConfig {
   brakeTurnCos: number;
   /** Minimum gap between two brake sounds from the same body. */
   brakeCooldownSec: number;
+  /** Minimum speed at which a sharp turn counts as an audible direction change. */
+  brakeTurnMinSpeed: number;
   /**
-   * v1 has no body-to-body contact — players pass through each other (concept, "решено").
-   * The mechanic is expected later, so the switch exists and the code path behind it is real.
+   * Window over which a turn is measured, seconds.
+   *
+   * It cannot be `brakeWindowSec`: a body at 5.5 m/s with 18 m/s² of grip needs about 0.43 s to
+   * swap its velocity through ninety degrees, so a 0.2 s window sees forty degrees of it and a
+   * hard cut is silent. Long enough to contain a real cut, short enough that jogging round a
+   * wide arc never accumulates into one.
    */
-  bodyCollision: boolean;
-  /** Restitution used when `bodyCollision` is on. */
-  bodyRestitution: number;
+  brakeTurnWindowSec: number;
 }
 
 export interface BallConfig {
@@ -215,6 +219,22 @@ export interface PerceptionConfig {
    * real decision, so it is spelled out here rather than hidden in the perception code.
    */
   exactKinds: SoundKind[];
+  /**
+   * The pure cheat dial, in hertz: how often this observer is simply *told* where every body is.
+   * 0 = off, which is every honest configuration.
+   *
+   * It exists because the concept's headline test — "a telepath must beat an honest bot" — could
+   * not be asked without it. `truthLeak` only removes the localisation error from sounds the
+   * observer already heard, so it cannot help against the thing that actually hides a body in
+   * this game, which is standing still and making none. Measured, `truthLeak = 1` on its own is
+   * worth almost nothing, and reading that as "information is worthless" would have been reading
+   * the instrument rather than the game.
+   *
+   * Delivered as a synthetic sonar return covering the whole pitch, because that channel already
+   * carries exact positions AND the negative half ("nobody else is anywhere"), which is what
+   * telepathy means. Nothing in the game turns it on.
+   */
+  xrayHz: number;
   /** Sound marks are drawn/decayed over this window — a renderer hint, kept here to stay tunable. */
   markerLifeSec: number;
   /**
@@ -256,6 +276,83 @@ export interface AiConfig {
   [key: string]: number | boolean | string;
 }
 
+
+/**
+ * The fight for the ball — added 2026-08-25, and it replaces the earlier decision that v1 would
+ * have no contact at all.
+ *
+ * That decision was measured rather than argued about, and it failed: with no way to take the
+ * ball off a carrier, knowing where an opponent is buys nothing you can act on, so a telepathic
+ * bot played exactly as well as an honest one and never pinged in its life. Everything in this
+ * block exists to give knowledge something to be spent on. Each mechanic is a separate switch
+ * so the rule tournament (`npm run contest`) can price them one at a time.
+ */
+export interface StealConfig {
+  enabled: boolean;
+  /** An opponent inside this radius of the carrier is contesting the ball. */
+  radius: number;
+  /** Contiguous seconds of contest needed to take it. */
+  holdSec: number;
+  /** The thief must be pressing catch: a timed action rather than a walk-in. */
+  requirePress: boolean;
+  /** The thief must be moving at least this fast. 0 = standing next to him is enough. */
+  minSpeed: number;
+  /** The ball comes loose instead of changing hands. */
+  knockLoose: boolean;
+  /** Nobody can be robbed again for this long — otherwise a steal instantly bounces back. */
+  graceSec: number;
+}
+
+export interface TackleConfig {
+  /** A dive that passes close to a body knocks it down. Extends the existing `dive`. */
+  enabled: boolean;
+  /** Centre-to-centre distance at which a diving body catches an opponent. */
+  radius: number;
+  /** How long the victim lies there: noisy, helpless, and out of the play. */
+  stunSec: number;
+  /** A diver who hit nothing lies there for `dive.recoverySec * missPenalty`. */
+  missPenalty: number;
+  /** A tackled carrier loses the ball. */
+  dropsBall: boolean;
+}
+
+export interface CollisionConfig {
+  /** Bodies stop passing through each other. This is also what makes a screen a real thing. */
+  enabled: boolean;
+  restitution: number;
+  /** Closing speed above which the bump rings out and staggers both bodies. */
+  loudSpeed: number;
+  /** Seconds of lost control after a hard bump. */
+  staggerSec: number;
+  /** A carrier in a hard collision loses the ball. */
+  dropsBall: boolean;
+}
+
+/**
+ * What happens when a ball nobody timed meets a body.
+ *
+ * `'always'` is the v1 rule and it is why two parked defenders were unbeatable: any contact
+ * above `catching.contactFumbleMinSpeed` was a guaranteed fumble, so a body on the line was an
+ * absolute wall. `'speed'` makes a hard shot likely to go straight past a defender who did not
+ * time it — which turns blocking into an action instead of a piece of furniture.
+ */
+export interface BlockConfig {
+  mode: 'always' | 'speed';
+  /** Ball speed above `contactFumbleMinSpeed` at which stopping probability reaches `minStop`. */
+  speedSpan: number;
+  /** Floor of the stopping probability, however hard the shot. */
+  minStop: number;
+  /** A body pressing catch, or diving, stops anything it touches. Blocking as a decision. */
+  activeAlwaysStops: boolean;
+}
+
+export interface ContestConfig {
+  steal: StealConfig;
+  tackle: TackleConfig;
+  collision: CollisionConfig;
+  block: BlockConfig;
+}
+
 export interface SimConfig {
   /** Fixed simulation step. Never read from a wall clock anywhere. */
   dt: number;
@@ -275,7 +372,24 @@ export interface SimConfig {
    */
   loudness: Record<SoundKind, number>;
   perception: PerceptionConfig;
+  /**
+   * Per-team overrides of the perception knobs, indexed by team id. Absent = both teams share
+   * `perception`, which is what every match used to do.
+   *
+   * It exists because the concept's headline test needs it: "does a telepath beat an honest
+   * bot" is a question about ONE side's channel, and a single global `truthLeak` turns the dial
+   * for both of them at once, which measures nothing. Only the keys present are overridden.
+   */
+  perceptionByTeam?: (Partial<PerceptionConfig> | null)[];
+  contest: ContestConfig;
   ai: AiConfig;
+}
+
+/** The perception knobs one team actually plays with: the globals, with its own overrides on top. */
+export function perceptionFor(cfg: SimConfig, team: number): PerceptionConfig {
+  const over = cfg.perceptionByTeam?.[team];
+  if (!over) return cfg.perception;
+  return { ...cfg.perception, ...over, exactKinds: [...(over.exactKinds ?? cfg.perception.exactKinds)] };
 }
 
 /** The concept's table, verbatim. */
@@ -355,8 +469,11 @@ export function defaultConfig(): SimConfig {
       brakeWindowSec: 0.2,
       brakeTurnCos: 0.1,
       brakeCooldownSec: 0.5,
-      bodyCollision: false,
-      bodyRestitution: 0.2,
+      // Above a jog: a walker changing his mind is not an 11 m event, a runner cutting is. The
+      // speed dips to about 3.9 m/s in the middle of a ninety-degree cut, so the floor has to sit
+      // below that or the cut switches itself off halfway through.
+      brakeTurnMinSpeed: 3.2,
+      brakeTurnWindowSec: 0.5,
     },
     ball: {
       radius: 0.12,
@@ -408,8 +525,46 @@ export function defaultConfig(): SimConfig {
       truthLeak: 0,
       teamShare: false,
       exactKinds: ['sonar', 'whistle'],
+      xrayHz: 0,
       markerLifeSec: 2.5,
       emitterNoiseSmoothing: 0.97,
+    },
+    contest: {
+      steal: {
+        enabled: true,
+        // Measured, not guessed: 1.5 m for half a second produced twenty-two steals a minute in
+        // the rule tournament — a change of possession every 2.6 seconds, almost all of them
+        // accidental, because two bots converging on a ball are inside 1.5 m of each other most
+        // of the time anyway. A steal has to be something you *did*, so the radius came down
+        // below the natural crowding distance and the hold went up past the time it takes to
+        // run through somebody.
+        radius: 1.1,
+        holdSec: 0.7,
+        requirePress: false,
+        minSpeed: 0,
+        knockLoose: false,
+        graceSec: 1,
+      },
+      tackle: {
+        enabled: true,
+        radius: 0.9,
+        stunSec: 1,
+        missPenalty: 1,
+        dropsBall: true,
+      },
+      collision: {
+        enabled: true,
+        restitution: 0.2,
+        loudSpeed: 3.2,
+        staggerSec: 0.25,
+        dropsBall: true,
+      },
+      block: {
+        mode: 'speed',
+        speedSpan: 12,
+        minStop: 0.25,
+        activeAlwaysStops: true,
+      },
     },
     ai: {
       beliefDecay: 0.5,
@@ -454,6 +609,7 @@ export const PRESETS: Record<string, () => SimConfig> = {
     c.perception.truthLeak = 1;
     c.perception.hearingScale = 10;
     c.perception.emitterNoiseSmoothing = 0;
+    c.perception.xrayHz = 10;
     return c;
   },
 
@@ -468,14 +624,29 @@ export const PRESETS: Record<string, () => SimConfig> = {
   /**
    * A bot that values information far above its price.
    *
-   * Not a balance setting — a demonstration one. At the tuned defaults the bot pings roughly
-   * once a match, because in v1 there is no tackle and no steal, so knowing where an opponent is
-   * buys almost nothing you can act on (see the AI report). This preset forces the question to
-   * be asked so the mechanic can be watched in the playground.
+   * Not a balance setting — a demonstration one. It dates from the version of the game that had
+   * no tackle and no steal, where knowing an opponent's position bought nothing you could act
+   * on and the bot pinged roughly once a match. The contest rules have moved that number up on
+   * their own; the preset stays because forcing the question makes the mechanic easy to watch
+   * in the playground.
    */
   curious: () => {
     const c = defaultConfig();
     c.ai.infoMul = 40;
+    return c;
+  },
+
+  /**
+   * The rules as they were before the fight for the ball existed — no steal, no tackle, no body
+   * contact, and a body on the shot line as an absolute wall. Kept as the control group of the
+   * rule tournament: every claim about contest mechanics is a claim relative to this row.
+   */
+  'no-contest': () => {
+    const c = defaultConfig();
+    c.contest.steal.enabled = false;
+    c.contest.tackle.enabled = false;
+    c.contest.collision.enabled = false;
+    c.contest.block.mode = 'always';
     return c;
   },
 
@@ -508,6 +679,15 @@ export function cloneConfig(c: SimConfig): SimConfig {
     ping: { ...c.ping },
     loudness: { ...c.loudness },
     perception: { ...c.perception, exactKinds: [...c.perception.exactKinds] },
+    perceptionByTeam: c.perceptionByTeam
+      ? c.perceptionByTeam.map((o) => (o ? { ...o, ...(o.exactKinds ? { exactKinds: [...o.exactKinds] } : {}) } : null))
+      : undefined,
+    contest: {
+      steal: { ...c.contest.steal },
+      tackle: { ...c.contest.tackle },
+      collision: { ...c.contest.collision },
+      block: { ...c.contest.block },
+    },
     ai: { ...c.ai },
   };
 }

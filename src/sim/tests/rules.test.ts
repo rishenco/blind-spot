@@ -155,3 +155,198 @@ describe('field and rules', () => {
     }
   });
 });
+
+/**
+ * The fight for the ball.
+ *
+ * Each of these pins one contest rule to the smallest situation that can break it, and each one
+ * also pins its OFF switch: the rule tournament is only meaningful if `contest.*.enabled = false`
+ * really does restore the old behaviour, so a variant row measures the rule and not a bug.
+ */
+describe('the fight for the ball', () => {
+  /** Puts two bodies at chosen spots with the ball in P0's hands, everything else neutral. */
+  function rigged(mutate: (c: ReturnType<typeof defaultConfig>) => void) {
+    const cfg = defaultConfig();
+    cfg.teamSize = 1;
+    cfg.match.spawnJitter = 0;
+    cfg.match.carryTimeoutSec = 0;
+    cfg.contest.steal.enabled = false;
+    cfg.contest.tackle.enabled = false;
+    cfg.contest.collision.enabled = false;
+    cfg.contest.block.mode = 'always';
+    mutate(cfg);
+    return new Simulation(cfg, 5);
+  }
+
+  const place = (sim: Simulation, a: { x: number; y: number }, b: { x: number; y: number }): void => {
+    sim.state.players[0]!.pos = { ...a };
+    sim.state.players[1]!.pos = { ...b };
+    sim.state.ball.pos = { x: a.x + 0.85, y: a.y };
+  };
+
+  it('gives the ball to an opponent who stays close for long enough, and not before', () => {
+    const sim = rigged((c) => {
+      c.contest.steal.enabled = true;
+    });
+    const hold = sim.config.contest.steal.holdSec;
+    place(sim, { x: 0, y: 0 }, { x: 0.9, y: 0 });
+    expect(sim.state.ball.carrier).toBe(0);
+    // Short of the hold time: still his.
+    run(sim, Math.floor((hold - 0.06) * 60), () => idleFor(2));
+    expect(sim.state.ball.carrier).toBe(0);
+    let out = sim.step(idleFor(2));
+    for (let i = 0; i < 8 && sim.state.ball.carrier === 0; i++) out = sim.step(idleFor(2));
+    expect(sim.state.ball.carrier).toBe(1);
+    // And it is a sound, not a silent teleport — a slap at the thief's feet.
+    expect(out.events.some((e) => e.kind === 'catch')).toBe(true);
+  });
+
+  it('never steals when the rule is off, however long the two stand together', () => {
+    const sim = rigged(() => {});
+    place(sim, { x: 0, y: 0 }, { x: 0.9, y: 0 });
+    run(sim, 600, () => idleFor(2));
+    expect(sim.state.ball.carrier).toBe(0);
+  });
+
+  it('resets the steal clock the moment the thief drops out of range', () => {
+    const sim = rigged((c) => {
+      c.contest.steal.enabled = true;
+      c.contest.steal.radius = 1;
+    });
+    place(sim, { x: 0, y: 0 }, { x: 1.2, y: 0 });
+    // Walk him in and straight out again, twice as long as the hold in total.
+    for (let i = 0; i < 120; i++) {
+      sim.state.players[1]!.pos = { x: i % 20 < 10 ? 1.2 : 4, y: 0 };
+      sim.step(idleFor(2));
+    }
+    expect(sim.state.ball.carrier).toBe(0);
+  });
+
+  it('puts a body on the floor when a dive connects, and the diver on the floor when it does not', () => {
+    const sim = rigged((c) => {
+      c.contest.tackle.enabled = true;
+    });
+    place(sim, { x: 0, y: 0 }, { x: 2.5, y: 0 });
+    const dive = idleFor(2);
+    dive[1]!.dive = true;
+    dive[1]!.move = { x: -1, y: 0 };
+    dive[1]!.aim = { x: -1, y: 0 };
+    sim.step(dive);
+    let hit = false;
+    for (let i = 0; i < 40; i++) {
+      const out = sim.step(idleFor(2));
+      if ((out.contests ?? []).some((c) => c.kind === 'tackle')) hit = true;
+    }
+    expect(hit).toBe(true);
+    expect(sim.state.players[0]!.downT).toBeGreaterThan(0);
+    // The tackled carrier loses the ball, loudly.
+    expect(sim.state.ball.carrier).toBeNull();
+
+    const missSim = rigged((c) => {
+      c.contest.tackle.enabled = true;
+      c.contest.tackle.missPenalty = 2;
+    });
+    place(missSim, { x: 0, y: 0 }, { x: 9, y: 0 });
+    const wild = idleFor(2);
+    wild[1]!.dive = true;
+    wild[1]!.move = { x: 0, y: 1 };
+    wild[1]!.aim = { x: 0, y: 1 };
+    missSim.step(wild);
+    let missed = false;
+    for (let i = 0; i < 40; i++) {
+      const out = missSim.step(idleFor(2));
+      if ((out.contests ?? []).some((c) => c.kind === 'tackle-miss')) missed = true;
+    }
+    expect(missed).toBe(true);
+    expect(missSim.state.ball.carrier).toBe(0);
+    expect(missSim.state.players[1]!.recoverT).toBeGreaterThan(missSim.config.dive.recoverySec);
+  });
+
+  it('stops bodies passing through each other once contact is on, and rings out when it is hard', () => {
+    const sim = rigged((c) => {
+      c.contest.collision.enabled = true;
+    });
+    place(sim, { x: -3, y: 0 }, { x: 0, y: 0 });
+    let heard = false;
+    for (let i = 0; i < 90; i++) {
+      const intents = idleFor(2);
+      intents[0]!.move = { x: 1, y: 0 };
+      intents[0]!.moveMode = 'run';
+      intents[0]!.aim = { x: 1, y: 0 };
+      const out = sim.step(intents);
+      if ((out.contests ?? []).some((c) => c.kind === 'collision')) heard = true;
+    }
+    expect(heard).toBe(true);
+    const gap = Math.hypot(
+      sim.state.players[0]!.pos.x - sim.state.players[1]!.pos.x,
+      sim.state.players[0]!.pos.y - sim.state.players[1]!.pos.y,
+    );
+    expect(gap).toBeGreaterThanOrEqual(sim.config.player.radius * 2 - 1e-6);
+    // A hard bump knocks the ball out of the runner's hands.
+    expect(sim.state.ball.carrier).toBeNull();
+  });
+
+  it('lets a hard throw past a body that did not time it, and never past one that did', () => {
+    // Same throw, same geometry, two block modes. `'always'` is the old rule and has to stay
+    // available: it is the control row of the rule tournament.
+    const shots = (mode: 'always' | 'speed', active: boolean): number => {
+      let through = 0;
+      for (let seed = 1; seed <= 12; seed++) {
+        const cfg = defaultConfig();
+        cfg.teamSize = 1;
+        cfg.match.spawnJitter = 0;
+        cfg.match.carryTimeoutSec = 0;
+        cfg.contest.steal.enabled = false;
+        cfg.contest.tackle.enabled = false;
+        cfg.contest.collision.enabled = false;
+        cfg.contest.block.mode = mode;
+        const sim = new Simulation(cfg, seed);
+        sim.state.players[0]!.pos = { x: -6, y: 0 };
+        sim.state.players[1]!.pos = { x: 2, y: 0 };
+        sim.state.ball.pos = { x: -5.15, y: 0 };
+        const charge = idleFor(2);
+        charge[0]!.charge = true;
+        charge[0]!.aim = { x: 1, y: 0 };
+        run(sim, 45, () => charge);
+        for (let i = 0; i < 120; i++) {
+          const intents = idleFor(2);
+          intents[0]!.aim = { x: 1, y: 0 };
+          intents[1]!.catch = active;
+          const out = sim.step(intents);
+          if ((out.contests ?? []).some((c) => c.kind === 'through')) through++;
+        }
+      }
+      return through;
+    };
+    expect(shots('always', false)).toBe(0);
+    expect(shots('speed', false)).toBeGreaterThan(0);
+    // A defender who is reaching for it stops everything he touches.
+    expect(shots('speed', true)).toBe(0);
+  });
+
+  it('rings out when a runner changes direction hard, and stays quiet when a walker does', () => {
+    const cut = (mode: 'run' | 'walk'): boolean => {
+      const cfg = defaultConfig();
+      cfg.teamSize = 1;
+      const sim = new Simulation(cfg, 3);
+      sim.state.players[0]!.pos = { x: 0, y: 0 };
+      let brakes = 0;
+      const leg = (dir: { x: number; y: number }, ticks: number) => {
+        for (let i = 0; i < ticks; i++) {
+          const intents = idleFor(2);
+          intents[0]!.move = dir;
+          intents[0]!.moveMode = mode;
+          intents[0]!.aim = dir;
+          const out = sim.step(intents);
+          if (out.events.some((e) => e.kind === 'brake' && e.sourceId === 0)) brakes++;
+        }
+      };
+      leg({ x: 1, y: 0 }, 70);
+      leg({ x: 0, y: 1 }, 70);
+      return brakes > 0;
+    };
+    expect(cut('run')).toBe(true);
+    // Walking into a corner is how a body arrives anywhere quietly; it must stay free.
+    expect(cut('walk')).toBe(false);
+  });
+});

@@ -208,6 +208,8 @@ export interface SelfState {
   pingCooldown: number;
   diving: boolean;
   recovering: boolean;
+  /** Flat on the floor after being tackled: no movement, no actions, and everybody heard it. */
+  down: boolean;
   /** Audible radius of the noise this body is making right now — the concept's "am I loud" readout. */
   ownLoudness: number;
 }

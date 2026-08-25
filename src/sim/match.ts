@@ -18,7 +18,7 @@
  * whatever intents came from outside (a human at a keyboard) reproduce the match exactly.
  */
 import type { SimConfig } from './config';
-import { cloneConfig } from './config';
+import { cloneConfig, perceptionFor } from './config';
 import { makeField } from './field';
 import { dist2 } from './math';
 import { Perceiver } from './perception';
@@ -52,7 +52,7 @@ export interface MatchOptions {
 export interface TimelineEntry {
   tick: number;
   t: number;
-  kind: 'goal' | 'catch' | 'interception' | 'fumble' | 'throw' | 'ping' | 'restart';
+  kind: 'goal' | 'catch' | 'interception' | 'fumble' | 'throw' | 'ping' | 'restart' | 'contest';
   player: EntityId | null;
   team: TeamId | null;
   label: string;
@@ -80,6 +80,8 @@ export class Match {
   private readonly external: (Intent | null)[] = [];
   private readonly lastIntents: Intent[] = [];
   private readonly keepLog: boolean;
+  /** Which team held the ball last, for the possession-change counter. */
+  private lastOwner: TeamId | null = null;
 
   constructor(opts: MatchOptions) {
     this.config = cloneConfig(opts.config);
@@ -96,6 +98,7 @@ export class Match {
       duration: 0,
       score: [0, 0],
       players: [],
+      possessionChanges: 0,
     };
     for (let i = 0; i < n; i++) {
       const team: TeamId = i < this.config.teamSize ? 0 : 1;
@@ -186,10 +189,11 @@ export class Match {
     const view = this.sim.state;
     const heard: ReturnType<Perceiver['hear']>[] = [];
     for (const p of this.perceivers) heard.push(p.hear(view, out.events));
-    if (this.config.perception.teamShare) {
-      for (const p of this.perceivers) {
-        for (const mate of p.teammates) p.relay(view, heard[mate] ?? []);
-      }
+    // The voice link is a per-team channel now that perception knobs can differ by team: one
+    // side may be wired up and the other not.
+    for (const p of this.perceivers) {
+      if (!perceptionFor(this.config, p.team).teamShare) continue;
+      for (const mate of p.teammates) p.relay(view, heard[mate] ?? []);
     }
     for (const ret of out.sonar) this.perceivers[ret.owner]?.receiveSonar(ret);
     for (let i = 0; i < this.perceivers.length; i++) {
@@ -253,6 +257,44 @@ export class Match {
         );
       } else {
         this.push(s.tick, s.t, 'catch', touch.player, st.team, `P${touch.player} picks up`);
+      }
+    }
+
+    const carrier = s.ball.carrier;
+    if (carrier !== null) {
+      const owner: TeamId = carrier < this.config.teamSize ? 0 : 1;
+      if (this.lastOwner !== null && owner !== this.lastOwner) this.stats.possessionChanges += 1;
+      this.lastOwner = owner;
+    }
+
+    for (const contest of out.contests ?? []) {
+      const st = this.stats.players[contest.player];
+      const victim = contest.victim !== null ? this.stats.players[contest.victim] : undefined;
+      switch (contest.kind) {
+        case 'steal':
+          if (st) st.steals += 1;
+          if (victim) victim.robbed += 1;
+          this.push(s.tick, contest.t, 'contest', contest.player, st?.team ?? null,
+            `P${contest.player} strips P${contest.victim}`);
+          break;
+        case 'tackle':
+          if (st) st.tackles += 1;
+          if (victim) victim.tackled += 1;
+          this.push(s.tick, contest.t, 'contest', contest.player, st?.team ?? null,
+            `P${contest.player} tackles P${contest.victim}`);
+          break;
+        case 'tackle-miss':
+          if (st) st.tackleMisses += 1;
+          break;
+        case 'collision':
+          if (st) st.collisions += 1;
+          if (victim) victim.collisions += 1;
+          break;
+        case 'through':
+          if (st) st.ballsThrough += 1;
+          break;
+        default:
+          break;
       }
     }
 

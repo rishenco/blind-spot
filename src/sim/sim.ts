@@ -67,6 +67,25 @@ export interface PlayerState {
   /** Fastest speed seen inside the current brake window, and its age. */
   peakSpeed: number;
   peakAge: number;
+  /**
+   * Heading the body has been holding, and for how long. A sharp turn away from it is as loud
+   * as a hard stop — `player.brakeTurnCos` was declared in the config and read by nobody, which
+   * meant half of the loudness table's "резкая смена направления" row simply did not exist.
+   */
+  dirRef: Vec2;
+  dirRefNext: Vec2;
+  dirRefAge: number;
+  /** > 0 while this body is on the ground after being tackled: silent-less, helpless, visible. */
+  downT: number;
+  /** > 0 while a hard collision has taken the body's control away. */
+  staggerT: number;
+  /** Seconds spent contesting the current carrier, and who that carrier is. */
+  contestT: number;
+  contestTarget: EntityId | null;
+  /** Grace after a steal: this body can neither be robbed nor rob again until it expires. */
+  robbedCd: number;
+  /** Whether the dive in progress has already connected with somebody. */
+  tackleHit: boolean;
   /** Audible radius of the loudest noise this body made this tick — the "am I loud" readout. */
   loudness: number;
 }
@@ -137,6 +156,27 @@ export interface StepOutput {
   goals: { team: TeamId; scorer: EntityId | null; t: number }[];
   /** Possession handed over by a rule rather than by play (the goalkeeper throw). */
   turnovers: { team: TeamId; reason: 'crease' | 'passivity'; t: number }[];
+  /**
+   * The fight for the ball, event by event — what the rule tournament actually measures.
+   *
+   * Optional so that the handful of places that hand-build an empty `StepOutput` (the debug
+   * playground's first frame, the match's own priming frame) did not all have to change on the
+   * day contact was added. The simulation always fills it in.
+   */
+  contests?: ContestEvent[];
+}
+
+export type ContestKind = 'steal' | 'tackle' | 'tackle-miss' | 'collision' | 'block' | 'through';
+
+/**
+ * One moment of contact. `player` is whoever acted (the thief, the diver, the faster body in a
+ * collision); `victim` is who it happened to, when there is one.
+ */
+export interface ContestEvent {
+  kind: ContestKind;
+  player: EntityId;
+  victim: EntityId | null;
+  t: number;
 }
 
 /** Read-only face of the world, handed to `perceive` — never to a controller. */
@@ -155,6 +195,7 @@ export class Simulation {
   private readonly goals: { team: TeamId; scorer: EntityId | null; t: number }[] = [];
   private readonly touches: BallTouch[] = [];
   private readonly turnovers: { team: TeamId; reason: 'crease' | 'passivity'; t: number }[] = [];
+  private readonly contests: ContestEvent[] = [];
 
   constructor(config: SimConfig, seed: number) {
     this.config = config;
@@ -215,6 +256,15 @@ export class Simulation {
         brakeCd: 0,
         peakSpeed: 0,
         peakAge: 0,
+        dirRef: v2(1, 0),
+        dirRefNext: v2(1, 0),
+        dirRefAge: 0,
+        downT: 0,
+        staggerT: 0,
+        contestT: 0,
+        contestTarget: null,
+        robbedCd: 0,
+        tackleHit: false,
         loudness: 0,
       });
     }
@@ -279,6 +329,15 @@ export class Simulation {
       p.brakeCd = 0;
       p.peakSpeed = 0;
       p.peakAge = 0;
+      p.dirRef = v2(p.team === 0 ? 1 : -1, 0);
+      p.dirRefNext = clone2(p.dirRef);
+      p.dirRefAge = 0;
+      p.downT = 0;
+      p.staggerT = 0;
+      p.contestT = 0;
+      p.contestTarget = null;
+      p.robbedCd = 0;
+      p.tackleHit = false;
       p.loudness = 0;
       confineBody(f, p.pos, p.vel, this.config.player.radius);
     }
@@ -317,6 +376,7 @@ export class Simulation {
     this.goals.length = 0;
     this.touches.length = 0;
     this.turnovers.length = 0;
+    this.contests.length = 0;
 
     s.tick += 1;
     s.t += dt;
@@ -352,8 +412,11 @@ export class Simulation {
       this.stepPlayer(p, intent, prev, dt);
     }
 
+    this.resolveCollisions();
+    this.resolveTackles();
     this.stepBall(dt);
     this.resolveBallContacts(intents);
+    this.resolveSteals(intents, dt);
     this.checkCreaseBall(dt);
     this.checkPassivity(dt);
     this.advancePings(dt);
@@ -376,6 +439,7 @@ export class Simulation {
       events: this.events.slice(),
       touches: this.touches.slice(),
       turnovers: this.turnovers.slice(),
+      contests: this.contests.slice(),
       sonar: this.sonar.slice(),
       goals: this.goals.slice(),
     };
@@ -415,16 +479,40 @@ export class Simulation {
     p.diveCd = Math.max(0, p.diveCd - dt);
     p.ballCd = Math.max(0, p.ballCd - dt);
     p.brakeCd = Math.max(0, p.brakeCd - dt);
+    p.robbedCd = Math.max(0, p.robbedCd - dt);
+    p.staggerT = Math.max(0, p.staggerT - dt);
 
     const aimLen = len2(intent.aim);
     if (aimLen > 1e-6) p.aim = norm2(intent.aim, p.aim);
+
+    // --- flat on the ground: the price of being tackled, and of tackling nothing -----------
+    // A body on the floor does not move, cannot ping, cannot throw and cannot dive. It is not
+    // silent either: the fall itself rang out, and its position is now common knowledge.
+    if (p.downT > 0) {
+      p.downT -= dt;
+      p.vel = v2();
+      p.move = 'stand';
+      p.charging = false;
+      p.chargeT = 0;
+      p.strideAcc = 0;
+      p.peakSpeed = 0;
+      p.peakAge = 0;
+      if (p.hasBall) this.placeCarriedBall(this.state, p);
+      return;
+    }
 
     // --- dive: a committed burst, then a helpless recovery -------------------
     if (p.diveT > 0) {
       p.diveT -= dt;
       p.vel = { x: p.diveDir.x * cfg.dive.speed, y: p.diveDir.y * cfg.dive.speed };
       if (p.diveT <= 0) {
-        p.recoverT = cfg.dive.recoverySec;
+        // A dive that hit nobody leaves you lying there longer — that is the bet the tackle is:
+        // you spent your body on a prediction, and a wrong prediction costs time on the floor.
+        const miss = p.tackleHit ? 1 : cfg.contest.tackle.enabled ? cfg.contest.tackle.missPenalty : 1;
+        p.recoverT = cfg.dive.recoverySec * miss;
+        if (!p.tackleHit && cfg.contest.tackle.enabled) {
+          this.contests.push({ kind: 'tackle-miss', player: p.id, victim: null, t: this.state.t });
+        }
         p.vel = v2();
       }
     } else if (p.recoverT > 0) {
@@ -433,6 +521,7 @@ export class Simulation {
     } else {
       if (intent.dive && !prev.dive && p.diveCd <= 0) {
         p.diveT = cfg.dive.durationSec;
+        p.tackleHit = false;
         p.diveCd = cfg.dive.cooldownSec + cfg.dive.durationSec + cfg.dive.recoverySec;
         const dir = len2(intent.move) > 1e-6 ? norm2(intent.move, p.aim) : clone2(p.aim);
         p.diveDir = dir;
@@ -477,7 +566,9 @@ export class Simulation {
 
   private applyMovement(p: PlayerState, intent: Intent, dt: number): void {
     const cfg = this.config.player;
-    const want = intent.move;
+    // A hard bump takes the body's control away for a moment: no steering, only coasting to a
+    // halt. This is the "сбивает темп" half of body contact — the loud half is the sound.
+    const want = p.staggerT > 0 ? { x: 0, y: 0 } : intent.move;
     const wantLen = len2(want);
     const maxSpeed = intent.moveMode === 'run' ? cfg.runSpeed : cfg.walkSpeed;
     let target: Vec2;
@@ -551,7 +642,46 @@ export class Simulation {
       p.brakeCd = cfg.brakeCooldownSec;
       p.peakSpeed = speed;
       p.peakAge = 0;
+      if (speed > 1e-6) {
+        p.dirRef = { x: p.vel.x / speed, y: p.vel.y / speed };
+        p.dirRefNext = clone2(p.dirRef);
+      }
+      p.dirRefAge = 0;
       this.emit('brake', p.pos, p.id);
+      return;
+    }
+
+    // A hard turn is as loud as a hard stop, and for the same physical reason: the feet have to
+    // kill the old velocity before they can make the new one. The concept's loudness table says
+    // "резкая смена направления / стоп" in one row; until now only the second half existed, so
+    // a runner could switch direction at full speed in silence — and the feint, which is exactly
+    // that manoeuvre, was only half as expensive as it is supposed to be.
+    if (speed >= cfg.brakeTurnMinSpeed) {
+      const dir = { x: p.vel.x / speed, y: p.vel.y / speed };
+      // Two references, rotated every window, so the one being compared against is always
+      // between one and two windows old. A single reference reset on a timer is phase-dependent:
+      // if the reset happens to land in the middle of the turn, the comparison sees half of it
+      // and a genuine ninety-degree cut goes out silently — which it did, on exactly the timing
+      // this test uses.
+      p.dirRefAge += dt;
+      if (p.dirRefAge >= cfg.brakeTurnWindowSec) {
+        p.dirRef = clone2(p.dirRefNext);
+        p.dirRefNext = dir;
+        p.dirRefAge = 0;
+      }
+      if (p.brakeCd <= 0 && dot2(p.dirRef, dir) < cfg.brakeTurnCos) {
+        p.brakeCd = cfg.brakeCooldownSec;
+        p.dirRef = dir;
+        p.dirRefNext = dir;
+        p.dirRefAge = 0;
+        this.emit('brake', p.pos, p.id);
+      }
+    } else {
+      p.dirRefAge = 0;
+      if (speed > 1e-6) {
+        p.dirRef = { x: p.vel.x / speed, y: p.vel.y / speed };
+        p.dirRefNext = clone2(p.dirRef);
+      }
     }
   }
 
@@ -587,6 +717,216 @@ export class Simulation {
     // the rule survives whatever future mechanic does let a body in there.
     b.goalValid = !insideCrease(this.field, b.pos);
     this.emit('throw', b.pos, p.id);
+  }
+
+  // -- the fight for the ball ----------------------------------------------
+
+  /**
+   * Body contact.
+   *
+   * Two bodies stop occupying the same point, which is the whole mechanic: a silent defender
+   * standing in a corridor is now a wall rather than a rumour, and that is the cheapest way to
+   * make "where is he" a question worth paying for. A hard bump is loud (both bodies ring out
+   * where they touched), staggers both, and knocks the ball out of a carrier's hands.
+   */
+  private resolveCollisions(): void {
+    const col = this.config.contest.collision;
+    if (!col.enabled) return;
+    const s = this.state;
+    const R = this.config.player.radius;
+    const minGap = R * 2;
+    for (let i = 0; i < s.players.length; i++) {
+      const a = s.players[i]!;
+      for (let j = i + 1; j < s.players.length; j++) {
+        const b = s.players[j]!;
+        if (a.downT > 0 && b.downT > 0) continue;
+        let dx = b.pos.x - a.pos.x;
+        let dy = b.pos.y - a.pos.y;
+        let d = Math.sqrt(dx * dx + dy * dy);
+        if (d >= minGap) continue;
+        if (d < 1e-6) {
+          // Exactly coincident: separate along a fixed axis rather than dividing by zero. It has
+          // to be deterministic, so it cannot be a random direction.
+          dx = 1;
+          dy = 0;
+          d = 1;
+        }
+        const nx = dx / d;
+        const ny = dy / d;
+        const overlap = minGap - d;
+        // A body on the floor is furniture: it gets pushed by nobody and pushes nobody aside.
+        const aMoves = a.downT <= 0;
+        const bMoves = b.downT <= 0;
+        const share = aMoves && bMoves ? 0.5 : 1;
+        if (aMoves) {
+          a.pos.x -= nx * overlap * share;
+          a.pos.y -= ny * overlap * share;
+        }
+        if (bMoves) {
+          b.pos.x += nx * overlap * share;
+          b.pos.y += ny * overlap * share;
+        }
+        const closing = (a.vel.x - b.vel.x) * nx + (a.vel.y - b.vel.y) * ny;
+        if (closing > 0) {
+          const imp = closing * (1 + col.restitution) * share;
+          if (aMoves) {
+            a.vel.x -= nx * imp;
+            a.vel.y -= ny * imp;
+          }
+          if (bMoves) {
+            b.vel.x += nx * imp;
+            b.vel.y += ny * imp;
+          }
+        }
+        confineBody(this.field, a.pos, a.vel, R);
+        confineBody(this.field, b.pos, b.vel, R);
+        if (closing < col.loudSpeed) continue;
+        // Hard enough to hear. Both bodies made the noise, so both are drawn on both screens —
+        // a collision is the one event in the game that gives away two positions at once.
+        this.emit('brake', a.pos, a.id);
+        this.emit('brake', b.pos, b.id);
+        a.staggerT = Math.max(a.staggerT, col.staggerSec);
+        b.staggerT = Math.max(b.staggerT, col.staggerSec);
+        this.contests.push({ kind: 'collision', player: a.id, victim: b.id, t: s.t });
+        if (col.dropsBall) {
+          if (a.hasBall) this.knockBallLoose(a, { x: -nx, y: -ny });
+          else if (b.hasBall) this.knockBallLoose(b, { x: nx, y: ny });
+        }
+      }
+    }
+  }
+
+  /**
+   * The dive tackle: a bet on where somebody is going to be.
+   *
+   * This is the mechanic the whole information economy hangs on. Hearing where an opponent *is*
+   * is worth little; a dive has to be aimed where he *will be* 0.4 s from now, which is the only
+   * question in the game whose answer has to be predicted rather than observed. Hit and he is on
+   * the floor for a second, noisy and useless. Miss and it is you.
+   */
+  private resolveTackles(): void {
+    const tk = this.config.contest.tackle;
+    if (!tk.enabled) return;
+    const s = this.state;
+    for (const diver of s.players) {
+      if (diver.diveT <= 0 || diver.tackleHit) continue;
+      for (const other of s.players) {
+        if (other.team === diver.team || other.downT > 0) continue;
+        if (dist2(diver.pos, other.pos) > tk.radius + this.config.player.radius) continue;
+        diver.tackleHit = true;
+        diver.diveT = 0;
+        diver.recoverT = this.config.dive.recoverySec;
+        diver.vel = v2();
+        other.downT = tk.stunSec;
+        other.staggerT = 0;
+        const away = norm2({ x: other.pos.x - diver.pos.x, y: other.pos.y - diver.pos.y }, other.aim);
+        // The thud, from the man who went down. Louder than a run, quieter than the fumble that
+        // follows if he was carrying — a mistake still costs more than a hit.
+        this.emit('brake', other.pos, other.id);
+        if (other.hasBall && tk.dropsBall) this.knockBallLoose(other, away);
+        this.contests.push({ kind: 'tackle', player: diver.id, victim: other.id, t: s.t });
+        break;
+      }
+    }
+  }
+
+  /**
+   * The steal: stay close to the carrier long enough and the ball is yours.
+   *
+   * The cheapest possible version of "the carrier is hunted", and the reason it is worth having
+   * is asymmetry rather than the steal itself: the carrier hums across the whole pitch, so a
+   * hunter always knows where to go, while the carrier has to *find* his hunters — with hearing
+   * he is drowning out himself, or with a ping he can afford because he is audible anyway.
+   */
+  private resolveSteals(intents: readonly Intent[], dt: number): void {
+    const st = this.config.contest.steal;
+    const s = this.state;
+    const b = s.ball;
+    if (!st.enabled || b.carrier === null || s.phase !== 'play') {
+      if (!st.enabled) return;
+      for (const p of s.players) {
+        p.contestT = 0;
+        p.contestTarget = null;
+      }
+      return;
+    }
+    const holder = s.players[b.carrier]!;
+    for (let i = 0; i < s.players.length; i++) {
+      const p = s.players[i]!;
+      if (p.team === holder.team || p.downT > 0) {
+        p.contestT = 0;
+        p.contestTarget = null;
+        continue;
+      }
+      if (p.contestTarget !== holder.id) {
+        p.contestTarget = holder.id;
+        p.contestT = 0;
+      }
+      const intent = intents[i] ?? idleIntentInternal();
+      const close = dist2(p.pos, holder.pos) <= st.radius + this.config.player.radius;
+      const fast = st.minSpeed <= 0 || len2(p.vel) >= st.minSpeed;
+      const pressing = !st.requirePress || intent.catch;
+      if (!close || !fast || !pressing) {
+        p.contestT = 0;
+        continue;
+      }
+      p.contestT += dt;
+      if (p.contestT < st.holdSec) continue;
+      if (p.robbedCd > 0 || holder.robbedCd > 0) continue;
+      p.contestT = 0;
+      p.robbedCd = st.graceSec;
+      holder.robbedCd = st.graceSec;
+      this.contests.push({ kind: 'steal', player: p.id, victim: holder.id, t: s.t });
+      if (st.knockLoose) {
+        this.knockBallLoose(holder, norm2({ x: holder.pos.x - p.pos.x, y: holder.pos.y - p.pos.y }, holder.aim));
+        return;
+      }
+      holder.hasBall = false;
+      holder.charging = false;
+      holder.chargeT = 0;
+      holder.ballCd = this.config.catching.cooldownSec;
+      p.hasBall = true;
+      p.ballCd = 0;
+      b.carrier = p.id;
+      b.vel = v2();
+      b.lastToucher = p.id;
+      b.lastThrower = null;
+      b.lastThrowerTeam = null;
+      b.goalValid = false;
+      b.carryT = 0;
+      this.placeCarriedBall(s, p);
+      // The slap of the ball changing hands: the same 5 m sound a catch makes, because that is
+      // physically what it is.
+      this.emit('catch', p.pos, p.id);
+      this.touches.push({ kind: 'catch', player: p.id, fromThrower: null, fromTeam: null });
+      return;
+    }
+  }
+
+  /** Takes the ball out of a carrier's hands and puts it on the floor, loudly. */
+  private knockBallLoose(p: PlayerState, dir: Vec2): void {
+    const cfg = this.config;
+    const b = this.state.ball;
+    const away = norm2(dir, p.aim);
+    const speed = cfg.catching.fumbleSpeed * (0.5 + 0.5 * this.rng());
+    p.hasBall = false;
+    p.charging = false;
+    p.chargeT = 0;
+    p.ballCd = cfg.catching.cooldownSec;
+    b.carrier = null;
+    b.pos = {
+      x: p.pos.x + away.x * (cfg.player.radius + cfg.ball.radius + 0.02),
+      y: p.pos.y + away.y * (cfg.player.radius + cfg.ball.radius + 0.02),
+    };
+    b.vel = { x: away.x * speed, y: away.y * speed };
+    b.lastToucher = p.id;
+    b.lastThrower = null;
+    b.lastThrowerTeam = null;
+    b.goalValid = !insideCrease(this.field, b.pos);
+    b.inCreaseT = 0;
+    b.carryT = 0;
+    this.touches.push({ kind: 'fumble', player: p.id, fromThrower: null, fromTeam: null });
+    this.emit('fumble', p.pos, p.id);
   }
 
   // -- ball ----------------------------------------------------------------
@@ -823,6 +1163,7 @@ export class Simulation {
       const p = s.players[i]!;
       if (p.ballCd > 0) continue;
       const intent = intents[i] ?? idleIntentInternal();
+      if (p.downT > 0) continue;
       const prev = this.prevIntents[i] ?? idleIntentInternal();
       const rel = { x: b.pos.x - p.pos.x, y: b.pos.y - p.pos.y };
       const d = len2(rel);
@@ -857,11 +1198,40 @@ export class Simulation {
       }
 
       if (d <= bodyR && relSpeed >= cfg.catching.contactFumbleMinSpeed) {
-        // Hit by a ball nobody caught: a deflection, and everyone hears the mistake.
-        this.fumble(p, rel, d, 'contact');
-        return;
+        if (this.stopsBall(p, intent, relSpeed)) {
+          // Hit by a ball nobody caught: a deflection, and everyone hears the mistake.
+          this.fumble(p, rel, d, 'contact');
+          return;
+        }
+        // It went past him. Nothing happened, nothing was heard, and he cannot have a second
+        // bite at it — which is what "he did not time it" has to mean if a block is a decision.
+        p.ballCd = cfg.catching.cooldownSec;
+        this.contests.push({ kind: 'through', player: p.id, victim: null, t: s.t });
+        continue;
       }
     }
+  }
+
+  /**
+   * Does this body stop a ball it did not catch?
+   *
+   * Under the old rule it always did, and that is why two parked defenders were unbeatable: a
+   * body on the shot line was a guaranteed turnover whatever the shot, so the correct defence
+   * was to stand still and the correct attack was nothing at all. Under `'speed'` a hard throw
+   * is likely to go straight past a body that was not reaching for it, and a body that *was* —
+   * pressing catch, or committed to a dive — still stops everything. Blocking becomes an action
+   * with a cost instead of a piece of scenery.
+   */
+  private stopsBall(p: PlayerState, intent: Intent, relSpeed: number): boolean {
+    const blk = this.config.contest.block;
+    if (blk.mode === 'always') return true;
+    if (blk.activeAlwaysStops && (intent.catch || p.diveT > 0)) return true;
+    const over = relSpeed - this.config.catching.contactFumbleMinSpeed;
+    const pStop = clamp(1 - over / Math.max(1e-6, blk.speedSpan), blk.minStop, 1);
+    if (pStop >= 1) return true;
+    const stopped = this.rng() < pStop;
+    if (stopped) this.contests.push({ kind: 'block', player: p.id, victim: null, t: this.state.t });
+    return stopped;
   }
 
   private fumble(p: PlayerState, rel: Vec2, d: number, _why: 'mistimed' | 'contact'): void {
@@ -1013,6 +1383,8 @@ export class Simulation {
         p.id, p.team, p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.aim.x, p.aim.y,
         p.hasBall ? 1 : 0, p.charging ? 1 : 0, p.chargeT, p.diveT, p.recoverT, p.diveCd,
         p.pingCd, p.ballCd, p.strideAcc, p.brakeCd, p.peakSpeed, p.peakAge, p.loudness,
+        p.dirRef.x, p.dirRef.y, p.dirRefNext.x, p.dirRefNext.y, p.dirRefAge, p.downT, p.staggerT, p.contestT,
+        p.contestTarget ?? -99, p.robbedCd, p.tackleHit ? 1 : 0,
       );
     }
     const b = s.ball;
