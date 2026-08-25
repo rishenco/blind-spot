@@ -210,19 +210,52 @@ const standStill = (sec, hx, hz) =>
       const bs = window.bs;
       const track = [];
       for (let t = 0; t < s; t++) {
+        // Positions at the top of the second, so path-vs-displacement can be measured over it.
+        const start = bs.spiders.list().map((sp) => ({ x: sp.x, z: sp.z }));
+        const path = start.map(() => 0);
+        let prev = start.map((p) => ({ ...p }));
         for (let i = 0; i < 120; i++) {
           bs.step(1 / 120);
           if (i % 24 === 0) bs.draw();
+          const now = bs.spiders.list();
+          for (let k = 0; k < now.length; k++) {
+            path[k] += Math.hypot(now[k].x - prev[k].x, now[k].z - prev[k].z);
+            prev[k] = { x: now[k].x, z: now[k].z };
+          }
         }
-        const list = bs.spiders.list().filter((sp) => sp.alive);
-        const ds = list.map((sp) => Math.hypot(sp.x - x, sp.z - z)).sort((a, b) => a - b);
+        const all = bs.spiders.list();
+        const live = [];
+        for (let k = 0; k < all.length; k++) if (all[k].alive) live.push({ i: k, sp: all[k] });
+        const ds = live.map((e) => Math.hypot(e.sp.x - x, e.sp.z - z)).sort((a, b) => a - b);
+        // Personal space: how close the nearest neighbour of each spider is.
+        const nn = live.map((e) => {
+          let best = Infinity;
+          for (const o of live) {
+            if (o.i === e.i) continue;
+            // One standing on a rack above another is not crowding it, it is climbing over it.
+            if (Math.abs(o.sp.y - e.sp.y) > 0.3) continue;
+            best = Math.min(best, Math.hypot(e.sp.x - o.sp.x, e.sp.z - o.sp.z));
+          }
+          return best;
+        }).filter((v) => Number.isFinite(v));
+        // A "shiver" is a spider that walked a long way this second and ended up where it began.
+        let shiver = 0;
+        for (const e of live) {
+          const net = Math.hypot(e.sp.x - start[e.i].x, e.sp.z - start[e.i].z);
+          if (path[e.i] > 1.5 && net < 0.4) shiver++;
+        }
         const st = bs.spiders.stats();
         track.push({
           t: t + 1,
           near: ds[0] ?? Infinity,
           near3: ds.slice(0, 3).reduce((a, b) => a + b, 0) / Math.min(3, ds.length),
           mean: ds.reduce((a, b) => a + b, 0) / ds.length,
+          nnMin: nn.length ? Math.min(...nn) : Infinity,
+          nnMean: nn.length ? nn.reduce((a, b) => a + b, 0) / nn.length : Infinity,
+          shiver,
+          live: live.length,
           mode: st.mode,
+          chatter: st.chatter,
           courage: st.meanCourage,
           strikes: st.strikes,
         });
@@ -306,39 +339,54 @@ await truthCam(HOME.x, HOME.z, 40);
 await advance(0.02, 1);
 await shot(
   '00b-they-are-coming.png',
-  `t=10 s of standing still. The fright has worn off and the leads have not: nearest ${trackA[9].near.toFixed(1)} m, mean ${trackA[9].mean.toFixed(1)} m, pack mode ${trackA[9].mode}. Every goal line points inwards at the same spot. Nobody has heard anything since the shot — they are walking to a memory`,
+  `t=10 s of standing still, and it is already over: nearest ${trackA[9].near.toFixed(1)} m, mean ${trackA[9].mean.toFixed(1)} m, pack mode ${trackA[9].mode}, ${trackA[9].strikes} bites landed. The fright now costs a second and a half, not three, and the walk in is at 3.2 m/s — the ring reaches him inside ten seconds instead of twenty. Nobody has heard anything since the shot: they are walking to a memory`,
 );
 
-const trackB = await standStill(20, HOME.x, HOME.z);
+const trackB = await standStill(10, HOME.x, HOME.z);
 // trackB counts its own seconds from zero; the track is one continuous stand-still, so shift it.
 const track = [...trackA, ...trackB.map((r) => ({ ...r, t: r.t + trackA.length }))];
 await truthCam(HOME.x, HOME.z, 26);
 await advance(0.02, 1);
 await shot(
   '00c-they-came.png',
-  `t=30 s. Same camera, tighter. Nearest ${track[track.length - 1].near.toFixed(1)} m, mean of the closest three ${track[track.length - 1].near3.toFixed(1)} m, ${track[track.length - 1].strikes} bites landed. He never moved and never made another sound after the shot`,
+  `t=20 s. Same camera, tighter. Nearest ${track[track.length - 1].near.toFixed(1)} m, mean of the closest three ${track[track.length - 1].near3.toFixed(1)} m, ${track[track.length - 1].strikes} bites landed, nearest-neighbour spacing ${track[track.length - 1].nnMean.toFixed(1)} m — they are on him, and they are not standing on each other. He never moved and never made another sound after the shot`,
 );
 
 console.log('[spiders] stand-still track — distance to the player, metres:');
 console.log(`[spiders]   t=0   near ${startDists[0].toFixed(1)}  mean ${(startDists.reduce((a, b) => a + b, 0) / startDists.length).toFixed(1)}`);
 for (const r of track) {
-  if (r.t % 2 !== 0 && r.t !== 1) continue;
   console.log(
     `[spiders]   t=${String(r.t).padStart(2)}s near ${r.near.toFixed(1).padStart(5)}  near3 ${r.near3.toFixed(1).padStart(5)}` +
-      `  mean ${r.mean.toFixed(1).padStart(5)}  ${r.mode.padEnd(6)} courage ${r.courage.toFixed(2)} strikes ${r.strikes}`,
+      `  mean ${r.mean.toFixed(1).padStart(5)}  nn ${r.nnMean.toFixed(1).padStart(4)}  shiver ${r.shiver}` +
+      `  ${r.mode.padEnd(6)} courage ${r.courage.toFixed(2)} chatter ${r.chatter.toFixed(0).padStart(2)}/s strikes ${r.strikes}`,
   );
 }
 notes.push(
   `stand-still track (one shot, then nothing): near ` +
-    [0, 4, 9, 14, 19, 24, 29].map((i) => (i === 0 ? startDists[0] : track[i].near).toFixed(1)).join(' → ') +
-    ` m at t = 0, 5, 10, 15, 20, 25, 30 s.`,
+    [0, 2, 4, 6, 9, 14, 19].map((i) => (i === 0 ? startDists[0] : track[i].near).toFixed(1)).join(' → ') +
+    ` m at t = 0, 3, 5, 7, 10, 15, 20 s.`,
+);
+
+// How long the player has between giving himself away and having one on him. This is the number
+// the human was complaining about — «полгода созревает» — so it is a check, not a note.
+const contactAt = track.find((r) => r.near < 3)?.t ?? Infinity;
+check(
+  'the answer to a gunshot arrives in seconds, not in half a minute',
+  contactAt <= 12,
+  `first spider inside 3 m at t=${contactAt} s (was ~18-20 s), first bite at t=${track.find((r) => r.strikes > 0)?.t ?? '-'} s`,
 );
 
 const last = track[track.length - 1];
 check(
   'the pack closes on a player who only gave himself away once',
   last.near3 < startDists[2] * 0.4,
-  `nearest three were ${((startDists[0] + startDists[1] + startDists[2]) / 3).toFixed(1)} m at the shot, ${last.near3.toFixed(1)} m thirty seconds later`,
+  `nearest three were ${((startDists[0] + startDists[1] + startDists[2]) / 3).toFixed(1)} m at the shot, ${last.near3.toFixed(1)} m twenty seconds later`,
+);
+check(
+  'and it never turns into a huddle',
+  track.every((r) => r.shiver <= 2) && Math.max(...track.map((r) => r.nnMean)) > 0.8,
+  `worst second: ${Math.max(...track.map((r) => r.shiver))} of ${last.live} spiders walking on the spot, ` +
+    `closest anyone stood to a neighbour ${Math.min(...track.map((r) => r.nnMin)).toFixed(2)} m`,
 );
 check(
   'and it gets all the way in, not to some standoff radius',
@@ -350,7 +398,7 @@ await playerCam(90, 0);
 await advance(0.02, 1);
 await shot(
   '00d-they-came-player.png',
-  'the same thirty seconds from inside his head: he fired once and then heard them arrive. Every blob is a click or a footfall that really happened at that point — the pack talking itself into range around a man who is standing perfectly still',
+  'the same twenty seconds from inside his head: he fired once and then heard them arrive. Every blob is a click or a footfall that really happened at that point — the pack talking itself into range around a man who is standing perfectly still',
 );
 
 // The control, and the reason this is not just "the aggression was turned up": identical setup,
@@ -375,6 +423,76 @@ check(
 );
 
 // ===========================================================================
+// 0b. «Собираются в кучу и дрожат» — the bug, and the proof it is gone.
+//
+// Reproducing it needs a *stale* lead: the player fires, and then is not there any more. Fourteen
+// spiders converge on one point in an empty hall, which is exactly the case the old code could
+// not survive — they arrived, found nothing, kept believing (chatter re-confirmed the rumour to
+// each other forever), and ground against each other on the spot at 5 m of walking per second
+// for a net displacement of 30 cm.
+//
+// Measured per second: how close the nearest neighbour of each spider is (personal space), and
+// how many of them walked more than 1.5 m in the second and ended up within 40 cm of where they
+// started (a "shiver"). Before the fix: nn down to 0.04 m, 8-14 of 14 shivering, forever.
+// ===========================================================================
+const LURE = { x: -6, z: -6 };
+await call('spiders.spawn', 14);
+await call('pose', LURE.x, LURE.z, 90);
+await ring(LURE.x, LURE.z, 8);
+await advance(0.5, 4);
+await call('aim', 90, 0);
+await call('shoot');
+// ...and the player is simply not there any more. No further noise of any kind: the belief they
+// are all walking towards is now a lie, and they have to work that out for themselves.
+await call('pose', 22, 22, 90);
+const stale = await standStill(14, LURE.x, LURE.z);
+await truthCam(LURE.x, LURE.z, 15);
+// The panel is in the way of the one thing this frame is about — the spacing between bodies.
+await call('hud', false);
+await advance(0.02, 1);
+await shot(
+  '00f-no-huddle.png',
+  `fourteen seconds after a shot fired at a spot the player then left. They walked to it, found ` +
+    `nothing, and dropped it: every label reads p0.00 — no confidence left — and the lines are ` +
+    `only the link back to the place that lied to them. They are spread on a ring, each sweeping ` +
+    `its own way out, instead of piled on the lie grinding against each other. ` +
+    `Nearest-neighbour spacing ${stale[13].nnMean.toFixed(1)} m ` +
+    `(closest pair ${stale[13].nnMin.toFixed(2)} m), ${stale[13].shiver} of ${stale[13].live} ` +
+    `walking on the spot, pack mode ${stale[13].mode}`,
+);
+console.log('[spiders] stale-lead track — the huddle test:');
+for (const r of stale) {
+  console.log(
+    `[spiders]   t=${String(r.t).padStart(2)}s  nn min ${r.nnMin.toFixed(2).padStart(5)}  nn mean ${r.nnMean.toFixed(2).padStart(5)}` +
+      `  shiver ${String(r.shiver).padStart(2)}/${r.live}  ${r.mode.padEnd(6)} chatter ${r.chatter.toFixed(0)}/s`,
+  );
+}
+// A spider is 0.3 m of radius, so 0.6 m between two centres is exactly two bodies touching and
+// is the floor the de-overlap pass enforces. The tightest second of the whole run should sit on
+// that floor and not under it — under it means they are inside each other, which is the huddle.
+check(
+  'nobody stands on anybody: the pack keeps its personal space',
+  stale.every((r) => r.nnMin > 0.55) && stale.every((r) => r.nnMean > 0.75),
+  `worst pair over 14 s: ${Math.min(...stale.map((r) => r.nnMin)).toFixed(2)} m — ` +
+    `two bodies touching is 0.60 m — and the worst second's mean spacing is ` +
+    `${Math.min(...stale.map((r) => r.nnMean)).toFixed(2)} m (before the fix: 0.04 m and 0.50 m)`,
+);
+check(
+  'and a dead lead is dropped instead of ground on',
+  stale.slice(4).every((r) => r.shiver <= 2),
+  `most spiders walking on the spot in any second after t=4: ` +
+    `${Math.max(...stale.slice(4).map((r) => r.shiver))} of ${stale[13].live} (before the fix: 8-14 of 14, permanently)`,
+);
+notes.push(
+  `the «кучкуются и дрожат» bug: the pack walked onto a stale belief and could never let go of ` +
+    `it, because chatter re-confirmed the rumour between them faster than it decayed and COMMIT ` +
+    `had no failure test. Now a rumour cannot install more than ${'0.55'} confidence, arriving at ` +
+    `an empty spot marks it checked, and separation is a smooth per-tick force instead of a kick ` +
+    `on the 15 Hz decision slice. Worst spacing over 14 s: ` +
+    `${Math.min(...stale.map((r) => r.nnMin)).toFixed(2)} m, worst shiver ${Math.max(...stale.map((r) => r.shiver))}/14.`,
+);
+
+// ===========================================================================
 // 1. The pack circles.
 // ===========================================================================
 await call('pose', HOME.x, HOME.z, 90);
@@ -383,7 +501,7 @@ await call('spiders.spawn', 14);
 // hunts as a pack. Any wider and half of them simply never hear him and stay idle.
 await ring(HOME.x, HOME.z, 8);
 await advance(0.4, 4);
-const hunt = await paceUntilHunting(8, 5, 30);
+const hunt = await paceUntilHunting(8, 2, 30);
 
 const circling = await spiderStats();
 const circlingList = await spiderList();
@@ -414,12 +532,12 @@ await playerCam(90, 0);
 await advance(0.02, 1);
 const dark1 = await shot(
   '02-circling-player.png',
-  'the identical moment as the player experiences it: a black hall with a handful of soft marks in it. That is a stalking pack — a footfall carries about a metre and a half and a bored spider clicks once every ten seconds, so almost nothing reaches you. The silence is the information',
+  'the identical moment as the player experiences it: a black hall with a scatter of soft marks in it. That is a stalking pack. A calm spider does chatter — a couple of clicks a second across the whole pack — but a footfall carries only a metre and a half and a stalking click is a lone soft blob, so what reaches you is a hint of company and no idea where. The contrast with the next frame is the information',
 );
 check(
-  'a stalking pack is nearly invisible',
-  litFraction(dark1) < 0.06,
-  `lit=${litFraction(dark1).toFixed(4)} of the frame, chatter ${circling.chatter.toFixed(1)} clicks/s`,
+  'a stalking pack is quiet, but it is not silent',
+  litFraction(dark1) < 0.06 && circling.chatter > 0,
+  `lit=${litFraction(dark1).toFixed(4)} of the frame, chatter ${circling.chatter.toFixed(1)} clicks/s from ${circling.count} spiders`,
 );
 const quietChatter = circling.chatter;
 
@@ -449,8 +567,10 @@ const rallyDark = await shot(
 const rallyChatter = (await spiderStats()).chatter;
 check(
   'a rally is loud, a stalk is not',
-  rallyChatter > quietChatter * 1.8,
-  `${quietChatter.toFixed(1)} clicks/s circling vs ${rallyChatter.toFixed(1)} clicks/s rallying`,
+  rallyChatter > quietChatter * 2.5,
+  `${quietChatter.toFixed(1)} clicks/s circling vs ${rallyChatter.toFixed(1)} clicks/s rallying ` +
+    `(x${(rallyChatter / Math.max(0.1, quietChatter)).toFixed(1)}) — calm chatter is deliberately audible now, ` +
+    `so silence means "nothing is out there" instead of "nothing is implemented"`,
 );
 check(
   'and it shows on the player’s screen',

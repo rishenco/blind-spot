@@ -135,6 +135,24 @@ export interface SpiderTunables {
   weightChatter: number;
   /** Metres: two belief points closer than this count as "the same place" for the pinned timer. */
   pinnedRadius: number;
+  /**
+   * Ceiling on the confidence a *rumour* can install — a click carries what the speaker
+   * believes, and hearsay must never be worth as much as hearing the thing yourself.
+   *
+   * Without this cap the pack talks itself into certainty: A tells B, B tells A, and both
+   * beliefs are refreshed to 1 forever, so the belief can never go stale and the whole swarm
+   * spends the rest of the match charging a spot the player left a minute ago. That is exactly
+   * the "собираются в кучу и дрожат" the playtest saw.
+   */
+  rumourCap: number;
+  /**
+   * Seconds a spider refuses rumours about a place it has just been to and found empty.
+   *
+   * Arriving is the only way a belief is ever disproven, so the disproof has to stick for
+   * longer than it takes a neighbour to click. A *real* noise from that place clears the mark
+   * immediately — new evidence beats an old conclusion.
+   */
+  checkedSeconds: number;
 
   // --- fear ---------------------------------------------------------------
   /** Loudness, in metres of notice, below which a noise can never be frightening however close. */
@@ -224,6 +242,12 @@ export interface SpiderTunables {
   orbitSpeed: number;
 
   // --- contact ------------------------------------------------------------
+  /** Metres from its belief at which a charging spider counts as "there" and can be disappointed. */
+  arriveRadius: number;
+  /** Metres of personal space, and how hard a body is pushed out of a neighbour's, m/s. */
+  separation: number;
+  separationPush: number;
+
   /** Metres at which a spider touching the player counts as a strike. */
   strikeRange: number;
   /** Loudness of the strike screech. */
@@ -258,8 +282,8 @@ export function defaultSpiderTunables(): SpiderTunables {
     height: 0.36,
     stepHeight: 0.62,
     speedIdle: 1.0,
-    speedStalk: 2.4,
-    speedCreep: 1.2,
+    speedStalk: 3.2,
+    speedCreep: 2.0,
     speedCommit: 5.2,
     speedFlee: 6.0,
     accel: 14,
@@ -271,25 +295,27 @@ export function defaultSpiderTunables(): SpiderTunables {
     weightProp: 0.65,
     weightChatter: 0.5,
     pinnedRadius: 2.5,
+    rumourCap: 0.55,
+    checkedSeconds: 10,
 
     // A gunshot is 90 m of notice and a barrel going over caps at 34; a sprint is 16. So this
     // line puts "the world fell over" and "he fired" on the frightening side and leaves ordinary
     // walking on the informative side, which is exactly the split the concept asks for.
     scareLoudness: 20,
-    scarePressure: 3,
-    scareSeconds: 3.2,
-    scareCost: 0.75,
+    scarePressure: 4.5,
+    scareSeconds: 1.5,
+    scareCost: 0.45,
 
-    courageGain: 0.22,
+    courageGain: 0.45,
     courageDecay: 0.05,
     packSize: 3,
     packRadius: 11,
-    pinnedGain: 0.1,
+    pinnedGain: 0.16,
     pinnedSeconds: 5,
 
-    readyCourage: 0.55,
+    readyCourage: 0.45,
     quorum: 3,
-    rallySeconds: 1.6,
+    rallySeconds: 1.2,
     commitSeconds: 6,
     recoilSeconds: 1.8,
     waveCourageKeep: 0.6,
@@ -304,10 +330,14 @@ export function defaultSpiderTunables(): SpiderTunables {
     deathLoudness: 26,
     hitRadius: 0.34,
 
-    stalkRadius: 7,
-    creepRadius: 3.4,
-    creepCourage: 0.32,
+    stalkRadius: 5.5,
+    creepRadius: 2.4,
+    creepCourage: 0.25,
     orbitSpeed: 26,
+
+    arriveRadius: 0.9,
+    separation: 1.15,
+    separationPush: 3.2,
 
     strikeRange: 0.85,
     strikeLoudness: 24,
@@ -318,7 +348,7 @@ export function defaultSpiderTunables(): SpiderTunables {
     stepLoudnessFloor: 1.6,
     stepLoudnessMetal: 3.6,
     clickLoudness: 12,
-    clickSlow: 12,
+    clickSlow: 4.5,
     clickFast: 0.55,
     smashSeconds: 0.7,
     smashImpulse: 4.5,
@@ -423,6 +453,9 @@ interface Spider {
   /** Unit heading chosen by the last steering decision. */
   headX: number;
   headZ: number;
+  /** Horizontal velocity the last steering decision asked for, before personal space is added. */
+  steerX: number;
+  steerZ: number;
   /** Metres walked since the last footfall. */
   sinceStep: number;
   /** Simulation time until which the body is clinging to a wall and going up it. */
@@ -442,6 +475,10 @@ interface Spider {
   phase: number;
   /** Simulation time it last had a belief worth walking to — the clock the search runs on. */
   ledAt: number;
+  /** The last place it walked to and found empty, and when. Rumours about it are ignored. */
+  checkedX: number;
+  checkedZ: number;
+  checkedAt: number;
   /** Sweep angle of the search pattern, radians. */
   sweep: number;
   /** Simulation time it died, or Infinity. A corpse is furniture: it stops moving and stays. */
@@ -583,6 +620,8 @@ export class Swarm {
         if (!this.free(px, y + this.shape.height * 0.5, pz)) continue;
         s.pos.set(px, y, pz);
         s.vel.set(0, 0, 0);
+        s.steerX = 0;
+        s.steerZ = 0;
         return true;
       }
     }
@@ -607,6 +646,8 @@ export class Swarm {
       goal: new THREE.Vector3(x, 0, z),
       headX: Math.cos(angle),
       headZ: Math.sin(angle),
+      steerX: 0,
+      steerZ: 0,
       sinceStep: range(this.rng, 0, this.tunables.stride),
       climbUntil: 0,
       clickIn: range(this.rng, 0.5, 4),
@@ -618,6 +659,9 @@ export class Swarm {
       scareZ: z,
       phase: id,
       ledAt: -99,
+      checkedX: 0,
+      checkedZ: 0,
+      checkedAt: -99,
       sweep: angle,
       deadAt: Infinity,
     };
@@ -665,6 +709,11 @@ export class Swarm {
         continue;
       }
 
+      // A real noise from a place this spider had written off is new evidence, and beats the
+      // old conclusion: the mark is cleared before the belief is written.
+      if (Math.hypot(event.x - s.checkedX, event.z - s.checkedZ) < t.pinnedRadius) {
+        s.checkedAt = -99;
+      }
       this.updateBelief(s, event.x, event.z, quality * weight);
       s.heard = `${event.source} ${event.loudness.toFixed(0)}m @${d.toFixed(0)}m`;
       s.heardAt = this.time;
@@ -690,8 +739,28 @@ export class Swarm {
     }
   }
 
-  private updateBelief(s: Spider, x: number, z: number, quality: number): void {
+  /**
+   * Fold one piece of evidence into a belief.
+   *
+   * `rumour` marks a click — what a neighbour thinks, not what this spider heard. Hearsay is
+   * capped and can be refused outright, and that is not a detail: without the cap the pack is a
+   * feedback loop that manufactures certainty out of nothing (see `rumourCap`).
+   */
+  private updateBelief(s: Spider, x: number, z: number, quality: number, rumour = false): void {
+    const t = this.tunables;
     const b = s.belief;
+    if (rumour) {
+      // "I have just been there. There is nothing there. Stop telling me about it."
+      if (
+        this.time - s.checkedAt < t.checkedSeconds &&
+        Math.hypot(x - s.checkedX, z - s.checkedZ) < t.pinnedRadius
+      ) {
+        return;
+      }
+      if (b.confidence >= t.rumourCap) return;
+      quality = Math.min(quality, t.rumourCap - b.confidence * 0.5);
+      if (quality <= 0) return;
+    }
     const moved = Math.hypot(b.x - x, b.z - z);
     if (quality >= b.confidence) {
       b.x = x;
@@ -704,8 +773,9 @@ export class Swarm {
       b.z += (z - b.z) * k;
       b.confidence = Math.min(1, b.confidence + quality * 0.1);
     }
+    if (rumour) b.confidence = Math.min(b.confidence, t.rumourCap);
     b.at = this.time;
-    if (moved > this.tunables.pinnedRadius) b.pinnedFor = 0;
+    if (moved > t.pinnedRadius) b.pinnedFor = 0;
   }
 
   // ---- update -------------------------------------------------------------
@@ -729,7 +799,9 @@ export class Swarm {
         this.decide(s, dt * every);
         this.stats.decisions++;
       }
+      this.separate(s);
       this.integrate(s, dt);
+      this.deoverlap(s);
       this.voice(s, dt);
       this.contact(s);
     }
@@ -847,6 +919,22 @@ export class Swarm {
     }
   }
 
+  /**
+   * "I went there. He is not there." Writes the disproof down — the belief collapses, the place
+   * is marked as checked so the pack cannot immediately talk this spider back into it, and the
+   * spider starts combing outwards instead of standing on the spot it was wrong about.
+   */
+  private giveUp(s: Spider): void {
+    s.checkedX = s.belief.x;
+    s.checkedZ = s.belief.z;
+    s.checkedAt = this.time;
+    s.belief.confidence = 0;
+    s.belief.pinnedFor = 0;
+    s.ledAt = this.time;
+    s.sweep += 1.3;
+    this.enter(s, 'search');
+  }
+
   private enter(s: Spider, state: SpiderState): void {
     if (s.state === state) return;
     s.state = state;
@@ -914,9 +1002,13 @@ export class Swarm {
         // A widening sweep about the point the trail went cold. Slow — it is feeling its way,
         // and a spider that ran the search would be a spider the player can hear coming.
         speed = t.speedCreep;
-        s.sweep += 1.1 * dt * s.orbitDir;
         const age = this.time - b.at;
         const r = Math.min(t.searchRadius, 1.2 + age * 0.25);
+        // The sweep point walks at the spider's own pace, not at a fixed angular rate. With a
+        // fixed rate the target ran round the circle faster than the spider could follow at any
+        // useful radius, so fourteen searchers all spiralled into the middle and combed the one
+        // spot they already knew was empty — the pack looked like a huddle.
+        s.sweep += (speed / Math.max(1.2, r)) * dt * s.orbitDir;
         gx = b.x + Math.cos(s.sweep) * r;
         gz = b.z + Math.sin(s.sweep) * r;
         break;
@@ -942,6 +1034,18 @@ export class Swarm {
         speed = t.speedCommit;
         gx = b.x;
         gz = b.z;
+        // Arrived at the spot it was sure of, and nothing is there. Before this test the pack
+        // had no way to be wrong: fourteen bodies converged on one point, jammed against each
+        // other and ran on the spot at attack speed for as long as the belief lasted — and the
+        // belief lasted forever, because they kept telling each other about it. Going there and
+        // finding nobody is the disproof, so it has to actually disprove something.
+        if (
+          Math.hypot(s.pos.x - b.x, s.pos.z - b.z) < t.arriveRadius &&
+          Math.hypot(s.pos.x - this.player.x, s.pos.z - this.player.z) > t.strikeRange * 2
+        ) {
+          this.giveUp(s);
+          return;
+        }
         break;
       }
       case 'recoil':
@@ -966,29 +1070,16 @@ export class Swarm {
     let dz = s.goal.z - s.pos.z;
     let len = Math.hypot(dx, dz);
     if (len < 0.25) {
-      // Arrived. Keep the last heading rather than jittering on the spot.
+      // Arrived: stop. It used to keep a fifth of walking pace "so it does not jitter on the
+      // spot", which meant an idle spider drifted across the hall for ever, ground along every
+      // shelf it met and never shut up — a permanent noise floor made of spiders going nowhere.
       dx = s.headX;
       dz = s.headZ;
       len = 1;
-      speed = Math.min(speed, t.speedIdle * 0.4);
+      speed = 0;
     }
     dx /= len;
     dz /= len;
-
-    // Personal space, so the ring does not collapse into one clump of overlapping bodies.
-    for (const o of this.spiders) {
-      if (o === s || !o.alive) continue;
-      const ox = s.pos.x - o.pos.x;
-      const oz = s.pos.z - o.pos.z;
-      const d2 = ox * ox + oz * oz;
-      if (d2 > 2.25 || d2 < 1e-6) continue;
-      const inv = 1 / Math.sqrt(d2);
-      dx += ox * inv * 0.8;
-      dz += oz * inv * 0.8;
-    }
-    const dl = Math.max(1e-4, Math.hypot(dx, dz));
-    dx /= dl;
-    dz /= dl;
 
     // Up, before around. A spider that has walked into the side of a crate or into a shelf
     // upright would rather go over it than take the long way — that is what makes a warehouse
@@ -999,16 +1090,16 @@ export class Swarm {
       s.climbUntil = this.time + 0.45;
       s.headX = dx;
       s.headZ = dz;
-      s.vel.x = dx * speed * 0.6;
-      s.vel.z = dz * speed * 0.6;
+      s.steerX = dx * speed * 0.6;
+      s.steerZ = dz * speed * 0.6;
       return;
     }
 
     const chosen = this.whisker(s, dx, dz);
     s.headX = chosen.x;
     s.headZ = chosen.z;
-    s.vel.x = chosen.x * speed;
-    s.vel.z = chosen.z * speed;
+    s.steerX = chosen.x * speed;
+    s.steerZ = chosen.z * speed;
   }
 
   /**
@@ -1091,6 +1182,71 @@ export class Swarm {
     return canOccupy(boxes, x, feetY, z, t.radius, t.height);
   }
 
+  /**
+   * Personal space, as a continuous force on the velocity, every tick.
+   *
+   * It used to be a kick added to the steering direction on the decision slice, with a hard
+   * cutoff at 1.5 m: inside the ring a spider was shoved out at full strength, one frame later
+   * it was outside and walked straight back in, and at fifteen decisions a second that reads as
+   * a knot of spiders vibrating. A smooth falloff applied every tick cannot oscillate — the
+   * push fades to nothing exactly where it stops applying — and it costs a handful of flops.
+   */
+  private separate(s: Spider): void {
+    const t = this.tunables;
+    const r = t.separation;
+    // The steering decision is the baseline every tick; the push is added on top of it and never
+    // to itself, or eight ticks between decisions would compound into a launch.
+    s.vel.x = s.steerX;
+    s.vel.z = s.steerZ;
+    let px = 0;
+    let pz = 0;
+    for (const o of this.spiders) {
+      if (o === s || !o.alive) continue;
+      const dx = s.pos.x - o.pos.x;
+      const dz = s.pos.z - o.pos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > r * r || d2 < 1e-8) continue;
+      const d = Math.sqrt(d2);
+      const w = 1 - d / r;
+      px += (dx / d) * w * w;
+      pz += (dz / d) * w * w;
+    }
+    if (px === 0 && pz === 0) return;
+    const len = Math.hypot(px, pz);
+    const push = Math.min(1, len) * t.separationPush;
+    s.vel.x = s.steerX + (px / len) * push;
+    s.vel.z = s.steerZ + (pz / len) * push;
+  }
+
+  /**
+   * Spiders are bodies, and two bodies cannot be in the same place. They collide with the world
+   * but never collided with each other, which is why fourteen of them committing on one point
+   * ended up 8 cm apart, inside each other. A force cannot fix that — at 5.2 m/s of commit speed
+   * any force loses to the goal line — so overlap is resolved as position, once per tick, half
+   * the error each (the other half arrives when the neighbour's turn comes round).
+   *
+   * Height is respected: one on a shelf above another is not overlapping it, it is standing on it.
+   */
+  private deoverlap(s: Spider): void {
+    const min = this.tunables.radius * 2;
+    for (const o of this.spiders) {
+      if (o === s || !o.alive) continue;
+      if (Math.abs(s.pos.y - o.pos.y) > this.tunables.radius) continue;
+      const dx = s.pos.x - o.pos.x;
+      const dz = s.pos.z - o.pos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > min * min) continue;
+      // Exactly coincident bodies (a spawn on a spawn) need a direction from somewhere; the id
+      // gives a deterministic one, which is what matters more than which way it points.
+      const d = Math.sqrt(d2);
+      const nx = d > 1e-6 ? dx / d : Math.cos(s.id * 2.399);
+      const nz = d > 1e-6 ? dz / d : Math.sin(s.id * 2.399);
+      const fix = (min - d) * 0.5;
+      s.pos.x += nx * fix;
+      s.pos.z += nz * fix;
+    }
+  }
+
   /** Gravity, collide-and-slide, and the ledge climbing that comes with it for free. */
   private integrate(s: Spider, dt: number): void {
     const t = this.tunables;
@@ -1147,6 +1303,7 @@ export class Swarm {
         z: s.pos.z,
         loudness: elevated ? t.stepLoudnessMetal : t.stepLoudnessFloor,
         material: elevated ? 'steel' : undefined,
+        kind: 'step',
       });
       this.stats.steps++;
     }
@@ -1180,14 +1337,20 @@ export class Swarm {
     if (s.state === 'commit') return 0.9;
     if (s.state === 'panic') return 0.85;
     if (s.state === 'flee' || s.state === 'recoil') return 0.45;
-    if (s.state === 'idle') return 0.05;
+    // «чтобы переговоры были слышны не только у взвинченной стаи, а в целом»: even a pack with
+    // nothing to say checks in with itself. The contrast with a rally is still an order of
+    // magnitude, which is the part that has to survive.
+    if (s.state === 'idle') return 0.18;
     // A searching pack talks: it has lost him and is asking the others where he went. It is also
     // the player's cue that his one noise is still being worked on.
-    if (s.state === 'search') return 0.3;
+    if (s.state === 'search') return 0.45;
     // Stalking and creeping: the more it believes and the braver it is, the more it talks.
     // Deliberately low: a stalking pack has to be *almost* silent, or the rally has nothing
     // to contrast with and the player cannot read "now it starts" off the click density.
-    return clamp01(s.belief.confidence * 0.5 + s.courage * 0.5) * (s.state === 'creep' ? 0.18 : 0.32);
+    return (
+      0.14 +
+      clamp01(s.belief.confidence * 0.5 + s.courage * 0.5) * (s.state === 'creep' ? 0.3 : 0.45)
+    );
   }
 
   private click(s: Spider): void {
@@ -1198,6 +1361,7 @@ export class Swarm {
       y: s.pos.y + 0.2,
       z: s.pos.z,
       loudness: t.clickLoudness,
+      kind: 'chatter',
     });
     this.stats.clicks++;
     this.clickWindow.push(this.time);
@@ -1212,7 +1376,7 @@ export class Swarm {
       const d = Math.hypot(o.pos.x - s.pos.x, o.pos.z - s.pos.z);
       if (d > reach) continue;
       const quality = Math.max(0.1, 1 - d / reach) * t.weightChatter * s.belief.confidence;
-      this.updateBelief(o, s.belief.x, s.belief.z, quality);
+      this.updateBelief(o, s.belief.x, s.belief.z, quality, true);
       o.heard = `chatter #${s.id}`;
       o.heardAt = this.time;
     }
@@ -1239,6 +1403,7 @@ export class Swarm {
       y: s.pos.y + 0.2,
       z: s.pos.z,
       loudness: t.strikeLoudness,
+      kind: 'bite',
     });
     this.stats.strikes++;
     for (const listener of this.strikeListeners) {
@@ -1314,6 +1479,8 @@ export class Swarm {
     }
     s.alive = false;
     s.deadAt = this.time;
+    s.steerX = 0;
+    s.steerZ = 0;
     s.hp = 0;
     s.vel.set(0, 0, 0);
     s.state = 'idle';
@@ -1326,6 +1493,7 @@ export class Swarm {
       y: s.pos.y + 0.1,
       z: s.pos.z,
       loudness: this.tunables.deathLoudness,
+      kind: 'death',
     });
     this.summarise();
   }
