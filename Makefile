@@ -9,10 +9,15 @@ HOST_GID ?= $(shell sh -c '[ "$$(uname -s)" = Linux ] && id -g || echo 0')
 
 DC := PORT=$(PORT) HOST_UID=$(HOST_UID) HOST_GID=$(HOST_GID) docker compose
 
-.PHONY: up down logs build shots sh reset
+.PHONY: up up3d down logs build test batch shots shots-handball sh reset
 
-## up: start the dev server in docker, wait until it answers, open it in the browser
+## up: start the dev server in docker and open the 2D debug playground
 up:
+	$(DC) up -d --build --renew-anon-volumes
+	@PORT=$(PORT) sh tools/open-when-ready.sh $(URL)/handball.html || { echo "server did not come up; try: make logs"; exit 1; }
+
+## up3d: the same server, opening the inherited 3D prototype instead
+up3d:
 	$(DC) up -d --build --renew-anon-volumes
 	@PORT=$(PORT) sh tools/open-when-ready.sh $(URL) || { echo "server did not come up; try: make logs"; exit 1; }
 
@@ -29,6 +34,20 @@ build:
 	@mkdir -p dist
 	$(DC) run --rm --build --user $(HOST_UID):$(HOST_GID) -e HOME=/tmp dev npm run build
 	@sh tools/fix-owner.sh dist
+
+## test: run the simulation test suite (determinism, rules, perception contract)
+test:
+	$(DC) run --rm --build --user $(HOST_UID):$(HOST_GID) -e HOME=/tmp dev npm test
+
+## batch: headless strategy tournament, e.g. make batch ARGS="--a striker --b goalie --seeds 1-50"
+batch:
+	$(DC) run --rm --build --user $(HOST_UID):$(HOST_GID) -e HOME=/tmp dev npm run batch -- $(ARGS)
+
+## shots-handball: keyframes for the 2D game -> out/handball/
+shots-handball:
+	@mkdir -p out/handball dist
+	$(DC) run --rm --build shots npm run shots:handball
+	@sh tools/fix-owner.sh dist out
 
 ## shots: regenerate the keyframes -> out/ (headless chromium, separate image)
 shots:

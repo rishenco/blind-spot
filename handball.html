@@ -9,7 +9,11 @@
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
         font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
-      #app { display: grid; grid-template-rows: auto 1fr auto auto; height: 100%; }
+      /* The lil-gui panel is fixed to the right edge; the app reserves a column for it so it
+         never sits on top of the pane a person (or a keyframe) is trying to look at. */
+      #app { display: grid; grid-template-rows: auto 1fr auto auto; height: 100%; margin-right: 252px; }
+      body.no-gui #app { margin-right: 0; }
+      body.no-gui .lil-gui { display: none; }
       header { display: flex; gap: 16px; align-items: center; padding: 6px 12px;
         background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
       header .big { font-size: 16px; letter-spacing: 0.08em; }
@@ -18,8 +22,9 @@
       button:hover { border-color: #35526e; }
       button.on { background: #1d3348; border-color: #4d80b0; }
       main { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 6px; min-height: 0; }
-      main.solo-truth { grid-template-columns: 1fr 0; }
-      main.solo-eyes { grid-template-columns: 0 1fr; }
+      /* A hidden pane leaves no grid track behind, so a solo layout is one column, not two
+         with one collapsed — otherwise the surviving pane inherits the 0-width track. */
+      main.solo-truth, main.solo-eyes { grid-template-columns: 1fr; }
       .pane { position: relative; min-width: 0; min-height: 0; border: 1px solid var(--line);
         background: #05070a; overflow: hidden; }
       .pane h2 { position: absolute; top: 6px; left: 8px; margin: 0; font-size: 11px;

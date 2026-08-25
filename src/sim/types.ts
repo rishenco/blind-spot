@@ -80,8 +80,19 @@ export interface ObservedEvent {
   pos: Vec2;
   /** Audible radius of the event in metres — a loudness cue, heard honestly. */
   intensity: number;
-  /** Standard deviation (m) of the error that was applied. The observer's honest uncertainty. */
+  /**
+   * Along-bearing standard deviation (m) of the error that was applied — the big axis of the
+   * error cigar, and the observer's honest uncertainty about *how far away* the sound was.
+   */
   sigma: number;
+  /** Across-bearing standard deviation (m) — the small axis. Ears point better than they range. */
+  sigmaBearing: number;
+  /**
+   * Unit vector from the observer to the reported position: the axis the cigar lies along.
+   * Handed over so a consumer can stamp the right ellipse into a belief grid without having to
+   * re-derive the geometry (and get it subtly wrong).
+   */
+  bearing: Vec2;
   /** Distance from the observer to the reported position at the moment of hearing. */
   distance: number;
   /** Self, teammate and ball keep their identity; opponents come through as null. */
@@ -121,7 +132,12 @@ export interface ObservedEmitter {
   kind: 'ball';
   /** Noisy estimate of the emitter's position. */
   pos: Vec2;
+  /** Along-bearing sigma (m) — the long axis of the error. */
   sigma: number;
+  /** Across-bearing sigma (m) — the short axis. */
+  sigmaBearing: number;
+  /** Unit vector from the observer to the reported position. */
+  bearing: Vec2;
   /** Distance from the observer to the reported position. */
   distance: number;
 }
@@ -159,6 +175,20 @@ export interface SonarReturn {
   range: number;
   /** How far the front has travelled by the end of this tick. */
   waveRadius: number;
+  /**
+   * The region this tick's sweep actually checked: the annulus between `sweptFrom` and
+   * `sweptTo`, restricted to the cone `aim ± acos(coneCos)`.
+   *
+   * This is the negative half of the answer, and it matters as much as the positive one:
+   * anything inside that sector would have come back as a hit, so anything NOT in `hits` was
+   * genuinely not there. A belief that only ever grows from hits believes in ghosts forever;
+   * this is what lets it carve them out.
+   */
+  sweptFrom: number;
+  sweptTo: number;
+  aim: Vec2;
+  /** Cosine of the cone's half-angle. -1 for the 360° ping. */
+  coneCos: number;
   hits: SonarHit[];
   /** True on the tick the front reaches full range: nothing more will come from this ping. */
   complete: boolean;
@@ -220,6 +250,13 @@ export interface PerceptionFrame {
   /** Continuous sources audible right now — in v1, the ball and nothing else. */
   emitters: readonly ObservedEmitter[];
   sonar: readonly SonarReturn[];
+  /**
+   * The radius within which this observer WOULD have heard each kind of sound, given the
+   * loudness table and its own hearing. Silence is information: no `step-run` in this frame
+   * means nobody ran within `hearing['step-run']` metres of here, and a belief layer is
+   * expected to use that to shrink itself rather than to wait for evidence that never comes.
+   */
+  hearing: Readonly<Record<SoundKind, number>>;
   /** Team-mates' ids (excluding self) — knowing who is on your team is not intel about where. */
   teammates: readonly EntityId[];
   opponents: readonly EntityId[];

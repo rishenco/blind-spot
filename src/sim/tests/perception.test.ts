@@ -213,6 +213,97 @@ describe('perception', () => {
     for (const r of relayed) expect(r.self).toBe(false);
   });
 
+  it('keeps a listening bot from averaging the ball into a perfect fix', () => {
+    // The honesty hole the research pass found: a continuously singing ball plus independent
+    // per-frame noise at 60 Hz lets a consumer average dozens of samples and know the ball
+    // better than any human could. The correlated error is what closes it, and this is the
+    // number that proves the door stays shut.
+    const cfg = defaultConfig();
+    const sim = new Simulation(cfg, 21);
+    const ears = new Perceiver(0, cfg, 21);
+    // A still ball, a still listener: the friendliest possible case for an averager.
+    sim.state.players[0]!.hasBall = false;
+    sim.state.ball.carrier = null;
+    sim.state.ball.pos = { x: 4, y: 3 };
+    sim.state.ball.vel = { x: 0, y: 0 };
+    const window = cfg.ai.observationMemory as number;
+    const errors: number[] = [];
+    for (let trial = 0; trial < 40; trial++) {
+      let sx = 0;
+      let sy = 0;
+      for (let i = 0; i < window; i++) {
+        sim.step(idleFor(sim.playerCount));
+        const em = ears.frame(sim.state, sim.field).emitters[0]!;
+        sx += em.pos.x;
+        sy += em.pos.y;
+      }
+      errors.push(Math.hypot(sx / window - 4, sy / window - 3));
+    }
+    const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
+    const d = Math.hypot(4 - sim.state.players[0]!.pos.x, 3 - sim.state.players[0]!.pos.y);
+    const sigma = Math.min(cfg.perception.localizationSigmaCap, cfg.perception.localizationSigmaPerMeter * d);
+    // Averaging `observationMemory` frames must not buy more than a modest fraction of sigma:
+    // independent noise would have divided it by sqrt(12) ≈ 3.5.
+    expect(mean).toBeGreaterThan(sigma * 0.3);
+  });
+
+  it('reports the volume a ping actually checked, not only what it found', () => {
+    // Negative information: the belief layer has to be able to carve out empty space.
+    const cfg = defaultConfig();
+    const sim = new Simulation(cfg, 31);
+    const ears = new Perceiver(0, cfg, 31);
+    const firing = idleFor(sim.playerCount);
+    firing[0]!.ping = true;
+    let covered = 0;
+    let maxSwept = 0;
+    for (let i = 0; i < 60; i++) {
+      const out = sim.step(i === 0 ? firing : idleFor(sim.playerCount));
+      for (const ret of out.sonar) if (ret.owner === 0) ears.receiveSonar(ret);
+      for (const ret of ears.frame(sim.state, sim.field).sonar) {
+        expect(ret.sweptTo).toBeGreaterThanOrEqual(ret.sweptFrom);
+        expect(ret.coneCos).toBe(-1); // the concept's 360° ping
+        covered += ret.sweptTo - ret.sweptFrom;
+        maxSwept = Math.max(maxSwept, ret.sweptTo);
+      }
+    }
+    // The annuli tile the whole disc exactly once, out to the ping's range.
+    expect(maxSwept).toBeCloseTo(cfg.ping.range, 5);
+    expect(covered).toBeCloseTo(cfg.ping.range, 5);
+  });
+
+  it('tells the listener how far each kind of silence reaches', () => {
+    const cfg = defaultConfig();
+    cfg.perception.hearingScale = 1.5;
+    const sim = new Simulation(cfg, 41);
+    const ears = new Perceiver(0, cfg, 41);
+    sim.step(idleFor(sim.playerCount));
+    const frame = ears.frame(sim.state, sim.field);
+    expect(frame.hearing['step-run']).toBeCloseTo(cfg.loudness['step-run'] * 1.5, 6);
+    expect(frame.hearing['step-walk']).toBeLessThan(frame.hearing['step-run']);
+  });
+
+  it('shapes the hearing error like a cigar, not a disc', () => {
+    const cfg = defaultConfig();
+    const sim = new Simulation(cfg, 51);
+    const ears = new Perceiver(0, cfg, 51);
+    const me = sim.state.players[0]!.pos;
+    let along = 0;
+    let across = 0;
+    const n = 400;
+    for (let i = 0; i < n; i++) {
+      const truth = { x: me.x + 8, y: me.y };
+      const obs = ears.hear(sim.state, [
+        { t: 0, tick: 0, kind: 'fumble', pos: truth, intensity: 14, sourceId: 3 },
+      ])[0]!;
+      along += (obs.pos.x - truth.x) ** 2;
+      across += (obs.pos.y - truth.y) ** 2;
+    }
+    const alongSigma = Math.sqrt(along / n);
+    const acrossSigma = Math.sqrt(across / n);
+    expect(alongSigma).toBeGreaterThan(acrossSigma * 1.6);
+    expect(acrossSigma).toBeGreaterThan(0);
+  });
+
   it('hands a controller nothing that leads back into the world', () => {
     const cfg = defaultConfig();
     const sim = new Simulation(cfg, 2);

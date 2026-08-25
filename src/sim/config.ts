@@ -35,6 +35,23 @@ export interface MatchConfig {
   /** Frozen seconds after a goal before play resumes. */
   restartDelaySec: number;
   /**
+   * Seeded jitter (metres) applied to every kickoff position.
+   *
+   * Without it a match between two deterministic strategies is the same match for every seed —
+   * 200 "different" runs produce one result, and the batch runner measures nothing. This is the
+   * only randomisation in the setup, and it is drawn from the simulation's own seeded stream.
+   */
+  spawnJitter: number;
+  /**
+   * Who kicks off. 'fixed' = team 0 always, which is the concept as written; 'alternate' gives
+   * the ball to the team chosen by the seed's parity.
+   *
+   * It matters for measurement, not for play: the side that kicks off has a real advantage, so
+   * with 'fixed' a tournament between two deterministic strategies produces the same result on
+   * every seed. The batch runner alternates by default for exactly that reason.
+   */
+  kickoffTeam: 'fixed' | 'alternate';
+  /**
    * Passivity rule: a carrier that holds the ball longer than this loses it to the nearest
    * opponent. 0 turns it off, which is the concept as written.
    *
@@ -162,11 +179,16 @@ export interface PerceptionConfig {
   localizationSigmaPerMeter: number;
   localizationSigmaCap: number;
   /**
-   * Hearing is anisotropic: you know the *direction* of a sound much better than its distance.
-   * This scales the across-bearing component of the error (1 = a round blob, 0.25 = an ellipse
-   * four times longer along the line of hearing than across it).
+   * Angular precision of hearing, in degrees. Ears point well and range badly, so the error
+   * cloud is a cigar lying along the line from the listener to the source, not a disc:
+   * across-bearing sigma is `d · tan(bearingDeg)`, along-bearing sigma is `d ·
+   * localizationSigmaPerMeter`.
+   *
+   * This is what makes triangulation a real mechanic rather than a cheat: two team-mates'
+   * cigars crossing at an angle pin a position that neither of them has on its own, which is
+   * the gameplay reason `teamShare` exists.
    */
-  localizationBearingFactor: number;
+  localizationBearingDeg: number;
   /** Strip `sourceId` from opponents' sounds (data association becomes the listener's problem). */
   anonymousSources: boolean;
   /** Delay between a sound happening and the observer receiving it. Humans need ~0.2–0.3 s. */
@@ -237,19 +259,51 @@ export interface SimConfig {
 }
 
 /** The concept's table, verbatim. */
+/**
+ * The concept's table (v0.2). The numbers came down deliberately: the half-diagonal of a 24×14
+ * pitch is 13.9 m, so the first pass (12/14/18/20 m) meant almost everything was audible from
+ * almost everywhere and distance stopped being a dimension of the game at all.
+ *
+ * The two rows that ARE the whole pitch — the ball's hum and a ping — are that way on purpose.
+ * Field size and this table are one tuning surface, not two, which is why the batch runner can
+ * sweep them together (`npm run batch -- --sweep`).
+ */
 export const DEFAULT_LOUDNESS: Record<SoundKind, number> = {
-  'step-walk': 4,
-  'step-run': 12,
-  brake: 14,
-  dive: 14,
-  catch: 6,
-  fumble: 20,
-  throw: 18,
+  'step-walk': 3,
+  'step-run': 9,
+  brake: 11,
+  dive: 11,
+  catch: 5,
+  fumble: 14,
+  throw: 13,
   'ball-hum': 30,
-  'ball-wall': 20,
+  'ball-wall': 14,
   sonar: 40,
   whistle: 100,
 };
+
+/** The rows that are meant to cover the whole pitch whatever its size. Sweeps leave them alone. */
+export const WHOLE_FIELD_KINDS: SoundKind[] = ['ball-hum', 'sonar', 'whistle'];
+
+/**
+ * Scales every distance-limited row of the loudness table. Used by the field/loudness sweep:
+ * shrinking the pitch without shrinking the table changes nothing, so the two move together.
+ */
+export function scaleLoudness(cfg: SimConfig, factor: number): void {
+  for (const key of Object.keys(cfg.loudness) as SoundKind[]) {
+    if (WHOLE_FIELD_KINDS.includes(key)) continue;
+    cfg.loudness[key] = cfg.loudness[key] * factor;
+  }
+}
+
+/** Resizes the pitch, keeping the goal and crease in proportion to the short axis. */
+export function resizeField(cfg: SimConfig, width: number, height: number): void {
+  const k = height / cfg.field.height;
+  cfg.field.goalWidth *= k;
+  cfg.field.creaseRadius *= k;
+  cfg.field.width = width;
+  cfg.field.height = height;
+}
 
 export function defaultConfig(): SimConfig {
   return {
@@ -267,6 +321,8 @@ export function defaultConfig(): SimConfig {
       goalsToWin: 5,
       durationSec: 180,
       restartDelaySec: 1.2,
+      spawnJitter: 0.75,
+      kickoffTeam: 'fixed',
       carryTimeoutSec: 0,
     },
     player: {
@@ -326,7 +382,7 @@ export function defaultConfig(): SimConfig {
       hearingScale: 1,
       localizationSigmaPerMeter: 0.06,
       localizationSigmaCap: 1.5,
-      localizationBearingFactor: 0.25,
+      localizationBearingDeg: 1.5,
       anonymousSources: true,
       reactionLatencySec: 0,
       truthLeak: 0,
@@ -373,7 +429,7 @@ export const PRESETS: Record<string, () => SimConfig> = {
   omniscient: () => {
     const c = defaultConfig();
     c.perception.localizationSigmaPerMeter = 0;
-    c.perception.localizationBearingFactor = 1;
+    c.perception.localizationBearingDeg = 0;
     c.perception.anonymousSources = false;
     c.perception.truthLeak = 1;
     c.perception.hearingScale = 10;

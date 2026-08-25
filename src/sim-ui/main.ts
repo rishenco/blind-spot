@@ -86,6 +86,8 @@ let layout: 'both' | 'truth' | 'eyes' = 'both';
 let playing = true;
 /** Harness mode: the keyframe generator drives ticks itself and there is no animation loop. */
 const harness = new URLSearchParams(location.search).has('harness');
+// Keyframes are about the game, not about the tuning panel.
+if (harness) document.body.classList.add('no-gui');
 
 const input = new HumanInput();
 input.attach(document.body, [truthCanvas, eyesCanvas]);

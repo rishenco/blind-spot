@@ -195,6 +195,8 @@ export class Match {
     for (let i = 0; i < this.perceivers.length; i++) {
       const frame = this.perceivers[i]!.frame(view, this.field);
       this.frames[i] = frame;
+      const st = this.stats.players[i];
+      if (st) st.heardEvents += frame.events.length;
       this.controllers[i]!.onPerceive?.(frame);
     }
   }

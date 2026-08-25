@@ -240,7 +240,9 @@ export class Simulation {
       nextPingId: 1,
       restartTeam: 0,
     };
-    this.layout(state, 0);
+    const kickoff: TeamId = this.config.match.kickoffTeam === 'alternate' ? ((seedParity(this.seed)) as TeamId) : 0;
+    state.restartTeam = kickoff;
+    this.layout(state, kickoff);
     return state;
   }
 
@@ -257,7 +259,12 @@ export class Simulation {
       const idx = p.id % size;
       const spread = size === 1 ? 0 : (idx / (size - 1) - 0.5) * (f.height - 4);
       const sign = p.team === 0 ? -1 : 1;
+      const jitter = this.config.match.spawnJitter;
       p.pos = own ? v2(sign * restartX, spread) : v2(sign * (f.halfWidth * 0.35), spread);
+      if (jitter > 0) {
+        p.pos.x += (this.rng() * 2 - 1) * jitter;
+        p.pos.y += (this.rng() * 2 - 1) * jitter;
+      }
       p.vel = v2();
       p.aim = v2(p.team === 0 ? 1 : -1, 0);
       p.move = 'stand';
@@ -614,7 +621,11 @@ export class Simulation {
       const goal = this.goalCrossing(b.pos, { x: nx, y: ny });
       if (goal) {
         b.pos = goal.pos;
-        this.scoreGoal(goal.team);
+        if (goal.valid) this.scoreGoal(goal.team);
+        // A ball that goes in without a valid release is not a goal — but it is still out of
+        // the world, and there is no wall behind the net to bring it back. It becomes the
+        // defending team's throw, exactly like a ball that dies inside the crease.
+        else this.deadBall(goal.team === 0 ? 1 : 0);
         return;
       }
 
@@ -713,7 +724,22 @@ export class Simulation {
 
     const goal0 = dist2(b.pos, this.field.goalCentre[0]);
     const goal1 = dist2(b.pos, this.field.goalCentre[1]);
-    const team: TeamId = goal0 < goal1 ? 0 : 1;
+    b.inCreaseT = 0;
+    this.giveTo(goal0 < goal1 ? 0 : 1, 'crease');
+  }
+
+  /**
+   * Hands the ball to the team defending `team`'s goal — its player nearest that goal picks it
+   * up, and the whistle tells everyone it happened. Used by the crease rule and by a ball that
+   * left the pitch through a goal mouth without a valid release.
+   */
+  private deadBall(team: TeamId): void {
+    this.giveTo(team, 'crease');
+  }
+
+  private giveTo(team: TeamId, reason: 'crease' | 'passivity'): void {
+    const s = this.state;
+    const b = s.ball;
     const own = this.field.goalCentre[team];
     let best: PlayerState | null = null;
     let bestD = Infinity;
@@ -725,7 +751,6 @@ export class Simulation {
         best = p;
       }
     }
-    b.inCreaseT = 0;
     if (!best) return;
     for (const p of s.players) {
       p.hasBall = false;
@@ -740,13 +765,15 @@ export class Simulation {
     b.lastThrower = null;
     b.lastThrowerTeam = null;
     b.goalValid = false;
+    b.inCreaseT = 0;
+    b.carryT = 0;
     this.placeCarriedBall(s, best);
-    this.turnovers.push({ team, reason: 'crease', t: s.t });
+    this.turnovers.push({ team, reason, t: s.t });
     this.emit('whistle', b.pos, best.id);
   }
 
   /** Returns the goal that a segment crosses, if any. Team = whoever gets the point. */
-  private goalCrossing(a: Vec2, bPos: Vec2): { team: TeamId; pos: Vec2 } | null {
+  private goalCrossing(a: Vec2, bPos: Vec2): { team: TeamId; pos: Vec2; valid: boolean } | null {
     const f = this.field;
     for (const side of [-1, 1] as const) {
       const line = side * f.halfWidth;
@@ -757,9 +784,8 @@ export class Simulation {
       const u = (line - a.x) / denom;
       const y = a.y + (bPos.y - a.y) * u;
       if (Math.abs(y) > f.goalWidth / 2) continue;
-      if (!this.state.ball.goalValid) continue;
       // The ball went in at x = -half → the team attacking -x (team 1) scores.
-      return { team: side < 0 ? 1 : 0, pos: { x: line, y } };
+      return { team: side < 0 ? 1 : 0, pos: { x: line, y }, valid: this.state.ball.goalValid };
     }
     return null;
   }
@@ -942,7 +968,10 @@ export class Simulation {
       }
 
       const complete = nextR >= cfg.range - 1e-9 && ping.geomCursor >= ping.geometry.length;
-      if (hits.length > 0 || complete) {
+      // A return is emitted on EVERY tick the front is alive, even when it found nothing. An
+      // empty sweep is not an empty message: it is the statement "this annulus is clear", which
+      // is the only way a belief can ever shrink.
+      {
         this.sonar.push({
           owner: ping.owner,
           pingId: ping.id,
@@ -950,6 +979,12 @@ export class Simulation {
           origin: clone2(ping.origin),
           range: cfg.range,
           waveRadius: nextR,
+          // The negative half of the answer: this tick's front swept the annulus prevR..nextR
+          // inside the cone, and everything in it that was not reported was not there.
+          sweptFrom: prevR,
+          sweptTo: nextR,
+          aim: clone2(ping.aim),
+          coneCos: ping.cosHalf,
           hits,
           complete,
         });
@@ -987,6 +1022,11 @@ export class Simulation {
     );
     return hashNumbers(nums);
   }
+}
+
+/** 0 or 1 from a seed — used only to decide who kicks off when the config asks for it. */
+function seedParity(seed: number): number {
+  return (seed >>> 0) & 1;
 }
 
 function cmpVec(a: Vec2, b: Vec2): number {

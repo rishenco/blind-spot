@@ -24,6 +24,12 @@ export interface PlayerStats {
   pings: number;
   /** Ticks in which this body made no sound at all (and carried no ball). */
   silentTicks: number;
+  /**
+   * Discrete sounds this player actually received. The headline number for whether the pitch
+   * and the loudness table are in proportion: if everyone hears everything all the time,
+   * distance has stopped being a dimension of the game.
+   */
+  heardEvents: number;
   distanceToBallSum: number;
   distanceRun: number;
   ticks: number;
@@ -51,6 +57,7 @@ export function emptyPlayerStats(id: EntityId, team: TeamId, controller: string)
     fumbles: 0,
     pings: 0,
     silentTicks: 0,
+    heardEvents: 0,
     distanceToBallSum: 0,
     distanceRun: 0,
     ticks: 0,
@@ -63,6 +70,7 @@ export interface PlayerSummary extends PlayerStats {
   silentShare: number;
   avgDistanceToBall: number;
   pingsPerMinute: number;
+  heardPerSecond: number;
 }
 
 export function summarise(stats: MatchStats): PlayerSummary[] {
@@ -72,6 +80,7 @@ export function summarise(stats: MatchStats): PlayerSummary[] {
     silentShare: p.ticks ? p.silentTicks / p.ticks : 0,
     avgDistanceToBall: p.ticks ? p.distanceToBallSum / p.ticks : 0,
     pingsPerMinute: stats.duration > 0 ? (p.pings * 60) / stats.duration : 0,
+    heardPerSecond: stats.duration > 0 ? p.heardEvents / stats.duration : 0,
   }));
 }
 

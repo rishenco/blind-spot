@@ -8,8 +8,13 @@
  *
  *   npm run batch -- --a striker --b goalie --seeds 1-50
  *   npm run batch -- --a striker --b statue --seeds 1-20 --config sprint --json
+ *
+ * Field size and the loudness table are ONE tuning surface, not two — shrinking the pitch
+ * without shrinking the table changes nothing about who can hear whom. So they sweep together:
+ *
+ *   npm run batch -- --a striker --b goalie --seeds 1-10 --sweep 24x14@1,24x14@0.7,20x12@1
  */
-import { configFromPreset } from '../config';
+import { configFromPreset, resizeField, scaleLoudness } from '../config';
 import { CONTROLLERS, makeController } from '../controllers';
 import { Match } from '../match';
 import { aggregate, summarise, type MatchStats } from '../stats';
@@ -50,11 +55,21 @@ function parseSeeds(spec: string): number[] {
   return out;
 }
 
+/** "24x14@0.8" — a pitch size and a multiplier for every distance-limited loudness row. */
+function parseSweep(spec: string): { label: string; width: number; height: number; loud: number }[] {
+  return spec.split(',').map((part) => {
+    const m = part.trim().match(/^(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(?:@(\d+(?:\.\d+)?))?$/);
+    if (!m) throw new Error(`bad sweep entry: ${part} (want e.g. 24x14@0.8)`);
+    return { label: part.trim(), width: Number(m[1]), height: Number(m[2]), loud: Number(m[3] ?? 1) };
+  });
+}
+
 const args = parseArgs(process.argv.slice(2));
 if (args.help === 'true') {
   console.log(
     'usage: npm run batch -- --a <strategy> --b <strategy> [--seeds 1-20] [--config default]\n' +
-      `       [--teamSize N] [--json] [--per-match]\nstrategies: ${Object.keys(CONTROLLERS).join(', ')}`,
+      `       [--teamSize N] [--json] [--per-match] [--sweep 24x14@1,20x12@0.8]\n` +
+      `strategies: ${Object.keys(CONTROLLERS).join(', ')}`,
   );
   process.exit(0);
 }
@@ -62,19 +77,72 @@ if (args.help === 'true') {
 const aName = args.a ?? 'striker';
 const bName = args.b ?? 'goalie';
 const seeds = parseSeeds(args.seeds ?? '1-20');
-const config = configFromPreset(args.config ?? 'default');
+let config = configFromPreset(args.config ?? 'default');
 if (args.teamSize) config.teamSize = Number(args.teamSize);
+// Kicking off is an advantage, and a fixed kickoff makes every seed produce the same match
+// between two deterministic strategies. Alternate unless told otherwise.
+if (args['no-alternate'] !== 'true') config.match.kickoffTeam = 'alternate';
 // Batch runs are about numbers, not pictures: no event log, no timeline weight.
 const results: MatchStats[] = [];
 
+const roster = () => [
+  ...Array.from({ length: config.teamSize }, () => makeController(aName)),
+  ...Array.from({ length: config.teamSize }, () => makeController(bName)),
+];
+
 const t0 = process.hrtime.bigint();
 let ticks = 0;
+
+if (args.sweep) {
+  // Joint field/loudness sweep: one row per configuration, the same seeds throughout.
+  const grid = parseSweep(args.sweep);
+  const head = ['field@loud', 'score', 'goals/min', 'poss%', 'intcp', 'fumbl', 'silent%', 'ball d', 'heard/s'];
+  const rows: string[][] = [];
+  for (const cell of grid) {
+    resizeField(config, cell.width, cell.height);
+    scaleLoudness(config, cell.loud);
+    const runs: MatchStats[] = [];
+    for (const seed of seeds) {
+      const match = new Match({ config, seed, controllers: roster() });
+      const res = match.run();
+      ticks += res.stats.ticks;
+      runs.push(res.stats);
+      void match;
+    }
+    const a = aggregate(runs);
+    const goals = a.score[0] + a.score[1];
+    const dur = runs.reduce((s2, r) => s2 + r.duration, 0) / runs.length;
+    rows.push([
+      cell.label,
+      `${a.score[0].toFixed(2)}:${a.score[1].toFixed(2)}`,
+      ((goals * 60) / Math.max(1, dur)).toFixed(2),
+      (a.players.reduce((s2, p2) => s2 + p2.possessionShare, 0) * 100).toFixed(0),
+      a.players.reduce((s2, p2) => s2 + p2.interceptions, 0).toFixed(1),
+      a.players.reduce((s2, p2) => s2 + p2.fumbles, 0).toFixed(1),
+      ((a.players.reduce((s2, p2) => s2 + p2.silentShare, 0) / a.players.length) * 100).toFixed(0),
+      (a.players.reduce((s2, p2) => s2 + p2.avgDistanceToBall, 0) / a.players.length).toFixed(1),
+      (a.players.reduce((s2, p2) => s2 + p2.heardPerSecond, 0) / a.players.length).toFixed(1),
+    ]);
+    // Reset for the next cell: the config object is mutated in place.
+    config = configFromPreset(args.config ?? 'default');
+    if (args.teamSize) config.teamSize = Number(args.teamSize);
+    if (args['no-alternate'] !== 'true') config.match.kickoffTeam = 'alternate';
+// Kicking off is an advantage, and a fixed kickoff makes every seed produce the same match
+// between two deterministic strategies. Alternate unless told otherwise.
+if (args['no-alternate'] !== 'true') config.match.kickoffTeam = 'alternate';
+  }
+  const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
+  const line = (cells: string[]) => cells.map((c, i) => c.padStart(widths[i]!)).join('  ');
+  console.log(`\nsweep: ${aName} vs ${bName}, ${seeds.length} seeds each\n`);
+  console.log(line(head));
+  for (const r of rows) console.log(line(r));
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  console.log(`\n${grid.length * seeds.length} matches, ${ticks} ticks in ${ms.toFixed(0)} ms`);
+  process.exit(0);
+}
+
 for (const seed of seeds) {
-  const controllers = [
-    ...Array.from({ length: config.teamSize }, () => makeController(aName)),
-    ...Array.from({ length: config.teamSize }, () => makeController(bName)),
-  ];
-  const match = new Match({ config, seed, controllers });
+  const match = new Match({ config, seed, controllers: roster() });
   const res = match.run();
   ticks += res.stats.ticks;
   results.push(res.stats);
@@ -105,7 +173,7 @@ console.log(
 );
 
 const head = [
-  'player', 'ctrl', 'goals', 'poss%', 'catch', 'intcp', 'fumbl', 'throw', 'ping/min', 'silent%', 'ball d', 'run m',
+  'player', 'ctrl', 'goals', 'poss%', 'catch', 'intcp', 'fumbl', 'throw', 'ping/min', 'silent%', 'heard/s', 'ball d', 'run m',
 ];
 const rows = agg.players.map((p) => [
   `P${p.id} (t${p.team})`,
@@ -118,6 +186,7 @@ const rows = agg.players.map((p) => [
   p.throws.toFixed(2),
   p.pingsPerMinute.toFixed(1),
   (p.silentShare * 100).toFixed(1),
+  p.heardPerSecond.toFixed(1),
   p.avgDistanceToBall.toFixed(2),
   p.distanceRun.toFixed(0),
 ]);

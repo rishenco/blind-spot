@@ -37,9 +37,19 @@ import {
   type SonarHit,
   type SonarReturn,
   type SoundEvent,
+  type SoundKind,
   type TeamId,
   type Vec2,
 } from './types';
+
+/** Unit vector from the listener to a reported position; the axis the error cigar lies along. */
+function bearingTo(from: Vec2, to: Vec2): Vec2 {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const d = Math.sqrt(dx * dx + dy * dy);
+  if (d < 1e-9) return { x: 1, y: 0 };
+  return { x: dx / d, y: dy / d };
+}
 
 interface Delayed {
   deliverAt: number;
@@ -125,6 +135,10 @@ export class Perceiver {
       origin: { x: ret.origin.x, y: ret.origin.y },
       range: ret.range,
       waveRadius: ret.waveRadius,
+      sweptFrom: ret.sweptFrom,
+      sweptTo: ret.sweptTo,
+      aim: { x: ret.aim.x, y: ret.aim.y },
+      coneCos: ret.coneCos,
       complete: ret.complete,
       hits: ret.hits.map((h) => this.anonymiseHit(h)),
     });
@@ -158,6 +172,7 @@ export class Perceiver {
         timeLeft: Math.max(0, this.cfg.match.durationSec - view.t),
       },
       field,
+      hearing: this.hearingRadii(),
       events,
       emitters: this.observeEmitters(view, me.pos),
       sonar,
@@ -167,6 +182,23 @@ export class Perceiver {
   }
 
   // -- internals -----------------------------------------------------------
+
+  /**
+   * Cached per-kind audible radii — the shape of this observer's silence. Recomputed only when
+   * the config's hearing scale is edited (the playground can do that live).
+   */
+  private hearingCache: { scale: number; radii: Record<SoundKind, number> } | null = null;
+
+  private hearingRadii(): Readonly<Record<SoundKind, number>> {
+    const scale = this.cfg.perception.hearingScale;
+    if (this.hearingCache && this.hearingCache.scale === scale) return this.hearingCache.radii;
+    const radii = {} as Record<SoundKind, number>;
+    for (const key of Object.keys(this.cfg.loudness) as SoundKind[]) {
+      radii[key] = this.cfg.loudness[key] * scale;
+    }
+    this.hearingCache = { scale, radii };
+    return radii;
+  }
 
   private selfState(view: WorldView): SelfState {
     const me = view.players[this.id]!;
@@ -191,19 +223,34 @@ export class Perceiver {
    * Draws one localisation error, shaped like hearing actually is: long along the line to the
    * source, short across it. You can point at a sound; you cannot tell how far away it is.
    */
-  private anisotropicOffset(from: Vec2, to: Vec2, d: number, sigma: number): Vec2 {
-    const radial = gauss(this.rng) * sigma;
-    const tangential = gauss(this.rng) * sigma * this.cfg.perception.localizationBearingFactor;
+  private anisotropicOffset(
+    from: Vec2,
+    to: Vec2,
+    d: number,
+    sigmas: { radial: number; tangential: number },
+  ): Vec2 {
+    const radial = gauss(this.rng) * sigmas.radial;
+    const tangential = gauss(this.rng) * sigmas.tangential;
     if (d < 1e-6) return { x: radial, y: tangential };
     const ux = (to.x - from.x) / d;
     const uy = (to.y - from.y) / d;
     return { x: ux * radial - uy * tangential, y: uy * radial + ux * tangential };
   }
 
-  /** Sigma of the hearing error at distance `d`, in metres. */
-  private sigmaAt(d: number): number {
+  /**
+   * The two sigmas of the hearing error at distance `d`, in metres.
+   *
+   * Along the bearing the error is a fraction of the distance (and capped); across it, a small
+   * angle times the distance. The angle is applied as `d · θ` rather than `d · tan θ`: at a few
+   * degrees the difference is under a thousandth of a metre, and the small-angle form keeps
+   * trigonometry — which is not bit-reproducible across engines — out of the perception path.
+   */
+  private sigmasAt(d: number): { radial: number; tangential: number } {
     const p = this.cfg.perception;
-    return Math.min(p.localizationSigmaCap, p.localizationSigmaPerMeter * d);
+    return {
+      radial: Math.min(p.localizationSigmaCap, p.localizationSigmaPerMeter * d),
+      tangential: d * p.localizationBearingDeg * (Math.PI / 180),
+    };
   }
 
   private localise(
@@ -215,11 +262,11 @@ export class Perceiver {
   ): ObservedEvent {
     const p = this.cfg.perception;
     const exact = self || p.exactKinds.includes(ev.kind);
-    const sigma = exact ? 0 : this.sigmaAt(d);
+    const sigmas = exact ? { radial: 0, tangential: 0 } : this.sigmasAt(d);
     let x = ev.pos.x;
     let y = ev.pos.y;
-    if (sigma > 0) {
-      const off = this.anisotropicOffset(from, ev.pos, d, sigma);
+    if (sigmas.radial > 0 || sigmas.tangential > 0) {
+      const off = this.anisotropicOffset(from, ev.pos, d, sigmas);
       // truthLeak blends the true position back in. 0 = honest; it exists to be measured
       // against, not to be switched on quietly.
       const k = 1 - clamp(p.truthLeak, 0, 1);
@@ -232,7 +279,9 @@ export class Perceiver {
       kind: ev.kind,
       pos: { x, y },
       intensity: ev.intensity,
-      sigma,
+      sigma: sigmas.radial,
+      sigmaBearing: sigmas.tangential,
+      bearing: bearingTo(from, { x, y }),
       distance: d,
       sourceId: this.identify(ev.sourceId),
       self,
@@ -271,7 +320,7 @@ export class Perceiver {
     for (const em of emittersOf(view, this.cfg)) {
       const d = dist2(myPos, em.pos);
       if (d > em.intensity * p.hearingScale) continue;
-      const sigma = this.sigmaAt(d);
+      const sigmas = this.sigmasAt(d);
       let off = this.emitterOffset.get(em.id);
       if (!off) {
         off = { x: 0, y: 0 };
@@ -284,10 +333,10 @@ export class Perceiver {
       // The walk lives in (radial, tangential) coordinates; it is rotated into the world below,
       // so the error stays an ellipse pointing at the emitter even as the emitter moves.
       off.x = off.x * a + gauss(this.rng) * fresh;
-      off.y = off.y * a + gauss(this.rng) * fresh * p.localizationBearingFactor;
+      off.y = off.y * a + gauss(this.rng) * fresh;
       const k = 1 - clamp(p.truthLeak, 0, 1);
-      let ex = off.x * sigma * k;
-      let ey = off.y * sigma * k;
+      let ex = off.x * sigmas.radial * k;
+      let ey = off.y * sigmas.tangential * k;
       if (d > 1e-6) {
         const ux = (em.pos.x - myPos.x) / d;
         const uy = (em.pos.y - myPos.y) / d;
@@ -302,7 +351,9 @@ export class Perceiver {
         id: em.id,
         kind: em.kind,
         pos: { x, y },
-        sigma,
+        sigma: sigmas.radial,
+        sigmaBearing: sigmas.tangential,
+        bearing: bearingTo(myPos, { x, y }),
         distance: dist2(myPos, { x, y }),
       });
     }

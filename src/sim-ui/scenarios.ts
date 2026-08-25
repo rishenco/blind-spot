@@ -61,7 +61,8 @@ export const SCENARIOS: Scenario[] = [
   {
     name: 'interception',
     note: 'a throw taken out of the air by the other team',
-    stopOn: { kind: 'interception', lead: 2 },
+    // Negative lead = a few ticks AFTER the moment, so the catch is visible rather than pending.
+    stopOn: { kind: 'interception', lead: -6 },
     make: () => {
       const config = configFromPreset('default');
       return { config, seed: 3, controllers: pair('striker', 'goalie', config.teamSize), eyes: 2 };
@@ -70,7 +71,7 @@ export const SCENARIOS: Scenario[] = [
   {
     name: 'fumble',
     note: 'a mistimed grab: the ball bounces off a body and the mistake is heard 20 m away',
-    stopOn: { kind: 'fumble', lead: 1 },
+    stopOn: { kind: 'fumble', lead: -6 },
     make: () => {
       const config = configFromPreset('default');
       return { config, seed: 3, controllers: pair('striker', 'ballchaser', config.teamSize), eyes: 3 };
@@ -114,7 +115,8 @@ export const SCENARIOS: Scenario[] = [
       config.ping.waveSpeed = Infinity;
       const prober = scripted(
         [
-          { for: 0.15, aim: [1, 0] },
+          // Identical to `ping-self` down to the tick — the A/B is worthless otherwise.
+          { for: 0.05, aim: [1, 0] },
           { ping: true, label: 'ping' },
           { for: 3, label: 'listen' },
         ],
@@ -153,8 +155,8 @@ export const SCENARIOS: Scenario[] = [
         controllers: [
           { name: 'prober', make: prober },
           makeController('statue'),
-          makeController('randomwalker'),
-          makeController('randomwalker'),
+          makeController('statue'),
+          makeController('statue'),
         ],
         eyes: 0,
       };

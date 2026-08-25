@@ -26,6 +26,8 @@ export interface Mark {
   kind: SoundKind;
   intensity: number;
   sigma: number;
+  sigmaBearing: number;
+  bearing: Vec2;
   sourceId: EntityId | null;
   self: boolean;
   relayed: boolean;
@@ -45,12 +47,16 @@ export interface SonarSnapshot {
   origin: Vec2;
   firedAt: number;
   waveRadius: number;
+  /** How far out the front has confirmed what is there — including where it found nothing. */
+  checkedRadius: number;
   points: SonarPoint[];
 }
 
 export interface BallEstimate {
   pos: Vec2;
   sigma: number;
+  sigmaBearing: number;
+  bearing: Vec2;
   /** Finite difference of successive estimates — noisy, which is honest. */
   vel: Vec2;
   updatedAt: number;
@@ -107,6 +113,8 @@ export class PerceivedModel {
         kind: ev.kind,
         intensity: ev.intensity,
         sigma: ev.sigma,
+        sigmaBearing: ev.sigmaBearing,
+        bearing: ev.bearing,
         sourceId: ev.sourceId,
         self: ev.self,
         relayed: ev.relayed,
@@ -124,11 +132,13 @@ export class PerceivedModel {
           origin: ret.origin,
           firedAt: ret.t,
           waveRadius: ret.waveRadius,
+          checkedRadius: ret.sweptTo,
           points: [],
         };
         this.sonar.push(snap);
       }
       snap.waveRadius = ret.waveRadius;
+      snap.checkedRadius = Math.max(snap.checkedRadius, ret.sweptTo);
       for (const hit of ret.hits) {
         snap.points.push({ pos: hit.pos, kind: hit.kind, sourceId: hit.sourceId, vel: hit.vel, born: now });
       }
@@ -141,6 +151,8 @@ export class PerceivedModel {
       this.ball = {
         pos: heardBall.pos,
         sigma: heardBall.sigma,
+        sigmaBearing: heardBall.sigmaBearing,
+        bearing: heardBall.bearing,
         vel: prev
           ? { x: (heardBall.pos.x - prev.pos.x) / dt, y: (heardBall.pos.y - prev.pos.y) / dt }
           : { x: 0, y: 0 },
@@ -165,7 +177,9 @@ export class PerceivedModel {
     if (this.sonar.length > 0) {
       const sonarCut = now - this.sonarLife;
       for (const snap of this.sonar) snap.points = snap.points.filter((p) => p.born >= sonarCut);
-      this.sonar = this.sonar.filter((s) => s.points.length > 0);
+      // A snapshot survives while it still has dots OR while its "I checked here" disc is fresh:
+      // the absence it recorded is worth as much as the dots and must not vanish first.
+      this.sonar = this.sonar.filter((s) => s.points.length > 0 || now - s.firedAt < this.sonarLife);
     }
   }
 

@@ -123,6 +123,22 @@ describe('field and rules', () => {
     expect(p1.interceptions).toBe(0);
   });
 
+  it('never lets the ball leave the world, goal mouths included', () => {
+    // The mouth is a hole in the wall: a ball that goes through it without a valid release is
+    // not a goal, and there is nothing behind the net to stop it. It has to become a dead ball.
+    for (const seed of [1, 2, 3, 4, 5, 6]) {
+      const cfg = defaultConfig();
+      cfg.match.durationSec = 60;
+      const m = new Match({ config: cfg, seed, controllers: roster('striker', 'ballchaser', cfg.teamSize) });
+      const limit = Math.hypot(m.field.halfWidth, m.field.halfHeight) + 1;
+      while (!m.isOver) {
+        m.step();
+        const b = m.sim.state.ball;
+        expect(Math.hypot(b.pos.x, b.pos.y)).toBeLessThan(limit);
+      }
+    }
+  });
+
   it('runs 1v1, 2v2 and 3v3 without leaving the pitch', () => {
     for (const size of [1, 2, 3]) {
       const cfg = defaultConfig();

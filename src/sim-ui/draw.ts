@@ -120,6 +120,39 @@ function circle(ctx: CanvasRenderingContext2D, cam: Camera, at: Vec2, radiusM: n
   ctx.restore();
 }
 
+/**
+ * The error cigar: an ellipse long along the bearing to the source and short across it. Drawing
+ * the honest shape of the uncertainty is the point — a circle would say the listener knows the
+ * distance as well as the direction, which is exactly the thing that is not true.
+ */
+function ellipse(
+  ctx: CanvasRenderingContext2D,
+  cam: Camera,
+  at: Vec2,
+  along: number,
+  across: number,
+  bearing: Vec2,
+  color: string,
+  alpha: number,
+): void {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = color;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.ellipse(
+    sx(cam, at),
+    sy(cam, at),
+    Math.max(1, along * cam.scale),
+    Math.max(1, across * cam.scale),
+    Math.atan2(-bearing.y, bearing.x),
+    0,
+    Math.PI * 2,
+  );
+  ctx.stroke();
+  ctx.restore();
+}
+
 export function clear(ctx: CanvasRenderingContext2D, cam: Camera): void {
   ctx.fillStyle = '#05070a';
   ctx.fillRect(0, 0, cam.w, cam.h);
@@ -219,8 +252,11 @@ export function drawTruth(ctx: CanvasRenderingContext2D, cam: Camera, o: TruthOp
 
 function drawBody(ctx: CanvasRenderingContext2D, cam: Camera, p: PlayerState, o: TruthOptions): void {
   const color = TEAM_COLOR[p.team];
-  // The halo: how far this body can be heard right now. The concept's non-negotiable readout.
-  if (o.showRadii && p.loudness > 0) circle(ctx, cam, p.pos, p.loudness, color, 0.08);
+  // The halo: how far this body can be heard right now — the concept's non-negotiable readout.
+  // Only for the player being listened to: four overlapping 30 m rings say nothing to anyone.
+  if (o.showRadii && p.loudness > 0 && p.id === o.highlight) {
+    circle(ctx, cam, p.pos, p.loudness, color, 0.14);
+  }
   ctx.fillStyle = p.id === o.highlight ? '#ffffff' : color;
   ctx.beginPath();
   ctx.arc(sx(cam, p.pos), sy(cam, p.pos), Math.max(4, o.playerRadius * cam.scale), 0, Math.PI * 2);
@@ -264,6 +300,16 @@ export function drawPerceived(ctx: CanvasRenderingContext2D, cam: Camera, o: Per
 
   // --- sonar returns: cold, sharp, dying ----------------------------------
   for (const snap of m.sonar) {
+    // The volume the ping has checked so far, drawn as a barely-there disc: this is the
+    // negative information — everywhere in here that is not a dot is confirmed empty.
+    if (snap.checkedRadius > 0) {
+      ctx.globalAlpha = 0.05 * Math.max(0, 1 - (o.now - snap.firedAt) / 1.2);
+      ctx.fillStyle = '#6fd3e0';
+      ctx.beginPath();
+      ctx.arc(sx(cam, snap.origin), sy(cam, snap.origin), snap.checkedRadius * cam.scale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
     if (snap.waveRadius > 0 && o.now - snap.firedAt < 1.2) {
       circle(ctx, cam, snap.origin, snap.waveRadius, '#ffffff', 0.25);
     }
@@ -294,7 +340,9 @@ export function drawPerceived(ctx: CanvasRenderingContext2D, cam: Camera, o: Per
     const a = m.markAlpha(mark, o.now);
     if (a <= 0) continue;
     const color = SOUND_COLOR[mark.kind];
-    if (o.showRadii && mark.sigma > 0) circle(ctx, cam, mark.pos, mark.sigma, color, a * 0.5, [3, 3]);
+    if (o.showRadii && mark.sigma > 0) {
+      ellipse(ctx, cam, mark.pos, mark.sigma, mark.sigmaBearing, mark.bearing, color, a * 0.5);
+    }
     blob(ctx, cam, mark.pos, Math.min(2.4, 0.45 + mark.intensity * 0.06), color, a * (mark.self ? 0.35 : 0.75));
     if (mark.relayed) circle(ctx, cam, mark.pos, 0.5, '#7dffa8', a * 0.6);
   }
@@ -302,7 +350,7 @@ export function drawPerceived(ctx: CanvasRenderingContext2D, cam: Camera, o: Per
   // --- the ball: never silent, never exact --------------------------------
   if (m.ball) {
     trail(ctx, cam, m.ballTrail, BALL_COLOR);
-    circle(ctx, cam, m.ball.pos, Math.max(0.15, m.ball.sigma), BALL_COLOR, 0.6, [2, 3]);
+    ellipse(ctx, cam, m.ball.pos, Math.max(0.12, m.ball.sigma), Math.max(0.06, m.ball.sigmaBearing), m.ball.bearing, BALL_COLOR, 0.6);
     ctx.fillStyle = BALL_COLOR;
     ctx.beginPath();
     ctx.arc(sx(cam, m.ball.pos), sy(cam, m.ball.pos), 4, 0, Math.PI * 2);
