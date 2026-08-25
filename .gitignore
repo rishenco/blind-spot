@@ -2,3 +2,6 @@ node_modules
 dist
 shots
 *.log
+
+# Ephemeral agent worktrees created inside the repo by the tooling. Never a deliverable.
+.claude/worktrees/
