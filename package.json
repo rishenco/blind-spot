@@ -20,6 +20,7 @@
     "playwright": "^1.62.1",
     "typescript": "^5.9.2",
     "vite": "^7.1.5",
-    "vite-plugin-singlefile": "^2.3.3"
+    "vite-plugin-singlefile": "^2.3.3",
+    "vitest": "^4.1.11"
   }
 }
