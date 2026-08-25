@@ -252,10 +252,13 @@ If (1) stalls, no content fixes it.
 - **Masking law + hum-walking.** Any sound covers sounds under half its intensity,
   symmetrically for all ears. Corollary: the hum masks walk-steps inside its 12 m — step
   on the beat and vanish inside the beacon everyone hears.
-- **Everything that falls, paints (M2).** Any loose object can be picked up, dropped, or
-  thrown: flight is silent; the impact sounds in its material's voice (vision §3.9), paints
-  the area around the landing, and draws investigation. Every piece of debris is a portable
-  question and a portable lure — spiders divert to it like to any other sound origin.
+- **Everything that falls, paints.** Any loose object can be picked up, dropped, or thrown:
+  flight is silent *and unseen* — unlike the rig's own spheres, an artifact is a world object
+  and beacons nothing, so a throw genuinely loses track of it until it lands. That contrast is
+  the point: your gear tells you where it is, the world's objects never do. The impact sounds in
+  its material's voice (vision §3.9), paints the area around the landing, and draws
+  investigation. Every piece of debris is a portable question and a portable lure — spiders
+  divert to it like to any other sound origin.
 - **Wounded reactor.** Under 25 HP the cracked chassis whines every 3 s (6 m audible):
   dying makes you glow. Banking repairs.
 - **Shelf (post-MVP):** Dock Bloom · weather draws · girder chord · molt cycle · egg
@@ -281,7 +284,8 @@ after all of them.
 - **M1 — the noise crystallizer.** One mechanism for every sound in the game: multi-emitter
   safety, the hearing *query* that AI will consume, source identity on events, material
   voices (vision §3.9), audio — the synthesized WebAudio subscriber on the same bus.
-- **M2 — throwables.** The cheapest non-player emitter, and M1's integration test.
+- **M2 — the sphere.** The cheapest non-player emitter, and M1's integration test. One throwable,
+  rig-owned, always visible, detonating on first contact (vision §1 *Rig-own instruments*, §3.3).
 - **M3 — the gym.** One authored level containing exactly one instance of every mechanism the
   tower will later multiply. The actual first playable.
 - **M4 — the spider.** Behaviour and tells first, then procedural contact-driven gait (§3.2),

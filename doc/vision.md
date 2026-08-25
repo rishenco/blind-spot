@@ -46,6 +46,18 @@ Law-adjacent commitments — not laws, but consequences of them we have locked i
   the hum is the rig's own gauge, has no position and no emitter, is audible to nobody but its
   pilot, and nothing in the world can hear it. A hum with a place in the world would be a
   violation, which is why it is not given one.
+- **Rig-own instruments** (laws 1-3). The rig may show its pilot its own equipment — the Halo,
+  the hands, the spheres in the rack and the one in the air — without a sound having painted it.
+  A machine is allowed to know where its own parts are, and pretending otherwise buys nothing:
+  the previous throwable was invisible in flight on exactly this reasoning, and the verb became
+  unreadable rather than pure. The rule that keeps the concession honest is that **a rig-own
+  instrument reports only itself** — its position, its state, its charge — and never the world.
+  A thrown sphere is a beacon telemetering its own coordinates back to its owner; the walls it
+  passes stay black, and the first thing it ever says about the room is the boom, on the bus,
+  at the speed of sound like everything else. It cannot be scanned and takes no paint, for the
+  same reason the Halo hum has no position: until it detonates it is not *in* the soundscape.
+  The test for anything added here later: could the pilot learn a fact about the world from it
+  that no event on the bus told them? If yes, it is not an instrument, it is free intel.
 - **No canned walk cycles** (law 2). Enemy movement animation is procedural, contact-driven IK
   — never a keyframed cycle. A keyframed cycle foot-slides, and a sliding foot would emit a
   footfall sound (and therefore paint geometry) at a point where no foot actually touched
@@ -106,26 +118,43 @@ gated on it (§3.1). The spider joins that predicate at M4 rather than bringing 
 | Q-ping (360°) | 12 m | 18 m |
 | E-ping (110° cone) | 22 m | 30 m — at **both ends** of the beam |
 | Slide — **unbuilt** | 5 m continuous | 16 m |
-| Thrown-object impact (a can landing) — **emitter M2** | 8–12 m by impact speed | 25 m |
-| Prop knock — a can settling, a can lifted — **emitter M2** | 1.5 m | 4 m |
-| Throw wind-up — start, and the full-tension click — **emitter M2** | 0.5 m | 2.5 m |
+| Sphere boom — a thrown sphere detonating | 12 m | 32 m |
+| Throw wind-up — the arm winding | 0.5 m | 2.5 m |
+| Thrown-object impact — **class only, no emitter** | 8–12 m by impact speed | 25 m |
+| Prop knock — **class only, no emitter** | 1.5 m | 4 m |
 | Spider gait cycle: patrol / investigate / chase — **unbuilt**, M4 | 2 / 4 / 8 m around the body | — |
 | Carried artifact hum (every 2 s) — **unbuilt** | 2 m self-halo | 12 m |
 | Voice (open mic) — **unbuilt** | scales with volume | scales with volume |
 
-The three M2 rows replace v1.0's single "prop knock, 8–12 / 25" guess, which conflated three
-different sounds a throwable makes into one. Class and voice shipped ahead of the emitter: each
-is a row in `SOUND_CLASSES` and in `CONTACT_CLASSES` (`src/paint/soundEvents.ts`) and the mixer
-already builds all three, but nothing yet makes them — the throw verb is what turns them on.
+**The boom is the sphere's own voice, and the floor it lands on does not colour it.** It is the
+one contact-shaped event in the table that answers `false` in `CONTACT_CLASSES`, because what
+makes the noise is the charge, not the slab — the sphere is a device that exists to be loud, and
+a device does not get quieter for landing on dust. `assertMaterials` refuses a material on the
+class outright, so the rule is a runtime invariant rather than a convention, and
+`tools/listen.mjs` §06 asserts the same boom on steel and on dust arrives *identical*. The cost
+of that rule, stated plainly: a throw no longer interrogates a surface at range. It never
+usefully did — three of the four materials measured within the noise floor through a thrown
+object, and the object's own material dragged the timbre halfway to its own — and the job now
+belongs to the artifact clang (core-loop §2), where two bodies meeting is the point rather than
+a side effect.
 
-The wind-up is the odd one of the three twice over. It is the only one that strikes nothing, so
-it is the only one that answers `false` in `CONTACT_CLASSES` and the only one no material scales.
-And it is, deliberately, the entire charge meter: there is no charge bar anywhere on screen, the
-full-tension click is how you know the arm is wound, and that click is a real sound anything
-within 2.5 m hears. A readout that is also a price is the shape law 1 asks for, and it is why
-the throw costs no energy at all — the arm is a mechanism, not the reactor, and its price is
-already threefold in the game's own currencies: finite cans, the wind-up's noise, and the walk
-back to fetch one.
+At 32 m the boom is the loudest deliberate act a player has: above the E-ping's 30, below the
+landing's effective 42. That ceiling is not a coincidence and not free to move — `HALO_MAX_RADIUS_M`
+is derived by sweeping every class, so a boom that out-carried the landing would silently
+re-scale the pilot's own loudness readout (§3.8).
+
+**The arc is the charge meter.** There is no charge bar anywhere on screen: holding the throw key
+draws the trajectory the rig would take, and the arc lengthens as the arm winds. It is a *vacuum*
+parabola and it is never collision-tested — a preview that stopped at real geometry would let a
+player sweep their aim across a black room and read the walls off it, which is precisely the free,
+silent intel law 1 forbids. It frays out with distance instead of ending at a point, because a
+hard endpoint would promise a landing spot the arc cannot know. The two rows above are what the
+wind-up still costs: 0.5 m of paint and 2.5 m of carry, a sound anything standing next to you
+hears. The arc says how hard; the world hears that you are asking.
+
+Throwing costs no energy at all — the arm is a mechanism, not the reactor. Its price is threefold
+and all three are in the game's native currencies: a finite rack, the wind-up's noise, and the
+recharge you wait out before the next one.
 
 All contact-made classes (steps, landings, slides, knocks, impacts, spider footfalls) are
 scaled by the surface's material voice (§3.9) — and where two bodies meet, by the mean of both
@@ -199,7 +228,7 @@ First-pass multipliers: metal ×1.5 · stone ×1.15 · concrete ×1.0 · dust ×
 **The multiplier scales every radius the event carries, not just the class default.** A landing
 that computed its own 8–14 m from impact speed is scaled by the surface it struck, as is a
 thrown object's impact. The surface speaks whatever loudness arrives at it, and keeping the law
-in one place is what stops each new emitter from having to remember it — M2's throwables and
+in one place is what stops each new emitter from having to remember it — the props of §8 and
 M4's spider would forget. The consequence is real and intended: a hard landing on steel is
 14 × 1.5 = 21 m of paint, louder than a Q-ping, which makes a steel floor a genuinely dangerous
 thing to drop onto.
@@ -224,8 +253,8 @@ together, which is the honest trade and the one that belongs in this table rathe
 a modal gain nobody reads.
 
 **Two bodies, one contact: the level is the mean of the two multipliers in dB.** A footfall is
-one body meeting one surface, so a single multiplier answers for it. A thrown can is two — the
-can and the slab it lands on — and the table above gives each of them a number. The rule for
+one body meeting one surface, so a single multiplier answers for it. A dropped artifact is
+two — the artifact and the slab it lands on — and the table above gives each a number. The rule for
 combining them is the **geometric mean**, `√(m_object · m_surface)`, which is the arithmetic
 mean in decibels: metal on dust and dust on metal both land at ×0.95, halfway between ×1.5 and
 ×0.6 on the only scale a listener uses.
@@ -243,18 +272,26 @@ coincidentally unchanged by it.
 **What the mean throws away is level, not identity.** "Metal struck dust" and "dust struck
 metal" reach the ear at the same loudness and sound nothing alike, because the asymmetry is
 carried entirely by **timbre**: the arriving body is the *attack*, the struck surface is the
-*resonance*. A metal can hitting dust is a bright tick into a dead thud, tailing near 250 Hz; a
-dust clod hitting steel is a soft slap that sets a 0.3 s ring going near 1 kHz. Which of the two
+*resonance*. A steel artifact set down on dust is a bright tick into a dead thud, tailing
+near 250 Hz; a dust clod hitting steel is a soft slap that rings 0.3 s near 1 kHz. Which of the two
 happened is the information — where the object came from, and what it found — and timbre is
 where a listener actually reads it. A level difference would only be legible to someone who had
 heard the other case to compare it against, which in a black room is nobody.
 
-Status: live. `materialVoiceFor` in `src/paint/soundEvents.ts` is the one place the mean is
-taken, and it is taken for composed classes only — a footfall returns before reaching it.
-`objMat` on the event carries the arriving body's material through to the mixer, which builds
-the two-part voice in `src/audio/voices.ts` with no per-emitter knowledge of what is striking
-what. All sixteen pairs are asserted to arrive at one level, and the timbre split is asserted
-separately, in `tests/audio/composedVoice.test.ts`.
+Status: built, and currently without an emitter. `materialVoiceFor` in
+`src/paint/soundEvents.ts` is the one place the mean is taken, and it is taken for composed
+classes only — a footfall returns before reaching it. `objMat` on the event carries the arriving
+body's material through to the mixer, which builds the two-part voice in `src/audio/voices.ts`
+with no per-emitter knowledge of what is striking what. All sixteen pairs are asserted to arrive
+at one level, and the timbre split is asserted separately, in
+`tests/audio/composedVoice.test.ts`.
+
+Nothing in the game currently strikes anything with a second body: the sphere's boom is its own
+voice and refuses a material outright (§3.3), and the retrievable can that used to exercise this
+path is retired. The machinery stays because the class-before-emitter order is the house habit
+and because the artifact clang (core-loop §2) is what it was built for — a heavy object set down
+on a floor you chose, where *what it found* is the whole point rather than a side effect. The
+tests are bus-level and stay green with nothing emitting.
 
 Dust is the quiet end, and it exists so the tower has a floor to reward: without a class below
 concrete, every surface is normal-or-louder and "go slow and stay quiet" has nothing to pay it.
@@ -299,9 +336,16 @@ One bar. Capacity 100, regeneration 6 /s.
 - **Throwing costs nothing.** The spends above are all *reactor* acts — a rig converting stored
   energy into a deliberate emission. An arm is a mechanism, and taxing it here would double-charge
   a verb whose price is already threefold and already in the game's native currencies: a finite
-  supply, the wind-up's noise, and the walk back to fetch what you threw. Charging it in energy
-  as well would push every player back onto pings, which would delete the one thing a throwable
-  can do that nothing else can — put a sound somewhere you are not (§3.3, M2 rows).
+  rack, the wind-up's noise, and the recharge you wait out before the next one. Charging it in
+  energy as well would push every player back onto pings, which would delete the one thing a
+  throwable can do that nothing else can — put a sound somewhere you are not (§3.3).
+
+  **The rack refills on a timer, not from the bar.** One sphere every 12 s, held while the arm is
+  winding so charging a throw never earns the next one. This is the replacement for a price that
+  the retrieval verb used to carry and no longer does — walking back to pick up what you threw —
+  and it is deliberately a *time* cost rather than an energy one, so it cannot compete with pings
+  for the same bar. The number is a dial and expected to move: four with no refill at all teaches
+  hoarding, and hoarding teaches not using the game's best verb.
 
 ## 5. Movement
 
@@ -343,43 +387,26 @@ noise; there is no hard timer — escalation is the clock.
 ## 8. Props and traps
 
 Knockable props are authored sound-traps, never physics clutter: sparse, deliberate placements —
-chain curtains, glass fields, stacked cans — at chokepoints, each with a crisp single audio
+chain curtains, glass fields, stacked drums — at chokepoints, each with a crisp single audio
 signature. They are read-and-route puzzles (crouch through, go around), and they are the real
 price of moving through unpainted space. Machinery hazards obey law 4: they sing their rhythm
 (crushers thump their cycle) — timed by ear, confirmed by ping. No ragdoll comedy anywhere.
 
-**A prop can also be a supply**, and the stacked cans are the first one that is. The verb list
-grows a third entry beside crouch-through and go-around: *take from*. The same column reads two
-ways depending on the speed you meet it at, which is `CAN_LIFT_SPEED` doing the same job
-everywhere else in this document — pricing rather than preventing. Walk up with room in the rack
-and you mine it off the top, one can per touch, for four soft knocks nobody hears past 6 m.
-Sprint the same line and you boot the column across the loudest lane in the room and come out
-the far side with the rack you went in with and a floor full of metal. It is deliberately not
-"the fast route that also resupplies you": you pay, and you get nothing for it.
+**A prop is not a supply.** The stacked cans were, briefly, and the experiment is worth one
+paragraph because of what it cost. A column you could mine cans off of made props do two jobs at
+once — sound trap and resupply — and the second job dragged in a whole verb (walk back, stand
+close, take one) that fought the game's own movement fantasy and cluttered the floor with
+retrievable objects. Throwables now come off the rig, not off the map (§1, *Rig-own
+instruments*), and props go back to being exactly one thing: something you must route around,
+crouch through, or pay for in noise. Anything the tower wants to hand a player is handed by the
+tower, not by a prop the player mugs.
 
-Built and measured, that fork has four positions rather than two, and the two extra ones are what
-make it honest. **Crouch** into the column with room in the rack and you take four cans and the
-fifth is left standing at its authored pose — the quietest approach is the only one that leaves
-the stack looking untouched, which is a fact a teammate arriving later can read off the floor.
-**Walk** and you take the same four but carry a stride too far and nudge the last one over.
-**Walk into it with a full rack** and there is nothing to take, so the column simply goes down:
-a rack with no room in it may not turn the rig into a ghost that walks through matter, which is
-law 2 at the smallest scale the game has. **Sprint** and all five go at once, at pace, down the
-loud lane.
-
-What makes the first two positions exist at all is that **the arm and the body are different
-sizes**. Reach is a stoop — 60 cm, and a cylinder rather than a ball, because a ball at full
-horizontal stretch has no height left and the nearest can on an approach is then always the
-bottom one. The body is a 35 cm shell. The quarter-metre between them is the standing room a
-player gets: close enough to take cans off the top, not so close as to be leaning on the column.
-One number for both and "walk up and take four" ends in a clang every time.
-
-The constraint this puts on whoever authors the next one: **a column may be no taller than the
-rig can reach**, because retrieval takes the highest can in reach and a can above that line is
-one nobody can ever pick up — reaching for it hands you the can below and drops the stranded one
-on the pile, a clang on the first touch of every run that no skill avoids. `world/room.ts`
-derives its count from the reach rather than choosing it, so the tower's stacks cannot quietly
-inherit the bug the test room found.
+What survives the experiment is the constraint it discovered, restated for whatever the tower
+stacks next: **a prop that can be taken from may be no taller than the rig can reach.** An object
+above the reach line is one nobody can ever pick up, and reaching for it hands you the one below
+and drops the stranded one on the pile — a clang on the first touch of every run that no skill
+avoids. It is a good rule and it cost a milestone to find; it is written here so the next author
+gets it for free.
 
 ## 9. Upgrades
 
@@ -437,11 +464,13 @@ funny.
 
 - No weapons. Counterplay verbs: read, avoid, bait, juke, break contact. (Fallback if playtests
   show cornered-helplessness: a loud 12-energy Shove that staggers a pouncing spider — added
-  only on that evidence.) **A thrown can is not a weapon and must never become one**: it does no
-  damage, it cannot stagger, and hitting the spider with one is worth exactly what hitting a wall
-  with one is worth — a sound, at that spot. The day a can does damage, every player aims at the
-  enemy instead of past it, and the verb stops being about information. It is a way of asking a
-  question from somewhere you are not standing, and that is all it is.
+  only on that evidence.) **A thrown sphere is not a weapon and must never become one**: it does
+  no damage, it cannot stagger, and detonating one against the spider is worth exactly what
+  detonating one against a wall is worth — a sound, at that spot. The day a sphere does damage,
+  every player aims at the enemy instead of past it, and the verb stops being about information.
+  It is a way of asking a question from somewhere you are not standing, and that is all it is.
+  The sphere booms, which makes this easy to get wrong: loud is not lethal, and §3.3's 32 m is a
+  hearing radius, not a blast radius. There is no blast radius.
 - No third-person camera — first person is the only view; third person is a debug affordance
   at most, never a player-facing mode.
 - No sampled audio assets — everything is synthesized (WebAudio), driven by the event bus (§1).
