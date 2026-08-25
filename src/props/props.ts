@@ -683,6 +683,69 @@ export class PropWorld {
     b.applyImpulseAtPoint({ x: ix, y: iy, z: iz }, { x, y, z }, true);
   }
 
+  /** Mass of a prop, kilograms. The gate for "банка да, бочка нет". */
+  massOf(i: number): number {
+    if (i < 0 || i >= this.count) return Infinity;
+    return this.weight[i]! / 9.81;
+  }
+
+  /** Longest dimension of a prop's shape, metres. The other half of that gate. */
+  spanOf(i: number): number {
+    if (i < 0 || i >= this.count) return Infinity;
+    return shapeSpan(ARCHETYPES[this.arch[i]!]!.parts);
+  }
+
+  /**
+   * Picks a body up (M6a). It stays the same body in the same world with the same colliders —
+   * this is the whole point: a carried thing is not a UI item, it is a prop you happen to be
+   * driving. Only its type changes, to kinematic, exactly like the player and the rifle: it
+   * shoves the world and the world does not shove it, so a can in your fist cannot be knocked
+   * out of it by a shelf.
+   *
+   * Everything downstream keeps working unchanged, which is what the radio in M7 needs: whatever
+   * makes noise about prop `i` goes on making it, from wherever the hand is.
+   */
+  grabProp(i: number): boolean {
+    if (i < 0 || i >= this.count) return false;
+    const b = this.bodies[i]!;
+    if (b.bodyType() !== this.R.RigidBodyType.Dynamic) return false;
+    b.setBodyType(this.R.RigidBodyType.KinematicPositionBased, true);
+    return true;
+  }
+
+  /** Drives a carried body. Called once per tick with wherever the hand is. */
+  holdProp(i: number, x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number): void {
+    if (i < 0 || i >= this.count) return;
+    const b = this.bodies[i]!;
+    if (b.bodyType() === this.R.RigidBodyType.Dynamic) return;
+    this.vec.x = x;
+    this.vec.y = y;
+    this.vec.z = z;
+    b.setNextKinematicTranslation(this.vec);
+    b.setNextKinematicRotation({ x: qx, y: qy, z: qz, w: qw });
+  }
+
+  /**
+   * Lets go, with a velocity. Dynamic again from this tick on, so everything after the release —
+   * the arc, the bounce, the noise where it lands — is ordinary physics and the ordinary impulse
+   * formula. There is deliberately no "throw sound": the only noise a throw makes is the one the
+   * can makes when it arrives.
+   */
+  releaseProp(i: number, vx: number, vy: number, vz: number, sx: number, sy: number, sz: number): void {
+    if (i < 0 || i >= this.count) return;
+    const b = this.bodies[i]!;
+    b.setBodyType(this.R.RigidBodyType.Dynamic, true);
+    b.setLinvel({ x: vx, y: vy, z: vz }, true);
+    b.setAngvel({ x: sx, y: sy, z: sz }, true);
+    b.wakeUp();
+  }
+
+  /** True while prop `i` is being carried. */
+  isCarried(i: number): boolean {
+    if (i < 0 || i >= this.count) return false;
+    return this.bodies[i]!.bodyType() !== this.R.RigidBodyType.Dynamic;
+  }
+
   /** Material name of a prop, so a bullet hit can be reported as hitting steel rather than air. */
   materialOf(i: number): string | undefined {
     if (i < 0 || i >= this.count) return undefined;

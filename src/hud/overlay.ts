@@ -95,6 +95,22 @@ export interface HudLayerTunables {
   refreshHz: number;
   /** `sonar`: how many sectors a bearing is rounded to. */
   sectors: number;
+  /**
+   * The instrument cluster (M6a): how bright the ammunition / scanner / hand readouts are, 0
+   * turns them off entirely.
+   */
+  instBright: number;
+  /**
+   * Seconds a readout stays up after the thing it reports changed. It is not a permanent bar:
+   * law 1 says nothing renders "просто так", so at rest — full magazine, charged scanner, empty
+   * hand — this cluster draws exactly zero pixels. It appears when something *happened*, and it
+   * stays up as long as something is wrong (empty, reloading, still charging).
+   */
+  instHold: number;
+  /** Width of the cluster, as a fraction of half the shorter screen axis. */
+  instSpan: number;
+  /** How far below centre the cluster sits, same unit. */
+  instDrop: number;
 }
 
 export function defaultHudLayerTunables(): HudLayerTunables {
@@ -109,7 +125,34 @@ export function defaultHudLayerTunables(): HudLayerTunables {
     lagPx: 620,
     refreshHz: 4,
     sectors: 32,
+    instBright: 1,
+    instHold: 2.5,
+    instSpan: 0.52,
+    instDrop: 0.74,
   };
+}
+
+/**
+ * What the kit knows about the player's own hands (M6a): how many rounds, whether the scanner
+ * has come back, and whether there is anything in the left hand.
+ *
+ * Three readings and no fourth. The human's brief was explicit — "не заливай экран цифрами" —
+ * so this struct is deliberately the *whole* of what the instrument cluster is allowed to know.
+ * Anything that is not one of these three states cannot be drawn, because there is nowhere to
+ * put it.
+ */
+export interface Instruments {
+  /** Rounds left in the magazine. */
+  rounds: number;
+  magazine: number;
+  reloading: boolean;
+  /** 0..1 through the swap; 1 when not reloading. */
+  reloadProgress: number;
+  /** 0..1 towards the next scanner charge. */
+  scanCharge: number;
+  scanReady: boolean;
+  /** Is there something in the left hand. */
+  held: boolean;
 }
 
 /** One notch on the noise ring, already resolved to screen space by the caller. */
@@ -159,6 +202,11 @@ interface Frame {
   hurtFrom: number | null;
   /** 0..1 freshness of that bite. */
   hurtHot: number;
+  /** The hands, and how visible each of the three readouts is right now, 0..1. */
+  inst: Instruments | null;
+  instAmmo: number;
+  instScan: number;
+  instHand: number;
 }
 
 export class PlayerHudLayer {
@@ -174,6 +222,19 @@ export class PlayerHudLayer {
   private width = 1;
   private height = 1;
   private dpr = 1;
+
+  /*
+   * Instrument-cluster memory: the moment each of the three readouts last had something to say.
+   * It lives here rather than in the caller because it is purely presentation — the rifle knows
+   * how many rounds are left, it has no business knowing how long a HUD lingers.
+   */
+  private ammoAt = -1e9;
+  private scanAt = -1e9;
+  private handAt = -1e9;
+  private lastRounds = -1;
+  private lastReloading = false;
+  private lastScanReady = true;
+  private lastHeld = false;
 
   constructor(
     readonly tunables: HudLayerTunables = defaultHudLayerTunables(),
@@ -223,7 +284,14 @@ export class PlayerHudLayer {
    * One frame. `yaw` is the *render* camera's yaw, so a bearing tracks a head turn with no lag,
    * and `time` is the render clock, so a fade is smooth between simulation ticks.
    */
-  draw(vitals: PlayerVitals, yaw: number, time: number, notches: readonly CompassNotch[], compass: CompassDraw): void {
+  draw(
+    vitals: PlayerVitals,
+    yaw: number,
+    time: number,
+    notches: readonly CompassNotch[],
+    compass: CompassDraw,
+    inst: Instruments | null = null,
+  ): void {
     if (!this.visible) return;
     const ctx = this.ctx;
     const w = this.width;
@@ -236,7 +304,10 @@ export class PlayerHudLayer {
     const dark = this.showDamage ? sting * t.stingDark + degrade * t.lowDark : 0;
     const down = this.showDamage && !vitals.alive;
 
-    if (marks.length === 0 && notches.length === 0 && dark <= 0.001 && !down) {
+    const lit = this.instrumentFade(inst, time);
+    const instOn = lit.ammo + lit.scan + lit.hand > 0.004;
+
+    if (marks.length === 0 && notches.length === 0 && dark <= 0.001 && !down && !instOn) {
       // Nothing to say. Clear once, then stop paying for the layer entirely.
       if (this.dirty) {
         ctx.clearRect(0, 0, w, h);
@@ -268,6 +339,10 @@ export class PlayerHudLayer {
       vitals,
       hurtFrom: newest === null ? null : screenAngle(newest.bearing, yaw),
       hurtHot: hot * hot,
+      inst,
+      instAmmo: lit.ammo,
+      instScan: lit.scan,
+      instHand: lit.hand,
     };
 
     /*
@@ -299,8 +374,56 @@ export class PlayerHudLayer {
         this.drawRing(f);
         break;
     }
+    // `bone` renders literally zero pixels by design; it does not get a cockpit either.
+    if (instOn && t.style !== 'bone') this.drawInstruments(f);
     ctx.restore();
     if (f.down) this.drawDown(f.cx, f.cy);
+  }
+
+  /**
+   * How visible each of the three readouts is this frame.
+   *
+   * Two rules, and the first one is law 1: a readout is drawn only when it has something to say.
+   * Something *happened* — a round left the barrel, the swap finished, the scanner came back, the
+   * hand closed on a can — buys `instHold` seconds and then fades out. Something is *wrong* —
+   * empty magazine, swap in progress, scanner still charging, something still in the hand — is
+   * held up for as long as it is true, because that is the state the player is paying for.
+   *
+   * At rest, with a full magazine and a charged scanner and an empty hand, all three are zero and
+   * the cluster costs nothing and draws nothing.
+   */
+  private instrumentFade(
+    inst: Instruments | null,
+    time: number,
+  ): { ammo: number; scan: number; hand: number } {
+    if (inst === null || this.tunables.instBright <= 0) return { ammo: 0, scan: 0, hand: 0 };
+    // A teleport or a reload rewinds the clock in the harness; never hold a stamp from the future.
+    if (time + 1e-3 < this.ammoAt) this.ammoAt = -1e9;
+    if (time + 1e-3 < this.scanAt) this.scanAt = -1e9;
+    if (time + 1e-3 < this.handAt) this.handAt = -1e9;
+
+    if (inst.rounds !== this.lastRounds || inst.reloading !== this.lastReloading) this.ammoAt = time;
+    if (inst.scanReady !== this.lastScanReady) this.scanAt = time;
+    if (inst.held !== this.lastHeld) this.handAt = time;
+    this.lastRounds = inst.rounds;
+    this.lastReloading = inst.reloading;
+    this.lastScanReady = inst.scanReady;
+    this.lastHeld = inst.held;
+
+    const hold = Math.max(0.1, this.tunables.instHold);
+    const decay = (at: number): number => {
+      const age = time - at;
+      if (age < 0 || age > hold) return 0;
+      // Flat for the first two thirds, then out. A readout that starts dimming immediately reads
+      // as a flicker rather than as a device that latched a value.
+      return Math.min(1, Math.max(0, (hold - age) / (hold * 0.34)));
+    };
+    const wrong = (v: boolean): number => (v ? 1 : 0);
+    return {
+      ammo: Math.max(decay(this.ammoAt), wrong(inst.reloading || inst.rounds <= 0)),
+      scan: Math.max(decay(this.scanAt), wrong(!inst.scanReady)),
+      hand: Math.max(decay(this.handAt), wrong(inst.held)),
+    };
   }
 
   // =========================================================================
@@ -479,6 +602,96 @@ export class PlayerHudLayer {
       }
     }
     ctx.restore();
+  }
+
+  // =========================================================================
+  // the instrument cluster — rounds, scanner, left hand
+  // =========================================================================
+
+  /**
+   * The three readings the human asked for, in the one alphabet this HUD already speaks: short
+   * hard ticks, one hue, three brightness steps, no digits and no arcs.
+   *
+   * It is one row low in the frame, read left to right the way a hand is: what is in the left
+   * hand, what is in the magazine, what the scanner has left to do. They share a row on purpose —
+   * three separate widgets in three corners is a cockpit, and the game is about not being able to
+   * see. One glance down, one row, three answers.
+   *
+   *  - **rounds** — one tick each. Fired rounds stay drawn, at a sixth of the brightness, so the
+   *    magazine has a length and "three left" is a shape rather than a number you have to count.
+   *    During a swap the row fills left to right with the progress: that sweep *is* the three
+   *    seconds, and it is the only clock the player gets for them.
+   *  - **scanner** — one tick that grows. Stub while it charges, full length and bright when it
+   *    is back. Ten seconds of a bar creeping up is the price the concept charges for geometry,
+   *    made visible.
+   *  - **left hand** — a bracket, two ticks with a gap. Present or absent, and nothing else: the
+   *    kit can tell you your hand is full, it cannot tell you what a can is.
+   *
+   * `bone` is excluded by the caller — that style's whole thesis is that there is no instrument.
+   */
+  private drawInstruments(f: Frame): void {
+    const inst = f.inst;
+    if (inst === null) return;
+    const t = this.tunables;
+    const b = t.instBright * t.brightness;
+    if (b <= 0) return;
+    const ctx = this.ctx;
+    const y = f.cy + f.half * t.instDrop;
+    const span = f.half * t.instSpan;
+    const left = f.cx - span * 0.5;
+    // The one hue. Same cold phosphor as the rest of the readout: a colour here would have to
+    // mean something, and these three readings are already brightness and length.
+    const hue = (a: number): string => `rgba(150,166,158,${Math.max(0, Math.min(1, a)).toFixed(3)})`;
+
+    ctx.save();
+    ctx.lineCap = 'butt';
+
+    // --- rounds -----------------------------------------------------------
+    if (f.instAmmo > 0.004) {
+      const n = Math.max(1, Math.round(inst.magazine));
+      const gap = span / n;
+      const a = f.instAmmo * b;
+      const filled = inst.reloading ? Math.floor(inst.reloadProgress * n) : inst.rounds;
+      for (let i = 0; i < n; i++) {
+        const x = left + gap * (i + 0.5);
+        const on = i < filled;
+        const len = on ? 9 : 5;
+        // A spent round is not erased: the empty half of the row is what "nearly out" looks like.
+        this.bar(x, y, len, 2, hue(a * (on ? 0.55 : 0.09)));
+      }
+    }
+
+    // --- the scanner ------------------------------------------------------
+    if (f.instScan > 0.004) {
+      const a = f.instScan * b;
+      const x = f.cx + span * 0.5 + 18;
+      const charge = inst.scanReady ? 1 : Math.max(0, Math.min(1, inst.scanCharge));
+      // The stub is always drawn while the readout is up: an empty scanner still has to be a
+      // thing on the screen, or "charging" and "gone" look the same.
+      this.bar(x, y, 3, 2, hue(a * 0.1));
+      if (charge > 0.02) this.bar(x, y, 3 + 9 * charge, 2, hue(a * (inst.scanReady ? 0.62 : 0.3)));
+    }
+
+    // --- the left hand ----------------------------------------------------
+    if (f.instHand > 0.004) {
+      const a = f.instHand * b * (inst.held ? 0.5 : 0.16);
+      const x = f.cx - span * 0.5 - 18;
+      this.bar(x - 3, y, 7, 2, hue(a));
+      this.bar(x + 3, y, 7, 2, hue(a));
+    }
+
+    ctx.restore();
+  }
+
+  /** One vertical tick of the cluster, centred on `y`. The row's only primitive. */
+  private bar(x: number, y: number, len: number, width: number, style: string): void {
+    const ctx = this.ctx;
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(x, y - len * 0.5);
+    ctx.lineTo(x, y + len * 0.5);
+    ctx.stroke();
   }
 
   /** One radial tick: a short segment pointing out along `angle`. No arcs anywhere. */

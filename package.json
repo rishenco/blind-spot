@@ -11,6 +11,7 @@
     "quiet": "npm run build && node tools/quiet.mjs",
     "shots:spiders": "npm run build && node tools/spiders.mjs",
     "shots:hud": "npm run build && node tools/hud.mjs",
+    "shots:hands": "npm run build && node tools/hands.mjs",
     "shots:audio": "npm run build && node tools/audio.mjs",
     "shots:concussion": "npm run build && node tools/concussion.mjs",
     "shots:world": "npm run build && node tools/world.mjs"

@@ -32,7 +32,10 @@ const KEY_BINDINGS: Record<string, Action> = {
   // The trigger also lives on a key, and not only on the mouse: the left button is the
   // drag-look fallback (and the click that asks for pointer lock), so in those two situations
   // a mouse-only trigger would either fire when you meant to look or not fire at all.
-  KeyE: 'fire',
+  //
+  // M6a moved it from `E` to `Q`: `E` is now the left hand (pick up / throw), which is the one
+  // key convention players will reach for without being told.
+  KeyQ: 'fire',
 };
 
 /**

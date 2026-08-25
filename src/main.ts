@@ -22,6 +22,8 @@ import { Lidar, defaultLidarTunables } from './lidar/lidar';
 import { StructuredPaint, defaultStructuredTunables } from './lidar/structured';
 import { defaultAgeRamp } from './lidar/palette';
 import { TouchLayer, defaultTouchTunables } from './touch/touch';
+import { Carry, defaultCarryTunables } from './carry/carry';
+import { HeldView, defaultHeldViewTunables } from './carry/heldview';
 import {
   PlayerController,
   defaultCameraTunables,
@@ -56,6 +58,7 @@ import {
   HUD_STYLES,
   type CompassNotch,
   type HudStyle,
+  type Instruments,
 } from './hud/overlay';
 
 type ViewMode = 'player' | 'third' | 'top';
@@ -65,7 +68,9 @@ const HELP: HelpRow[] = [
   { keys: 'Shift / Ctrl', action: 'run / crouch' },
   { keys: 'Space', action: 'jump, climb at a ledge' },
   { keys: 'F  or  RMB', action: 'lidar ping — cone forward + halo around you' },
-  { keys: 'E  or  LMB', action: 'shoot — flash, recoil, and the loudest noise in the hall' },
+  { keys: 'Q  or  LMB', action: 'shoot — flash, recoil, and the loudest noise in the hall' },
+  { keys: 'R', action: 'reload — 3 seconds of being blind, useless and (quietly) audible' },
+  { keys: 'E', action: 'left hand: pick up the nearest small thing / throw it where you look' },
   { keys: 'X', action: 'fire mode: auto / single' },
   { keys: 'Y', action: 'debug: hold the flash open (it lives 3 frames)' },
   { keys: 'U', action: 'debug: hitscan tracers — where the bullets really went' },
@@ -82,12 +87,12 @@ const HELP: HelpRow[] = [
   { keys: 'P', action: 'debug: spider overlay — state, goal, belief, above each spider' },
   { keys: 'I', action: 'debug: damage feedback (wedge, flinch, dark edge) on/off' },
   { keys: 'Z', action: 'debug: take a bite — from the nearest spider, else from behind' },
-  { keys: 'R', action: 'respawn' },
+  { keys: 'Backspace', action: 'respawn' },
   { keys: 'H', action: 'this help' },
 ];
 
 const HINT =
-  'WASD move · Shift run · Ctrl crouch · F lidar ping · E/LMB shoot · X fire mode · O compass · Y hold flash · P spiders · U tracers · L lights · V view · G tuning · H help';
+  'WASD move · Shift run · Ctrl crouch · F lidar ping · Q/LMB shoot · R reload · E take/throw · X fire mode · O compass · Y hold flash · P spiders · U tracers · L lights · V view · G tuning · H help';
 
 /** Where the muzzle is relative to the eye, metres — matches the rifle's collider box. */
 const MUZZLE_AHEAD = 0.55;
@@ -101,6 +106,19 @@ interface Perf {
   paintMs: number;
   renderMs: number;
   frameMs: number;
+}
+
+/**
+ * The camera's right axis, from its forward. World up is used as the reference, which is exactly
+ * right for a first-person camera that never rolls; straight up or straight down would degenerate,
+ * so those fall back to the yaw-only right vector.
+ */
+function rightOf(fx: number, _fy: number, fz: number): [number, number, number] {
+  const rx = -fz;
+  const rz = fx;
+  const len = Math.hypot(rx, rz);
+  if (len < 1e-4) return [1, 0, 0];
+  return [rx / len, 0, rz / len];
 }
 
 class App {
@@ -127,6 +145,10 @@ class App {
   private readonly lidar = new Lidar(defaultLidarTunables());
   private readonly paint: StructuredPaint;
   private readonly touch: TouchLayer;
+  /** The left hand. Exists only once the prop world does — there is nothing to pick up before. */
+  private carry: Carry | null = null;
+  /** The contour of whatever is in the left hand. Built with the props, like the carry system. */
+  private heldView: HeldView | null = null;
   /**
    * The sound layer. It listens to the bus and to nothing else, exactly as the concept demands:
    * it has no idea what physics or the player did, only that a noise happened at a point.
@@ -363,6 +385,12 @@ class App {
     // The rifle gets the prop world as its hitscan target and a seed stream of its own, so how
     // much you shoot cannot perturb the layout RNG and break every other keyframe.
     this.rifle = new Rifle(this.bus, this.props, this.seed, defaultRifleTunables());
+    this.carry = new Carry(this.props, defaultCarryTunables());
+    // The fourth thing the hand can feel is whatever it picked up — same channel, same shader,
+    // same switch as the rifle, because it is the same gesture.
+    this.heldView = new HeldView(this.props, defaultHeldViewTunables());
+    this.scene.add(this.heldView.object);
+    this.touch.attach(this.heldView);
     this.propsMs = performance.now() - t0;
 
     this.spiders.setProps(this.props);
@@ -409,6 +437,9 @@ class App {
       const p = this.player.position;
       this.props.setPlayer(p.x, p.y, p.z, this.player.bodyRadius, this.player.bodyHeight);
       this.placeRifle(eye);
+      // Whatever is in the left hand rides the camera the same way the rifle's collider does,
+      // and for the same reason: it is a kinematic body in the world, not a picture.
+      this.updateCarry(eye);
       // Before the step, so a bullet's impulse is resolved by the very tick it was fired on.
       this.updateWeapon(dt, eye);
       this.props.step(dt, this.time);
@@ -467,9 +498,15 @@ class App {
     if (i.wasKeyPressed('KeyJ')) this.lidar.refill();
     if (i.wasKeyPressed('KeyG')) this.toggleGui();
     if (i.wasKeyPressed('KeyH')) this.hud.toggleHelp();
-    if (i.wasKeyPressed('KeyR')) {
+    // M6a. `R` is the reload, because that is what `R` is in every shooter ever made; respawn —
+    // a debug affordance, not a verb of the game — moved off it onto Backspace.
+    if (i.wasKeyPressed('KeyR')) this.rifle?.beginReload();
+    if (i.wasKeyPressed('KeyE')) this.toggleCarry();
+    if (i.wasKeyPressed('Backspace')) {
       this.player.respawn();
       this.rifle?.resetRecoil();
+      this.rifle?.refillMag();
+      this.carry?.dropInPlace();
       this.vitals.reset();
       this.compass.clear();
     }
@@ -558,6 +595,44 @@ class App {
       this.camera.quaternion.z,
       this.camera.quaternion.w,
     );
+  }
+
+  /**
+   * The left hand's tick: drive whatever is in it, from the camera's own basis.
+   *
+   * Runs before `props.step`, like `placeRifle`, so the held body's kinematic target is set for
+   * the very step that is about to run and it never lags a tick behind the head.
+   */
+  private updateCarry(eye: THREE.Vector3): void {
+    const carry = this.carry;
+    if (carry === null) return;
+    if (carry.takeChanged()) {
+      // Standing still and picking something up has to make it felt *now*; the touch layer only
+      // re-queries when the player moves, and the player has not.
+      this.touch.poke();
+    }
+    if (carry.holding < 0) return;
+    const f = this.scratchDir;
+    this.camera.getWorldDirection(f);
+    if (f.lengthSq() < 1e-6) f.set(0, 0, -1);
+    const [rx, ry, rz] = rightOf(f.x, f.y, f.z);
+    carry.update(eye.x, eye.y, eye.z, f.x, f.y, f.z, rx, ry, rz);
+  }
+
+  /**
+   * One press of `E`. Empty hand takes the nearest thing small enough; full hand throws it where
+   * you are looking. There is no third case and no held-to-charge: the human asked for two
+   * presses and two presses is what makes it usable in the dark, where you cannot see a meter.
+   */
+  private toggleCarry(): 'picked' | 'thrown' | 'nothing' {
+    const carry = this.carry;
+    if (carry === null) return 'nothing';
+    const eye = this.player.eye;
+    const f = this.scratchDir;
+    this.camera.getWorldDirection(f);
+    if (f.lengthSq() < 1e-6) f.set(0, 0, -1);
+    const [rx, ry, rz] = rightOf(f.x, f.y, f.z);
+    return carry.toggle(eye.x, eye.y, eye.z, f.x, f.y, f.z, rx, ry, rz);
   }
 
   /** Debug: kick over whatever is a couple of metres ahead. The mess-maker for the keyframes. */
@@ -699,6 +774,8 @@ class App {
         cp.x, cp.y, cp.z,
         gunPunch?.pitch ?? 0, gunPunch?.back ?? 0,
       );
+      // And the thing in the other hand, drawn in the same tactile alphabet the rifle uses.
+      this.heldView?.update(this.carry?.holding ?? -1, first);
     }
     this.renderer.shadowMap.needsUpdate = this.flash.takeShadowUpdate();
 
@@ -762,7 +839,28 @@ class App {
       widthDeg: c.widthDeg,
       thickness: c.thickness,
       brightness: c.brightness,
-    });
+    }, this.instruments());
+  }
+
+  /**
+   * The three things the kit is allowed to say about the player's own hands (M6a): rounds,
+   * scanner, left hand. Assembled here because it is the only place that can see all three
+   * devices; the HUD decides when any of it is worth drawing.
+   */
+  private instruments(): Instruments | null {
+    const rifle = this.rifle;
+    if (rifle === null) return null;
+    const r = rifle.getStats();
+    const l = this.lidar.state;
+    return {
+      rounds: r.rounds,
+      magazine: r.magazine,
+      reloading: r.reloading,
+      reloadProgress: r.reloadProgress,
+      scanCharge: l.progress,
+      scanReady: l.ready,
+      held: (this.carry?.holding ?? -1) >= 0,
+    };
   }
 
   /** Debug: bite yourself. The nearest spider if there is one within earshot, else from behind. */
@@ -859,6 +957,24 @@ class App {
         rifle === null
           ? 'off'
           : `${this.rifle!.tunables.mode} · ${rifle.shots} shot / ${rifle.hits} hit · spread ${rifle.spreadDeg.toFixed(2)}°`,
+      ],
+      // M6a: the two things that can stop you acting — an empty magazine and a spent scanner —
+      // and the one thing that changes what E does next.
+      [
+        'mag',
+        rifle === null
+          ? '-'
+          : rifle.reloading
+            ? `RELOADING ${(rifle.reloadProgress * 100) | 0}%`
+            : `${rifle.rounds} / ${rifle.magazine}${rifle.rounds === 0 ? ' · EMPTY' : ''}`,
+      ],
+      [
+        'hand',
+        this.carry === null
+          ? 'off'
+          : this.carry.holding < 0
+            ? `empty · ${this.carry.state.picks} taken / ${this.carry.state.throws} thrown`
+            : `${this.carry.state.material} ${this.carry.state.mass.toFixed(1)} kg · #${this.carry.holding}`,
       ],
       [
         'recoil',
@@ -1001,6 +1117,7 @@ class App {
     shape.add(lidar, 'haloRange', 1, 20, 0.5);
     shape.add(lidar, 'waveSpeed', 8, 120, 1);
     shape.add(lidar, 'rechargeSeconds', 0.2, 20, 0.1);
+    shape.add(lidar, 'charges', 1, 4, 1).name('charges held');
 
     const cost = gui.addFolder('cost (the lag knobs)');
     cost.add(t, 'spacing', 0.08, 0.6, 0.01).onFinishChange(() => this.rebuildPaint());
@@ -1043,6 +1160,11 @@ class App {
     sound.add(m, 'spread', 30, 600, 5).onChange(() => this.markers.applyLook());
     sound.add(m, 'softness', 0.6, 6, 0.1).onChange(() => this.markers.applyLook());
     sound.add(m, 'brightness', 0, 2, 0.05).onChange(() => this.markers.applyLook());
+    // M6a: «большие области шума не должны уходить в белый». `peak` is the ceiling one
+    // mark may reach; `capOverlap` decides whether two overlapping marks add up past it
+    // (the old additive look) or stop at the brighter of the two.
+    sound.add(m, 'peak', 0.15, 1, 0.01).name('ceiling (below white)').onChange(() => this.markers.applyLook());
+    sound.add(m, 'capOverlap').name('overlap: max, not sum').onChange(() => this.markers.applyLook());
     sound.open();
 
     /*
@@ -1056,6 +1178,12 @@ class App {
     const fl = this.flash.tunables;
     gun.add(r, 'mode', FIRE_MODES as unknown as string[]);
     gun.add(r, 'rpm', 120, 1100, 10);
+    // M6a: the magazine is the brake on «бесконечно себе светить». Reload is loud, but
+    // much quieter than the shot that made you need it.
+    gun.add(r, 'magazine', 1, 60, 1).name('magazine, rounds');
+    gun.add(r, 'reloadSeconds', 0.5, 8, 0.1).name('reload, seconds');
+    gun.add(r, 'reloadLoudness', 0, 60, 1).name('reload loudness (m)');
+    gun.add({ reload: () => { this.rifle?.beginReload(); } }, 'reload').name('reload now (R)');
     gun.add(fl, 'life', 0.008, 0.5, 0.002);
     gun.add(fl, 'intensity', 20, 2000, 5);
     gun.add(fl, 'range', 8, 120, 1);
@@ -1143,7 +1271,52 @@ class App {
     me.add(this.playerHud.tunables, 'wedgeRadius', 0.15, 1, 0.01).name('ring: radius');
     me.add(this.playerHud.tunables, 'stingDark', 0, 1, 0.02);
     me.add(this.playerHud.tunables, 'lowDark', 0, 1, 0.02);
+    // M6a instruments: rounds, scanner, left hand. They live inside the sonar readout and
+    // fade out again, so the screen is black by default and speaks only when something changed.
+    me.add(this.playerHud.tunables, 'instBright', 0, 2, 0.05).name('instruments: bright');
+    me.add(this.playerHud.tunables, 'instHold', 0, 8, 0.1).name('instruments: hold, s');
+    me.add(this.playerHud.tunables, 'instSpan', 0.2, 1, 0.02).name('instruments: width');
+    me.add(this.playerHud.tunables, 'instDrop', 0.4, 0.95, 0.01).name('instruments: height');
     me.open();
+
+    // M6a — the left hand. Thresholds are the whole design question here: a can yes, a
+    // barrel no, and where exactly the line falls is his to find.
+    if (this.carry !== null) {
+      const hand = gui.addFolder('left hand (M6a)');
+      const c = this.carry.tunables;
+      hand.add(c, 'reach', 0.5, 5, 0.1).name('reach, m');
+      hand.add(c, 'maxMass', 0.2, 40, 0.2).name('max mass, kg');
+      hand.add(c, 'maxSpan', 0.1, 2, 0.02).name('max size, m');
+      hand.add(c, 'throwSpeed', 2, 30, 0.5).name('throw speed, m/s');
+      hand.add(c, 'throwLoftDeg', -10, 30, 0.5).name('throw loft, deg');
+      hand.add(c, 'throwSpin', 0, 30, 0.5).name('throw spin');
+      hand.add(c, 'holdForward', 0.1, 1.2, 0.02).name('hold: out in front');
+      hand.add(c, 'holdLeft', 0, 0.8, 0.02).name('hold: off to the left');
+      hand.add(c, 'holdDrop', 0, 0.8, 0.02).name('hold: below the eye');
+      if (this.heldView !== null) {
+        hand.add(this.heldView.tunables, 'bright', 0, 3, 0.05).name('contour brightness');
+        hand.add(this.heldView.tunables, 'visible').name('draw the contour');
+      }
+      hand.add({ drop: () => { this.carry?.dropInPlace(); } }, 'drop').name('put it down');
+      hand.close();
+    }
+
+    // M6b — the spiders' own knobs. «Радиус в тюнеры — человек будет щупать сам.»
+    if (this.spiders !== null) {
+      const sp = gui.addFolder('spiders (M6b)');
+      const st = this.spiders.tunables;
+      sp.add(st, 'smellRange', 0, 8, 0.1).name('nose radius, m');
+      sp.add(st, 'smellRise', 0.5, 6, 0.1).name('nose height, m');
+      sp.add(st, 'hopDistance', 0.5, 5, 0.1).name('hop length, m');
+      sp.add(st, 'hopRise', 0.5, 6, 0.1).name('hop up to, m');
+      sp.add(st, 'hopArc', 0.1, 3, 0.05).name('hop apex, m');
+      sp.add(st, 'restCalm', 0, 3, 0.05).name('freeze calm, s');
+      sp.add(st, 'restHot', 0, 1.5, 0.02).name('freeze rushing, s');
+      sp.add(st, 'clickSlow', 1, 20, 0.5).name('click gap, listening');
+      sp.add(st, 'clickFast', 0.05, 3, 0.05).name('click gap, attacking');
+      sp.add(st, 'clickCloseRange', 0, 20, 0.5).name('loud only within, m');
+      sp.close();
+    }
 
     const cp = gui.addFolder('noise compass');
     const ct = this.compass.tunables;
@@ -1268,7 +1441,7 @@ class App {
       },
       /** Holds the trigger down / lets it go, so a scenario can fire an honest burst. */
       trigger: (on: boolean) => {
-        window.dispatchEvent(new KeyboardEvent(on ? 'keydown' : 'keyup', { code: 'KeyE' }));
+        window.dispatchEvent(new KeyboardEvent(on ? 'keydown' : 'keyup', { code: 'KeyQ' }));
       },
       fireMode: (mode?: FireMode) => {
         const rifle = this.rifle;
@@ -1292,6 +1465,55 @@ class App {
         Object.assign(this.rifle.tunables, patch);
         return { ...this.rifle.tunables };
       },
+      /** M6a: rounds left, whether a reload is running, and how far along it is. */
+      ammo: () => {
+        const st = this.rifle?.getStats() ?? null;
+        if (st === null) return null;
+        return {
+          rounds: st.rounds,
+          magazine: st.magazine,
+          reloading: st.reloading,
+          reloadProgress: st.reloadProgress,
+          ready: st.ready,
+        };
+      },
+      /** Leave exactly n rounds in the gun — how a scenario photographs an empty magazine. */
+      setRounds: (n: number) => {
+        this.rifle?.setRounds(n);
+        return this.rifle?.getStats().rounds ?? 0;
+      },
+      /** Start a reload the way R does. False when it is already running or the mag is full. */
+      reload: () => this.rifle?.beginReload() ?? false,
+      /** The left hand, exactly as E drives it: take the nearest small thing, or throw it. */
+      hand: () => {
+        const c = this.carry;
+        if (c === null) return null;
+        const st = c.state;
+        return {
+          held: c.holding,
+          material: st.material,
+          mass: st.mass,
+          picks: st.picks,
+          throws: st.throws,
+          lastThrow: [st.lastThrowX, st.lastThrowY, st.lastThrowZ] as [number, number, number],
+          /** Which prop the tactile contour is actually drawing this frame, or -1. */
+          contour: this.heldView?.drawing ?? -1,
+        };
+      },
+      /*
+       * One press of E, applied now rather than queued as a key event: the generator wants the
+       * answer in the same call ("did it take anything?"), and a dispatched KeyE would only be
+       * read on the next fixed tick.
+       */
+      handToggle: () => {
+        this.toggleCarry();
+        return this.carry?.holding ?? -1;
+      },
+      /** Put whatever is in the hand back on the floor without throwing it. */
+      handDrop: () => {
+        this.carry?.dropInPlace();
+        return this.carry?.holding ?? -1;
+      },
       /** Debug/keyframes: the rifle mesh on or off, to measure what it adds to a flash frame. */
       viewmodel: (on?: boolean) => {
         if (on !== undefined) this.rifleView.tunables.visible = on;
@@ -1308,11 +1530,20 @@ class App {
       },
       /** Every recent trace, muzzle → impact, for scenarios that check where rounds landed. */
       shotList: () => this.rifle?.recentShots.map((sh) => ({ ...sh })) ?? [],
-      pose: (x: number, z: number, yawDeg: number) => {
+      /**
+       * `y` is optional and defaults to the floor, which is every existing call. M6b needs the
+       * player standing on top of a cupboard — the one place the pack was not supposed to be able
+       * to reach — and there is no other way to get him up there deterministically.
+       */
+      pose: (x: number, z: number, yawDeg: number, y = 0) => {
         // A teleport is not a shooting stance: drop the climb the last burst left in the body,
         // or every scenario inherits the drift of the one before it.
         this.rifle?.resetRecoil();
-        this.player.setSpawn(new THREE.Vector3(x, 0, z), yawDeg);
+        // Same argument for the magazine and for the left hand: a scenario that teleports must
+        // not inherit the ammunition — or the can — that the previous scenario left behind.
+        this.rifle?.refillMag();
+        this.carry?.dropInPlace();
+        this.player.setSpawn(new THREE.Vector3(x, y, z), yawDeg);
         // The ping direction is read off the camera, so the camera has to already be there.
         this.player.applyToCamera(this.camera, 0);
       },
@@ -1389,6 +1620,12 @@ class App {
         return this.markers.style;
       },
       markerStyles: () => [...MARKER_STYLES],
+      /** M6a: the ceiling knobs, live — `tools/hands.mjs` shoots the A/B pair with them. */
+      markerTune: (patch: Partial<Record<string, number | boolean>>) => {
+        Object.assign(this.markers.tunables, patch);
+        this.markers.applyLook();
+        return { ...this.markers.tunables };
+      },
       markList: () => this.markers.list(),
       /** Debug: shove the clutter around a world point. Returns how many bodies woke up. */
       disturb: (x: number, y: number, z: number, radius: number, impulse: number) =>

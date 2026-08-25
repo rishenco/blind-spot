@@ -30,7 +30,7 @@
 import type { SoundBus, SoundEvent, SoundSource } from '../events/bus';
 
 /** Sources the compass refuses to report, because they are always at the player himself. */
-const SELF: ReadonlySet<SoundSource> = new Set<SoundSource>(['player-step', 'player-land', 'gunshot']);
+const SELF: ReadonlySet<SoundSource> = new Set<SoundSource>(['player-step', 'player-land', 'gunshot', 'reload']);
 
 /**
  * Colour is identity, not quantity — the one rule this palette has.

@@ -46,8 +46,12 @@ export function defaultLidarTunables(): LidarTunables {
     coneRange: 34,
     haloRange: 5.5,
     waveSpeed: 42,
-    rechargeSeconds: 5,
-    charges: 2,
+    // M6a: the concept calls the recharge "долгая" and prices the whole device on it, and at
+    // 5 s x 2 charges it was neither — you could paint the room, walk, and paint it again before
+    // the dark had time to matter. Ten seconds, and only one charge held: a scan is now a
+    // decision you live with, and the ten seconds after it are the game.
+    rechargeSeconds: 10,
+    charges: 1,
   };
 }
 

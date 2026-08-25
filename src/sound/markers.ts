@@ -74,6 +74,9 @@ const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number; kind: numb
   'prop-impact': { color: 0xffc46a, gain: 1, kind: KIND_WORLD },
   gunshot: { color: 0xfff0c0, gain: 1.15, kind: KIND_SELF },
   'bullet-hit': { color: 0xffd890, gain: 1.3, kind: KIND_WORLD },
+  // The magazine swap: your own noise, and small. Cooler than a muzzle blast on purpose — it is
+  // metal handled, not powder burnt.
+  reload: { color: 0xffb060, gain: 0.9, kind: KIND_SELF },
   spider: { color: 0xff9ec0, gain: 1, kind: KIND_ALIEN },
 };
 
@@ -191,6 +194,24 @@ export interface MarkerTunables {
   /** Falloff exponent of the blob. Low = wide woolly haze, high = tight core. */
   softness: number;
   brightness: number;
+  /**
+   * The ceiling the channel is allowed to reach, 0..1 — M6a, and the human's own reasoning:
+   * "если фон и так белый, вспышке нечем светить". A big mark used to saturate its centre to
+   * pure white, and once a corner of the frame is white the muzzle flash — the only real light
+   * in the game, and the thing the whole shot is paid for — has nothing left to add. So the
+   * layer stops a shade below white and stays a *readout* rather than a light source.
+   */
+  peak: number;
+  /**
+   * Whether overlapping marks are capped as well as single ones.
+   *
+   * Clamping one fragment is not enough on its own: under additive blending five marks at 0.7
+   * still sum to white, and "big areas of noise" are exactly where several marks pile up. With
+   * this on, the layer composites with `max` instead of `+` — the brightest mark at a pixel wins
+   * and nothing ever accumulates past `peak`. Off restores the old additive sum, kept because
+   * the two are worth comparing on the same frame rather than argued about.
+   */
+  capOverlap: boolean;
   style: MarkerStyle;
 }
 
@@ -238,6 +259,15 @@ export function defaultMarkerTunables(): MarkerTunables {
     spread: 110,
     softness: 1.5,
     brightness: 1,
+    /*
+     * 0.68. Chosen against the one thing the ceiling is for: the muzzle flash's own frame. The
+     * flash lifts what it hits to nearly full white, so the noise layer has to sit far enough
+     * below that for the difference to still read as *light arriving*. Two thirds is that
+     * distance by eye on the shot keyframe; higher and the flash lands on a bright background,
+     * lower and the loud end of the loudness scale stops being loud.
+     */
+    peak: 0.68,
+    capOverlap: true,
     /*
      * `echo` is the human's pick out of the seven, made in the live game: "ехо визуал мне нрав".
      * It is therefore the baseline now, and `bloom` — which was the baseline only because it was
@@ -360,6 +390,7 @@ const FRAGMENT = /* glsl */ `
   precision highp float;
   uniform float uSoftness;
   uniform float uBright;
+  uniform float uPeak;
   uniform float uStyle;
   varying vec3  vColor;
   varying float vFade;
@@ -556,6 +587,10 @@ const FRAGMENT = /* glsl */ `
     a *= mix(1.0, 0.45 + 0.55 * smoothstep(0.0, 0.78, r), vBurn);
 
     a *= vFade * uBright;
+    // The ceiling. Applied to alpha rather than to the colour, so the hue of the mark is exactly
+    // what it was and only its energy is limited — a clamp on the premultiplied RGB would drag
+    // every bright mark towards grey as it approached the cap.
+    a = min(a, uPeak);
     if (a <= 0.002) discard;
     gl_FragColor = vec4(c * a, a);
   }
@@ -680,6 +715,7 @@ export class SoundMarkers {
         uViewport: { value: new THREE.Vector2(1280, 720) },
         uSoftness: { value: tunables.softness },
         uBright: { value: tunables.brightness },
+        uPeak: { value: tunables.peak },
         uStyle: { value: STYLE_INDEX[tunables.style] },
       },
       vertexShader: VERTEX,
@@ -687,8 +723,10 @@ export class SoundMarkers {
       transparent: true,
       depthTest: false,
       depthWrite: false,
+      // Set properly a line below; see `applyBlend`.
       blending: THREE.AdditiveBlending,
     });
+    this.applyBlend();
 
     const blobs = new THREE.Mesh(this.geometry, this.material);
     blobs.frustumCulled = false;
@@ -791,8 +829,32 @@ export class SoundMarkers {
     u.uSpread!.value = t.spread;
     u.uSoftness!.value = t.softness;
     u.uBright!.value = t.brightness;
+    u.uPeak!.value = t.peak;
     u.uStyle!.value = STYLE_INDEX[t.style] ?? 0;
+    this.applyBlend();
     this.ringMaterial.uniforms.uLife!.value = t.life;
+  }
+
+  /**
+   * `max` or `+`. Under `max` a pixel takes the brightest mark covering it and stops there, which
+   * is the only way a *ceiling* survives ten marks landing on the same spot. It also means the
+   * sound layer no longer washes out the lidar's dots underneath it — a welcome second effect,
+   * and the reason the flash still has somewhere to go.
+   */
+  private applyBlend(): void {
+    const m = this.material;
+    if (this.tunables.capOverlap) {
+      m.blending = THREE.CustomBlending;
+      m.blendEquation = THREE.MaxEquation;
+      m.blendSrc = THREE.OneFactor;
+      m.blendDst = THREE.OneFactor;
+      m.blendEquationAlpha = THREE.MaxEquation;
+      m.blendSrcAlpha = THREE.OneFactor;
+      m.blendDstAlpha = THREE.OneFactor;
+    } else {
+      m.blending = THREE.AdditiveBlending;
+    }
+    m.needsUpdate = true;
   }
 
   /** The bus subscriber. One event, one slot in the ring. No allocation. */

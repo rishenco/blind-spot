@@ -73,6 +73,19 @@ export interface RifleTunables {
   hitLoudness: number;
   /** Impulse handed to whatever the bullet hits, N·s. Light junk gets thrown; a barrel rocks. */
   hitImpulse: number;
+  /**
+   * Rounds in a magazine. The reason this number exists at all (M6a): unlimited fire is
+   * unlimited light, and the game's central trade — see a little now, pay a lot later — stops
+   * being a trade when the flash is free.
+   */
+  magazine: number;
+  /** Seconds to swap a magazine. Deliberately long: a moment of being blind and useless. */
+  reloadSeconds: number;
+  /**
+   * Metres of notice for the reload itself. It is not silent — you are fumbling metal in the
+   * dark — but next to a 90 m gunshot it is a whisper.
+   */
+  reloadLoudness: number;
 }
 
 export function defaultRifleTunables(): RifleTunables {
@@ -107,6 +120,9 @@ export function defaultRifleTunables(): RifleTunables {
     gunshotLoudness: 90,
     hitLoudness: 15,
     hitImpulse: 6.5,
+    magazine: 15,
+    reloadSeconds: 3,
+    reloadLoudness: 11,
   };
 }
 
@@ -148,6 +164,14 @@ export interface RifleStats {
   risePitchDeg: number;
   riseYawDeg: number;
   ready: boolean;
+  /** Rounds left in the magazine. */
+  rounds: number;
+  /** Magazine size, echoed so a HUD does not have to reach into the tunables. */
+  magazine: number;
+  /** True while a magazine is being swapped: no rounds leave the barrel. */
+  reloading: boolean;
+  /** 0..1 through the reload, 1 when not reloading. */
+  reloadProgress: number;
 }
 
 /**
@@ -169,6 +193,10 @@ export class Rifle {
 
   private cooldown = 0;
   private sinceShot = 1e9;
+  /** Rounds left. Filled in the constructor from the tunable, so a slider change is not retroactive. */
+  private rounds: number;
+  /** Seconds left in the current magazine swap, 0 when not reloading. */
+  private reloadLeft = 0;
   private shots = 0;
   private hits = 0;
 
@@ -195,6 +223,7 @@ export class Rifle {
     tunables: RifleTunables = defaultRifleTunables(),
   ) {
     this.tunables = tunables;
+    this.rounds = Math.max(1, Math.round(tunables.magazine));
     // A stream of its own: the layout RNG must not be perturbed by how much the player shoots.
     this.rng = makeRng((seed ^ 0x5f3b91) >>> 0);
   }
@@ -206,7 +235,13 @@ export class Rifle {
       spreadDeg: this.tunables.spreadDeg + this.spread,
       risePitchDeg: this.risePitch,
       riseYawDeg: this.riseYaw,
-      ready: this.cooldown <= 0,
+      ready: this.cooldown <= 0 && this.reloadLeft <= 0 && this.rounds > 0,
+      rounds: this.rounds,
+      magazine: Math.max(1, Math.round(this.tunables.magazine)),
+      reloading: this.reloadLeft > 0,
+      reloadProgress: this.reloadLeft > 0
+        ? 1 - this.reloadLeft / Math.max(0.01, this.tunables.reloadSeconds)
+        : 1,
     };
   }
 
@@ -243,13 +278,33 @@ export class Rifle {
     this.cooldown -= dt;
     this.sinceShot += dt;
 
+    // The magazine swap. It runs on the simulation clock like everything else, and while it runs
+    // the trigger does nothing at all — that helplessness is the point of the feature.
+    if (this.reloadLeft > 0) {
+      this.reloadLeft -= dt;
+      if (this.reloadLeft <= 0) {
+        this.reloadLeft = 0;
+        this.rounds = Math.max(1, Math.round(t.magazine));
+        // The noise of the swap lands where the player is, when the magazine seats — not when
+        // the button was pressed. Spare magazines are unlimited for now, so there is nothing
+        // else to account for.
+        this.bus.emit({ source: 'reload', x: mx, y: my, z: mz, loudness: t.reloadLoudness, material: 'steel' });
+      }
+      this.spread = Math.max(0, this.spread - t.spreadRecover * dt);
+    } else if (this.rounds <= 0 && (held || pressed)) {
+      // Pulling the trigger on an empty gun starts the swap. No dry-fire click: an empty
+      // magazine is a state the instrument reports, not a sound the player discovers.
+      this.beginReload();
+    }
+
     // Single fire wants the *edge*: holding the trigger down must produce exactly one round.
     const wants = this.tunables.mode === 'auto' ? held : pressed;
-    if (wants && this.cooldown <= 0) {
+    if (wants && this.cooldown <= 0 && this.reloadLeft <= 0 && this.rounds > 0) {
       // Rounds land on the cyclic rate, not on the tick rate: at 120 Hz sim and 720 rpm a held
       // trigger would otherwise fire on some ticks and not others, and the rhythm would wobble.
       this.cooldown += 60 / t.rpm;
       if (this.cooldown < 0) this.cooldown = 60 / t.rpm;
+      this.rounds--;
       out.push(this.shoot(mx, my, mz, fx, fy, fz, time));
       this.sinceShot = 0;
     } else if (!held) {
@@ -299,6 +354,34 @@ export class Rifle {
    */
   forceReady(): void {
     this.cooldown = 0;
+  }
+
+  /**
+   * Starts a magazine swap. Refuses if one is already running or the magazine is already full —
+   * "R spam" must not be a way to keep the gun permanently unusable *or* permanently noisy.
+   */
+  beginReload(): boolean {
+    const t = this.tunables;
+    if (this.reloadLeft > 0) return false;
+    if (this.rounds >= Math.max(1, Math.round(t.magazine))) return false;
+    this.reloadLeft = Math.max(0.01, t.reloadSeconds);
+    return true;
+  }
+
+  /**
+   * Debug/harness only: a full magazine, right now, with no swap and no noise. The keyframe
+   * generator teleports between unrelated scenarios and must not inherit the previous one's
+   * ammunition — same reasoning as `resetRecoil`.
+   */
+  refillMag(): void {
+    this.reloadLeft = 0;
+    this.rounds = Math.max(1, Math.round(this.tunables.magazine));
+  }
+
+  /** Debug/harness only: leave exactly `n` rounds, so "empty magazine" is one call away. */
+  setRounds(n: number): void {
+    this.reloadLeft = 0;
+    this.rounds = Math.max(0, Math.min(Math.max(1, Math.round(this.tunables.magazine)), Math.round(n)));
   }
 
   /**

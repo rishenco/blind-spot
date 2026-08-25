@@ -22,6 +22,13 @@ export type SoundSource =
   | 'prop-impact'
   | 'gunshot'
   | 'bullet-hit'
+  /**
+   * A magazine swap (M6a). Added because the reload is a *moment*, not a pause: the player is
+   * blind, useless and — now — audible, at a fraction of a gunshot's reach. It is a separate
+   * source rather than a quiet 'gunshot' so the mixer and the marker layer can give it its own
+   * character without having to guess from loudness.
+   */
+  | 'reload'
   | 'spider';
 
 /**

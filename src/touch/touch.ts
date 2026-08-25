@@ -117,6 +117,15 @@ export class TouchLayer {
     return this.stats;
   }
 
+  /**
+   * "Something changed under the hand" — re-query on the next tick even if the player has not
+   * moved a millimetre. Standing still and picking a can up used to leave it unfelt until you
+   * shuffled 8 cm, because the only thing that ever invalidated the mask was your own motion.
+   */
+  poke(): void {
+    this.dirty = true;
+  }
+
   /** Forgets the trail. The mask itself is cleared by the paint, which owns it. */
   clear(): void {
     this.lastX = Number.NaN;
