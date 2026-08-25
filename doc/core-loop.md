@@ -29,7 +29,12 @@ camp and artifact bank.
   gradient: bare steel frame up top, poured concrete mid-tower, stone and dust pockets below.
   Every surface's material class scales the sound of crossing it (vision §3.9) — the loud-fast
   steel walkway versus the quiet-slow dust slab is the tower's most frequent routing choice,
-  and the spider's footfall timbre tells you which surface it is on.
+  and the spider's footfall timbre tells you which surface it is on. The shape of that choice
+  is built once already, as the test room's dust apron (vision §3.9, `src/world/room.ts`): one
+  landmark that must be gone *around*, a short loud lane on one side of it and a longer quiet
+  one on the other, and the material boundary laid on a line the player can already point at.
+  That is the unit the tower multiplies, and §5's "three price-tier routes to every artifact"
+  is the same claim one scale up.
 - **Props.** Construction clutter is the authored sound-trap set — pipe stacks, sheet metal,
   chain curtains, glass panes — at chokepoints. Readable via the 2 m contact shell before they
   trigger at walk speed.

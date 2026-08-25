@@ -201,15 +201,28 @@ Dust is the quiet end, and it exists so the tower has a floor to reward: without
 concrete, every surface is normal-or-louder and "go slow and stay quiet" has nothing to pay it.
 
 The player-facing consequence: crossing the steel walkway is loud and fast, crossing the dusty
-slab is quiet and slow — a real routing choice every few seconds, priced in the same currency
-as everything else. And it cuts both ways: the spider's footfalls carry the material they
-strike, so its voice tells you what it is walking on and therefore *where it is* — a change of
-timbre mid-stride is a change of surface (core-loop §3.2).
+slab is quiet and slow — a real routing choice, priced in the same currency as everything else,
+and at tower scale one the player meets every few seconds (core-loop §1). And it cuts both
+ways: the spider's footfalls carry the material they strike, so its voice tells you what it is
+walking on and therefore *where it is* — a change of timbre mid-stride is a change of surface
+(core-loop §3.2).
 
 Status: the multipliers are live. `SoundBus.emit` scales both radii of every contact-class
 event by the struck surface's voice, and the surface comes from the box the collision pass
 resolved against (`MoveResult.groundBox`), so what the world hears is what the body actually
 touched. Pings are not contact sounds and are not scaled — naming a material on one throws.
+
+Dust has a floor to stand on as of the test room's **apron**: the far room south of the
+chokepoint door-line is the same continuous slab as the rest of the floor in a different
+material band, which turns the tank in the middle of that room into a fork — a short loud lane
+north of it, a long quiet one south of it (`src/world/room.ts`; the two lanes are searched,
+measured and pinned in `tests/room.test.ts`). One fork in one room is a probe of the mechanic,
+not the cadence this section asks for; that arrives with the gym (core-loop §11, M3) and the
+tower's material gradient (core-loop §1). What the probe does establish is that the difference
+survives the only condition the game is ever played in: one walk-step on concrete hands back
+2184 dots of floor and one on dust 673, and the screenshots are a lit room against a puddle at
+your own feet (`tools/shoot.mjs` §08).
+
 What remains of M1 is making the difference *audible* rather than only visible: the synthesized
 voices themselves, and the attack-window loudness normalization described above.
 

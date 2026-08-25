@@ -49,8 +49,14 @@ const GOLDEN_DUST = [
  * The lattice dot count of the shipped room on the default path. A real measurement, not a
  * guess: it is what `structDots` has always reported, and the whole point of pinning it is that
  * it moves the moment the lattice jitter stream does.
+ *
+ * 95055 until the dust apron split the floor into three coplanar material bands, then 95268.
+ * Nearly all of the +213 is the bottom row of the new buried seam faces, which the bury test's
+ * own slack lets through a metre under the walking surface (dots below y = -0.05 went 3336 ->
+ * 3542); the remainder is the whole lattice shifting, because every box draws its jitter from
+ * one sequential stream and there are now two more boxes in it.
  */
-const ROOM_DOTS_DEFAULT = 95055;
+const ROOM_DOTS_DEFAULT = 95268;
 
 function draw(seed: number, count: number): number[] {
   const rng = makeRng(seed);

@@ -296,7 +296,9 @@ describe('the headless simulation', () => {
   it('builds the real room and its meshes without a renderer', () => {
     const world = new StaticWorld();
     const room = buildRoom(world);
-    expect(world.boxes).toHaveLength(60);
+    // 62 since the dust apron: the floor is one slab in three coplanar material bands
+    // (`src/world/room.ts`), not one box, so splitting it added two.
+    expect(world.boxes).toHaveLength(62);
     expect(room.reveal.visible).toBe(false);
     room.dispose();
   });

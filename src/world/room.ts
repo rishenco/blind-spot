@@ -3,9 +3,11 @@
  *
  * This is the level the prototype runs in and the shape the eventual authored-room library
  * (vision §11) will be assembled out of: a rectangular shell with a chokepoint across it, a
- * side chamber whose only way in is a corner doorway, a stair flight, scattered cargo and one
- * large-silhouette landmark. It is smaller than 45 × 30 on purpose — §11 wants floors sized
- * 30-40 % under what looks right on paper, because dark space reads bigger.
+ * side chamber whose only way in is a corner doorway, a stair flight, scattered cargo, one
+ * large-silhouette landmark, and — around that landmark — the level's one routing choice, a
+ * loud short way and a quiet long one (see `APRON_Z`). It is smaller than 45 × 30 on purpose —
+ * §11 wants floors sized 30-40 % under what looks right on paper, because dark space reads
+ * bigger.
  *
  * Two rules govern everything here:
  *
@@ -24,7 +26,7 @@
 
 import * as THREE from 'three';
 import { StaticWorld, aabbFromBounds } from '../core/collision';
-import { MAT_CONCRETE, MAT_METAL, MAT_STONE } from '../paint/materials';
+import { MAT_CONCRETE, MAT_DUST, MAT_METAL, MAT_STONE } from '../paint/materials';
 
 // Room shell.
 const HALF_X = 15;
@@ -41,6 +43,73 @@ const TEST_CRATE = { x: -9.0, z: -3.2 };
 /** West end of the side-chamber partition. Everything from here to the chokepoint is doorway. */
 const CHAMBER_DOOR_X = -1.0;
 
+/*
+ * ---------------------------------------------------------------------------
+ * The dust apron: the far room's quiet half, and the level's one routing choice
+ * ---------------------------------------------------------------------------
+ *
+ * Vision §3.9 promises the player a decision: "crossing the steel walkway is loud and fast,
+ * crossing the dusty slab is quiet and slow — a real routing choice ... priced in the same
+ * currency as everything else." Until this apron there was no `MAT_DUST` collider anywhere in
+ * the game, so the quiet end of the material table was a number with nothing under it: the
+ * multiplier was unit-tested, the voice was synthesized, and no body could ever stand on it.
+ *
+ * **Where the choice is.** The tank at (8.5, -2) is 6.4 m across and 6 m tall — the only thing
+ * in the room that cannot be gone over, only around. It leaves two ways east: a 3.6 m gap
+ * between its north face and the side-chamber partition, and a 4.8 m one between its south face
+ * and the -Z wall. Both leave the chokepoint doorway and both rejoin at the far room's east
+ * end, which is what makes them routes rather than directions — and the tank is the room's
+ * landmark, so "north of it or south of it" is a decision a player can hold in their head after
+ * one ping.
+ *
+ * **What each costs.** Measured door-to-east-wall on a 0.25 m grid (`tests/room.test.ts` walks
+ * both and pins them): north is 20.9 m and not one step of it is on dust; south is 24.0 m and
+ * most of it is. So quiet is +15 % distance — and distance is the smaller half of the bill. The
+ * north lane carries the steel bench, which is the invitation to sprint it and to vault rather
+ * than round it: over the bench it is 19.1 m, and at 6 m/s the whole run is 3.2 s with every
+ * footfall lighting 7 m of concrete ahead (10.5 m off the steel). The south lane at ×0.6 has to
+ * be *walked*, because sprinting on dust still paints 4.2 m and carries 14.4 m to any ear —
+ * quiet is a stance, and the surface only discounts it. Walked, a dust step paints 2.4 m instead
+ * of 4: barely past your own feet, on the blind side of a 6 m tank, for 6.9 s. Twice the time
+ * for a route you can hardly see, and buying the sight back costs a Q-ping, which is louder than
+ * every footstep it saved. Law 1 collecting on both sides of the same decision.
+ *
+ * **Why the boundary is here.** §3.2 fixes painted geometry to the cyan band whatever it is made
+ * of, so a ping can show you *that* the floor is jointed here and never *what* is on the far
+ * side of the joint — the reveal draws a contour wherever two boxes meet, and a joint could be
+ * anything. Learning that this one is the quiet surface still costs a footstep, which is the
+ * shape law 1 wants: the question is free to ask and the answer is not.
+ *
+ * So the boundary wants to be a line the player can already point at. `APRON_Z` is the
+ * chokepoint doorway's south jamb run due east: step out of the door, turn right, and a metre
+ * later you are on it. `APRON_X` is the same wall's east face — which also buys the west seam
+ * for nothing, because it hides under a wall the floor already creases against, leaving one new
+ * line in the room instead of two. The apron is exactly "the far room, south of the door-line",
+ * and the near room keeps its ordinary poured floor as the thing dust is quieter *than*.
+ */
+/** The far room's floor changes on this line: the chokepoint doorway's south jamb, run east. */
+const APRON_Z = -1.9;
+/** ...and starts at the chokepoint wall's east face, so the near room stays entirely concrete. */
+const APRON_X = -3.8;
+/*
+ * The bands abut exactly — no overlap, no gap — and both halves of that matter.
+ *
+ * A gap is a hole to fall down. An overlap is worse than it looks: two coplanar tops both
+ * survive the reveal's bury test (a face is culled only when it turns out of the level or sits
+ * *strictly* inside a neighbour, and nothing is above a floor), so the strip where they cross
+ * gets lattice twice and reads as a brighter line drawn exactly along the material change.
+ * That is the matter layer answering a question it is not allowed to answer: §3.2 gives painted
+ * geometry one hue band whatever it is made of, precisely so that what a surface is made of
+ * costs a footstep to learn. Measured, a 0.2 m sink cost 184 dots more than a clean abutment
+ * and put 51 of them in that strip.
+ *
+ * What abutting still costs is the vertical seams themselves, a metre tall and buried: their
+ * lattice is culled row by row against the band next door except the bottom row, which lands on
+ * the bury test's own slack. That is 206 dots a metre under the floor, on faces no probe can
+ * reach unoccluded, so they are built and never unlocked — the same edge artifact every
+ * abutment in this room already has, and the cheapest of the three ways to split a slab.
+ */
+
 /**
  * World boxes tooling counts known geometry inside (see `Game.debugProbe`).
  *
@@ -52,9 +121,13 @@ export const PROBE_REGIONS: Readonly<
   Record<string, readonly [number, number, number, number, number, number]>
 > = Object.freeze({
   // The +X face of the 1 m crate: the side the player cannot see when facing it from the spawn.
-  crateBack: [TEST_CRATE.x + 0.45, 0, TEST_CRATE.z - 0.55, TEST_CRATE.x + 0.6, 1.0, TEST_CRATE.z + 0.55],
+  // Floored at 4 cm so the box named here is the crate's face and nothing else: the reveal puts
+  // floor dots 1.2 cm up (`SURFACE_OFFSET`) and the crate's lowest lattice row at 7 cm, and a
+  // region that reaches y = 0 quietly counts the slab in the crate's own shadow as part of the
+  // crate — which is a dot that will never unlock with it, because it is not part of it.
+  crateBack: [TEST_CRATE.x + 0.45, 0.04, TEST_CRATE.z - 0.55, TEST_CRATE.x + 0.6, 1.0, TEST_CRATE.z + 0.55],
   // The -X face of the same crate: the side that is struck.
-  crateFront: [TEST_CRATE.x - 0.6, 0, TEST_CRATE.z - 0.55, TEST_CRATE.x - 0.45, 1.0, TEST_CRATE.z + 0.55],
+  crateFront: [TEST_CRATE.x - 0.6, 0.04, TEST_CRATE.z - 0.55, TEST_CRATE.x - 0.45, 1.0, TEST_CRATE.z + 0.55],
   // Deep inside the side chamber, past the doorway's line of sight from anywhere in the room.
   chamber: [4, 0, 5.6, 14, 7, 9.8],
   // The crate standing in it.
@@ -67,6 +140,10 @@ export const PROBE_REGIONS: Readonly<
 export const REVEAL_BACKGROUND = 0x0d1216;
 const REVEAL_COLORS = {
   floor: 0x8d959c,
+  // The apron, so a human holding L can see where the quiet half of the far room begins. The
+  // dark cannot borrow this: §3.2 gives painted geometry one hue band whatever it is made of,
+  // and the only way to learn a surface in play is still to stand on it.
+  dust: 0x6f685c,
   wall: 0x99a1a8,
   prop: 0x7d858c,
   accent: 0x2d6b78,
@@ -75,6 +152,7 @@ const REVEAL_COLORS = {
 
 interface RevealMaterials {
   floor: THREE.Material;
+  dust: THREE.Material;
   wall: THREE.Material;
   prop: THREE.Material;
   accent: THREE.Material;
@@ -190,6 +268,7 @@ export function buildRoom(world: StaticWorld): Room {
 
   const mats: RevealMaterials = {
     floor: make(REVEAL_COLORS.floor, 0.95),
+    dust: make(REVEAL_COLORS.dust, 1.0),
     wall: make(REVEAL_COLORS.wall, 0.98),
     prop: make(REVEAL_COLORS.prop, 0.9),
     accent: make(REVEAL_COLORS.accent, 0.85),
@@ -199,8 +278,17 @@ export function buildRoom(world: StaticWorld): Room {
   const b = new Builder(reveal, world, geometries);
 
   // --- shell: floor, ceiling and four walls. A closed box, so every ping has something
-  // to come back from in every direction. All of it poured concrete.
-  b.bounds(-HALF_X, -1, -HALF_Z, HALF_X, 0, HALF_Z, mats.floor, MAT_CONCRETE, true);
+  // to come back from in every direction.
+  //
+  // The floor is one slab in three material bands, not three floors: same plane, same top at
+  // y = 0, one continuous walking surface. The apron is laid first because `moveBody` resolves
+  // ties on `maxY` in favour of the first box the broadphase yields and all three tops are at
+  // y = 0 — so a foot whose circle reaches the door-line at all is standing on dust, rather
+  // than the body having to clear the line by its own radius before the floor admits what it
+  // is made of.
+  b.bounds(APRON_X, -1, -HALF_Z, HALF_X, 0, APRON_Z, mats.dust, MAT_DUST, true);
+  b.bounds(-HALF_X, -1, -HALF_Z, APRON_X, 0, APRON_Z, mats.floor, MAT_CONCRETE, true);
+  b.bounds(-HALF_X, -1, APRON_Z, HALF_X, 0, HALF_Z, mats.floor, MAT_CONCRETE, true);
   b.bounds(-HALF_X, ROOM_H, -HALF_Z, HALF_X, ROOM_H + 0.5, HALF_Z, mats.wall, MAT_CONCRETE, true);
   b.bounds(-HALF_X - WALL_T, 0, -HALF_Z - WALL_T, -HALF_X, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE, true);
   b.bounds(HALF_X, 0, -HALF_Z - WALL_T, HALF_X + WALL_T, ROOM_H, HALF_Z + WALL_T, mats.wall, MAT_CONCRETE, true);

@@ -670,8 +670,17 @@ describe('the shared slab core reproduces what it replaced', () => {
     game.step();
     game.sim.paint.structured.drain();
     const state = game.sim.debugState();
-    expect(Number(state.structUnlockedDots)).toBe(24286);
-    expect(Number(state.structUnlockedEdges)).toBe(2537);
+    // 24286 before the dust apron split the floor into three coplanar bands. The apron adds no
+    // surface a ping can reach — the bands share one plane and one top — so what moved is the
+    // jitter stream under every dot in the room, and the count moved by ten.
+    expect(Number(state.structUnlockedDots)).toBe(24276);
+    // 2537 before the apron. Splitting the floor put two new box edges in it, and the reveal
+    // draws a contour wherever two faces meet whether or not the surface turns there — the same
+    // thing the tank's nine abutting slices already do along their shared tops. The west one is
+    // free: it runs under the chokepoint wall, where the floor already creases. The north one is
+    // the 18.8 m the count moved for, and it lies on the line the doorway's south jamb already
+    // draws, which is the second reason the apron starts there.
+    expect(Number(state.structUnlockedEdges)).toBe(2654);
     game.sim.dispose();
   });
 });
