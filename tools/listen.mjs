@@ -341,6 +341,10 @@ async function renderScene(scene, withHum) {
       cls: event.class,
       mat: event.mat === null ? null : MATERIAL_NAMES[event.mat],
       carries: event.hearingRadius,
+      // How far the ear was from it. Not printed — the timeline is for a listener and a column
+      // of metres is noise there — but half of `gainFor` is this number, so a scene that wants
+      // to argue about level between two events has to be able to show they were equally far.
+      d: Math.hypot(event.x - p.x, event.y - p.y, event.z - p.z),
       audible: SoundBus.canHear(event, p.x, p.y, p.z, game.sim.paint.perception.hearingRange),
     });
   });
@@ -368,9 +372,14 @@ async function renderScene(scene, withHum) {
      * avoid: a pose the player could not have produced. The conversion is read from
      * `cameraTunables` so retuning the mouse does not silently turn every scene by a different
      * amount.
+     *
+     * Pitch through the same call and the same conversion, because aim is one thing: a scene
+     * that threw down at the floor by writing `pitch` would be aiming from a pose no mouse can
+     * reach, and the clamp at ±89° would never get a say in it.
      */
-    turn(degrees) {
-      game.input.look(-degrees / game.sim.cameraTunables.sensitivity, 0);
+    turn(yawDegrees, pitchDegrees = 0) {
+      const sens = game.sim.cameraTunables.sensitivity;
+      game.input.look(-yawDegrees / sens, -pitchDegrees / sens);
     },
     /**
      * Puts the body as high as it can legally stand above where it is standing now.
@@ -606,6 +615,189 @@ function buildScenes(world, body) {
             staged.dropped === undefined
               ? 'the scene never staged a drop'
               : `left ${staged.dropped.from.toFixed(2)} m, dropped from ${staged.dropped.to.toFixed(2)} m, landed ${back.toFixed(2)} m`,
+        },
+      ];
+    },
+  });
+
+  /*
+   * §3.3's three throwable rows, in the order one throw produces them.
+   *
+   * They are a scene of their own rather than another segment of 03 because every sound above
+   * this line is a sound the body makes *at* the body — the ear is always within a metre of the
+   * source, and distance is a thing the file asserts rather than a thing you hear. A can is the
+   * first sound in the game that happens somewhere the player is not, and the only way to judge
+   * whether that reads is to hear one arm, one flight and one landing as a single continuous
+   * event with the metres audible in it.
+   *
+   * Everything here is the shipped path: `ScriptedInput` holds and releases the throw action on
+   * the real `GameSim`, `game/throwables.ts` charges the arm and integrates the ballistics, and
+   * `game/sim.ts` turns its contact records into bus events. Nothing in this file emits a can.
+   */
+  scenes.push({
+    file: '05-throw.wav',
+    title: 'the arm: a tap, the walk back for it, and a charge held to the click',
+    seconds: 9,
+    listenFor: [
+      'One whole turn of the verb, in the order a player performs it. First a tap: the arm starts',
+      'with a dry tick at your own shoulder that carries 2.5 m and no further, and a can goes down',
+      'the lane. Two impacts as it lands and skips — and then nothing, because a `prop-knock`',
+      'carries 4.9 m on concrete and the can came to rest seven metres away. That silence is the',
+      'verb working. A throw puts a sound where you are not, and the tail of it is not addressed',
+      'to you; if you want to know where it stopped, you go and find out.',
+      'Then the price, which §3.3 says is threefold and two thirds of it are audible here. Four',
+      'walk-steps to fetch it — each one individually louder than anything the can said — and',
+      'one knock as it comes off the floor. Same class and material as the settle you did not',
+      'hear a moment ago; the only difference is that this one happened at your feet. Retrieval is',
+      'not free and it does not pretend to be.',
+      'Last, the charged throw, and the thing to count rather than listen to. Two ticks 0.9 s',
+      'apart: the arm starting, and full tension. They are the same sound — one class, one',
+      'voice, no second timbre for "ready" — so the *gap* is the meter and the second tick',
+      'is the readout. There is no charge bar in this game, and anything within 2.5 m heard you',
+      'wind it. Then a long flight and three impacts inside four tenths of a second: concrete,',
+      'the tank’s steel flank, concrete again. Carry over distance puts all three inside a',
+      'decibel of each other, so if you can tell which one was steel you are hearing §3.9’s',
+      'composed voice and not a volume change. 06 is that same comparison, controlled.',
+    ],
+    cues: [
+      // A tap, level, straight down the spawn lane. `CAN_THROW_MIN` and no charge at all: the
+      // throw a player makes without thinking about it, and therefore the one that has to be
+      // legible with nothing held down to read.
+      [0.4, hold('throw')],
+      [0.45, release('throw')],
+      // Walking starts a full half-second after the can has stopped, so the fetch never overlaps
+      // the flight. The two halves of the price have to be separable or the scene argues that a
+      // throw is loud, which is the one thing `world/cans.ts` says it must not be.
+      [2.4, hold('forward')],
+      [4.7, release('forward')],
+      // Held 1.3 s, comfortably past `CAN_CHARGE_SECONDS`. Not "long enough to charge" — long
+      // enough that the click lands well inside the hold, so a listener can hear that the arm
+      // went quiet again afterwards, and that holding longer buys nothing but noise already made.
+      [5.6, hold('throw')],
+      [6.9, release('throw')],
+    ],
+    after: ({ sim, log }) => {
+      const winds = log.filter((e) => e.cls === 'throw-windup').map((e) => e.t);
+      const knocks = log.filter((e) => e.cls === 'prop-knock');
+      const near = knocks.filter((e) => e.audible).length;
+      return [
+        /*
+         * The check that matters most in this scene, and the reason it is written down rather
+         * than left to the ear. Every guard below the staging block passes on a scene that threw
+         * nothing at all: a body standing still on concrete still makes sound, still does not
+         * clip and still is not silence. Only the rack knows whether the arm ever moved.
+         */
+        {
+          label: 'two cans left the rack and one of them came back',
+          ok:
+            sim.throwables.thrown === 2 &&
+            sim.throwables.carried === 3 &&
+            sim.throwables.refused === 0,
+          detail:
+            `thrown ${sim.throwables.thrown}, rack ${sim.throwables.carried}, ` +
+            `refused ${sim.throwables.refused}`,
+        },
+        {
+          label: 'the arm wound twice and reached full tension once',
+          ok: winds.length === 3,
+          detail:
+            winds.map((t) => `${t.toFixed(2)}s`).join(', ') +
+            (winds.length === 3 ? ` — ${(winds[2] - winds[1]).toFixed(2)} s of held charge` : ''),
+        },
+        {
+          // Both sides of one hearing gate, from one class, in one file. If the settle across
+          // the room ever becomes audible the scene still renders and still sounds fine — and
+          // the argument the annotation makes about §3.3's 4 m row quietly stops being true.
+          label: 'a knock sounded at the feet and the settle across the room did not',
+          ok: near > 0 && near < knocks.length,
+          detail: `${near} of ${knocks.length} knocks inside a prop-knock's carry`,
+        },
+      ];
+    },
+  });
+
+  /*
+   * §3.9's composed voice, made judgeable — the claim that an impact is *two* materials, the
+   * arriving body as the attack and the struck surface as the resonance, at a level that is the
+   * mean of the two in dB.
+   *
+   * Nothing in normal play can test that claim, because a thrown can lands once, on whatever
+   * happened to be there, with no second landing to hold it against. So this scene is the
+   * comparison and nothing else: one can (always metal, always ×1.5, always the same attack) at
+   * every floor the room owns, thrown the same way each time.
+   *
+   * The body is set down 5 cm onto each surface where 03 drops it 1.6 m. 03 wants that landing —
+   * a landing is the loudest thing a *surface* says and the fastest way to learn its voice. Here
+   * it would be the loudest thing in the segment and it would be the body's voice, sitting on top
+   * of the one sound the whole scene exists to compare.
+   */
+  const lobs = materials.map((m, i) => ({ ...m, at: 0.4 + i * 3.2 }));
+  scenes.push({
+    file: '06-throw-materials.wav',
+    title: `the same can onto ${lobs.map((m) => m.name).join(' → ')}`,
+    seconds: (lobs[lobs.length - 1]?.at ?? 0) + 2.6,
+    note:
+      missing.length > 0
+        ? `no surface in this room to throw at for: ${missing.join(', ')}`
+        : null,
+    listenFor: [
+      'The same can, thrown identically, onto each floor the room has. The body stands on the',
+      'surface and lobs it two metres along that same surface, so the ear is the same distance',
+      'from all four landings — `gainFor` is carry over distance, and with the distance held',
+      'equal the carry figures in the timeline *are* the level, exactly and nothing else.',
+      'Level is therefore the easy half, and it is not the half that matters. What has to survive',
+      'is identity. The strike is the same bright metal tick every time, because the can never',
+      'changes; what answers it differs every time. Steel rings for about a third of a second,',
+      'stone knocks and stops, dust takes the tick and gives nothing back. If the four segments',
+      'differ mainly in how loud they are, the composed voice has collapsed into a volume knob and',
+      'a thrown can has lost the only thing it can do — tell you where it landed.',
+      'Each segment ends with two soft knocks: the same can settling, same pair of materials, far',
+      'less energy behind them. That is what the tail of a throw sounds like when it happens near',
+      'enough to hear — which in 05, at seven metres, it did not.',
+    ],
+    cues: lobs.flatMap((m) => [
+      [m.at, (s) => s.placeOn(m.surface, 0.05)],
+      /*
+       * 60° down. Steep enough that the can is on the ground inside a second and never leaves
+       * the surface its segment staged — a can that skips off the bench onto the floor is a
+       * segment arguing about two materials at once. Shallow enough that it lands two metres out,
+       * well outside `CAN_REACH`: a can that comes down at your own feet is one the rig lifts or
+       * boots on the next tick, and then the sound is about the body again.
+       */
+      [m.at + 0.25, (s) => s.turn(0, -60)],
+      [m.at + 0.45, hold('throw')],
+      [m.at + 0.55, release('throw')],
+    ]),
+    after: ({ log }) => {
+      const firsts = [];
+      let prev = null;
+      for (const e of log) {
+        if (e.cls !== 'prop-impact') continue;
+        if (e.mat !== prev) firsts.push(e);
+        prev = e.mat;
+      }
+      const struck = firsts.map((e) => e.mat);
+      const want = lobs.map((m) => m.name);
+      const spread =
+        firsts.length === 0
+          ? Infinity
+          : Math.max(...firsts.map((e) => e.d)) - Math.min(...firsts.map((e) => e.d));
+      return [
+        {
+          label: 'each can landed on the surface its segment staged',
+          ok: struck.length === want.length && struck.every((m, i) => m === want[i]),
+          detail: `staged ${want.join(' → ')}, struck ${struck.join(' → ') || 'nothing'}`,
+        },
+        {
+          /*
+           * The comparison is fair only if the ear was equally far from every landing. Level is
+           * carry over distance, so a segment that flew a hand's breadth further would be quieter
+           * for a reason that has nothing to do with its material — and the file would then be
+           * making the opposite of the argument it was written to make, inaudibly.
+           */
+          label: 'every segment threw the same throw',
+          ok: spread < 0.01,
+          detail: firsts.map((e) => `${e.mat} at ${e.d.toFixed(3)} m`).join(', ') || 'no impacts',
         },
       ];
     },
