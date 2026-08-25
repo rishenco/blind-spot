@@ -354,8 +354,25 @@ ways depending on the speed you meet it at, which is `CAN_LIFT_SPEED` doing the 
 everywhere else in this document — pricing rather than preventing. Walk up with room in the rack
 and you mine it off the top, one can per touch, for four soft knocks nobody hears past 6 m.
 Sprint the same line and you boot the column across the loudest lane in the room and come out
-the far side with an empty-handed rack and a floor full of metal. It is deliberately not "the
-fast route that also resupplies you": you pay, and you get nothing for it.
+the far side with the rack you went in with and a floor full of metal. It is deliberately not
+"the fast route that also resupplies you": you pay, and you get nothing for it.
+
+Built and measured, that fork has four positions rather than two, and the two extra ones are what
+make it honest. **Crouch** into the column with room in the rack and you take four cans and the
+fifth is left standing at its authored pose — the quietest approach is the only one that leaves
+the stack looking untouched, which is a fact a teammate arriving later can read off the floor.
+**Walk** and you take the same four but carry a stride too far and nudge the last one over.
+**Walk into it with a full rack** and there is nothing to take, so the column simply goes down:
+a rack with no room in it may not turn the rig into a ghost that walks through matter, which is
+law 2 at the smallest scale the game has. **Sprint** and all five go at once, at pace, down the
+loud lane.
+
+What makes the first two positions exist at all is that **the arm and the body are different
+sizes**. Reach is a stoop — 60 cm, and a cylinder rather than a ball, because a ball at full
+horizontal stretch has no height left and the nearest can on an approach is then always the
+bottom one. The body is a 35 cm shell. The quarter-metre between them is the standing room a
+player gets: close enough to take cans off the top, not so close as to be leaning on the column.
+One number for both and "walk up and take four" ends in a clang every time.
 
 The constraint this puts on whoever authors the next one: **a column may be no taller than the
 rig can reach**, because retrieval takes the highest can in reach and a can above that line is

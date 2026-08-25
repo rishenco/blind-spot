@@ -661,8 +661,27 @@ export class Throwables {
    */
   private retrieve(): void {
     const p = this.thrower.position;
+    /*
+     * The body's own radius, which is not the arm's.
+     *
+     * `CAN_REACH` is a stoop — 0.6 m, most of it out in front of a rig whose shell stops at
+     * `radius` (0.35 m). Using one number for both is what made "walk up and take four" end in
+     * a clang every single time: the rig pocketed the top four, its arm was still over the
+     * bottom can with a full rack, and the only thing left to do with a can you cannot pocket
+     * is move it. Nothing had touched it.
+     *
+     * Split, the two questions read the way they should. *Can I pick this up* is a question
+     * about an arm and reaches 0.6 m. *Did I just walk into it* is a question about a body and
+     * reaches 0.35 m. The quarter-metre between them is where a player gets to stand: reach the
+     * column, take what fits, and stop — the last can is still standing because nothing touched
+     * it. Overrun it and your leg does, which is a price you chose and could see coming.
+     */
+    const body = this.movement.radius;
+    const head = this.movement.standHeight;
     let best = -1;
     let bestY = -Infinity;
+    let hit = -1;
+    let hitY = -Infinity;
     for (let id = 0; id < this.cans.length; id++) {
       const can = this.cans[id]!;
       if (!can.live) continue;
@@ -674,6 +693,13 @@ export class Throwables {
       if (!can.armed) {
         if (d2 > CAN_REARM_M * CAN_REARM_M) can.armed = true;
         continue;
+      }
+      const flat2 = dx * dx + dz * dz;
+      // The shell: feet to head, `radius` across. A can inside this is a can the rig is
+      // standing in, whatever its arms are doing.
+      if (dy >= -CAN_RADIUS && dy <= head && flat2 <= body * body && b.y > hitY) {
+        hitY = b.y;
+        hit = id;
       }
       /*
        * Reach is a **cylinder** around the feet, not a ball: `CAN_REACH` sideways and
@@ -694,23 +720,39 @@ export class Throwables {
        * once and the highest-first rule below finally means what it says.
        */
       if (Math.abs(dy) > CAN_REACH) continue;
-      if (dx * dx + dz * dz > CAN_REACH * CAN_REACH) continue;
+      if (flat2 > CAN_REACH * CAN_REACH) continue;
       if (b.y > bestY) {
         bestY = b.y;
         best = id;
       }
     }
-    if (best < 0) return;
-    if (this.groundSpeed < CAN_LIFT_SPEED) this.lift(best);
-    else this.kick(best);
+    if (best < 0 && hit < 0) return;
+    /*
+     * Three outcomes, not two, and the third is the one that was missing.
+     *
+     * A full rack used to make `lift` a no-op, which meant a rig carrying four cans walked
+     * *through* the authored column — five cairns of metal at knee height — and the world
+     * emitted nothing at all. Measured: 0 events, the column standing untouched on the far
+     * side. That is law 2 broken at the scale the player is closest to: the matter layer
+     * showed five things, the body passed through them, and the system behaved as though they
+     * were decoration. A prop with no price when your pockets happen to be full is not a prop,
+     * and §8 calls props "the real price of moving through unpainted space".
+     *
+     * So the body always does *something* to a can it meets. Whether it pockets it is a
+     * question about the rack; whether it moves it is not a question at all.
+     */
+    const canLift = best >= 0 && this.groundSpeed < CAN_LIFT_SPEED && this.rack < CAN_RACK_CAP;
+    if (canLift) this.lift(best);
+    else if (hit >= 0) this.kick(hit);
   }
 
-  /**
-   * Into the rack. A full rack cannot lift — and does not need to say so, because the can is
-   * still there and the player is still walking over it. It can still be kicked.
-   */
+  /** Into the rack, off whatever it was lying on. Only ever called with room to put it. */
   private lift(id: number): void {
-    if (this.rack >= CAN_RACK_CAP) return;
+    if (this.rack >= CAN_RACK_CAP) {
+      // `retrieve` owns this decision and sends a full rack to `kick`. Returning quietly here
+      // was how a full rack came to mean "nothing happens"; overfilling would be worse.
+      throw new Error('Throwables.lift: a full rack moves a can, it does not pocket it.');
+    }
     const can = this.cans[id]!;
     const b = can.body;
     this.rack++;
@@ -736,7 +778,20 @@ export class Throwables {
     this.wakeSupported(x, y, z);
   }
 
-  /** Booted: the can takes the rig's momentum and a small hop, loudly, and disarms itself. */
+  /**
+   * Moved by the body: the can takes the rig's momentum and a small hop, and disarms itself.
+   *
+   * One method, two voices, because it is reached at two very different speeds. Sprint into a
+   * can and this is the boot §8 prices the north lane in. Walk into one you have no room to
+   * pocket and it is a nudge — the same physics, scaled by the same momentum, arriving far
+   * quieter because the rig was moving far slower.
+   *
+   * Which voice is decided exactly where `onContact` decides it and by the same constant: above
+   * `IMPACT_MIN_SPEED` the contact is in §3.3's `prop-impact` band, below it the touchdown is
+   * still voiced but as a `prop-knock`. `SoundBus.impactRadius` requires its caller to have
+   * gated at that speed, so a nudge emitted as an impact would be a contract broken as well as
+   * a shuffle that sounds like a dropped can.
+   */
   private kick(id: number): void {
     const can = this.cans[id]!;
     const b = can.body;
@@ -750,20 +805,34 @@ export class Throwables {
     can.armed = false;
     b.grounded = false;
     wakeBallistic(b, v.x * KICK_KEEP, KICK_LIFT, v.z * KICK_KEEP);
-    this.sounds.push({
-      kind: 'impact',
-      can: id,
-      x: b.x,
-      y: b.y,
-      z: b.z,
-      nx: 0,
-      ny: 1,
-      nz: 0,
-      // The approach speed is the rig's, because the can was not going anywhere: the same band a
-      // thrown can's landing is priced in, read from the other side of the contact.
-      speed: this.groundSpeed,
-      mat: can.restMat,
-    });
+    if (this.groundSpeed >= IMPACT_MIN_SPEED) {
+      this.sounds.push({
+        kind: 'impact',
+        can: id,
+        x: b.x,
+        y: b.y,
+        z: b.z,
+        nx: 0,
+        ny: 1,
+        nz: 0,
+        // The approach speed is the rig's, because the can was not going anywhere: the same band
+        // a thrown can's landing is priced in, read from the other side of the contact.
+        speed: this.groundSpeed,
+        mat: can.restMat,
+      });
+    } else {
+      this.sounds.push({
+        kind: 'knock',
+        can: id,
+        x: b.x,
+        y: b.y,
+        z: b.z,
+        nx: 0,
+        ny: 1,
+        nz: 0,
+        mat: can.restMat,
+      });
+    }
     this.wakeSupported(b.x, b.y, b.z);
   }
 

@@ -257,12 +257,14 @@ export class GameSim {
       movement: this.movement,
       prints: this.paint.prints,
       /*
-       * The room's authored stack (§8), handed across as six poses and nothing else — no
-       * structure, no parent, no "stack" object. Nothing in `throwables.ts` knows what a stack
-       * *is*: a column is a fact about six sets of coordinates, and the moment one is disturbed
-       * the room simply contains six cans in worse places. That is what makes a knocked-over
-       * stack cost nothing to represent, and it is why the room authors poses rather than
-       * handing the sim a thing to maintain.
+       * The room's authored stack (§8), handed across as a flat list of poses and nothing else
+       * — no structure, no parent, no "stack" object, and deliberately no count (the room
+       * derives how many cans fit under `CAN_REACH`; anything here that named a number would go
+       * stale the moment the reach moved). Nothing in `throwables.ts` knows what a stack *is*: a
+       * column is a fact about a handful of coordinates, and the moment one is disturbed the room
+       * simply contains the same cans in worse places. That is what makes a knocked-over stack
+       * cost nothing to represent, and it is why the room authors poses rather than handing the
+       * sim a thing to maintain.
        */
       boot: CAN_STACK,
     });

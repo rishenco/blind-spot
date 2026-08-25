@@ -812,27 +812,39 @@ describe("the room's own stack (§8)", () => {
   });
 
   /**
-   * Walk the lane with an empty rack and the column is a quiet resupply, mined off the top.
+   * Creep up with an empty rack and the column is a quiet resupply, mined off the top.
    *
-   * The fork §8 asks for, measured from the game rather than argued. Four lift knocks
-   * (`prop-knock`, 1.5 m paint) and **no impact at all** — nothing falls, because taking the
-   * highest can in reach never unsupports anything. The bottom can is still standing at the end,
-   * which is the rack cap doing its job: a stack is a place you come back to, not a pile you
-   * empty in one visit.
+   * The cleanest reading of the fork §8 asks for, measured from the game rather than argued.
+   * Four lift knocks (`prop-knock`, 1.5 m paint), **no impact at all**, and the bottom can still
+   * standing where the room put it — untouched, not merely un-pocketed. Nothing falls, because
+   * taking the highest can in reach never unsupports anything, and nothing is nudged, because a
+   * crouched rig has the deceleration to stop with the column still outside its shell.
    *
-   * The descending-height assertion is the one that pins the reach *shape*. Reach used to be a
-   * ball around the feet, and a ball has no height left at 0.6 m out — so approaching the column
-   * handed you the bottom can and dropped the other four. That version passed every count in
-   * this test; it fails this line.
+   * Two assertions carry the shape of the rules and are worth naming.
+   *
+   * *Descending heights* pins the reach as a cylinder. A ball has no height left at 0.6 m out, so
+   * approaching the column would hand you the bottom can and drop the other four; that version
+   * passes every count here and fails this line.
+   *
+   * *The bottom can asleep at its pose* pins the arm and the body as different distances. Share
+   * one number and a rig that has just filled its rack is standing over a can it cannot pocket,
+   * and the only thing left to do with such a can is move it — the take always ended in a clang,
+   * unavoidably, which is the failure this suite already rejected once when the stack was a can
+   * too tall. The quarter metre between `CAN_REACH` and the rig's own radius is where a player
+   * gets to stand, and `crouch` is the stance that can stop inside it.
    */
-  it('is mined off the top, quietly, by an empty rack that walks up to it', () => {
+  it('is mined off the top, quietly, by an empty rack that creeps up to it', () => {
     const game = createHeadlessGame();
     emptyRack(game);
     atTheStack(game, 3.5);
     const props = recordProps(game);
 
+    game.input.hold('crouch');
     game.input.hold('forward');
-    game.run(2.5);
+    for (let i = 0; i < 600; i++) {
+      game.step();
+      if (game.sim.throwables.carried === CAN_RACK_CAP) break;
+    }
     game.input.release('forward');
     game.run(3);
 
@@ -846,13 +858,52 @@ describe("the room's own stack (§8)", () => {
       );
     }
 
-    // What is left standing: the bottom can, exactly where the room put it.
+    // Left standing: the bottom can, at its authored pose, never woken.
     const left = game.sim.throwables
       .cansSnapshot()
       .filter((c) => Math.hypot(c.x - CAN_STACK[0]!.x, c.z - CAN_STACK[0]!.z) < CAN_REACH);
     expect(left.length).toBe(1);
     expect(left[0]!.y).toBeCloseTo(CAN_STACK[0]!.y, 10);
+    expect(left[0]!.z).toBeCloseTo(CAN_STACK[0]!.z, 10);
     expect(left[0]!.asleep).toBe(true);
+    game.sim.dispose();
+  });
+
+  /**
+   * A full rack does not make a stack of cans stop existing.
+   *
+   * The bug this pins was invisible until the stack was in the game: `lift` returned early on a
+   * full rack, and returning early was the *whole* response — so a rig carrying four cans walked
+   * straight through a 0.6 m column of five and the bus carried **zero events**. Measured, before
+   * the fix: the rig came out the far side at x = 9.65 and every can was still asleep at the pose
+   * the room authored. The matter layer showed five things and the body passed through them.
+   *
+   * That is law 2 at the scale the player is closest to, and it is §8's claim about props being
+   * "the real price of moving through unpainted space" quietly refunded to anyone whose pockets
+   * happened to be full. Whether the rig can pocket a can is a question about the rack. Whether
+   * it moves one it walks into is not a question at all.
+   */
+  it('is not walked through by a full rack as though it were not there', () => {
+    const game = createHeadlessGame();
+    atTheStack(game, 3.5);
+    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP);
+    const props = recordProps(game);
+
+    game.input.hold('forward');
+    game.run(2.5);
+    game.input.release('forward');
+    game.run(3);
+
+    // Nothing pocketed — a full rack is full — and nothing left standing either.
+    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP);
+    expect(game.sim.throwables.inWorld).toBe(BOOT_CANS);
+    expect(props.length).toBeGreaterThanOrEqual(BOOT_CANS);
+    for (const can of game.sim.throwables.cansSnapshot()) {
+      const home = CAN_STACK.some(
+        (a) => Math.hypot(can.x - a.x, can.y - a.y, can.z - a.z) < CAN_RADIUS,
+      );
+      expect(home, 'a can survived a body walking through it').toBe(false);
+    }
     game.sim.dispose();
   });
 
@@ -996,22 +1047,87 @@ describe('carry and retrieve (§5)', () => {
     }
   });
 
-  it('a full rack cannot lift, but it can still kick', () => {
+  /**
+   * A full rack moves what it walks into, and *only* what it walks into.
+   *
+   * Two distances, on the bare rig, where nothing about a room can rescue either of them. An arm
+   * reaches `CAN_REACH`; a body is `radius` across. Standing half a metre off, the rig's arm is
+   * over the can and its shell is nowhere near it, and a rack with no room to pocket it means
+   * nothing happens — no sound, the can still asleep. Step in to where the shell actually
+   * contains the can and it moves, whatever the rack is doing.
+   *
+   * Merge the two distances and either half breaks. Use the arm for both and a rig that has just
+   * filled its rack knocks over the can it is reaching past, every time, unavoidably. Use the
+   * body for both and you cannot pick a can up without standing on it.
+   *
+   * The third tick is the sound the *speed* chooses. `kick` is one method reached at two very
+   * different paces, and it voices itself where `onContact` does and by the same constant: a
+   * shuffle is a `prop-knock`, a boot is a `prop-impact`.
+   */
+  it('a full rack moves what it walks into, and only what it walks into', () => {
     const b = bench();
+    const movement = defaultMovementTunables();
     b.hand.spawnAt(4, 0.02, 0);
     expect(b.hand.carried).toBe(CAN_RACK_CAP);
-    b.rig.position.x = 4;
+
+    // Inside the arm, outside the shell: the rig is reaching over it, not standing in it.
+    const gap = (CAN_REACH + movement.radius) / 2;
+    expect(gap).toBeLessThan(CAN_REACH);
+    expect(gap).toBeGreaterThan(movement.radius);
+    b.rig.position.x = 4 - gap;
     b.rig.groundSpeed = 1;
     expect(b.tick()).toEqual([]);
     expect(b.hand.inWorld).toBe(1);
     expect(b.hand.canAt(0)!.asleep).toBe(true);
 
-    b.rig.velocity.x = CAN_LIFT_SPEED + 1;
-    b.rig.groundSpeed = CAN_LIFT_SPEED + 1;
-    const sounds = b.tick();
-    expect(sounds.map((s) => s.kind)).toEqual(['impact']);
+    // Inside the shell, still far under `CAN_LIFT_SPEED` and under `IMPACT_MIN_SPEED`: a nudge.
+    b.rig.position.x = 4 - movement.radius / 2;
+    b.rig.velocity.x = 1;
+    expect(b.tick().map((s) => s.kind)).toEqual(['knock']);
     expect(b.hand.canAt(0)!.asleep).toBe(false);
     expect(b.hand.carried).toBe(CAN_RACK_CAP);
+
+    // And the same contact taken at pace is the boot §8 prices the loud lane in.
+    b.settle();
+    const rest = b.prints.poses.get(0)!;
+    b.rig.position.x = rest.x - CAN_REARM_M - 1;
+    b.tick();
+    b.rig.position.x = rest.x;
+    b.rig.velocity.x = CAN_LIFT_SPEED + 1;
+    b.rig.groundSpeed = CAN_LIFT_SPEED + 1;
+    expect(b.tick().map((s) => s.kind)).toEqual(['impact']);
+    expect(b.hand.carried).toBe(CAN_RACK_CAP);
+  });
+
+  /**
+   * The shell has a top and a bottom, and walking under a can is not walking into it.
+   *
+   * The body test is a cylinder like the arm's, and a cylinder with no ends is a column of
+   * infinite height: a can on a gantry three metres up would be booted by a rig strolling
+   * underneath, and a can on the floor by a rig standing on a crate over it. Neither is a
+   * contact, and law 2 does not let the game make a noise where nothing touched anything —
+   * a `prop-impact` out of a ceiling is a lie that also paints 8-12 m of geometry.
+   *
+   * Both cans here sit outside the arm as well, so a full rack is not what makes this pass;
+   * nothing about either of them is in reach of anything.
+   */
+  it('does not touch a can it walks under, or one it stands over', () => {
+    const b = bench();
+    const movement = defaultMovementTunables();
+    const above = b.hand.spawnAt(0, movement.standHeight + 1, 0);
+    b.rig.position.x = 0;
+    b.rig.position.z = 0;
+    b.rig.velocity.x = 1;
+    b.rig.groundSpeed = 1;
+    expect(b.tick()).toEqual([]);
+    expect(b.hand.canAt(above)!.asleep).toBe(true);
+
+    // And the other end: the rig up on something, the can on the floor well below its feet.
+    const below = b.hand.spawnAt(20, CAN_RADIUS, 0);
+    b.rig.position.x = 20;
+    b.rig.position.y = CAN_REACH + 1;
+    expect(b.tick()).toEqual([]);
+    expect(b.hand.canAt(below)!.asleep).toBe(true);
   });
 
   /**
