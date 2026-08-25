@@ -31,6 +31,7 @@ import { MAT_CONCRETE, MAT_DUST, MAT_METAL, MAT_STONE, materialLoudness } from '
 import { SOUND_CLASSES, SoundBus, type SoundClass, type SoundEvent } from '../src/paint/soundEvents';
 import { createHeadlessGame, type HeadlessGame } from '../src/game/headless';
 import { TIME_SCALES, stepClassOf } from '../src/game/sim';
+import { HALO_RING_MIN_ALPHA, haloRingAlpha } from '../src/ui/hud';
 import { HALO_PITCH_POINTS, HALO_PITCH_TOLERANCE_CENTS } from './support/audioSpec';
 
 const STEP_CLASSES = ['crouch-step', 'walk-step', 'sprint-step'] as const;
@@ -520,6 +521,63 @@ describe('the readout the driver sees', () => {
     game.step(12); // 0.1 s — well inside the 0.18 s time constant
     const state = game.sim.debugState();
     expect(Number(state.haloTarget)).toBeGreaterThan(Number(state.haloRadius) + 1);
+  });
+});
+
+describe('the ring is the guaranteed readout (§3.8)', () => {
+  /*
+   * §3.8 gives the ring one job — "brightness equals your current audible radius" — and one
+   * privilege: it is the face that survives the player turning the sound off, which the doc
+   * treats as a live possibility ("a volume slider is an accessibility control, not a retreat —
+   * the ring remains the guaranteed readout"). So the map from brightness to opacity is tested
+   * here rather than left to the browser. The hum has a phonometric suite behind it; until this
+   * existed the ring had a `toFixed(3)` and a hope.
+   *
+   * The Halo-ring section of `tools/shoot.mjs` covers the other half — that the number reaches
+   * the DOM and changes pixels — which is not something a node test can see.
+   */
+  it('is affine in the brightness — no second curve on top of the first', () => {
+    // The point is not that it rises. It is that it rises *the way the brightness does*, so the
+    // ring cannot say "a third as loud as a sprint" where the hum says "nearly half". A gamma on
+    // the opacity — the obvious perceptual "fix" — breaks this and nothing else would catch it.
+    const slope = haloRingAlpha(1) - haloRingAlpha(0);
+    for (let b = 0; b <= 1.0001; b += 0.05) {
+      expect(haloRingAlpha(b)).toBeCloseTo(haloRingAlpha(0) + b * slope, 12);
+    }
+  });
+
+  it('reaches full opacity at the loudest reading and the floor at the quietest', () => {
+    expect(haloRingAlpha(1)).toBeCloseTo(1, 12);
+    expect(haloRingAlpha(0)).toBeCloseTo(HALO_RING_MIN_ALPHA, 12);
+  });
+
+  it('never fades out — the quietest reading is a reading, not a missing HUD', () => {
+    // `haloBrightness` is 0 at 1.5 m, which means "nothing further than a metre and a half can
+    // hear you", not "the readout is off". A ring at zero opacity there would put the complaint
+    // §3.8 calls non-negotiable back at the one end of the dial where a player is listening
+    // hardest for an answer. NaN lands there too rather than propagating into the style string.
+    for (const b of [0, -1, -1e9, Number.NaN]) {
+      expect(haloRingAlpha(b)).toBeGreaterThan(0.1);
+      expect(haloRingAlpha(b)).toBeCloseTo(HALO_RING_MIN_ALPHA, 12);
+    }
+  });
+
+  it('clamps rather than running past a legal opacity', () => {
+    for (const b of [1, 1.5, 1e9, Number.POSITIVE_INFINITY]) {
+      expect(haloRingAlpha(b)).toBeCloseTo(1, 12);
+    }
+  });
+
+  it('orders the three stances the way the pitch does, end to end', () => {
+    // The whole chain, from §3.3's carry radius to the number the DOM is handed.
+    const [crouch, walk, sprint] = [2, 11, 24].map((r) => haloRingAlpha(haloBrightness(r)));
+    expect(crouch!).toBeLessThan(walk!);
+    expect(walk!).toBeLessThan(sprint!);
+    expect(crouch!).toBeGreaterThan(HALO_RING_MIN_ALPHA);
+    // A sprint on concrete is loud, but not the loudest thing the game has: steel is (§3.9), so
+    // the ring must still have somewhere to go.
+    expect(sprint!).toBeLessThan(1);
+    expect(haloRingAlpha(haloBrightness(HALO_MAX_RADIUS_M))).toBeCloseTo(1, 12);
   });
 });
 

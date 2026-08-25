@@ -39,7 +39,13 @@ Law-adjacent commitments — not laws, but consequences of them we have locked i
   bus (`src/paint/soundEvents.ts`); the paint system and the audio mixer are both subscribers
   to that same stream. The *same* event paints the world and makes the noise, so sight and
   hearing can never disagree — a sound with no paint, or paint with no sound, is impossible to
-  produce. Audio itself is **unbuilt** (milestone M1); the bus ships.
+  produce. Both subscribers ship: the reveal and the synthesized mixer (`src/audio/`) read the
+  same events, and every voice the mixer builds takes its level from the event's own hearing
+  radius. There is exactly one sound in the game that is not on the bus — §3.8's Halo hum — and
+  it is not an exception to this. The law forbids a sound *the world makes* that paints nothing;
+  the hum is the rig's own gauge, has no position and no emitter, is audible to nobody but its
+  pilot, and nothing in the world can hear it. A hum with a place in the world would be a
+  violation, which is why it is not given one.
 - **No canned walk cycles** (law 2). Enemy movement animation is procedural, contact-driven IK
   — never a keyframed cycle. A keyframed cycle foot-slides, and a sliding foot would emit a
   footfall sound (and therefore paint geometry) at a point where no foot actually touched
@@ -214,8 +220,9 @@ Status: the multipliers are live. `SoundBus.emit` scales both radii of every con
 event by the struck surface's voice, and the surface comes from the box the collision pass
 resolved against (`MoveResult.groundBox`), so what the world hears is what the body actually
 touched. Pings are not contact sounds and are not scaled — naming a material on one throws.
-What remains of M1 is making the difference *audible* rather than only visible: the synthesized
-voices themselves, and the attack-window loudness normalization described above.
+The difference is now audible as well as visible: `src/audio/voices.ts` synthesizes the four
+voices and normalizes each one's attack as described above, and the invariant is asserted in
+`tests/audio/materialVoices.test.ts` at every stance, not only at the one the fit was made at.
 
 ## 4. Energy: the reactor
 

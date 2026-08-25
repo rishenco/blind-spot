@@ -1134,6 +1134,87 @@ check(
   `${cleared.structUnlockedDots} dots known, lit=${pct(photo(clearedBuf).lit)}`,
 );
 
+// --- the Halo ring (§3.8) ----------------------------------------------------
+/*
+ * "A ring around the reticle whose brightness equals your current audible radius."
+ *
+ * `tests/halo.test.ts` owns the numbers — the carry radius, the pitch, the brightness, and the
+ * affine map from brightness to opacity. What no node test can answer is whether any of that
+ * reaches the screen: a `setHalo` nobody calls, an element nobody appends and a stylesheet with
+ * a typo in it all leave the whole suite green. So this is the pixel end of it, and the question
+ * is deliberately the crudest one available — is the ring brighter when the body is louder.
+ *
+ * **It lives here, after the wipe, because the reading has to be of the ring and not of the
+ * room.** Getting into a stance means moving, moving paints, and painted floor sits behind the
+ * reticle: measured in the movement section, the window read 28.5 → 39.1 with about 22 of that
+ * being geometry the sprint had just revealed. A brighter ring and a busier room are the same
+ * number. So every reading below wipes the map on the frame it is taken, which costs nothing —
+ * the map is already black here and §07 below clears it again before using it.
+ *
+ * The window is the hole FRAME already punches out of its own, which is why the ring was sized
+ * to fit inside it: every other pixel golden in this file is read over FRAME, and a ring that
+ * leaked past the hole would move all of them at once.
+ */
+const RETICLE = FRAME_HOLES[0];
+/** A screenshot without writing one — the same two-frame settle `shot` uses. */
+async function frame() {
+  await page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+  );
+  return page.screenshot();
+}
+
+/**
+ * Settles the body into a stance, wipes the room, and reads both faces of the readout.
+ *
+ * The extra 600 ms past top speed is the glide (`HALO_GLIDE_SEC`, 0.18 s): §3.8 has the readout
+ * lag the body on purpose, so a reading taken the instant the speed arrives is a reading of the
+ * glide rather than of the stance. Three-plus time constants puts it inside a percent.
+ */
+async function ringIn(keys, minSpeed) {
+  await respawn();
+  for (const k of keys) await page.keyboard.down(k);
+  await stepUntil((s) => Number(s.speed) > minSpeed, ticksFor(1500), 4);
+  await step(ticksFor(600));
+  await clearMap();
+  const s = await state();
+  const luma = meanLuminance(decodePng(await frame()), RETICLE, []).mean;
+  for (const k of keys) await page.keyboard.up(k);
+  await step(1);
+  return { luma, radius: Number(s.haloRadius), brightness: Number(s.haloBrightness) };
+}
+
+const ringCrouch = await ringIn(['c', 'w'], 1.5);
+const ringWalk = await ringIn(['w'], 3.2);
+const ringSprint = await ringIn(['Shift', 'w'], 5.6);
+check(
+  'the Halo ring gets brighter the further away you can be heard (§3.8)',
+  ringCrouch.luma < ringWalk.luma && ringWalk.luma < ringSprint.luma,
+  `crouch ${ringCrouch.radius.toFixed(1)} m → ${ringCrouch.luma.toFixed(2)}/255 · ` +
+    `walk ${ringWalk.radius.toFixed(1)} m → ${ringWalk.luma.toFixed(2)} · ` +
+    `sprint ${ringSprint.radius.toFixed(1)} m → ${ringSprint.luma.toFixed(2)}`,
+);
+/*
+ * ...and the pixels are the *readout*, not merely something that rises with it.
+ *
+ * Ordering alone would pass on a ring wired to speed, to the stance, or to the radius scaled
+ * linearly — the obvious `r / max`, which `tests/halo.test.ts` rejects on the simulation side for
+ * putting a walk a third of the way up the ring while the hum puts it nearly half. What pins the
+ * pixels to §3.8 is that they rise *in step with* `haloBrightness`, the same number the hum is
+ * built from, so where the walk sits between crouch and sprint has to agree on both.
+ */
+const lumaSpan = ringSprint.luma - ringCrouch.luma;
+const lumaShare = (ringWalk.luma - ringCrouch.luma) / lumaSpan;
+const brightShare =
+  (ringWalk.brightness - ringCrouch.brightness) /
+  (ringSprint.brightness - ringCrouch.brightness);
+check(
+  'and it is the brightness it is drawn from, not just something that rises with pace',
+  lumaSpan > 8 && Math.abs(lumaShare - brightShare) < 0.06,
+  `walk sits ${(lumaShare * 100).toFixed(1)}% up the measured span, ` +
+    `${(brightShare * 100).toFixed(1)}% up the readout's (span ${lumaSpan.toFixed(2)}/255)`,
+);
+
 // ===========================================================================
 //  07  cost
 //
