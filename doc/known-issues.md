@@ -13,27 +13,60 @@ it is fixed.
 
 ## Blocking
 
-### `slideXZ` depenetrates instead of sweeping — fast movers tunnel
-
-`src/core/collision.ts` (~line 232). The horizontal pass advances the body the full tick
-(`s.x += dx`), then pushes it back out of anything it now overlaps, up to four iterations.
-Nothing looks at the *path* between where the body was and where it landed. A body that
-crosses a thin obstacle entirely within one tick overlaps nothing at the end of the tick, so
-there is nothing to push out of, and it passes through.
-
-At 120 Hz a sprinting player covers 0.05 m per tick, which is thinner than any wall in the
-room, so this has never bitten. A thrown can at 15 m/s covers 0.125 m per tick, which is
-thicker than a chain curtain, a railing or a pane of glass — exactly the props §8 of the
-vision calls "authored sound-traps". A trap you can throw straight through is not a trap.
-
-**Owner: M2, and it blocks M2** — throwables cannot land on top of this. The fix is a swept
-test, which is also what `raycastWorld` is being built to serve.
+None. The `slideXZ` tunneling entry lived here until M2 measured it and found that M2 routes
+around it rather than being stopped by it — it now sits below, with a corrected failure law
+and a new owner.
 
 ---
 
 ## Real, and deferred on purpose
 
 Wrong, not blocking anything, and cheaper to fix when the thing that makes them matter exists.
+
+### `slideXZ` depenetrates instead of sweeping, and the threshold is half what this file claimed
+
+`src/core/collision.ts` (~line 232). The horizontal pass advances the body the full tick
+(`s.x += dx`), then pushes it back out of anything it now overlaps, up to four iterations.
+Nothing looks at the *path* between where the body was and where it landed.
+
+**The failure law recorded here until M2 was wrong, and wrong in the dangerous direction.**
+This entry used to say a body tunnels when it crosses a thin obstacle *entirely* within one
+tick — i.e. when `speed * dt > thickness + 2r`. Measured, the real threshold is:
+
+```
+speed * dt  >  thickness / 2 + radius
+```
+
+Half of what was claimed. The reason is `circlePush`: its centre-inside branch ejects the body
+through the face it is *nearest to*, so a step that lands past a box's midplane is pushed out
+the **far** side and arrives on the other side of the wall having never been outside it. The
+body does not need to clear the box. It only needs to overshoot the middle of it. A 0.06 m body
+at 24 m/s passes a 0.1 m wall; a 0.3 m wall held 0 phases out of 40 only because the
+approach-tick graze zeroes the velocity before the overshoot tick can happen, which is luck
+about tick phase rather than a margin.
+
+**There is a second defect underneath the first, and it has no threshold at all.** `slideXZ`
+implements *slide* semantics: a contact kills the normal component of velocity. A body moved
+through `moveBody` therefore cannot bounce, at any speed, on any wall — it can only stop and
+slide. For the player that is the correct feel and the whole point. For anything thrown it is
+wrong everywhere, not just where it tunnels, and no amount of sweeping fixes it.
+
+**Owner: M4, and it no longer blocks M2.** M2 does not fix this and does not need it fixed:
+thrown bodies never enter `moveBody`. They run on their own swept integrator — landing during
+M2 as `src/core/ballistics.ts` — built on `raycastWorld`, whose contract was authored for exactly
+this — inclusive `maxDist` "for a thrown object stepped by `speed * dt`", the `t = 0`
+separate-don't-reflect rule, and a reflectable normal from inside a box. A can needs none of
+`moveBody`'s stance machinery (step-up, mantle slack, ground snap, coyote edges) and gets
+bounce for free by not asking for slide.
+
+What still owns the bug is the next fast mover that genuinely *is* a `moveBody` body: M4's
+spider, which pounces. The M4 fix is a swept horizontal pass, and it should land with a test
+built from the corrected law above rather than the old one — a suite written against
+`thickness + 2r` passes on a body that is already tunnelling.
+
+**Do not let the old number survive as a safety argument.** Any claim of the form "X m/s is
+safe because the thinnest collider is Y m thick" must be recomputed against `Y/2 + r`, and any
+such claim about *unswept* motion is a smell in the first place.
 
 ### The ears do not crouch, and the beam leaves from above a crouched head
 
