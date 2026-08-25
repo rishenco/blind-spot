@@ -48,6 +48,24 @@ export interface VoiceSpec {
   readonly gain: number;
   /** Material index (`paint/materials`) for a contact, `null` for a ping. */
   readonly mat: number | null;
+  /**
+   * The material of the *other* body in a contact — what struck the surface `mat` names — or
+   * `null` when no second body is named.
+   *
+   * `null` is the ordinary case and will stay it: a footfall, a landing, a spider's foot are all
+   * "something the rig has no material for hitting a surface that does", and `voices.ts` answers
+   * a null here by building exactly the single-material voice it always has (see
+   * `COMPOSED_ATTACK_NORMS` for why that identity is structural rather than careful). A thrown
+   * can is the case that is not null: the strike is the can's and the ring is the floor's, and
+   * the voice needs both rows to say so.
+   *
+   * Written as a literal `null` in `decide` for now, because the bus has no event that carries a
+   * second material yet — the class that does arrives with the throwable. Declaring the field
+   * before there is an event for it is deliberate: it makes the seam in `contactVoice` a thing
+   * the compiler knows about, and lets the whole existing suite re-render through it and prove
+   * nothing moved, which is a proof that is only available while the answer is still `null`.
+   */
+  readonly objMat: number | null;
   /** Metres from the listener to the origin — the number `gainFor` used, kept for the mixer. */
   readonly distance: number;
   /** Where it happened, world space. Panning input the day spatialization lands. */
@@ -240,6 +258,9 @@ export class AudioDirector {
        * material, and `isContactClass` is asserted against it below so the two can never drift.
        */
       mat: event.mat,
+      // No event names a second body yet — see `VoiceSpec.objMat`. One literal, one line, and
+      // the day the throwable's class lands this reads `event.objMat` instead.
+      objMat: null,
       distance,
       x: event.x,
       y: event.y,

@@ -155,6 +155,104 @@ const MATERIAL_VOICES: readonly MaterialVoice[] = Object.freeze([
   }),
 ]);
 
+/**
+ * The `bright` the twelve off-diagonal norms below were fitted at.
+ *
+ * Exported so the class that carries a composed contact has to *name* this number, and so a
+ * retune of that class's brightness fails an assertion instead of walking the fit. The norms are
+ * hostage to it for the same reason `ATTACK_WINDOW_SEC` is hostage to the window: the exciter's
+ * cutoff is `exciterLp × spec.bright`, and moving a cutoff moves how much of the strike lands
+ * inside the attack window. The leak is small — every class's level tracks its own gain to
+ * within 0.21 dB across the shipped 0.55–1.6 range of `bright` — but "small" is measured against
+ * §3.9's half-decibel budget, and the whole of that budget is already spent elsewhere.
+ *
+ * 1.45 is the impact's shape: a thrown thing strikes harder than a walk (1.0) and not as hard as
+ * a body landing (1.6).
+ */
+export const COMPOSED_NORM_FIT_BRIGHT = 1.45;
+
+/**
+ * The twelve *fitted* cells of the composed attack normalization — [object][surface], with the
+ * diagonal deliberately absent.
+ *
+ * `null` on the diagonal is not a placeholder to be filled in later. It is the point: a
+ * composed contact where the two bodies are the same material **is** a single-material contact,
+ * and its norm has to be the same float a footfall on that surface uses or the two disagree
+ * about how loud the same material is. So the diagonal is not written here at all —
+ * `COMPOSED_ATTACK_NORMS` takes it from `MATERIAL_VOICES[i].attackNorm` — and the module-load
+ * check at the bottom of this file refuses a table that tries to write one.
+ *
+ * **Why twelve numbers and not two.** The tempting shape is `normObj × normSurf`: four fitted
+ * values, composed. It fails, and it fails for a reason that is visible in the graph rather than
+ * in the fit. The modal bank is *fed by* the exciter (`lp.connect(bp)`), so the level inside the
+ * attack window is a function of both rows at once and not a product of two independent ones.
+ * Measured against this table, the separable model is close on the object rows that mostly drive
+ * modes — metal's cells sit within 0.63 dB of it and stone's within 0.32 — and hopeless on dust,
+ * which misses by 2.07 dB on metal and 3.09 dB on dust: dust is nearly all scuff, and how much of
+ * that scuff survives the window depends entirely on what it is driving. Three decibels is six
+ * times §3.9's whole budget, and `tests/audio/composedVoice.test.ts` asserts it rather than
+ * leaving it as a sentence here.
+ *
+ * Sixteen *numbers* is not sixteen voices: the audio content is still four excitations and four
+ * resonator banks, and every one of them is the shipped one.
+ *
+ * Fitted the way the shipped four were, and by the same estimator the test uses to check them:
+ * 192 strikes stratified across `NOISE_SLOTS`, power-meaned over `ATTACK_WINDOW_SEC`, at
+ * `COMPOSED_NORM_FIT_BRIGHT`. That makes the pair invariant a regression pin at birth rather
+ * than an independent measurement — the same honest circularity the four `attackNorm`s carry,
+ * and worth stating because the independent content lives elsewhere: the radii are exact
+ * arithmetic on the bus, and level-tracks-carry is structural through `gainFor`.
+ */
+const COMPOSED_OFF_DIAGONAL_NORMS: readonly (readonly (number | null)[])[] = Object.freeze([
+  //                            surface: concrete    metal     stone     dust
+  /* object concrete */ Object.freeze([null, 0.787030, 0.980666, 1.071759]),
+  /* object metal    */ Object.freeze([1.508906, null, 1.468010, 1.677572]),
+  /* object stone    */ Object.freeze([1.234623, 0.936895, null, 1.348517]),
+  /* object dust     */ Object.freeze([1.365230, 0.847094, 1.271354, null]),
+]);
+
+/**
+ * The attack normalization of a contact between two bodies, `[object][surface]`.
+ *
+ * **The diagonal is the shipped four, by reference — not copied literals.** That is the whole
+ * reason this table is built rather than written. A copied diagonal is a second place the
+ * footfall's level lives, and the day a refit moved one of them the game's every step would get
+ * quietly louder while `MATERIAL_ATTACK_NORMS` — the thing the loudness law is asserted against
+ * — still read the old number. Taking the same float makes that drift unavailable: there is one
+ * `attackNorm` per material and this table points at it.
+ *
+ * The price of the choice, measured rather than assumed: the diagonal was fitted at the walk
+ * shape and this table's off-diagonals at `COMPOSED_NORM_FIT_BRIGHT`, so on the diagonal the
+ * familiar `bright` leak is left in. A composed contact between two bodies of one material lands
+ * metal −0.097 dB, stone −0.016 and dust +0.262 from the reference pair, where the twelve fitted
+ * cells land at 0.000. All three are inside §3.9's 0.5 dB tolerance, and buying them back would
+ * mean refitting the numbers every footstep in the game is levelled by, to save at most a quarter
+ * of a decibel on a sound nothing emits yet. Not worth it; recorded here so nobody has to
+ * re-derive that it was considered.
+ */
+export const COMPOSED_ATTACK_NORMS: readonly (readonly number[])[] = Object.freeze(
+  MATERIAL_VOICES.map((row, obj) =>
+    Object.freeze(
+      MATERIAL_VOICES.map((_, surf) =>
+        obj === surf ? row.attackNorm : (COMPOSED_OFF_DIAGONAL_NORMS[obj]?.[surf] ?? NaN),
+      ),
+    ),
+  ),
+);
+
+/**
+ * Which row of `MATERIAL_VOICES` a material index names, concrete for one it does not.
+ *
+ * The fallback is `materialLoudness`'s, deliberately: an index off the end of the table answers
+ * with the ordinary surface there too, so the two halves of "unknown material" agree instead of
+ * one of them crashing mid-stride. It resolves to an *index* rather than to a row because the
+ * composed norm is looked up by index, and a lookup that fell back differently from the row
+ * selector would pair concrete's modes with some other material's level.
+ */
+function materialRow(mat: number | null): number {
+  return mat !== null && MATERIAL_VOICES[mat] !== undefined ? mat : MAT_CONCRETE;
+}
+
 /** Bandpass Q that gives a mode the stated T60. (Q ≈ π·f·t60 / ln(1000), ln(1000) ≈ 6.9.) */
 const qOf = (f: number, t60: number): number => Math.max(0.7, 0.4545 * f * t60);
 
@@ -240,10 +338,32 @@ function fallTo(param: AudioParam, from: number, at: number, seconds: number): v
 /**
  * One contact: a seeded noise exciter through a parallel modal bank, plus a pitch-dropping thump.
  *
- * The whole of §3.9's audible half is here. `spec.mat` picks the modes and the exciter; `spec.
- * bright` scales the exciter's cutoff, so a sprint is a harder strike on the same surface than a
- * crouch; `spec.toneHz` is the thump, which is weight. Level is `spec.gain` times the material's
- * attack normalization and nothing else.
+ * The whole of §3.9's audible half is here. `spec.bright` scales the exciter's cutoff, so a
+ * sprint is a harder strike on the same surface than a crouch; `spec.toneHz` is the thump, which
+ * is weight. Level is `spec.gain` times the attack normalization and nothing else.
+ *
+ * **A contact is two bodies, and the graph already knew it.** The four subgraphs below split
+ * cleanly along that line and always have: the exciter, the scuff and the thump are the *strike*
+ * — the arriving body's hardness, texture and mass — and the modal bank is the *surface
+ * answering*. So the two rows are selected separately. `spec.mat` is what was struck and picks
+ * the modes; `spec.objMat` is what struck it and picks the exciter, the scuff and the thump. The
+ * bank is fed by the exciter, which is physical and intended — a can dropped on steel drives the
+ * steel — and it is also why the level of the pair cannot be factorized (see
+ * `COMPOSED_ATTACK_NORMS`).
+ *
+ * What that buys, measured: 150–300 ms after the strike, concrete thrown at steel is still
+ * ringing ~33 dB above steel thrown at concrete. Swap the two selectors and the two numbers swap
+ * with them, so the difference does not shrink — it changes sign. The ring belongs to the floor,
+ * and the strike belongs to the can; `tests/audio/composedVoice.test.ts` is where both halves of
+ * that sentence are held.
+ *
+ * **`objMat === null` is the single-material voice, bit for bit.** Both selectors then resolve to
+ * the same row and the norm branch takes `attackNorm` — which is the same float
+ * `COMPOSED_ATTACK_NORMS` holds on its diagonal, by reference. Every footfall, landing and step
+ * the game emits today takes that path and renders exactly the samples it rendered before the
+ * seam existed. The branch is kept rather than folded into the table lookup precisely so that
+ * equality is a thing a test can assert instead of a thing that is true by having nowhere to
+ * differ.
  */
 export function contactVoice(
   ctx: BaseAudioContext,
@@ -251,11 +371,17 @@ export function contactVoice(
   spec: VoiceSpec,
   when: number,
 ): void {
-  const voice = MATERIAL_VOICES[spec.mat ?? MAT_CONCRETE] ?? MATERIAL_VOICES[MAT_CONCRETE]!;
+  const surf = materialRow(spec.mat);
+  const obj = spec.objMat === null ? surf : materialRow(spec.objMat);
+  /** The struck surface: what answers. */
+  const resonance = MATERIAL_VOICES[surf]!;
+  /** The arriving body: what strikes. The same row as `resonance` for every single-body contact. */
+  const excitation = MATERIAL_VOICES[obj]!;
   const stop = when + spec.durationSec;
 
   const sum = ctx.createGain();
-  sum.gain.value = spec.gain * voice.attackNorm;
+  sum.gain.value =
+    spec.gain * (spec.objMat === null ? resonance.attackNorm : COMPOSED_ATTACK_NORMS[obj]![surf]!);
   sum.connect(out);
 
   // The exciter: a slice of the bank, shaped by its own fall, then lowpassed by how hard the
@@ -264,20 +390,20 @@ export function contactVoice(
   const exciter = ctx.createBufferSource();
   exciter.buffer = noiseBank(ctx);
   const env = ctx.createGain();
-  fallTo(env.gain, 1, when, voice.exciterTau * 6);
+  fallTo(env.gain, 1, when, excitation.exciterTau * 6);
   const lp = ctx.createBiquadFilter();
   lp.type = 'lowpass';
-  lp.frequency.value = voice.exciterLp * spec.bright;
+  lp.frequency.value = excitation.exciterLp * spec.bright;
   lp.Q.value = 0.5;
   exciter.connect(env);
   env.connect(lp);
 
   const scuff = ctx.createGain();
-  scuff.gain.value = voice.scuff;
+  scuff.gain.value = excitation.scuff;
   lp.connect(scuff);
   scuff.connect(sum);
 
-  for (const mode of voice.modes) {
+  for (const mode of resonance.modes) {
     const q = qOf(mode.f, mode.t60);
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass';
@@ -305,7 +431,7 @@ export function contactVoice(
   osc.frequency.setValueAtTime(spec.toneHz, when);
   osc.frequency.exponentialRampToValueAtTime(spec.toneHz * 0.35, when + drop);
   const thump = ctx.createGain();
-  fallTo(thump.gain, voice.thump * 0.8, when, drop * 2.5);
+  fallTo(thump.gain, excitation.thump * 0.8, when, drop * 2.5);
   osc.connect(thump);
   thump.connect(sum);
 
@@ -416,4 +542,44 @@ if (MATERIAL_ATTACK_NORMS.length !== MATERIAL_NAMES.length) {
   throw new Error(
     `audio/voices: ${MATERIAL_NAMES.length} materials but ${MATERIAL_ATTACK_NORMS.length} voices.`,
   );
+}
+
+/**
+ * The composed table is square, complete, and has no diagonal of its own — checked at module load.
+ *
+ * Three failures, all of which would otherwise reach a gain node as a number rather than as an
+ * error. A missing cell arrives as `NaN`, and one non-finite sample poisons every summing node
+ * downstream — the exact failure `hasNaN` exists to catch, except here it would be catchable only
+ * after somebody had rendered it. A diagonal literal is worse than wrong: `COMPOSED_ATTACK_NORMS`
+ * ignores it and takes `attackNorm` instead, so the number would sit in the file looking
+ * authoritative and meaning nothing. And a row of the wrong length is what adding a fifth
+ * material without extending this table looks like.
+ *
+ * A load-time throw and not a test, for the same reason the voice-count check above is one: it
+ * runs in the game as well as in the suite, and there is no arrangement of imports that reaches
+ * the synthesis without passing it.
+ */
+for (let obj = 0; obj < MATERIAL_VOICES.length; obj++) {
+  const fitted = COMPOSED_OFF_DIAGONAL_NORMS[obj];
+  if (fitted === undefined || fitted.length !== MATERIAL_VOICES.length) {
+    throw new Error(
+      `audio/voices: composed norms row ${obj} has ${fitted?.length ?? 0} cells, ` +
+        `expected ${MATERIAL_VOICES.length}.`,
+    );
+  }
+  for (let surf = 0; surf < fitted.length; surf++) {
+    if ((fitted[surf] === null) !== (obj === surf)) {
+      throw new Error(
+        `audio/voices: composed norm [${MATERIAL_NAMES[obj]}][${MATERIAL_NAMES[surf]}] is ` +
+          `${obj === surf ? 'a literal; the diagonal is MATERIAL_VOICES[i].attackNorm by reference' : 'null; every off-diagonal pair needs a fitted norm'}.`,
+      );
+    }
+    const composed = COMPOSED_ATTACK_NORMS[obj]?.[surf];
+    if (composed === undefined || !(composed > 0) || !Number.isFinite(composed)) {
+      throw new Error(
+        `audio/voices: composed norm [${MATERIAL_NAMES[obj]}][${MATERIAL_NAMES[surf]}] is ` +
+          `${String(composed)}; a gain has to be a positive finite number.`,
+      );
+    }
+  }
 }
