@@ -1498,6 +1498,777 @@ check(
 );
 
 // ===========================================================================
+//  09  the throw: the light lands where the can does
+//
+//  The verb's whole promise (`world/cans.ts`) is a sound somewhere you are not, and the half of
+//  that a camera can settle is *where the light is*. No dot count can settle it: a can that lit
+//  the room from the rig's own boots would unlock exactly as many dots as one that lit it from
+//  eight metres out. It has to be read off the picture, through two windows — one on the floor
+//  the can struck, one on the floor 2.5 m in front of the rig.
+//
+//  Both windows are aimed in world coordinates, because "where the can landed" is not a place
+//  on screen until the can has landed. `project` below is the camera's own transform written
+//  out once; §10 and §11 aim their windows with it too.
+//
+//  Each window is read black first, before the arm moves — a control frame that also proves
+//  neither window has drifted onto a piece of the HUD — and then under each of three sounds
+//  fired from that one stand: the throw, an E-beam down the same aim, and a Q-ping.
+//
+//  **The far window is brighter for free, which is why there are three sounds and not one.** It
+//  looks at floor 8 m out, where the lattice's 0.18 m spacing covers a third as many pixels as
+//  it does at 2.5 m, so far-over-near is a large ratio before anything is thrown. The Q-ping is
+//  what measures that ratio and takes it off the table: 360°, 12 m, centred on the rig — the one
+//  source in this game whose paint is symmetric about the player *by construction*, so any skew
+//  it shows through these two windows is the windows and not the sound. Against that yardstick a
+//  throw's skew means what it says, and a raw far-over-near number would have meant almost
+//  nothing.
+//
+//  **The claim this section refused to make.** It was written to assert both halves of
+//  `cans.ts`'s asymmetry — the far end lights, *and* the thrower's own end stays darker than a
+//  beam would have left it. The second half is not true of the picture: the rig's own floor
+//  reads 3.09/255 after the throw against 3.48 after the beam, 1.1×, and lofting the can to 17 m
+//  only bounces it back to 13.7 m and repaints the near field anyway. The claim was wrong, not
+//  the measurement. An impact carries 8–12 m of paint scaled by the metal-on-concrete voice
+//  (§3.9) — up to ~14.7 m — radiating from a point 8.4 m out, so its sphere covers the thrower
+//  with room to spare. The asymmetry `cans.ts` is really claiming lives in the *hearing* column
+//  of §3.3, 25 m off the impact against 2.5 m off the wind-up, and a hearing radius is precisely
+//  the thing that paints nothing for a camera to find. Both numbers stay in the log below so
+//  that the next person to reach for this comparison finds the answer already taken.
+// ===========================================================================
+/**
+ * A point in the world, in viewport pixels — the camera's own transform, written out.
+ *
+ * `getState` publishes the render camera's position and the two look angles, and `src/main.ts`
+ * builds the projection from a 90° vertical field of view. That is the whole mapping, and
+ * having it here is what lets a measurement window be aimed at a *place* — the spot a can
+ * struck, the floor a cairn stands on — instead of at a rectangle eyeballed off one screenshot
+ * and quietly wrong the day the room moves.
+ */
+const PIXELS_PER_TANGENT = 360; // 90° vertical FOV over a 720-tall viewport: half of it per unit
+function project(s, p) {
+  const yaw = (Number(s.yawDeg) * Math.PI) / 180;
+  const pitch = (Number(s.pitchDeg) * Math.PI) / 180;
+  const cy = Math.cos(yaw);
+  const sy = Math.sin(yaw);
+  const fwd = [-sy * Math.cos(pitch), Math.sin(pitch), -cy * Math.cos(pitch)];
+  const right = [cy, 0, -sy];
+  const up = [
+    right[1] * fwd[2] - right[2] * fwd[1],
+    right[2] * fwd[0] - right[0] * fwd[2],
+    right[0] * fwd[1] - right[1] * fwd[0],
+  ];
+  const d = [p.x - Number(s.camX), p.y - Number(s.camY), p.z - Number(s.camZ)];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const depth = dot(d, fwd);
+  return {
+    depth,
+    x: 640 + (PIXELS_PER_TANGENT * dot(d, right)) / depth,
+    y: 360 - (PIXELS_PER_TANGENT * dot(d, up)) / depth,
+  };
+}
+/** A square measurement window of a given pixel size, centred on a projected point. */
+const windowAt = (p, size) => ({
+  x: Math.round(p.x - size / 2),
+  y: Math.round(p.y - size / 2),
+  w: size,
+  h: size,
+});
+/**
+ * Is this window looking at the renderer's output and nothing else?
+ *
+ * Measured on a black frame of this build: inside x ∈ [300, 1020) the only rows carrying DOM ink
+ * are 10-214 (the HUD panel and the title), 345-374 (the reticle) and 639-705 (the two hint
+ * lines). A derived window is aimed by the camera, so a change of stance or of pitch can walk it
+ * onto the reticle, where it would read the game's own overlay as if it were revealed geometry.
+ * Cheaper to refuse the reading than to explain it later.
+ *
+ * The reticle is why this is a list of two bands and not one range. It sits dead centre and
+ * splits the clear middle of the frame in half, and the two halves are where the two kinds of
+ * reading in these sections naturally land: a patch of floor falls below it, a stacked column
+ * seen from a few metres off falls above it. A window must fit wholly inside one band — one
+ * that straddles the reticle is reading the overlay whichever band you would rather it were in.
+ */
+const DOM_FREE_ROWS = [
+  [215, 344],
+  [375, 638],
+];
+const domFree = (r) =>
+  r.x >= 300 &&
+  r.x + r.w <= 1020 &&
+  DOM_FREE_ROWS.some(([top, bottom]) => r.y >= top && r.y + r.h <= bottom + 1);
+/** The point on the floor `metres` straight ahead of the body. */
+const groundAhead = (s, metres) => {
+  const yaw = (Number(s.yawDeg) * Math.PI) / 180;
+  return {
+    x: Number(s.x) - Math.sin(yaw) * metres,
+    y: 0,
+    z: Number(s.z) - Math.cos(yaw) * metres,
+  };
+};
+/** Winds the arm for `ticks` of simulated time and lets go, on the tick the can leaves. */
+async function throwCan(ticks) {
+  const before = Number((await state()).cansThrown);
+  await page.keyboard.down('f');
+  await step(ticks);
+  await page.keyboard.up('f');
+  return stepUntil((s) => Number(s.cansThrown) > before, 30, 1);
+}
+/**
+ * Every can in the world asleep.
+ *
+ * A thrown can bounces, and `paint/prints.ts` lays its cairn where it *stops* — so a picture
+ * taken before the world is still is a picture of a can that has not finished arriving.
+ */
+const cansAtRest = () => stepUntil((s) => s.canPoses.every((c) => c.asleep), ticksFor(9000), 2);
+/** The id the world gave the can that was not there a moment ago. */
+const newCanId = (before, after) => {
+  const had = new Set(before.canPoses.map((c) => c.id));
+  return after.canPoses.find((c) => !had.has(c.id))?.id ?? -1;
+};
+
+await respawn();
+await clearMap();
+await settleInk();
+const beforeThrow = await state();
+// The control frame, taken before anything is thrown and read through the two windows the throw
+// is about to define. It answers two questions at once: the room is black, and neither window is
+// looking at a piece of DOM — a reticle inside a window would read as paint that no sound made.
+const darkFrame = await frame();
+
+const launched = await throwCan(ticksFor(1200)); // well past CAN_CHARGE_SECONDS, so: the cap
+const thrownId = newCanId(beforeThrow, launched);
+const launchSeq = Number(launched.lastEventSeq);
+const struck = await stepUntil(
+  (s) => Number(s.lastEventSeq) > launchSeq && s.lastEvent === 'prop-impact',
+  ticksFor(4000),
+  1,
+);
+const strikePose = struck.canPoses.find((c) => c.id === thrownId);
+const strikeRange = Math.hypot(
+  strikePose.x - Number(beforeThrow.x),
+  strikePose.z - Number(beforeThrow.z),
+);
+await cansAtRest();
+await settleInk();
+const throwBuf = await shot('15-throw-impact.png');
+
+const shooting = await state();
+const LANDING = windowAt(project(shooting, strikePose), 64);
+const OWN_GROUND = windowAt(project(shooting, groundAhead(shooting, 2.5)), 64);
+const darkLanding = photo(darkFrame, LANDING, []);
+const darkOwn = photo(darkFrame, OWN_GROUND, []);
+const thrownLanding = photo(throwBuf, LANDING, []);
+const thrownOwn = photo(throwBuf, OWN_GROUND, []);
+
+// The same aim, the same spot, the other two ways of asking. The beam is the throw's rival for
+// the far end and is priced at 18 energy for it (§3.5); the Q-ping is not a rival at all — it is
+// the yardstick, a sphere centred on the rig, and its far-over-near reading is what these two
+// windows do to a sound that cannot favour either of them.
+await clearMap();
+await ping('e-ping');
+await settleInk();
+const beamBuf = await frame();
+const beamLanding = photo(beamBuf, LANDING, []);
+const beamOwn = photo(beamBuf, OWN_GROUND, []);
+
+await clearMap();
+await ping('q-ping');
+await settleInk();
+const sphereBuf = await frame();
+const sphereLanding = photo(sphereBuf, LANDING, []);
+const sphereOwn = photo(sphereBuf, OWN_GROUND, []);
+
+/** How far out a source threw its light, in these two windows, before the yardstick. */
+const skew = (far, near) => far.mean / Math.max(near.mean, 0.01);
+const thrownSkew = skew(thrownLanding, thrownOwn);
+const beamSkew = skew(beamLanding, beamOwn);
+const sphereSkew = skew(sphereLanding, sphereOwn);
+
+console.log(
+  `  can struck the floor ${strikeRange.toFixed(2)} m out, came to rest ` +
+    `${Math.hypot(
+      Number(shooting.canPoses.find((c) => c.id === thrownId).x) - Number(beforeThrow.x),
+      Number(shooting.canPoses.find((c) => c.id === thrownId).z) - Number(beforeThrow.z),
+    ).toFixed(2)} m out, ${shooting.structUnlockedDots} dots unlocked\n` +
+    `  landing window ${LANDING.x},${LANDING.y} ${LANDING.w}px: ` +
+    `${darkLanding.mean.toFixed(3)} dark → ${thrownLanding.mean.toFixed(2)} thrown → ` +
+    `${beamLanding.mean.toFixed(2)} beamed → ${sphereLanding.mean.toFixed(2)} q-pinged\n` +
+    `  own-ground window ${OWN_GROUND.x},${OWN_GROUND.y} ${OWN_GROUND.w}px: ` +
+    `${darkOwn.mean.toFixed(3)} dark → ${thrownOwn.mean.toFixed(2)} thrown → ` +
+    `${beamOwn.mean.toFixed(2)} beamed → ${sphereOwn.mean.toFixed(2)} q-pinged\n` +
+    `  far over near: ${thrownSkew.toFixed(2)}× thrown, ${beamSkew.toFixed(2)}× beamed, ` +
+    `${sphereSkew.toFixed(2)}× q-pinged — the last of those is the windows themselves`,
+);
+check(
+  'both windows are black before the arm moves, and neither is looking at the HUD',
+  darkLanding.mean < 0.05 && darkOwn.mean < 0.05 && domFree(LANDING) && domFree(OWN_GROUND),
+  `landing ${darkLanding.mean.toFixed(3)}/255, own ground ${darkOwn.mean.toFixed(3)}/255`,
+);
+check(
+  'a thrown can lights the floor it struck',
+  strikeRange > 6 && thrownLanding.mean > 6,
+  `struck ${strikeRange.toFixed(2)} m out — ${thrownLanding.mean.toFixed(2)}/255, ` +
+    `${pct(thrownLanding.lit)} of the window lit, from ${darkLanding.mean.toFixed(3)}/255 black`,
+);
+check(
+  'out where it struck rather than around the rig, past what the windows do for free',
+  thrownOwn.mean < thrownLanding.mean * 0.3 && thrownSkew > sphereSkew * 1.25,
+  `${thrownOwn.mean.toFixed(2)}/255 (${pct(thrownOwn.lit)} lit) at the rig's feet against ` +
+    `${thrownLanding.mean.toFixed(2)}/255 (${pct(thrownLanding.lit)}) where the can landed — ` +
+    `${thrownSkew.toFixed(2)}× far over near, against the ${sphereSkew.toFixed(2)}× a Q-ping ` +
+    `shows through the same two windows: ${times(thrownSkew, sphereSkew)} the skew a sound ` +
+    `centred on the rig can produce`,
+);
+check(
+  'and buys the far picture an 18-energy beam buys, for a can',
+  thrownLanding.mean > beamLanding.mean * 0.8 &&
+    thrownLanding.mean < beamLanding.mean * 1.25 &&
+    thrownLanding.lit > beamLanding.lit * 0.8,
+  `landing window ${thrownLanding.mean.toFixed(2)}/255 and ${pct(thrownLanding.lit)} lit from ` +
+    `the can against ${beamLanding.mean.toFixed(2)}/255 and ${pct(beamLanding.lit)} from the ` +
+    `beam — ${pct2(Math.abs(thrownLanding.mean - beamLanding.mean), beamLanding.mean)} apart, ` +
+    `for a can and no energy; the two sounds' own near ground reads ` +
+    `${thrownOwn.mean.toFixed(2)}/255 against ${beamOwn.mean.toFixed(2)}, which settles nothing`,
+);
+
+// ===========================================================================
+//  10  the cairn: a stacked column against the floor it stands on (§8)
+//
+//  `world/cans.ts` justifies `CAN_STACK_PITCH` on a perceptual claim that nothing had ever
+//  checked: a column of cairns "reads instantly as something a person stacked" because it is
+//  locally denser than any patch of lattice can be — 0.12 m of glyph against 0.18 m of spacing.
+//  That is a statement about pixels in a black room, so it is answerable, and it deserved
+//  answering before anything else was stacked on top of it.
+//
+//  The reading is one Q-ping onto a wiped map, from a stand a few metres short of the column in
+//  the north lane, and it is deliberately not a reading of the walk that got there: what a
+//  player sees when a sound arrives is what the claim is about. The window is the column's own
+//  silhouette, and the controls are four windows of exactly that size beside it at the same
+//  screen rows — so both are looking at the same heights above the same floor at the same
+//  range, and the only difference between them is that one has cans in it.
+// ===========================================================================
+await respawn();
+await clearMap();
+await page.keyboard.down('w');
+await stepUntil((s) => Number(s.x) > 4.0, ticksFor(30000), 4);
+await page.keyboard.up('w');
+await step(1);
+// North onto the lane first, then east along it. Pointing at the stack from anywhere further
+// west means pointing through the tank, and walking at it means walking into the tank.
+await turnTo(180, sens);
+await page.keyboard.down('w');
+await stepUntil((s) => Number(s.z) > 1.9, ticksFor(20000), 1);
+await page.keyboard.up('w');
+await stepUntil((s) => Number(s.speed) === 0, ticksFor(3000), 2);
+await turnTo(-90, sens);
+await page.keyboard.down('w');
+await stepUntil((s) => Number(s.x) > 5.5, ticksFor(10000), 2);
+await page.keyboard.up('w');
+await stepUntil((s) => Number(s.speed) === 0, ticksFor(3000), 2);
+const atStand = await state();
+const column = atStand.canPoses[Math.floor(atStand.canPoses.length / 2)];
+await turnTo(yawTo(Number(atStand.x), Number(atStand.z), column.x, column.z), sens);
+// Pitched well down: at −30 the column projects into the reticle's rows and the reading would
+// be of the reticle. The stand is close enough that the angle to the cairns is steep anyway.
+await pitchBy(-40 - Number((await state()).pitchDeg), sens);
+await clearMap();
+await ping('q-ping');
+await settleColour();
+const cairnBuf = await shot('16-resting-print.png');
+
+const atColumn = await state();
+const stackPts = atColumn.canPoses.map((c) => project(atColumn, c));
+const canPixels = (PIXELS_PER_TANGENT * 0.06) / mean(stackPts.map((p) => p.depth));
+const COLUMN = {
+  x: Math.round(Math.min(...stackPts.map((p) => p.x)) - canPixels),
+  y: Math.round(Math.min(...stackPts.map((p) => p.y)) - canPixels),
+  w: Math.round(2 * canPixels + spread(stackPts.map((p) => p.x))),
+  h: Math.round(2 * canPixels + spread(stackPts.map((p) => p.y))),
+};
+const BESIDE = [-3, -2, 2, 3].map((k) => ({ ...COLUMN, x: Math.round(COLUMN.x + k * COLUMN.w) }));
+const cairns = photo(cairnBuf, COLUMN, []);
+const beside = BESIDE.map((r) => photo(cairnBuf, r, []));
+const besideMean = mean(beside.map((b) => b.mean));
+const besideLit = mean(beside.map((b) => b.lit));
+const standRange = Math.hypot(
+  column.x - Number(atColumn.x),
+  column.z - Number(atColumn.z),
+);
+console.log(
+  `  stood ${standRange.toFixed(2)} m off the column, ${COLUMN.w}x${COLUMN.h} px of silhouette ` +
+    `at ${COLUMN.x},${COLUMN.y}\n  column ${cairns.mean.toFixed(2)}/255 ` +
+    `(${pct(cairns.lit)} lit) · ` +
+    `four windows beside it ${beside.map((b) => b.mean.toFixed(1)).join(', ')} ` +
+    `(mean ${besideMean.toFixed(2)}/255, ${pct(besideLit)} lit)`,
+);
+check(
+  'one ping, and every can in the column has a print on the map',
+  Number(atColumn.canPrintsKnown) === atColumn.canPoses.length &&
+    Number(atColumn.canPrintDots) === Number(atColumn.canPrintsKnown) * 7,
+  `${atColumn.canPrintsKnown} of ${atColumn.canPrints} prints known, ` +
+    `${atColumn.canPrintDots} dots — seven a can`,
+);
+check(
+  'and the column reads denser than the floor lattice either side of it',
+  domFree(COLUMN) &&
+    BESIDE.every(domFree) &&
+    cairns.mean > besideMean * 2 &&
+    cairns.lit > besideLit * 2,
+  `from ${standRange.toFixed(2)} m: ${cairns.mean.toFixed(2)}/255 and ${pct(cairns.lit)} lit ` +
+    `against ${besideMean.toFixed(2)}/255 and ${pct(besideLit)} beside it — ` +
+    `${times(cairns.mean, besideMean)} the brightness and ` +
+    `${times(cairns.lit, besideLit)} the coverage`,
+);
+
+// ===========================================================================
+//  11  the pickup: the print goes when the can does (law 2, at its smallest scale)
+//
+//  A cairn is drawn at a pose (`world/cans.ts`), so a cairn still on the floor after the can has
+//  gone into the rack would be the system lying about a thing the player is standing on top of.
+//  It is the smallest lie the game is capable of telling and one of the easiest to ship, because
+//  nothing else in the frame would look wrong.
+//
+//  Two frames, and the trap they have to avoid: the lift is itself a `prop-knock`, so the floor
+//  where the can was is *brighter* a moment after the pickup than a moment before. Read raw,
+//  the after-frame wins and the print appears to have survived. So both frames are taken the
+//  same way — wipe, one Q-ping, let the ramp cool — which makes the reveal identical and leaves
+//  the cans as the only difference between them.
+//
+//  The window is a patch of *floor*, projected fresh in each frame from the same world square,
+//  because the body is 0.5 m closer for the second one and a fixed pixel rectangle would be
+//  looking at a different amount of ground. Its control is the same square of floor a stride to
+//  either side, and what is compared is the excess: how much brighter the can's own patch is
+//  than the floor around it. West of the chokepoint on purpose — the authored stack is 21 m
+//  away, outside the Q-ping's reach, so the print counts below belong to this can alone.
+// ===========================================================================
+await respawn();
+await clearMap();
+await pitchBy(-35, sens);
+const beforeToss = await state();
+const tossed = await throwCan(1); // a tap: CAN_THROW_MIN, and a few metres of floor
+const tossedId = newCanId(beforeToss, tossed);
+await cansAtRest();
+await settleInk();
+const atRest = await state();
+const restingCan = atRest.canPoses.find((c) => c.id === tossedId);
+await turnTo(
+  yawTo(Number(atRest.x), Number(atRest.z), restingCan.x, restingCan.z),
+  sens,
+);
+// Stopped short of `CAN_REACH`, so the before-frame is of a can nobody has touched. Walking is
+// 3.5 m/s, under `CAN_LIFT_SPEED`, which is what makes the second half of this a lift and not a
+// boot — the same approach at a sprint is §12.
+await page.keyboard.down('w');
+await stepUntil(
+  (s) => Math.hypot(restingCan.x - Number(s.x), restingCan.z - Number(s.z)) < 1.35,
+  ticksFor(8000),
+  1,
+);
+await page.keyboard.up('w');
+await stepUntil((s) => Number(s.speed) === 0, ticksFor(2000), 2);
+await pitchBy(-40 - Number((await state()).pitchDeg), sens);
+
+/** The screen rectangle a square of floor `2·half` across, centred on a world point, occupies. */
+function floorPatch(s, at, half) {
+  const pts = [
+    [-1, -1],
+    [1, -1],
+    [-1, 1],
+    [1, 1],
+  ].map(([u, v]) => project(s, { x: at.x + u * half, y: 0, z: at.z + v * half }));
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  return {
+    x: Math.round(Math.min(...xs)),
+    y: Math.round(Math.min(...ys)),
+    w: Math.max(2, Math.round(spread(xs))),
+    h: Math.max(2, Math.round(spread(ys))),
+  };
+}
+/** The same patch, one stride left and one stride right of it across the camera's own axis. */
+function floorBeside(s, at, half, metres) {
+  const yaw = (Number(s.yawDeg) * Math.PI) / 180;
+  return [-1, 1].map((k) =>
+    floorPatch(
+      s,
+      { x: at.x + k * metres * Math.cos(yaw), z: at.z - k * metres * Math.sin(yaw) },
+      half,
+    ),
+  );
+}
+async function readCairnFloor(name) {
+  await clearMap();
+  await ping('q-ping');
+  await settleColour();
+  const buf = await shot(name);
+  const s = await state();
+  const on = floorPatch(s, restingCan, 0.12);
+  const off = floorBeside(s, restingCan, 0.12, 0.6);
+  const cairn = photo(buf, on, []);
+  const floor = mean(off.map((r) => photo(buf, r, []).mean));
+  return { s, on, off, cairn, floor, excess: cairn.mean - floor };
+}
+const before = await readCairnFloor('17-pickup.png');
+await page.keyboard.down('w');
+const took = await stepUntil(
+  (s) => Number(s.carriedCans) > Number(before.s.carriedCans),
+  ticksFor(4000),
+  1,
+);
+await page.keyboard.up('w');
+await stepUntil((s) => Number(s.speed) === 0, ticksFor(2000), 2);
+// Back to the stand the first picture was taken from. The lift fires at `CAN_REACH`, so a body
+// that stops where it stopped is a third of a metre from the floor it is being asked about, and
+// a patch of ground that close is half a screen tall and running off the bottom of it. Backing
+// off costs nothing: both frames wipe the map and re-light it with one ping, so the walk back
+// is not in either picture.
+await page.keyboard.down('s');
+await stepUntil(
+  (s) => Math.hypot(restingCan.x - Number(s.x), restingCan.z - Number(s.z)) > 0.9,
+  ticksFor(4000),
+  1,
+);
+await page.keyboard.up('s');
+await stepUntil((s) => Number(s.speed) === 0, ticksFor(2000), 2);
+const after = await readCairnFloor('17b-pickup-taken.png');
+console.log(
+  `  can at rest ${Math.hypot(
+    restingCan.x - Number(beforeToss.x),
+    restingCan.z - Number(beforeToss.z),
+  ).toFixed(2)} m out · lifted from ` +
+    `${Math.hypot(restingCan.x - Number(took.x), restingCan.z - Number(took.z)).toFixed(2)} m\n` +
+    `  its patch of floor ${before.on.w}x${before.on.h} px: ${before.cairn.mean.toFixed(2)}/255 ` +
+    `against ${before.floor.toFixed(2)} beside it (excess ${before.excess.toFixed(2)})\n` +
+    `  the same square after the lift ${after.on.w}x${after.on.h} px: ` +
+    `${after.cairn.mean.toFixed(2)}/255 against ${after.floor.toFixed(2)} (excess ` +
+    `${after.excess.toFixed(2)})`,
+);
+check(
+  'a can that has come to rest puts a cairn on the floor where it lies',
+  domFree(before.on) && Number(before.s.canPrintDots) === 7 && before.excess > 4,
+  `${before.cairn.mean.toFixed(2)}/255 on the can's own square of floor against ` +
+    `${before.floor.toFixed(2)}/255 a stride either side, ` +
+    `${before.s.canPrintDots} print dots known`,
+);
+check(
+  'and walking into it takes the cairn away with the can',
+  Number(after.s.carriedCans) === Number(before.s.carriedCans) + 1 &&
+    Number(after.s.worldCans) === Number(before.s.worldCans) - 1 &&
+    Number(after.s.canPrintDots) === 0,
+  `rack ${before.s.carriedCans} → ${after.s.carriedCans}, cans in the world ` +
+    `${before.s.worldCans} → ${after.s.worldCans}, print dots ` +
+    `${before.s.canPrintDots} → ${after.s.canPrintDots}`,
+);
+check(
+  'leaving floor that reads like floor',
+  domFree(after.on) && Math.abs(after.excess) < before.excess * 0.25,
+  `excess over the surrounding floor ${before.excess.toFixed(2)}/255 before the lift, ` +
+    `${after.excess.toFixed(2)}/255 after`,
+);
+
+// ===========================================================================
+//  12  the stack: the same column, walked up to and sprinted through (§8)
+//
+//  §8 prices the stack as a fork rather than an obstacle: walk up with room in the rack and you
+//  mine it off the top for four soft knocks, sprint the same line and you boot it across the
+//  loudest lane in the room. Two passes, one difference, and the frames have to be able to tell
+//  them apart — the whole point of authoring a prop as a sound trap is that the wrong approach
+//  is *visible* to everything with ears, and this suite is the only thing here that has eyes.
+//
+//  The rack starts full, so both passes empty it into the floor at spawn first: with four cans
+//  already carried there is no room to mine into, and the difference under test would be a
+//  difference in pockets rather than in speed.
+//
+//  Both frames are taken looking **up**. Reading the floor was tried first and it cannot answer:
+//  the rig is standing next to the column when the picture is taken, so its own footsteps have
+//  painted every square metre within four of it and the near floor is bright in both passes —
+//  measured, 14.2 against 14.7 out of 255, which is no answer at all. The ceiling is 7 m up,
+//  past a walk-step's 4 m and at the very limit of a sprint-step's 7, and a boot's `prop-impact`
+//  carries 11 m from the floor — so what is overhead is lit by the cans coming down and by
+//  almost nothing else. That the fork is priced twice, once in gait and once in what your leg
+//  does to the column, is not a confound to be subtracted: it is what §8 means by the loud lane.
+// ===========================================================================
+const CEILING = { x: 360, y: 376, w: 650, h: 254 };
+/**
+ * Four cans straight into the floor at the rig's feet.
+ *
+ * Down rather than out, because a can released at the ceiling of its arc lands where the pass is
+ * about to run and would be kicked twice. `CAN_REARM_M` leaves these four inert until the walk
+ * east has taken the body 1.5 m clear of them, which is the same rule that makes a throw-cancel
+ * a priced abort rather than a pickup loop.
+ */
+async function emptyTheRack() {
+  await pitchBy(-80 - Number((await state()).pitchDeg), sens);
+  while (Number((await state()).carriedCans) > 0) {
+    await throwCan(1);
+    await cansAtRest();
+  }
+  await pitchBy(0 - Number((await state()).pitchDeg), sens);
+}
+/**
+ * One pass down the north lane at one speed, photographed from where it ends.
+ *
+ * `laneZ` is the whole fork's other half. The stack stands at z = 1.8; reach is a 0.6 m cylinder
+ * and the body is 0.35 m across (`game/throwables.ts`), so a lane between those two — 2.15 to
+ * 2.37 m — is one the arm can mine and the leg never touches. That quarter-metre is where §8's
+ * "walk up ... and mine it off the top" actually lives, and running it is what turns the same
+ * 0.22 m of floor into five cans across the lane.
+ */
+async function lanePass(name, keys, laneZ, releaseX) {
+  await respawn();
+  await emptyTheRack();
+  await page.keyboard.down('w');
+  await stepUntil((s) => Number(s.x) > 4.6, ticksFor(30000), 4);
+  await page.keyboard.up('w');
+  await step(1);
+  await turnTo(180, sens);
+  await page.keyboard.down('w');
+  await stepUntil((s) => Number(s.z) > laneZ - 0.22, ticksFor(20000), 1);
+  await page.keyboard.up('w');
+  await stepUntil((s) => Number(s.speed) === 0, ticksFor(3000), 2);
+  await turnTo(-90, sens);
+  const lane = await state();
+  await clearMap();
+  for (const k of keys) await page.keyboard.down(k);
+  const crossing = await stepUntil((s) => Number(s.x) > releaseX, ticksFor(12000), 1);
+  for (const k of keys) await page.keyboard.up(k);
+  await stepUntil((s) => Number(s.speed) === 0, ticksFor(4000), 2);
+  await cansAtRest();
+  await settleInk();
+  await turnTo(90, sens);
+  await pitchBy(65 - Number((await state()).pitchDeg), sens);
+  await settleInk();
+  const buf = await shot(name);
+  const s = await state();
+  const left = s.canPoses.filter((c) => c.x > 5);
+  return {
+    s,
+    lane,
+    speed: Number(crossing.speed),
+    left,
+    strewn: left.length > 1 ? spread(left.map((c) => c.x)) : 0,
+    up: photo(buf, CEILING, []),
+  };
+}
+const minePass = await lanePass('18-stack-mined.png', ['w'], 2.26, 9.3);
+const bootPass = await lanePass('18b-stack-booted.png', ['Shift', 'w'], 1.8, 8.9);
+console.log(
+  `  walked the lane at z=${Number(minePass.lane.z).toFixed(2)}, ` +
+    `${minePass.speed.toFixed(2)} m/s: rack ${minePass.s.carriedCans}, ` +
+    `${minePass.left.length} can(s) still by the tank, ` +
+    `${minePass.s.structUnlockedDots} dots, ceiling ${minePass.up.mean.toFixed(2)}/255 ` +
+    `(${pct(minePass.up.lit)} lit)\n` +
+    `  sprinted it at z=${Number(bootPass.lane.z).toFixed(2)}, ` +
+    `${bootPass.speed.toFixed(2)} m/s: rack ${bootPass.s.carriedCans}, ` +
+    `${bootPass.left.length} can(s) strewn over ` +
+    `${bootPass.strewn.toFixed(2)} m, ${bootPass.s.structUnlockedDots} dots, ceiling ` +
+    `${bootPass.up.mean.toFixed(2)}/255 (${pct(bootPass.up.lit)} lit)`,
+);
+check(
+  'walking the mining lane takes the column apart and leaves one can standing',
+  Number(minePass.s.carriedCans) === 4 && minePass.left.length === 1 && minePass.strewn === 0,
+  `rack ${minePass.s.carriedCans} of 4, ${minePass.left.length} can left at ` +
+    `(${minePass.left[0]?.x.toFixed(2)}, ${minePass.left[0]?.z.toFixed(2)}) — the one the arm ` +
+    `could not pocket and the leg never reached`,
+);
+check(
+  'sprinting the column line pockets nothing and puts five cans across the lane',
+  Number(bootPass.s.carriedCans) === 0 && bootPass.left.length === 5 && bootPass.strewn > 0.5,
+  `rack ${bootPass.s.carriedCans}, ${bootPass.left.length} cans spread over ` +
+    `${bootPass.strewn.toFixed(2)} m of floor at ${bootPass.speed.toFixed(2)} m/s`,
+);
+check(
+  'and the two frames say which of them was the loud one',
+  bootPass.up.mean > minePass.up.mean * 2.5 && bootPass.up.lit > minePass.up.lit * 2.5,
+  `ceiling ${minePass.up.mean.toFixed(2)}/255 and ${pct(minePass.up.lit)} lit after the mine, ` +
+    `${bootPass.up.mean.toFixed(2)}/255 and ${pct(bootPass.up.lit)} after the boot — ` +
+    `${times(bootPass.up.mean, minePass.up.mean)} the light for the same six metres of lane`,
+);
+
+// ===========================================================================
+//  13  the rack: four dots that are four dots, and a centre that goes dark again
+//
+//  `world/cans.ts` justifies a four-can rack on a perceptual claim — "humans subitize up to
+//  four: a four-pip readout is *perceived*, not counted" — and `ui/hud.ts` spends that claim on
+//  a row 18 px wide with 2 px between the dots, tucked inside a 30 px ring. Subitizing four
+//  things requires four things. At three pixels a dot, with the browser antialiasing a
+//  border-radius circle, "four dots" and "a dash" are the same amount of ink and it is the gaps
+//  that decide which one a player sees. Nothing but a decoded frame can answer that.
+//
+//  It also settles a worry that turns out not to exist. The reveal is bloomed and 3 px of cyan
+//  1.3 px inside a 2 px cyan ring sounds like a smear waiting to happen — but the row is DOM
+//  over the canvas and the bloom pass runs on the renderer's target, so it never touches these
+//  pixels. The columns below are the proof rather than the argument.
+//
+//  Two claims, and the second is the one the rest of this file depends on. §14 rules out a
+//  minimap, a compass and objective markers, and a permanently lit glyph at the centre of a
+//  black screen is the same thing wearing a smaller footprint: the row has to *leave*. And every
+//  photometric golden in this suite is a reading of the frame minus a 40 px hole at the centre
+//  (`FRAME_HOLES`), so a row that painted one pixel outside it would move all of them at once —
+//  which is why the strip read here is bounded by the ring's own inner edge and the ring by the
+//  hole.
+// ===========================================================================
+/**
+ * The strip of screen the four pips live in, and the two bands beside it.
+ *
+ * `ui/hud.ts` puts the row's centre 6 px below the screen centre, 3 px tall and 18 px wide, so
+ * the pips occupy rows 364-367 and columns 631-648. The strip is 22 px of that row: wide enough
+ * to catch a pip that has walked sideways, narrow enough to stay clear of the Halo ring, whose
+ * stroke crosses this row at x ~ 626 and ~ 654 (a 30 px circle is 13.7 px wide at 6 px off its
+ * own centre). Row 363 is left out — the reticle's disc ends at 362.5 and its antialiasing does
+ * not.
+ */
+const PIP_STRIP = { x: 629, y: 364, w: 22, h: 4 };
+/** Columns the four pips sit on, and the three gaps between them — `RACK_PIP_GAP_PX` apart. */
+const PIP_COLUMNS = [
+  [631, 633],
+  [636, 638],
+  [641, 643],
+  [646, 648],
+];
+const PIP_GAPS = [
+  [634, 635],
+  [639, 640],
+  [644, 645],
+];
+/**
+ * One pixel's luminance out of a decoded frame.
+ *
+ * `channels` and not 4: `tools/png.mjs` decodes colour type 2 as three bytes a pixel and type 6
+ * as four, and a Playwright screenshot of an opaque page is type 2. Assuming RGBA reads every
+ * fourth byte of a three-byte stride, which does not fail — it returns a plausible, wrong,
+ * period-3 pattern that looks like a rendering artefact and costs an afternoon.
+ */
+function luminanceAt(img, col, row) {
+  const i = (row * img.width + col) * img.channels;
+  return 0.2126 * img.data[i] + 0.7152 * img.data[i + 1] + 0.0722 * img.data[i + 2];
+}
+/** Peak luminance down a column range of the pip strip — the brightest row of those four. */
+function stripProfile(buf) {
+  const img = decodePng(buf);
+  const at = ([from, to]) => {
+    let best = 0;
+    for (let col = from; col <= to; col++) {
+      for (let row = PIP_STRIP.y; row < PIP_STRIP.y + PIP_STRIP.h; row++) {
+        const l = luminanceAt(img, col, row);
+        if (l > best) best = l;
+      }
+    }
+    return best;
+  };
+  return { pips: PIP_COLUMNS.map(at), gaps: PIP_GAPS.map(at) };
+}
+/**
+ * Every lit pixel of the row, as a box measured from the screen centre.
+ *
+ * Read over a 60 px square rather than over the 40 px hole, so that a row which had escaped the
+ * hole would be *seen* escaping rather than silently cropped to the edge of the window looking
+ * for it. The room is black and wiped for these frames, so anything lit in here is chrome.
+ */
+function rowInk(buf) {
+  const img = decodePng(buf);
+  const box = { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity, lit: 0 };
+  for (let row = 330; row < 390; row++) {
+    for (let col = 610; col < 670; col++) {
+      const dx = col - 640;
+      const dy = row - 360;
+      // The reticle and the ring are the centre's other two tenants, and they are drawn in both
+      // frames: the disc out to 3 px, the ring's stroke from 13 px out. Between them is a 10 px
+      // annulus that belongs to nothing else, and the row's own furthest corner is 11.7 px out —
+      // which is `ui/hud.ts`'s stated clearance, read here rather than taken on trust.
+      const r2 = dx * dx + dy * dy;
+      if (r2 <= 16 || r2 >= 144) continue;
+      if (luminanceAt(img, col, row) < 8) continue;
+      box.lit++;
+      box.left = Math.min(box.left, dx);
+      box.right = Math.max(box.right, dx);
+      box.top = Math.min(box.top, dy);
+      box.bottom = Math.max(box.bottom, dy);
+    }
+  }
+  return box;
+}
+
+await respawn();
+await pitchBy(0 - Number((await state()).pitchDeg), sens);
+await clearMap();
+// A run opens with a full rack, which is a change from the readout's own zero, so the row states
+// the count once at spawn. Wait it out: what "dark" means here is *after* everything the boot
+// had to say, and a frame taken inside that first showing would call a working row a stuck one.
+await step(ticksFor(2500));
+await settleInk();
+const idleFrame = await frame();
+const idle = rowInk(idleFrame);
+
+// Winding, not throwing. `charging` is a level rather than an edge (`ui/hud.ts`), so the row is
+// up for as long as the arm is back and the frame can be taken at leisure — and the wind-up's
+// paint is 0.5 m around the eye, which at a level aim is floor far below the bottom of the
+// screen and nothing at all in the strip below.
+await page.keyboard.down('f');
+await stepUntil((s) => s.charging === true, 30, 1);
+await step(ticksFor(200));
+const fullFrame = await shot('19-rack-pips.png');
+const full = stripProfile(fullFrame);
+const fullInk = rowInk(fullFrame);
+await page.keyboard.up('f');
+await cansAtRest();
+
+// Two cans down, and the same picture again: the count is the only thing that changed.
+await throwCan(1);
+await cansAtRest();
+await page.keyboard.down('f');
+await stepUntil((s) => s.charging === true, 30, 1);
+await step(ticksFor(200));
+const twoFrame = await frame();
+const two = stripProfile(twoFrame);
+await page.keyboard.up('f');
+await cansAtRest();
+const twoState = await state();
+
+console.log(
+  `  idle centre: ${idle.lit} lit pixel(s) in the rack's own strip\n` +
+    `  full rack → pips ${full.pips.map((v) => v.toFixed(0)).join(', ')} ` +
+    `· gaps ${full.gaps.map((v) => v.toFixed(0)).join(', ')}\n` +
+    `  rack ${twoState.carriedCans} → pips ${two.pips.map((v) => v.toFixed(0)).join(', ')} ` +
+    `· gaps ${two.gaps.map((v) => v.toFixed(0)).join(', ')}\n` +
+    `  row ink x ∈ [${fullInk.left}, ${fullInk.right}], y ∈ [${fullInk.top}, ${fullInk.bottom}] ` +
+    `px from centre, ${fullInk.lit} lit`,
+);
+check(
+  'the centre of a black screen is black again once the rack has finished speaking',
+  idle.lit === 0,
+  `${idle.lit} lit pixel(s) below the reticle after the boot showing expired — ` +
+    `§14 gets no exception for chrome that is only 18 px wide`,
+);
+check(
+  'a wind-up puts four separate dots there, not a dash',
+  full.pips.every((v) => v > 60) && full.gaps.every((g) => g < Math.min(...full.pips) * 0.6),
+  `pips ${full.pips.map((v) => v.toFixed(0)).join('/')} against gaps ` +
+    `${full.gaps.map((v) => v.toFixed(0)).join('/')} out of 255 — the dimmest dot is ` +
+    `${times(Math.min(...full.pips), Math.max(...full.gaps))} the brightest gap`,
+);
+check(
+  'and the row says how many, by filling from the left',
+  Number(twoState.carriedCans) === 3 &&
+    two.pips[0] > 60 &&
+    two.pips[1] > 60 &&
+    two.pips[2] > 60 &&
+    two.pips[3] < two.pips[2] * 0.5,
+  `carrying ${twoState.carriedCans}: ${two.pips.map((v) => v.toFixed(0)).join('/')} — the spent ` +
+    `slot is still drawn, at ${pct2(two.pips[3], two.pips[2])} of a full one, because the ` +
+    `readout's claim is "three of four" and not "three"`,
+);
+check(
+  'and every pixel of it is inside the 40 px hole the rest of this file measures around',
+  fullInk.lit > 0 &&
+    Math.max(Math.abs(fullInk.left), Math.abs(fullInk.right)) <= 20 &&
+    Math.max(Math.abs(fullInk.top), Math.abs(fullInk.bottom)) <= 20,
+  `x ∈ [${fullInk.left}, ${fullInk.right}], y ∈ [${fullInk.top}, ${fullInk.bottom}] px from ` +
+    `centre against the hole's ±20 — a pixel outside it is counted as world paint by every ` +
+    `mean-luminance golden above`,
+);
+
+// ===========================================================================
 //  report
 // ===========================================================================
 check(
