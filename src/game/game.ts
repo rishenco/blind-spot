@@ -16,8 +16,11 @@ import type GUI from 'lil-gui';
 import type { Input } from '../core/input';
 import type { SeedConfig } from '../core/rng';
 import type { HelpRow, Hud } from '../ui/hud';
+import { AudioSystem } from '../audio/system';
 import { BloomChain, defaultBloomTunables, isSoftwareRenderer } from '../paint/post';
 import { REVEAL_BACKGROUND } from '../world/room';
+import { PLAYER_EMITTER_ID } from '../paint/soundEvents';
+import type { ListenerState } from '../audio/director';
 import { GameSim } from './sim';
 
 const HINT =
@@ -57,6 +60,18 @@ export class Game {
   /** The game. Everything else on this class is a way of looking at it. */
   readonly sim: GameSim;
 
+  /**
+   * The bus's second subscriber (§1, "one bus, two senses").
+   *
+   * It lives here and not in `GameSim` on purpose. A context is a browser object and a gesture is
+   * a browser event, and `sim.ts` is the half of the game that has neither — the headless runs
+   * and the whole determinism oracle depend on it staying that way. The sim makes the noises;
+   * this side is what turns them into sound.
+   */
+  readonly audio: AudioSystem;
+  /** Set once audio is live, so the gesture check stops running every frame forever. */
+  private audioLive = false;
+
   private readonly ctx: GameCtx;
   private readonly input: Input;
 
@@ -85,6 +100,11 @@ export class Game {
     ctx.scene.fog = null;
 
     this.sim = new GameSim({ seed: ctx.seed });
+    // Subscribed to the *same* bus the paint system is on, before anything can emit.
+    this.audio = new AudioSystem({
+      bus: this.sim.bus,
+      listener: () => this.listenerNow(),
+    });
     ctx.scene.add(this.sim.room.reveal);
     ctx.scene.add(this.sim.paint.object);
 
@@ -220,6 +240,26 @@ export class Game {
     (this.ctx.scene.background as THREE.Color).setHex(on ? REVEAL_BACKGROUND : 0x000000);
   }
 
+  /**
+   * Where the ears are, and how far they reach — read from the paint system rather than kept
+   * here, because §3.1 has one hearing range and a second copy of it on this class would be a
+   * second answer that nothing keeps in step.
+   *
+   * Handed to `AudioSystem` as a function, so it is evaluated when an event arrives rather than
+   * once a tick: the paint system reads the same pose at the same moment, and the two senses
+   * cannot disagree about whether something was in range.
+   */
+  private listenerNow(): ListenerState {
+    const l = this.sim.paint.listenerPosition;
+    return {
+      x: l.x,
+      y: l.y,
+      z: l.z,
+      range: this.sim.paint.perception.hearingRange,
+      emitter: PLAYER_EMITTER_ID,
+    };
+  }
+
   update(dt: number): void {
     // The presentation hotkeys, which the simulation has no opinion about. V is here with them
     // because which camera you are watching from is not a fact about the world; it reaches the
@@ -227,6 +267,16 @@ export class Game {
     if (this.input.wasKeyPressed('KeyL')) this.setReveal(!this.revealOn);
     if (this.input.wasKeyPressed('KeyB')) this.bloomOn = !this.bloomOn;
     if (this.input.wasKeyPressed('KeyV')) this.sim.player.toggleView();
+
+    /*
+     * Audio starts on the player's first key or click and not one frame before.
+     *
+     * Every browser refuses to start a context without a gesture, and building one anyway costs a
+     * console warning and a suspended context that swallows what is scheduled into it. So the
+     * gesture count is the trigger, and a run that never gets one — `tools/shoot.mjs` drives the
+     * game through synthetic input on a page nobody clicked — never constructs a context at all.
+     */
+    if (!this.audioLive && this.input.gestures > 0) this.audioLive = this.audio.unlock();
 
     this.sim.tick(dt, this.input);
 
@@ -326,6 +376,7 @@ export class Game {
   }
 
   dispose(): void {
+    this.audio.dispose();
     this.bloomChain?.dispose();
     this.bloomChain = null;
     this.ctx.scene.remove(this.sim.paint.object);

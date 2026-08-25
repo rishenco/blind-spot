@@ -50,6 +50,17 @@ export class Input {
 
   private readonly disposers: Array<() => void> = [];
 
+  /**
+   * How many user gestures — key or primary-button presses — have reached this input.
+   *
+   * Here rather than in the thing that needs it, because a gesture is a fact about the input
+   * device and every browser API that is gated on one (audio, pointer lock, fullscreen) will ask
+   * the same question. Counted rather than latched so a caller can tell "no gesture yet" from
+   * "the last one failed", and read-only from outside: nothing may claim a gesture that the user
+   * did not make, which is the whole point of the browser's rule.
+   */
+  private gestureCount = 0;
+
   constructor(private readonly target: HTMLElement) {
     this.on(window, 'keydown', this.onKeyDown as EventListener);
     this.on(window, 'keyup', this.onKeyUp as EventListener);
@@ -112,6 +123,11 @@ export class Input {
     return { dx, dy };
   }
 
+  /** User gestures seen so far. Zero means the browser will still refuse to start audio. */
+  get gestures(): number {
+    return this.gestureCount;
+  }
+
   /** True if this raw key code went down during the tick being simulated (UI hotkeys). */
   wasKeyPressed(code: string): boolean {
     return this.codesPressedThisTick.has(code);
@@ -141,6 +157,7 @@ export class Input {
   private onKeyDown = (e: KeyboardEvent): void => {
     if (e.repeat) return;
     if (Input.isTyping(e.target)) return;
+    this.gestureCount++;
     this.codesPressedThisTick.add(e.code);
     const action = KEY_BINDINGS[e.code];
     if (action === undefined) return;
@@ -164,6 +181,7 @@ export class Input {
 
   private onMouseDown = (e: MouseEvent): void => {
     if (e.button !== 0) return;
+    this.gestureCount++;
     if (this.lockMode === 'pointerlock' && !this.isLocked) this.requestLock();
     // Track the drag regardless of mode: if the lock request is denied part-way through
     // this gesture we keep looking around instead of eating the player's input.
