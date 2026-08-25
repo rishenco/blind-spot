@@ -105,6 +105,15 @@ check(
 );
 check('the gate is reachable in every hall', plans.every((p) => p.plan.reach.gate));
 check(
+  'every generated exit starts as a distant, small target',
+  plans.every((p) =>
+    Math.hypot(p.plan.gate.x - p.plan.spawn.x, p.plan.gate.z - p.plan.spawn.z) >= 30 &&
+    p.plan.gate.opening <= 3.5,
+  ),
+  `nearest ${Math.min(...plans.map((p) => Math.hypot(p.plan.gate.x - p.plan.spawn.x, p.plan.gate.z - p.plan.spawn.z))).toFixed(1)} m; ` +
+    `widest ${Math.max(...plans.map((p) => p.plan.gate.opening)).toFixed(1)} m`,
+);
+check(
   'rooms, not a field and not a maze',
   plans.every((p) => p.plan.rooms.length >= 7 && p.plan.rooms.length <= 13),
   `${Math.min(...plans.map((p) => p.plan.rooms.length))}..${Math.max(...plans.map((p) => p.plan.rooms.length))} rooms`,
@@ -115,19 +124,22 @@ check(
 );
 check(
   'landmarks are all different shapes',
-  plans.every((p) => new Set(p.plan.landmarks.map((l) => l.kind)).size === p.plan.landmarks.length),
+  plans.every((p) => {
+    const landmarks = p.plan.landmarks.filter((l) => l.kind !== 'gate' && l.kind !== 'spawn');
+    return new Set(landmarks.map((l) => l.kind)).size === landmarks.length;
+  }),
   'three identical columns are a trap, not a landmark',
 );
 check(
   'landmarks stand above the clutter',
-  plans.every((p) => p.plan.landmarks.every((l) => l.kind === 'spawn' || l.top >= 5)),
-  `lowest ${Math.min(...plans.flatMap((p) => p.plan.landmarks.filter((l) => l.kind !== 'spawn').map((l) => l.top))).toFixed(1)} m`,
+  plans.every((p) => p.plan.landmarks.every((l) => l.kind === 'spawn' || l.kind === 'gate' || l.top >= 5)),
+  `lowest ${Math.min(...plans.flatMap((p) => p.plan.landmarks.filter((l) => l.kind !== 'spawn' && l.kind !== 'gate').map((l) => l.top))).toFixed(1)} m`,
 );
 check(
   'landmarks are far enough apart to tell where you are',
   plans.every((p) =>
-    p.plan.landmarks.every((a, i) =>
-      p.plan.landmarks.every((b, j) => i >= j || Math.hypot(a.x - b.x, a.z - b.z) > 10),
+    p.plan.landmarks.filter((l) => l.kind !== 'gate' && l.kind !== 'spawn').every((a, i, landmarks) =>
+      landmarks.every((b, j) => i >= j || Math.hypot(a.x - b.x, a.z - b.z) > 10),
     ),
   ),
 );

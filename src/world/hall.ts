@@ -65,9 +65,6 @@ export const HALL: HallLayout = {
   spawnYawDeg: 35,
 };
 
-/** Where the readability gate walks to: the far gate, diagonally across the whole hall. */
-export const GATE_TARGET = new THREE.Vector3(29, 0, 0);
-
 /** Named places, for the HUD's "nearest landmark" line and for the top-down debug view. */
 export interface Landmark {
   readonly name: string;
@@ -153,6 +150,50 @@ export interface Reachability {
   readonly openFraction: number;
 }
 
+export type GateWall = 'west' | 'east' | 'north' | 'south';
+
+/** A small roll-up exit cut into one outer wall of this particular hall. */
+export interface PlannedGate {
+  /** A clear standing point just inside the opening — this is the gameplay target. */
+  readonly x: number;
+  readonly z: number;
+  /** Which outer wall contains the actual opening. */
+  readonly wall: GateWall;
+  /** Axis along the wall. */
+  readonly axis: Axis;
+  /** Centre of the opening on `axis` and its deliberately modest width. */
+  readonly at: number;
+  readonly opening: number;
+  /** Room reached when walking in through the gate. */
+  readonly room: number;
+}
+
+/**
+ * True only for a continuous inside → outside crossing through the open part of the gate.
+ *
+ * This deliberately takes two positions rather than a distance-to-target. Standing in the
+ * threshold is not an exit, and a debug teleport that begins outside cannot accidentally win.
+ */
+export function crossedGate(
+  gate: PlannedGate,
+  before: THREE.Vector3,
+  after: THREE.Vector3,
+  playerRadius: number,
+): boolean {
+  const wall = gate.wall === 'east' ? HALL.halfX : gate.wall === 'west' ? -HALL.halfX : gate.wall === 'south' ? HALL.halfZ : -HALL.halfZ;
+  const normalX = gate.wall === 'east' ? 1 : gate.wall === 'west' ? -1 : 0;
+  const normalZ = gate.wall === 'south' ? 1 : gate.wall === 'north' ? -1 : 0;
+  const beforeDepth = normalX * (before.x - wall) + normalZ * (before.z - wall);
+  const afterDepth = normalX * (after.x - wall) + normalZ * (after.z - wall);
+  // `afterDepth > 0` means the body centre actually made it beyond the exterior wall plane.
+  if (beforeDepth > 0 || afterDepth <= 0) return false;
+  const t = beforeDepth === afterDepth ? 0 : beforeDepth / (beforeDepth - afterDepth);
+  const along = gate.axis === 'x' ? before.x + (after.x - before.x) * t : before.z + (after.z - before.z) * t;
+  // A capsule centre has to clear the jambs as well. This matches movement collision rather than
+  // awarding a win for clipping a shoulder through the wall edge.
+  return Math.abs(along - gate.at) <= gate.opening / 2 - playerRadius;
+}
+
 export interface HallPlan {
   readonly seed: number;
   readonly halfX: number;
@@ -162,7 +203,7 @@ export interface HallPlan {
   readonly passages: Passage[];
   readonly landmarks: PlannedLandmark[];
   readonly spawn: { x: number; z: number };
-  readonly gate: { x: number; z: number };
+  readonly gate: PlannedGate;
   reach: Reachability;
 }
 
@@ -299,7 +340,8 @@ export function generatePlan(seed: number): HallPlan {
   }
 
   // --- landmarks ---------------------------------------------------------
-  const landmarks = placeLandmarks(rooms, passages, rng);
+  const gate = placeGate(rooms, dividers, rng);
+  const landmarks = placeLandmarks(rooms, passages, gate, rng);
 
   return {
     seed,
@@ -310,7 +352,7 @@ export function generatePlan(seed: number): HallPlan {
     passages,
     landmarks,
     spawn: { x: HALL.spawn.x, z: HALL.spawn.z },
-    gate: { x: GATE_TARGET.x, z: GATE_TARGET.z },
+    gate,
     reach: { gate: false, roomsReached: 0, rooms: rooms.length, openFraction: 0 },
   };
 }
@@ -473,13 +515,65 @@ function short(r: Room | undefined): string {
 }
 
 /**
+ * Pick an outer-wall exit after the partition is known.  A gate is intentionally not a fixed
+ * compass landmark: it moves from run to run, is only a 3.2 m opening, and has to sit behind at
+ * least one uninterrupted divider from the spawn corner.  The latter is checked in plan space,
+ * before clutter is generated, so a lucky sparse room cannot turn the exit into the first ping's
+ * obvious answer.
+ */
+function placeGate(rooms: Room[], dividers: Divider[], rng: Rng): PlannedGate {
+  const opening = 3.2;
+  const inset = 1.25;
+  const candidates: PlannedGate[] = [];
+  const add = (wall: GateWall, at: number): void => {
+    const axis: Axis = wall === 'west' || wall === 'east' ? 'z' : 'x';
+    const wallX = wall === 'west' ? -HALL.halfX : wall === 'east' ? HALL.halfX : at;
+    const wallZ = wall === 'north' ? -HALL.halfZ : wall === 'south' ? HALL.halfZ : at;
+    const x = wall === 'west' ? wallX + inset : wall === 'east' ? wallX - inset : at;
+    const z = wall === 'north' ? wallZ + inset : wall === 'south' ? wallZ - inset : at;
+    if (Math.hypot(x - HALL.spawn.x, z - HALL.spawn.z) < 30) return;
+    if (!dividerBlocksSpawn(HALL.spawn.x, HALL.spawn.z, x, z, dividers)) return;
+    candidates.push({ x, z, wall, axis, at, opening, room: roomAt(rooms, x, z) });
+  };
+
+  // Several points per far wall give the seed a meaningful choice while preserving generous
+  // jamb clearance at the corners. East/north are deliberately favoured: the start is southwest.
+  for (const at of [-15, -7.5, 0, 7.5, 15]) add('east', at);
+  for (const at of [-24, -12, 0, 12, 24]) add('north', at);
+  for (const at of [-15, -7.5, 0, 7.5, 15]) add('south', at);
+  for (const at of [-12, 0, 12]) add('west', at);
+
+  // Every practical seed has an occluded candidate. Keep this fallback deterministic and still
+  // far from spawn should a future partition algorithm temporarily fail that stronger contract.
+  if (candidates.length === 0) {
+    return { x: HALL.halfX - inset, z: 12, wall: 'east', axis: 'z', at: 12, opening, room: roomAt(rooms, HALL.halfX - inset, 12) };
+  }
+  return candidates[Math.floor(rng() * candidates.length)]!;
+}
+
+/** True when the spawn-to-target segment crosses solid divider material rather than one of its gaps. */
+function dividerBlocksSpawn(sx: number, sz: number, tx: number, tz: number, dividers: Divider[]): boolean {
+  for (const d of dividers) {
+    const delta = d.axis === 'x' ? tx - sx : tz - sz;
+    if (Math.abs(delta) < 0.001) continue;
+    const t = (d.at - (d.axis === 'x' ? sx : sz)) / delta;
+    if (t <= 0.04 || t >= 0.96) continue;
+    const along = d.axis === 'x' ? sz + (tz - sz) * t : sx + (tx - sx) * t;
+    if (along < d.from || along > d.to) continue;
+    if (d.passages.some((p) => Math.abs((d.axis === 'x' ? p.z : p.x) - along) <= p.width / 2)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
  * Four distinct shapes, four different rooms, spread apart.
  *
  * Uniqueness is the whole point: with two silos in one hall, "I am at the silo" stops being a
  * fact about where you are. The palette is shuffled per seed, so which shapes a hall has is
  * itself part of that hall's identity.
  */
-function placeLandmarks(rooms: Room[], passages: Passage[], rng: Rng): PlannedLandmark[] {
+function placeLandmarks(rooms: Room[], passages: Passage[], gate: PlannedGate, rng: Rng): PlannedLandmark[] {
   const palette: LandmarkKind[] = ['silo', 'twin columns', 'ziggurat', 'high rack', 'pipe stack', 'buttress column'];
   // Fisher-Yates on a copy: seeded, so which shapes this hall has is part of its identity.
   for (let i = palette.length - 1; i > 0; i--) {
@@ -506,7 +600,9 @@ function placeLandmarks(rooms: Room[], passages: Passage[], rng: Rng): PlannedLa
   // tell us afterwards.
   const reserved: Rect[] = [
     { minX: HALL.spawn.x - 6, maxX: HALL.spawn.x + 6, minZ: HALL.spawn.z - 6, maxZ: HALL.spawn.z + 6 },
-    { minX: 22, maxX: HALL.halfX, minZ: -4.5, maxZ: 4.5 },
+    gate.axis === 'z'
+      ? { minX: gate.x - 5, maxX: gate.x + 2, minZ: gate.at - gate.opening, maxZ: gate.at + gate.opening }
+      : { minX: gate.at - gate.opening, maxX: gate.at + gate.opening, minZ: gate.z - 5, maxZ: gate.z + 2 },
     MIDDLE,
   ];
   for (const p of passages) {
@@ -572,14 +668,16 @@ function placeLandmarks(rooms: Room[], passages: Passage[], rng: Rng): PlannedLa
   out.push({
     name: 'the gate',
     kind: 'gate',
-    x: 33,
-    z: 0,
-    top: 9,
-    radius: 1.4,
-    halfX: 1.4,
-    halfZ: 5,
-    axis: 'z',
-    room: roomAt(rooms, 32, 0),
+    x: gate.x,
+    z: gate.z,
+    // It is a small roll-up door, not a ninth-metre beacon: lidar can catch its frame nearby,
+    // but cannot use it as a global landmark.
+    top: 4.8,
+    radius: gate.opening / 2,
+    halfX: gate.axis === 'x' ? gate.opening / 2 : 0.45,
+    halfZ: gate.axis === 'z' ? gate.opening / 2 : 0.45,
+    axis: gate.axis,
+    room: gate.room,
   });
   out.push({
     name: 'spawn corner',
@@ -746,17 +844,7 @@ export function buildHall(seed = 20260824): Hall {
   // --- shell -------------------------------------------------------------
   b.bounds(-halfX - t, -1, -halfZ - t, halfX + t, 0, halfZ + t, 'shell');
   b.bounds(-halfX - t, height, -halfZ - t, halfX + t, height + t, halfZ + t, 'roof');
-  b.bounds(-halfX - t, 0, -halfZ - t, -halfX, height, halfZ + t, 'shell');
-  b.bounds(halfX, 0, -halfZ - t, halfX + t, height, halfZ + t, 'shell');
-  b.bounds(-halfX, 0, -halfZ - t, halfX, height, -halfZ, 'shell');
-  b.bounds(-halfX, 0, halfZ, halfX, height, halfZ + t, 'shell');
-
-  // The gate: a break in the east wall with a heavy lintel and two jambs. The one part of the
-  // shell with a silhouette, so it reads as "the way out" from across the hall. Fixed, every
-  // seed: it is the hall's north star and the destination of the readability walk.
-  b.bounds(halfX - 0.6, 0, -4.5, halfX + t, height, -3.5, 'landmark');
-  b.bounds(halfX - 0.6, 0, 3.5, halfX + t, height, 4.5, 'landmark');
-  b.bounds(halfX - 0.6, 5.5, -4.5, halfX + t, 6.5, 4.5, 'landmark');
+  buildShellWithGate(b, plan.gate, halfX, halfZ, height, t);
 
   // --- keep-outs ---------------------------------------------------------
   const keep: KeepOut[] = [];
@@ -772,8 +860,8 @@ export function buildHall(seed = 20260824): Hall {
   keep.push({ minX: HALL.spawn.x - 4, maxX: HALL.spawn.x + 4, minZ: HALL.spawn.z - 4, maxZ: HALL.spawn.z + 4, why: 'spawn' });
   // The middle of the hall: floor, in every seed. See MIDDLE.
   keep.push({ ...MIDDLE, why: 'middle' });
-  // The gate run, so the door is always walkable-to from inside.
-  keep.push({ minX: 24, maxX: halfX, minZ: -3.2, maxZ: 3.2, why: 'gate' });
+  // The gate approach, so the generated exit stays walkable-to from its room.
+  keep.push(gateKeepOut(plan.gate));
   for (const l of plan.landmarks) {
     if (l.radius <= 0) continue;
     keep.push({
@@ -818,6 +906,50 @@ export function buildHall(seed = 20260824): Hall {
       for (const m of Object.values(materials)) m.dispose();
     },
   };
+}
+
+/** A wall with one genuine opening; its collider and lidar mesh are built from the same boxes. */
+function buildShellWithGate(
+  b: Builder,
+  gate: PlannedGate,
+  halfX: number,
+  halfZ: number,
+  height: number,
+  thickness: number,
+): void {
+  const wall = (which: GateWall): void => {
+    const isGate = which === gate.wall;
+    const axis: Axis = which === 'west' || which === 'east' ? 'z' : 'x';
+    const fixed = which === 'west' ? -halfX : which === 'east' ? halfX : which === 'north' ? -halfZ : halfZ;
+    const from = axis === 'z' ? -halfZ - thickness : -halfX;
+    const to = axis === 'z' ? halfZ + thickness : halfX;
+    const openingLo = gate.at - gate.opening / 2;
+    const openingHi = gate.at + gate.opening / 2;
+    const segment = (lo: number, hi: number, minY = 0, maxY = height): void => {
+      if (hi <= lo) return;
+      if (axis === 'z') b.bounds(fixed, minY, lo, fixed + thickness, maxY, hi, 'shell');
+      else b.bounds(lo, minY, fixed, hi, maxY, fixed + thickness, 'shell');
+    };
+    if (!isGate) {
+      segment(from, to);
+      return;
+    }
+    // Narrow opening and a low lintel: it reads only once you are in its room, instead of
+    // becoming the hall's tallest, easiest lidar landmark.
+    segment(from, openingLo);
+    segment(openingHi, to);
+    segment(openingLo, openingHi, 3.35, height);
+  };
+  wall('west');
+  wall('east');
+  wall('north');
+  wall('south');
+}
+
+function gateKeepOut(gate: PlannedGate): KeepOut {
+  return gate.axis === 'z'
+    ? { minX: gate.x - 5, maxX: gate.x + 2, minZ: gate.at - gate.opening / 2 - 1.2, maxZ: gate.at + gate.opening / 2 + 1.2, why: 'gate' }
+    : { minX: gate.at - gate.opening / 2 - 1.2, maxX: gate.at + gate.opening / 2 + 1.2, minZ: gate.z - 5, maxZ: gate.z + 2, why: 'gate' };
 }
 
 /** Intervals of `[from, to]` left over once every keep-out crossing the run is subtracted. */

@@ -15,7 +15,7 @@
  *    delay is what stops the player from tapping the switch every step for a free, instant
  *    bearing: every reading costs several seconds of the loudest sound in the hall.
  *
- * Direction is never available. `clarity()` is a pure function of distance to `GATE_TARGET` —
+ * Direction is never available. `clarity()` is a pure function of distance to the generated gate —
  * nothing else feeds it, not yaw, not which way the player is looking, not time. That is the
  * one law in this file that must never be relaxed: the moment clarity depends on anything but
  * distance, the radio becomes a compass and the mechanic in `concept.md` §"один шум" is gone.
@@ -28,7 +28,6 @@
 
 import * as THREE from 'three';
 import type { SoundBus } from '../events/bus';
-import { GATE_TARGET } from '../world/hall';
 
 export interface RadioTunables {
   /** Proximity, metres, at which the ground unit is auto-picked-up. */
@@ -65,7 +64,10 @@ export function defaultRadioTunables(): RadioTunables {
     groundLoudness: 24,
     carryLoudness: 70,
     clarityNear: 6,
-    clarityFar: 58,
+    // A generated exit is guaranteed at least 30 m from the start. Matching the pure-noise
+    // distance to that contract means every run begins with an honest cold reading, then offers
+    // a usable gradient during the search instead of an arbitrary half-clear starting signal.
+    clarityFar: 30,
     blinkHz: 2.2,
     noiseGain: 0.05,
     melodyGain: 0.045,
@@ -84,6 +86,7 @@ export const RADIO_GROUND_POS = new THREE.Vector3(0, 0, 0);
 
 export class Radio {
   readonly tunables: RadioTunables;
+  private readonly gateTarget: Readonly<Pick<THREE.Vector3, 'x' | 'z'>>;
 
   private _carried = false;
   private _powered = false;
@@ -98,8 +101,12 @@ export class Radio {
   /** The continuous radio is spatial too; it must never bypass the listener as a UI sound. */
   private synthPanner: PannerNode | null = null;
 
-  constructor(tunables: RadioTunables = defaultRadioTunables()) {
+  constructor(
+    tunables: RadioTunables = defaultRadioTunables(),
+    gateTarget: Readonly<Pick<THREE.Vector3, 'x' | 'z'>> = new THREE.Vector3(),
+  ) {
     this.tunables = tunables;
+    this.gateTarget = gateTarget;
   }
 
   get carried(): boolean {
@@ -143,12 +150,12 @@ export class Radio {
   }
 
   /**
-   * Signal clarity, 0..1. Pure function of horizontal distance to `GATE_TARGET`. No yaw, no
+   * Signal clarity, 0..1. Pure function of horizontal distance to this hall's generated gate. No yaw, no
    * player facing, no time — see the file header. 0 = pure noise, 1 = fully legible melody.
    */
   clarity(position: THREE.Vector3): number {
     const t = this.tunables;
-    const d = Math.hypot(position.x - GATE_TARGET.x, position.z - GATE_TARGET.z);
+    const d = Math.hypot(position.x - this.gateTarget.x, position.z - this.gateTarget.z);
     const span = Math.max(0.001, t.clarityFar - t.clarityNear);
     const c = 1 - (d - t.clarityNear) / span;
     return Math.max(0, Math.min(1, c));

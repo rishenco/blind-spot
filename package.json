@@ -15,7 +15,8 @@
     "shots:audio": "npm run build && node tools/audio.mjs",
     "shots:concussion": "npm run build && node tools/concussion.mjs",
     "shots:world": "npm run build && node tools/world.mjs",
-    "shots:radio": "npm run build && node tools/radio.mjs"
+    "shots:radio": "npm run build && node tools/radio.mjs",
+    "check:gate": "npm run build && node tools/gate.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.20.0",

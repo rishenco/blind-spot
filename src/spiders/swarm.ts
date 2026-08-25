@@ -577,6 +577,21 @@ export interface SwarmStats {
 }
 
 /**
+ * What a reinforcement call actually managed to place.  This is deliberately richer than a
+ * boolean: the round/debug UI can say whether a wave was capped, blocked by the player, or
+ * fully admitted without inspecting the swarm's private array.
+ */
+export interface ReinforcementResult {
+  requested: number;
+  added: number;
+  alive: number;
+  /** The maximum simultaneous living pack size, fixed from the round's initial spawn count. */
+  cap: number;
+  /** Candidate positions tested; bounded so a blocked edge cannot hitch the frame. */
+  attempts: number;
+}
+
+/**
  * A landed bite, handed to whoever cares (M5's player vitals). The swarm itself has no opinion
  * about damage: it reports where the bite came from and moves on, so the health model can live
  * entirely outside this file and be switched off without the pack noticing.
@@ -706,6 +721,10 @@ export class Swarm {
   private readonly rng: Rng;
   private readonly shape: BodyShape;
   private readonly seed: number;
+  /** The round starts with this many predators; reinforcements replace losses, never escalate it. */
+  private readonly reinforcementCap: number;
+  /** Territorial anchors are made by `spawn` and retained by incremental arrivals. */
+  private groupCentres: { x: number; z: number }[] = [];
   private readonly unsubscribe: () => void;
   private props: Smashable | null = null;
   private readonly strikeListeners = new Set<StrikeListener>();
@@ -748,6 +767,7 @@ export class Swarm {
   ) {
     this.tunables = tunables;
     this.seed = seed | 0;
+    this.reinforcementCap = Math.max(0, Math.round(tunables.count));
     this.rng = makeRng(seed ^ 0x5eed_a1);
     this.shape = {
       radius: tunables.radius,
@@ -804,6 +824,7 @@ export class Swarm {
     for (let g = 0; g < groupCount; g++) {
       centres.push({ x: range(this.rng, -28, 28), z: range(this.rng, -19, 19) });
     }
+    this.groupCentres = centres;
     let placed = 0;
     let attempts = 0;
     while (placed < n && attempts < n * 60) {
@@ -825,6 +846,93 @@ export class Swarm {
       placed++;
     }
     this.stats.count = this.spiders.length;
+  }
+
+  /**
+   * Add replacements without touching any existing body or brain.
+   *
+   * Unlike `spawn`, this is safe to call during a round: living spiders keep their belief,
+   * current hop and state; corpses remain in the lidar/body list as settled props.  Arrivals are
+   * sampled from an inset around the hall perimeter, shun the player, and stop after a bounded
+   * number of candidates so a cluttered edge cannot turn a wave into an unbounded search.
+   */
+  reinforce(requested: number, awayFrom?: THREE.Vector3): ReinforcementResult {
+    const wanted = Number.isFinite(requested) ? Math.max(0, Math.floor(requested)) : 0;
+    const live = this.liveCount();
+    const room = Math.max(0, this.reinforcementCap - live);
+    const target = Math.min(wanted, room);
+    const shun = awayFrom ?? this.player;
+    const attemptsLimit = target * 48;
+    let attempts = 0;
+    let added = 0;
+
+    this.ensureGroupCentres();
+    while (added < target && attempts < attemptsLimit) {
+      attempts++;
+      const candidate = this.edgeCandidate();
+      if (Math.hypot(candidate.x - shun.x, candidate.z - shun.z) < 16) continue;
+      if (!this.free(candidate.x, 0.05, candidate.z)) continue;
+      if (!this.clearOfLiving(candidate.x, candidate.z)) continue;
+      this.spiders.push(this.make(this.spiders.length, candidate.x, candidate.z, this.groupFor(candidate.x, candidate.z)));
+      added++;
+    }
+    this.summarise();
+    return { requested: wanted, added, alive: this.stats.count, cap: this.reinforcementCap, attempts };
+  }
+
+  private liveCount(): number {
+    let live = 0;
+    for (const s of this.spiders) if (s.alive) live++;
+    return live;
+  }
+
+  /** Hall bounds are fixed by the generator today; keep arrivals inside the walls, at their edge. */
+  private edgeCandidate(): { x: number; z: number } {
+    switch (Math.floor(this.rng() * 4)) {
+      case 0:
+        return { x: range(this.rng, -30.5, -25), z: range(this.rng, -19, 19) };
+      case 1:
+        return { x: range(this.rng, 25, 30.5), z: range(this.rng, -19, 19) };
+      case 2:
+        return { x: range(this.rng, -30, 30), z: range(this.rng, -20.5, -15) };
+      default:
+        return { x: range(this.rng, -30, 30), z: range(this.rng, 15, 20.5) };
+    }
+  }
+
+  private clearOfLiving(x: number, z: number): boolean {
+    const min = this.tunables.radius * 2.25;
+    const min2 = min * min;
+    for (const s of this.spiders) {
+      if (!s.alive) continue;
+      const dx = s.pos.x - x;
+      const dz = s.pos.z - z;
+      if (dx * dx + dz * dz < min2) return false;
+    }
+    return true;
+  }
+
+  private ensureGroupCentres(): void {
+    const groups = Math.max(1, Math.round(this.tunables.groups));
+    if (this.groupCentres.length === groups) return;
+    this.groupCentres = [];
+    for (let g = 0; g < groups; g++) {
+      this.groupCentres.push({ x: range(this.rng, -28, 28), z: range(this.rng, -19, 19) });
+    }
+  }
+
+  private groupFor(x: number, z: number): number {
+    let groupId = 0;
+    let best = Infinity;
+    for (let g = 0; g < this.groupCentres.length; g++) {
+      const c = this.groupCentres[g]!;
+      const d = Math.hypot(x - c.x, z - c.z);
+      if (d < best) {
+        best = d;
+        groupId = g;
+      }
+    }
+    return groupId;
   }
 
   /**

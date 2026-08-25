@@ -147,7 +147,16 @@ await call('hud', false);
 await call('spiders.spawn', 0);
 await advance(2, 8);
 
-const gate = { x: 29, z: 0 };
+const gate = await page.evaluate(() => {
+  const p = window.bs.worldPlan().gate;
+  return { x: p.x, z: p.z, wall: p.wall, opening: p.opening };
+});
+const gateYaw = { east: 90, west: -90, north: 0, south: 180 }[gate.wall];
+const walkThroughGate = async () => {
+  await call('keys', ['KeyW'], []);
+  await advance(0.9, 4);
+  await call('keys', [], ['KeyW']);
+};
 const groundPos = { x: 0, z: 0 };
 const spawn = await page.evaluate(() => window.bs.stats().pos);
 const tune = await call('radio.tune', {});
@@ -310,71 +319,85 @@ notes.push(
 );
 
 // ===========================================================================
-// Waves: the pack reinforces on its own clock, capped, away from the player.
+// Waves: the pack replaces losses on its own clock, without resetting survivors.
 // ===========================================================================
+await call('spiders.spawn', 2);
+const beforeWave = await page.evaluate(() =>
+  window.bs.spiders.list().filter((s) => s.alive).map((s) => ({ x: s.x, z: s.z, state: s.state })),
+);
+const directReplacement = await call('spiders.reinforce', 6);
+const survivors = await page.evaluate((before) => {
+  const live = window.bs.spiders.list().filter((s) => s.alive);
+  return before.every((old) => live.some((s) => Math.hypot(s.x - old.x, s.z - old.z) < 0.01 && s.state === old.state));
+}, beforeWave);
+check(
+  'reinforcement keeps the first two bodies and state intact',
+  directReplacement.added > 0 && survivors,
+  `added ${directReplacement.added}, alive ${directReplacement.alive}/${directReplacement.cap}`,
+);
 const wave0 = await call('round.wave');
 await page.evaluate(([at]) => window.bs.step(Math.max(0, at + 0.05)), [wave0.nextAt]);
 const wave1 = await call('spiders.stats');
 const waveState = await call('round.wave');
 check(
-  'a wave fires on its own clock and grows the pack',
-  waveState.count > 0,
-  `count now ${waveState.count} (cap ${waveState.cap}), pack reports ${wave1?.count ?? 0}`,
+  'a wave replaces losses without rebuilding survivors',
+  waveState.added > 0 && waveState.alive <= waveState.cap && wave1?.count === waveState.alive,
+  `requested ${waveState.requested}, added ${waveState.added}, alive ${waveState.alive}/${waveState.cap}, ${waveState.attempts} candidate checks`,
 );
 const spread = await page.evaluate(() => {
   const bs = window.bs;
   const p = bs.stats().pos;
   return bs.spiders
     .list()
+    .filter((s) => s.alive)
     .map((s) => Math.hypot(s.x - p[0], s.z - p[2]))
     .reduce((min, d) => Math.min(min, d), Infinity);
 });
 check('and it does not spawn on top of the player', spread > 5, `nearest spider ${Number.isFinite(spread) ? spread.toFixed(1) : 'n/a'} m away`);
-await call('round.tune', { cap: 6 });
+await call('spiders.spawn', 14);
 await page.evaluate(() => {
   const bs = window.bs;
-  for (let i = 0; i < 3; i++) window.bs.step(Math.max(0.1, bs.round.wave().intervalS + 0.05));
+  for (let i = 0; i < 3; i++) bs.step(Math.max(0.1, bs.round.wave().intervalS + 0.05));
 });
 const waveCapped = await call('round.wave');
-check('and it stops at the cap, not forever', waveCapped.count <= 6, `count ${waveCapped.count} against cap 6`);
+check('and a full starting pack receives no extra spiders', waveCapped.added === 0 && waveCapped.alive === waveCapped.cap, `added ${waveCapped.added}, count ${waveCapped.alive}/${waveCapped.cap}`);
 notes.push(
-  `waves: every ${wave0.intervalS} s the pack's target count ratchets up by ${wave0.step}, capped at ` +
-    `${wave0.cap} simultaneous spiders, respawned away from wherever the player is standing — a disclosed ` +
-    "simplification of “reinforcements”, see the report's deviations section.",
+  `waves: every ${wave0.intervalS} s at most ${wave0.step} losses are replaced, never above the original ` +
+    `${waveState.cap}-spider pack. Existing brains and corpses are left alone; the bounded edge search used ` +
+    `${waveState.attempts} candidates for this wave.`,
 );
 
 // ===========================================================================
 // 4. The round ends: reach the gate carrying the radio.
 // ===========================================================================
-await call('round.tune', { cap: 24 });
 await call('spiders.spawn', 0);
 await call('round.force', 'playing');
 // `pose()` re-homes the radio to the floor on every teleport, the same way it refills the
 // magazine and drops the left hand — so it is always called *before* `radio.setCarried`, never
 // after, or the very thing under test would be wiped out by the move itself.
-await call('pose', gate.x - 1.5, gate.z, yawTo(gate.x - 1.5, gate.z, gate.x, gate.z));
+await call('pose', gate.x, gate.z, gateYaw);
 await call('radio.setCarried', true); // (not powered — winning does not require it switched on)
 const preWin = await call('round.state');
-check('still playing one step short of the gate', preWin === 'playing', `state=${preWin}`);
-await advance(0.5, 4);
+check('still playing while standing in the doorway', preWin === 'playing', `state=${preWin}`);
+await walkThroughGate();
 const wonState = await call('round.state');
-check('walking up to the gate while carrying it wins the round', wonState === 'won', `state=${wonState}`);
+check('walking through the gate while carrying it wins the round', wonState === 'won', `state=${wonState}`);
 
 await call('round.force', 'playing');
-await call('pose', gate.x - 1.5, gate.z, yawTo(gate.x - 1.5, gate.z, gate.x, gate.z)); // resets carried to false
-await advance(0.5, 4);
+await call('pose', gate.x, gate.z, gateYaw); // resets carried to false
+await walkThroughGate();
 const withoutRadio = await call('round.state');
 check(
-  'but the same spot without it does not end anything',
+  'but crossing it empty-handed does not end anything',
   withoutRadio === 'playing',
-  `state=${withoutRadio} while standing on the gate empty-handed`,
+  `state=${withoutRadio} after crossing the gate empty-handed`,
 );
 
 // Re-set the win for the photograph.
 await call('round.force', 'playing');
-await call('pose', gate.x - 1.5, gate.z, yawTo(gate.x - 1.5, gate.z, gate.x, gate.z));
+await call('pose', gate.x, gate.z, gateYaw);
 await call('radio.setCarried', true);
-await advance(0.5, 4);
+await walkThroughGate();
 await playerCam();
 // The restart prompt lives in the same DOM node the debug HUD toggle hides, so it has to be
 // switched back on for this one frame — otherwise the proof photograph of "the round ended"

@@ -30,7 +30,7 @@ import {
   defaultMovementTunables,
   type PlayerEvent,
 } from './player/controller';
-import { GATE_TARGET, HALL, LANDMARKS, buildHall } from './world/hall';
+import { HALL, LANDMARKS, buildHall, crossedGate } from './world/hall';
 import { PropWorld, defaultPropTunables, loadRapier } from './props/props';
 import { PropReveal } from './props/reveal';
 import { DynamicPaint } from './lidar/dynamic';
@@ -47,7 +47,7 @@ import { FIRE_MODES, Rifle, defaultRifleTunables, type FireMode, type Shot } fro
 import { MuzzleFlash, defaultFlashTunables } from './weapon/flash';
 import { RifleViewModel, defaultViewModelTunables } from './weapon/viewmodel';
 import { ShotTracers } from './weapon/tracers';
-import { Swarm, defaultSpiderTunables } from './spiders/swarm';
+import { Swarm, defaultSpiderTunables, type ReinforcementResult } from './spiders/swarm';
 import { SpiderOverlay } from './spiders/overlay';
 import { PlayerVitals, defaultVitalsTunables } from './hud/vitals';
 import { Radio, defaultRadioTunables } from './radio/radio';
@@ -100,9 +100,6 @@ const HINT =
 /** Where the muzzle is relative to the eye, metres — matches the rifle's collider box. */
 const MUZZLE_AHEAD = 0.55;
 const MUZZLE_DROP = 0.14;
-/** How close to `GATE_TARGET` counts as "reached it", metres. */
-const GATE_REACH = 2.5;
-
 /** How much of the loudness scale each thing the body does is worth, in metres of notice. */
 const STEP_LOUDNESS: Record<string, number> = { crouch: 3, walk: 9, sprint: 16 };
 
@@ -172,6 +169,8 @@ class App {
    */
   private readonly concussion = new Concussion(defaultConcussionTunables());
   private readonly player: PlayerController;
+  /** Position before this fixed movement tick; used to detect a real gate-plane crossing. */
+  private readonly playerBefore = new THREE.Vector3();
   /** Built after the wasm is up, so everything that touches them is null-guarded. */
   private props: PropWorld | null = null;
   private dyn: DynamicPaint | null = null;
@@ -221,12 +220,12 @@ class App {
    * bus like every other physical noise, and the marker layer / spider hearing pick it up with
    * zero changes of their own. See `src/radio/radio.ts` for the whole design.
    */
-  private readonly radio = new Radio(defaultRadioTunables());
+  private readonly radio = new Radio(defaultRadioTunables(), this.hall.plan.gate);
   /** The round (M7 "Раунд целиком"): a beginning, a wave timer, and exactly one of two endings. */
   private roundState: 'playing' | 'won' | 'dead' = 'playing';
-  /** Slider-backed wave knobs — kept here because `spawn()` is the only public entry point
-   *  `swarm.ts` offers, and it is destructive (see the task report's deviations section). */
-  private readonly wave = { cap: 24, intervalS: 60, step: 6 };
+  /** A wave replaces losses up to the original pack, never escalates the encounter. */
+  private readonly wave = { intervalS: 60, step: 6 };
+  private lastWave: ReinforcementResult = { requested: 0, added: 0, alive: 0, cap: 14, attempts: 0 };
   private nextWaveAt = 60;
   private readonly playerHud = new PlayerHudLayer(defaultHudLayerTunables());
   /** Rebuilt per frame from the live blips. Never grows past the compass's own capacity. */
@@ -440,6 +439,7 @@ class App {
     this.bus.setTime(this.time);
 
     this.hotkeys();
+    this.playerBefore.copy(this.player.position);
     this.player.update(dt, this.input);
     this.lidar.update(dt);
 
@@ -476,23 +476,19 @@ class App {
     if (this.roundState === 'playing') {
       this.radio.update(dt, this.time, this.bus, this.player.position);
 
-      // Reinforcements, roughly once a minute, capped and kept off the player's back. `spawn()`
-      // is the swarm's only public entry point and it rebuilds the whole pack rather than adding
-      // to it — see the report's deviations section for why a wave is a re-spawn here, not a
-      // true reinforcement.
+      // Reinforcements replace losses, never rebuild the living pack or grow it beyond its
+      // starting size. The bounded edge search cannot hitch on a cluttered perimeter.
       if (this.spiders !== null && this.time >= this.nextWaveAt) {
         this.nextWaveAt = this.time + this.wave.intervalS;
-        const st = this.spiders.tunables;
-        st.count = Math.min(this.wave.cap, st.count + this.wave.step);
-        this.spiders.spawn(st.count, this.player.position);
+        this.lastWave = this.spiders.reinforce(this.wave.step, this.player.position);
       }
 
       if (!this.vitals.alive) {
         this.roundState = 'dead';
       } else if (this.radio.carried) {
-        const p = this.player.position;
-        const dGate = Math.hypot(p.x - GATE_TARGET.x, p.z - GATE_TARGET.z);
-        if (dGate < GATE_REACH) this.roundState = 'won';
+        if (crossedGate(this.hall.plan.gate, this.playerBefore, this.player.position, this.player.bodyRadius)) {
+          this.roundState = 'won';
+        }
       }
     }
     if (this.roundState === 'dead') {
@@ -1024,7 +1020,7 @@ class App {
       this.rateAt = this.time;
       this.rateSeq = this.bus.emitted;
     }
-    const gate = Math.hypot(p.x - GATE_TARGET.x, p.z - GATE_TARGET.z);
+    const gate = Math.hypot(p.x - this.hall.plan.gate.x, p.z - this.hall.plan.gate.z);
 
     this.hud.setDebug([
       ['pos', `${p.x.toFixed(1)} ${p.y.toFixed(1)} ${p.z.toFixed(1)}`],
@@ -1088,7 +1084,7 @@ class App {
           ? 'on the floor · broadcasting'
           : `carried · ${this.radio.powered ? this.radio.indicator(this.time) : 'off'}`,
       ],
-      ['round', `${this.roundState} · next wave ${Math.max(0, this.nextWaveAt - this.time).toFixed(0)}s · pack cap ${this.wave.cap}`],
+      ['round', `${this.roundState} · next wave ${Math.max(0, this.nextWaveAt - this.time).toFixed(0)}s · pack ${this.lastWave.alive}/${this.lastWave.cap} · last +${this.lastWave.added}`],
     ]);
 
     this.hud.setPerf([
@@ -1466,9 +1462,8 @@ class App {
     rd.add(rt, 'blinkHz', 0.5, 6, 0.1).name('indicator blink rate');
     rd.add(rt, 'noiseGain', 0, 0.3, 0.005).name('hiss volume');
     rd.add(rt, 'melodyGain', 0, 0.3, 0.005).name('melody volume');
-    rd.add(this.wave, 'cap', 4, 60, 1).name('spider pop. cap');
     rd.add(this.wave, 'intervalS', 10, 180, 5).name('wave interval, s');
-    rd.add(this.wave, 'step', 1, 20, 1).name('spiders added per wave');
+    rd.add(this.wave, 'step', 1, 14, 1).name('replacements requested / wave');
     rd.close();
   }
 
@@ -1678,6 +1673,8 @@ class App {
       topFocus: (x: number | null, z = 0) => {
         this.topFocus = x === null ? null : { x, z };
       },
+      /** Generated geography for deterministic keyframes and numeric checks; never gameplay HUD. */
+      worldPlan: () => this.hall.plan,
       /** Every solid in the hall, as flat bounds — lets a scenario *find* its subject. */
       solids: () =>
         this.hall.world.boxes.map((b) => [b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ]),
@@ -1730,7 +1727,7 @@ class App {
             indicator: this.radio.indicator(this.time),
             clarity: this.radio.lastComputedClarity,
             position: pos.toArray(),
-            distanceToGate: Math.hypot(pos.x - GATE_TARGET.x, pos.z - GATE_TARGET.z),
+            distanceToGate: Math.hypot(pos.x - this.hall.plan.gate.x, pos.z - this.hall.plan.gate.z),
           };
         },
         /** Clarity as a pure function of a world point — for the "gate vs. far corner" numbers,
@@ -1754,7 +1751,7 @@ class App {
       /** M7. The round machine itself: state, the wave clock and the two restart forms. */
       round: {
         state: () => this.roundState,
-        wave: () => ({ ...this.wave, nextAt: this.nextWaveAt, count: this.spiders?.tunables.count ?? 0 }),
+        wave: () => ({ ...this.wave, nextAt: this.nextWaveAt, ...this.lastWave }),
         tune: (patch: Partial<typeof this.wave>) => {
           Object.assign(this.wave, patch);
           return { ...this.wave };
@@ -1821,6 +1818,7 @@ class App {
           this.spiders?.spawn(n, this.player.position);
           return this.spiders?.getStats().count ?? 0;
         },
+        reinforce: (n: number) => this.spiders?.reinforce(n, this.player.position) ?? null,
         place: (i: number, x: number, z: number, y?: number) =>
           this.spiders?.place(i, x, z, y) ?? false,
         hurt: (i: number) => this.spiders?.hurt(i) ?? false,
@@ -1949,7 +1947,7 @@ class App {
           // distinction the concept's whole cost/benefit joke rests on.
           bySource: Object.fromEntries(this.bus.countsBySource()),
         },
-        gate: Math.hypot(this.player.position.x - GATE_TARGET.x, this.player.position.z - GATE_TARGET.z),
+        gate: Math.hypot(this.player.position.x - this.hall.plan.gate.x, this.player.position.z - this.hall.plan.gate.z),
         radio: {
           carried: this.radio.carried,
           powered: this.radio.powered,
