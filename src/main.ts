@@ -83,9 +83,16 @@ const loop = new Loop({
   },
   render: (alpha) => {
     game.render(alpha);
+  },
+  draw: () => {
     // The game draws itself only when it owns a post chain; otherwise take the direct path.
     if (!game.renderFrame(scene, camera)) renderer.render(scene, camera);
   },
+  // Only ever called on a stepped tick (see `LoopHandlers.settleTick`). The reveal's unlock pass
+  // is amortised over frames against a millisecond budget, which is a question about the host;
+  // finishing it inside the tick that started it makes what the room knows a function of the
+  // tick count alone. `drain` is the same door the Node tests use for the same reason.
+  settleTick: () => game.sim.paint.structured.drain(),
 });
 
 loop.start();
@@ -95,13 +102,41 @@ loop.start();
 interface DebugHandle {
   getState(): Record<string, unknown>;
   probe(name: string, args?: Record<string, unknown>): unknown;
+  stepTicks(ticks: number): Record<string, unknown>;
+  resumeTicks(): Record<string, unknown>;
 }
+
+const getState = (): Record<string, unknown> => ({
+  fps: loop.fps,
+  lookMode: input.lookMode,
+  pointerLocked: document.pointerLockElement === renderer.domElement,
+  // The simulation's own clock. Two runs of one script that agree here agree about *when* every
+  // screenshot was taken, which is the only thing wall-clock pacing could never promise.
+  simTicks: loop.ticks,
+  simHz: 1 / loop.stepSeconds,
+  stepping: loop.suspended,
+  ...game.debugState(),
+});
+
 (window as unknown as { __blindspot: DebugHandle }).__blindspot = {
   probe: (name, args) => game.debugProbe(name, args),
-  getState: () => ({
-    fps: loop.fps,
-    lookMode: input.lookMode,
-    pointerLocked: document.pointerLockElement === renderer.domElement,
-    ...game.debugState(),
-  }),
+  getState,
+  /*
+   * Drives the clock, never the game.
+   *
+   * The rule above still holds — there is no way in here to move the body, fire a ping or set a
+   * flag, and tooling still has to press the keys. What this changes is *when* the world is
+   * looked at: it suspends the display clock and advances the simulation by an exact number of
+   * fixed ticks, so a screenshot depicts a named instant instead of "whatever 800 ms of a busy
+   * machine turned out to be". Inert until something calls it; `resumeTicks` gives the clock
+   * back, for the measurements that genuinely are about wall time.
+   */
+  stepTicks: (ticks) => {
+    loop.step(ticks);
+    return getState();
+  },
+  resumeTicks: () => {
+    loop.resume();
+    return getState();
+  },
 };
