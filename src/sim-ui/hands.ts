@@ -155,10 +155,10 @@ export class CatchHand implements HandScript {
     const press =
       this.mode === 'early'
         ? d < this.earlyRange && Number.isFinite(tca) && tca > 0
-        // A real receiver presses *into* the arrival, not on top of it: the rules resolve a
-        // body/ball encounter the instant they touch, so the last reachable tick is the one
-        // before contact. Pressing "exactly at closest approach" is already too late.
-        : d < 2.2 && Number.isFinite(tca) && tca > 0.02 && tca < 0.1;
+        // A real receiver presses *into* the arrival, not on top of it. With the reach model a
+        // press opens the hands for `reachSec` (0.22 s), so the window to aim at is a fifth of a
+        // second of remaining flight — earlier than the old rule wanted, and much less fussy.
+        : d < 3 && Number.isFinite(tca) && tca > 0.04 && tca < 0.18;
     if (press) {
       this.fired = true;
       intent.catch = true;

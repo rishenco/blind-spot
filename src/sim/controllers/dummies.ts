@@ -79,7 +79,7 @@ abstract class BaseController implements Controller {
     const speed = f.self.speed;
     const tca = speed > 0.2 ? Math.max(0, d - cfg.radius * 0.2) / speed : 0;
     const stationaryish = speed < 0.2 || closing >= 0;
-    if (!(stationaryish || tca <= cfg.windowSec)) return false;
+    if (!(stationaryish || tca <= cfg.reachSec)) return false;
     if (ballVel) {
       const away = (ballPos.x - f.self.pos.x) * ballVel.x + (ballPos.y - f.self.pos.y) * ballVel.y;
       if (away > 0 && len2(ballVel) > 2) return false;

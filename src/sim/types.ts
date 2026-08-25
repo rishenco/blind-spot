@@ -39,6 +39,10 @@ export type SoundKind =
   | 'throw'
   | 'ball-hum'
   | 'ball-wall'
+  /** A ball that went past a body nobody had timed: quiet, but never nothing. */
+  | 'ball-near'
+  /** The ball changing hands in a scuffle. Every change of possession has to be audible. */
+  | 'steal'
   | 'sonar'
   | 'whistle';
 
@@ -210,6 +214,29 @@ export interface SelfState {
   recovering: boolean;
   /** Flat on the floor after being tackled: no movement, no actions, and everybody heard it. */
   down: boolean;
+  /** > 0 while the hands are open: the catch button was pressed and the reach has not lapsed. */
+  reaching: boolean;
+  /**
+   * How far along an opponent is towards taking the ball off this body, 0..1.
+   *
+   * Proprioception, not intel: it says somebody is grabbing at *me*, which is a thing a blind
+   * player would feel through his own arms, and it says nothing about where anybody is. Without
+   * it a steal arrives out of nowhere and there is no such thing as reacting to being hunted —
+   * the mechanic would be a lottery rather than a contest.
+   */
+  stealPressure: number;
+  /** Seconds this body has held the ball. The passivity clock, from the inside. */
+  carrySeconds: number;
+  /**
+   * Why the last attempt on the ball failed, and when.
+   *
+   * `early` — the hands closed before the ball arrived. `late` — the ball reached the body with
+   * the hands shut, which is a fumble. `past` — a hard throw went straight through a body that
+   * was not reaching. Published because reconstructing it from the sign of a time-to-closest-
+   * approach is guesswork, and a player who is told nothing learns nothing.
+   */
+  lastCatchFail: 'early' | 'late' | 'past' | null;
+  lastCatchFailT: number;
   /** Audible radius of the noise this body is making right now — the concept's "am I loud" readout. */
   ownLoudness: number;
 }

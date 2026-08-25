@@ -259,6 +259,16 @@ export class Perceiver {
 
   private selfState(view: WorldView): SelfState {
     const me = view.players[this.id]!;
+    // How hard somebody is pulling at the ball I am holding. Read off the bodies contesting me,
+    // which is a thing my own arms would tell me and says nothing about where anybody is.
+    let pressure = 0;
+    if (me.hasBall) {
+      const hold = Math.max(1e-6, this.cfg.contest.steal.holdSec);
+      for (const other of view.players) {
+        if (other.team === me.team || other.contestTarget !== me.id) continue;
+        pressure = Math.max(pressure, clamp(other.contestT / hold, 0, 1));
+      }
+    }
     return {
       id: me.id,
       team: me.team,
@@ -273,6 +283,11 @@ export class Perceiver {
       diving: me.diveT > 0,
       recovering: me.recoverT > 0,
       down: me.downT > 0,
+      reaching: me.reachT > 0,
+      stealPressure: pressure,
+      carrySeconds: me.hasBall ? view.ball.carryT : 0,
+      lastCatchFail: me.lastCatchFail,
+      lastCatchFailT: me.lastCatchFailT,
       ownLoudness: me.loudness,
     };
   }

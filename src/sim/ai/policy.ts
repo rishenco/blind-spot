@@ -203,7 +203,12 @@ export function generateCandidates(input: PolicyInput): Action[] {
   if (f.role === 'carrier') {
     const shot = shotValue(f, f.me, cfg);
     out.push({ kind: 'shoot', tag: 'shoot', target: shot.target, charge: shot.charge });
-    if (f.mate && f.mate.fresh) {
+    // A pass is offered even when the team-mate has gone quiet. He is a body that has not made a
+    // sound, which is exactly what a good receiver looks like — and with a human in that slot it
+    // is the normal case, not the exception. The staleness is priced on the position axis rather
+    // than used as a gate, because "I cannot hear him" and "he is not there" are different
+    // statements and only the first one is true.
+    if (f.mate) {
       const lead = { x: f.mate.pos.x, y: f.mate.pos.y };
       const speed = clamp(dist2(f.me, lead) * 1.6, cfg.throwing.minSpeed, cfg.throwing.maxSpeed);
       out.push({ kind: 'pass', tag: 'pass', target: lead, charge: chargeForSpeed(speed, cfg.throwing) });
@@ -499,7 +504,10 @@ function positionValue(action: Action, endPos: Vec2, travelT: number, arrival: n
     const after = shotValue(f, to, cfg).value;
     const mine = shotValue(f, f.me, cfg).value;
     const gain = after > mine * 0.9 ? 1 : 0.55;
-    return clamp(0.8 * complete * (0.3 + 0.7 * after) * gain, 0.02, 1);
+    // Throwing at a place you last heard him four seconds ago is a worse idea than throwing at
+    // one you heard him in half a second ago, but it is not a forbidden idea.
+    const trust = f.mate && f.mate.fresh ? 1 : 0.45;
+    return clamp(0.8 * complete * (0.3 + 0.7 * after) * gain * trust, 0.02, 1);
   }
   if (action.kind === 'dive') {
     if (!f.intercept) return 0.05;
@@ -633,6 +641,14 @@ function infoValue(action: Action, input: PolicyInput, pHeard: number): number {
   vagueness /= n;
   void pHeard;
   let need = INFO_NEED[f.role];
+  // What is the question FOR. A ping is worth what it changes about the next decision, and there
+  // are exactly two decisions in this game that a fuzzy belief cannot be made: whether to throw
+  // the body at somebody (a tackle is a bet on a position, and a bet you cannot price is a bet
+  // you decline), and whether the man about to take the ball off me is close enough to matter.
+  // Before the contest rules existed neither of those decisions existed either, which is the
+  // real reason the bot used to ping once every ten minutes: it had nothing to ask about.
+  const stakes = clamp(1 - f.huntTime / 3, 0, 1);
+  need = clamp(Math.max(need, stakes * vagueness * (f.role === 'carrier' ? 1 : 0.8)), 0, 1);
   if (f.role === 'carrier') {
     // A carrier's question is not "where are they" in general, it is "is my shooting lane
     // blocked" — and that question is only worth asking when the answer is genuinely in doubt.

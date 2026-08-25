@@ -116,6 +116,8 @@ export class Feel {
    * kind of one-tick offset that makes feedback silently wrong, so it gets its own field.
    */
   private hadBall = false;
+  /** Timestamp of the last failure the core reported, so each one is announced exactly once. */
+  private lastFailT = -99;
 
   private hintQueue: { id: string; text: string; when: (f: PerceptionFrame, s: Feel) => boolean }[];
 
@@ -136,6 +138,7 @@ export class Feel {
     this.flashes = [];
     this.hints = [];
     this.hadBall = false;
+    this.lastFailT = -99;
     this.carryFor = 0;
     this.score = [0, 0];
     this.stats = { pings: 0, throws: 0, catches: 0, fumbles: 0, loudSeconds: 0, quietSeconds: 0 };
@@ -201,9 +204,26 @@ export class Feel {
       // the outcome. If the ball was out of reach it says so; otherwise the sign of the time to
       // closest approach is the whole answer, and it is the same quantity the simulation uses.
       const offset = Number.isFinite(this.ballTca) ? this.ballTca : 0;
-      let verdict: CatchVerdict = 'pending';
-      if (this.ballDistance > this.cfg.catchRadius) verdict = 'reach';
-      this.lastCatch = { t: this.t, verdict, offset, distance: this.ballDistance };
+      // The verdict is NOT decided here any more. A press opens the hands for `reachSec`, so
+      // pressing while the ball is still two metres out is the correct thing to do, not a
+      // mistake — and the simulation is the only thing that knows whether it worked. It says so
+      // in `self.lastCatchFail`, read below.
+      this.lastCatch = { t: this.t, verdict: 'pending', offset, distance: this.ballDistance };
+    }
+    // The core's own verdict, published as proprioception rather than reconstructed out here
+    // from the sign of a time-to-closest-approach. That reconstruction was fragile before the
+    // reach model and simply wrong after it: it called a successful catch TOO SOON for the four
+    // ticks between the press and the ball arriving.
+    if (self.lastCatchFail && self.lastCatchFailT > this.lastFailT) {
+      this.lastFailT = self.lastCatchFailT;
+      const distance = this.lastCatch && this.t - this.lastCatch.t < 1 ? this.lastCatch.distance : this.ballDistance;
+      const offset = self.lastCatchFail === 'early' ? 1 : -1;
+      this.lastCatch = {
+        t: this.t,
+        verdict: self.lastCatchFail === 'early' ? 'reach' : 'late',
+        offset,
+        distance,
+      };
     }
     if (poll?.pressedPing && self.pingCooldown <= 0) this.push('ping', 1);
     if (poll?.releasedCharge && self.hasBall) {

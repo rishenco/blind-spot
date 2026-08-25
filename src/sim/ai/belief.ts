@@ -434,15 +434,22 @@ export class Belief {
     const shrink = this.knobs.sonarShrink;
     for (const ret of frame.sonar) {
       const spare: Vec2[] = [];
-      const opponentHits: Vec2[] = [];
+      const opponentHits: { pos: Vec2; id: EntityId | null }[] = [];
       for (const hit of ret.hits) {
         if (hit.kind !== 'player') continue;
         spare.push(hit.pos);
-        if (hit.sourceId === null) opponentHits.push(hit.pos);
-        else if (this.mate && hit.sourceId === this.mate.id) {
+        if (hit.sourceId === null) {
+          opponentHits.push({ pos: hit.pos, id: null });
+        } else if (this.mate && hit.sourceId === this.mate.id) {
           this.mate.pos = { x: hit.pos.x, y: hit.pos.y };
           this.mate.t = this.now;
           this.mate.fresh = true;
+        } else if (this.opponents.some((t) => t.id === hit.sourceId)) {
+          // A NAMED opponent, which only happens with `anonymousSources` off. Dropping it here
+          // was the same bug as dropping a named footstep: the honesty dial, turned all the way
+          // up, deleted the very returns it was supposed to hand over — so the "omniscient" side
+          // of the rule tournament was measuring an eight-times-hearing bot and nothing more.
+          opponentHits.push({ pos: hit.pos, id: hit.sourceId });
         }
       }
       // The negative half first, over the annulus this tick's front actually checked — shrunk,
@@ -454,20 +461,25 @@ export class Belief {
           t.grid.multiplyNegativeSector(ret.origin, r0, r1, ret.aim, ret.coneCos, this.knobs.pDetectSonar, spare, 1.5);
         }
       }
-      for (const hit of opponentHits) this.absorbSonarHit(hit);
+      for (const hit of opponentHits) this.absorbSonarHit(hit.pos, hit.id);
     }
   }
 
-  private absorbSonarHit(at: Vec2): void {
+  private absorbSonarHit(at: Vec2, id: EntityId | null = null): void {
     const tracks = this.opponents;
     if (tracks.length === 0) return;
     let bestI = 0;
-    let best = -1;
-    for (let i = 0; i < tracks.length; i++) {
-      const l = tracks[i]!.grid.likelihoodMass(at, { x: 1, y: 0 }, 1.2, 1.2);
-      if (l > best) {
-        best = l;
-        bestI = i;
+    if (id !== null) {
+      const named = tracks.findIndex((t) => t.id === id);
+      if (named >= 0) bestI = named;
+    } else {
+      let best = -1;
+      for (let i = 0; i < tracks.length; i++) {
+        const l = tracks[i]!.grid.likelihoodMass(at, { x: 1, y: 0 }, 1.2, 1.2);
+        if (l > best) {
+          best = l;
+          bestI = i;
+        }
       }
     }
     const t = tracks[bestI]!;

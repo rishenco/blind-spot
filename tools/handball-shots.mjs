@@ -412,10 +412,10 @@ check(
 
 // --- 52 the catch, timed ---------------------------------------------------
 const caught = await storyboard('52', 'hands-catch', 2.2, [
-  { tick: 196, name: 'incoming', note: 'a pass arriving: the dashed leash points at the ball, the dotted ring is the 1.2 m the arms can reach, and the green arc is a countdown to the moment of closest approach' },
-  { tick: 206, name: 'window', note: '0.1 s out: the reach ring has gone solid green — this is the window, drawn before the fact rather than explained after it' },
-  { tick: 210, name: 'caught', note: 'pressed and caught. CAUGHT under the nose, a 5 m slap that the other team can hear, and the ball is now this player’s problem: it sings from their hands for at most five seconds' },
-  { tick: 226, name: 'carrying', note: 'carrying: the loudness meter is pinned, because a carrier is audible from anywhere on the pitch. The bargain of the whole game — you have the ball, and everyone knows exactly where you are' },
+  { tick: 200, name: 'incoming', note: 'a pass arriving: the dashed leash points at the ball, the dotted ring is the reach the arms have, and the green arc is the countdown to the moment it lands' },
+  { tick: 210, name: 'window', note: 'a fifth of a second out: the reach ring has gone solid green — this is the window, drawn before the fact rather than explained after it' },
+  { tick: 218, name: 'caught', note: 'pressed and caught. CAUGHT under the nose, a slap the other team can hear, and the ball is now this player’s problem: it sings from their hands for at most five seconds' },
+  { tick: 234, name: 'carrying', note: 'carrying: the loudness meter is pinned, because a carrier is audible from anywhere on the pitch. The bargain of the whole game — you have the ball, and everyone knows exactly where you are' },
 ]);
 check('catch: the pass was taken', caught[2].feel.stats.catches === 1, JSON.stringify(caught[2].feel.stats));
 check(
@@ -426,9 +426,9 @@ check(
 
 // --- 54 the catch, missed --------------------------------------------------
 const missedCatch = await storyboard('54', 'hands-catch-early', 2.2, [
-  { tick: 200, name: 'grabbing', note: 'the same pass, and a nervous player who grabs at it early' },
-  { tick: 207, name: 'verdict', note: 'the read-out: TOO SOON — it was still 2.6 m out. This is the whole point of the feedback layer: the failure has a number and a reason, so the player knows what to change, instead of concluding that the game is arbitrary' },
-  { tick: 220, name: 'gone', note: 'and the ball has gone past. Nothing was caught, nothing was fumbled, and the chance is spent' },
+  { tick: 196, name: 'grabbing', note: 'the same pass, and a nervous player who grabs at it six metres out' },
+  { tick: 206, name: 'verdict', note: 'the read-out: TOO SOON — it was still 5.9 m out. The verdict comes from the simulation itself now (`SelfState.lastCatchFail`), not from a guess made out here: the failure has a number and a reason, so the player knows what to change instead of concluding that the game is arbitrary' },
+  { tick: 224, name: 'gone', note: 'and the ball has gone past. The hands closed before it arrived, nothing was caught, and the chance is spent' },
 ]);
 check(
   'missed catch: the player is told why, in metres',
@@ -532,9 +532,9 @@ async function mechPair(index, name, tick, truthNote, eyesNote) {
 const steal = await mechPair(
   '30',
   'mech-steal',
-  108,
-  'the steal, truth: the carrier (cyan, left) walked it up, the hunter (orange) ran him down and then simply stayed with him. Seven tenths of a second inside 1.1 m and the ball changes hands',
-  'and the same instant from the man it was taken off: the hum that was in his hands is now a metre away and moving the other way. The slap of the steal is a 5 m sound — his team-mate across the pitch does not know it has happened yet',
+  144,
+  'the steal, truth: the carrier (cyan, left) walked it up, the hunter (orange) ran him down and then simply stayed with him. A full second inside a metre and the ball changes hands',
+  'and the same instant from the man it was taken off: the hum that was in his hands is now a metre away and moving the other way. The scuffle carries 9 m, so a change of possession is never silent — but the far side of the pitch still only learns it from the hum moving',
 );
 check(
   'steal: the ball changed hands',
@@ -556,7 +556,7 @@ check('tackle: the ball came loose', tackle.state.ball.carrier === null);
 const missed = await mechPair(
   '34',
   'mech-tackle-miss',
-  40,
+  45,
   'the same bet, lost: the dive went in a second early. The diver is the one lying there now, and the carrier walks past him',
   'and this is what the bet cost him in information: he made the loudest ordinary sound in the game, from a position he no longer holds, and learned nothing',
 );
@@ -571,18 +571,18 @@ const screen = await mechPair(
   '36',
   'mech-screen',
   124,
-  'the screen, truth: a body that has made no sound at all is standing in the corridor, and the carrier has just run into it at full speed. Bodies no longer pass through each other',
-  'the thud, heard: a silent defender is invisible right up to the moment somebody hits him — and then he is the loudest thing on the pitch, together with the ball he has just knocked loose',
+  'the screen, truth: a body that has made no sound at all is standing in the corridor, and the carrier has just run into it at full speed. Bodies no longer pass through each other, so a silent defender is a wall',
+  'the thud, heard: a screen is invisible right up to the moment somebody hits it — and then both bodies are the loudest thing on the pitch. The carrier keeps the ball; contact that also spilled it measured at sixteen fumbles a minute, which is a brawl and not a game',
 );
-check('screen: the ball came loose', screen.state.ball.carrier === null);
+check('screen: the runner was stopped but kept the ball', screen.state.ball.carrier === 0);
 
 // --- 38/39 the block that is no longer absolute -----------------------------
 const block = await mechPair(
   '38',
   'mech-block',
-  72,
+  84,
   'the block that is not a wall: a hard throw fired straight at a parked defender has gone past him. Under the old rule this contact was a guaranteed fumble, which is why two parked bodies were unbeatable',
-  'from behind the defender: the ball is simply still coming. Nothing happened, so nothing was heard — the absence of a mark is the information',
+  'from behind the defender: the ball is simply still coming. It whistled past him at 3.5 m — quiet, but never nothing, because a punishment nobody can hear is indistinguishable from a bug',
 );
 check(
   'block: the ball is past the defender and still loose',

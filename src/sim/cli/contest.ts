@@ -139,15 +139,61 @@ export const VARIANTS: RuleVariant[] = [
     apply: () => {},
   },
   {
-    name: 'all-slowthrow',
-    note: 'everything on, plus the concept\u2019s revised numbers: 16 m/s release, 2.5 m goal',
+    name: 'tackle+screen',
+    note: 'tackle and soft block, plus body contact that blocks and staggers but does not spill the ball',
     apply: (c) => {
-      // `doc/concept.md` says both of these were changed after the first simulation pass and
-      // `src/sim/config.ts` says they never were. Rather than pick a side by reading, they are a
-      // tournament row: a slower ball is a ball that can be intercepted, and a narrower goal is
-      // one that has to be aimed at.
-      c.throwing.maxSpeed = 16;
-      c.field.goalWidth = 2.5;
+      off(c);
+      c.contest.tackle.enabled = true;
+      c.contest.block.mode = 'speed';
+      // Body contact earns its place as a *screen*: a silent body in the corridor is a wall.
+      // Making it also spill the ball turned the pitch into a fumble machine — sixteen a minute
+      // in the `collision` row, one every four seconds — which is the "свалка" failure the
+      // concept's third test is there to catch.
+      c.contest.collision.enabled = true;
+      c.contest.collision.dropsBall = false;
+      c.contest.collision.loudSpeed = 4.5;
+    },
+  },
+  {
+    name: 'chosen',
+    note: 'the proposed default: tackle, soft block, a screen that does not spill the ball, and a steal that has to be worked for',
+    apply: (c) => {
+      // Assembled from the parts each of which measured well on its own, then re-measured as a
+      // whole — because "these three were fine separately" is not a measurement of the three.
+      c.contest.tackle.enabled = true;
+      c.contest.block.mode = 'speed';
+      c.contest.collision.enabled = true;
+      c.contest.collision.dropsBall = false;
+      c.contest.collision.loudSpeed = 4.5;
+      c.contest.steal.enabled = true;
+      c.contest.steal.radius = 1;
+      c.contest.steal.holdSec = 1;
+      c.contest.steal.graceSec = 1.5;
+    },
+  },
+  {
+    name: 'tackle+hardsteal',
+    note: 'tackle and soft block, plus a steal that has to be worked for: 1.0 m held for a full second',
+    apply: (c) => {
+      off(c);
+      c.contest.tackle.enabled = true;
+      c.contest.block.mode = 'speed';
+      c.contest.steal.enabled = true;
+      c.contest.steal.radius = 1;
+      c.contest.steal.holdSec = 1;
+      c.contest.steal.graceSec = 1.5;
+    },
+  },
+  {
+    name: 'all-fastthrow',
+    note: 'everything on, but back to the old 22 m/s release and 3 m goal',
+    apply: (c) => {
+      // The control row for the numbers the concept revised and the config had never followed.
+      // A 22 m/s release covers eight metres in 0.36 s, which is below anybody's reaction time,
+      // so it is worth knowing what the rest of the table looks like when a shot cannot be
+      // contested at all.
+      c.throwing.maxSpeed = 22;
+      c.field.goalWidth = 3;
     },
   },
   {

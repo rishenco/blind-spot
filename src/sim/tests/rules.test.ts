@@ -106,7 +106,10 @@ describe('field and rules', () => {
       { for: 0.5, charge: true, aim: [0, 1] },
       { for: 4 },
     ], 'thrower');
-    const catcher = scripted([{ for: 0.55 }, { for: 4, catch: true }], 'catcher');
+    // The catch is a timed action now: one press opens the hands for `reachSec` and holding the
+    // button does nothing after the first tick. The ball leaves at 0.5 s and covers the ten
+    // metres between them in about 0.63 s, so the grab has to be made just before it lands.
+    const catcher = scripted([{ for: 1.0 }, { catch: true }, { for: 4 }], 'catcher');
     const m = new Match({
       config: cfg,
       seed: 11,
@@ -198,7 +201,7 @@ describe('the fight for the ball', () => {
     for (let i = 0; i < 8 && sim.state.ball.carrier === 0; i++) out = sim.step(idleFor(2));
     expect(sim.state.ball.carrier).toBe(1);
     // And it is a sound, not a silent teleport — a slap at the thief's feet.
-    expect(out.events.some((e) => e.kind === 'catch')).toBe(true);
+    expect(out.events.some((e) => e.kind === 'steal')).toBe(true);
   });
 
   it('never steals when the rule is off, however long the two stand together', () => {
@@ -268,6 +271,7 @@ describe('the fight for the ball', () => {
     });
     place(sim, { x: -3, y: 0 }, { x: 0, y: 0 });
     let heard = false;
+    let staggered = false;
     for (let i = 0; i < 90; i++) {
       const intents = idleFor(2);
       intents[0]!.move = { x: 1, y: 0 };
@@ -275,20 +279,40 @@ describe('the fight for the ball', () => {
       intents[0]!.aim = { x: 1, y: 0 };
       const out = sim.step(intents);
       if ((out.contests ?? []).some((c) => c.kind === 'collision')) heard = true;
+      if (sim.state.players[0]!.staggerT > 0) staggered = true;
     }
     expect(heard).toBe(true);
+    expect(staggered).toBe(true);
     const gap = Math.hypot(
       sim.state.players[0]!.pos.x - sim.state.players[1]!.pos.x,
       sim.state.players[0]!.pos.y - sim.state.players[1]!.pos.y,
     );
     expect(gap).toBeGreaterThanOrEqual(sim.config.player.radius * 2 - 1e-6);
-    // A hard bump knocks the ball out of the runner's hands.
-    expect(sim.state.ball.carrier).toBeNull();
+    // The default rule is a screen, not a mugging: he is stopped, staggered and loud, and he
+    // keeps the ball. Spilling it as well measured at sixteen fumbles a minute.
+    expect(sim.state.ball.carrier).toBe(0);
+
+    // The switch still works the other way, because the tournament needs both rows.
+    const spill = rigged((c) => {
+      c.contest.collision.enabled = true;
+      c.contest.collision.dropsBall = true;
+    });
+    place(spill, { x: -3, y: 0 }, { x: 0, y: 0 });
+    for (let i = 0; i < 90; i++) {
+      const intents = idleFor(2);
+      intents[0]!.move = { x: 1, y: 0 };
+      intents[0]!.moveMode = 'run';
+      intents[0]!.aim = { x: 1, y: 0 };
+      spill.step(intents);
+    }
+    expect(spill.state.ball.carrier).toBeNull();
   });
 
   it('lets a hard throw past a body that did not time it, and never past one that did', () => {
     // Same throw, same geometry, two block modes. `'always'` is the old rule and has to stay
     // available: it is the control row of the rule tournament.
+    // `active` presses the catch button once, late, so the hands are open when the ball arrives.
+    // Holding it down does nothing: one press, one window.
     const shots = (mode: 'always' | 'speed', active: boolean): number => {
       let through = 0;
       for (let seed = 1; seed <= 12; seed++) {
@@ -308,10 +332,15 @@ describe('the fight for the ball', () => {
         charge[0]!.charge = true;
         charge[0]!.aim = { x: 1, y: 0 };
         run(sim, 45, () => charge);
+        let pressed = false;
         for (let i = 0; i < 120; i++) {
           const intents = idleFor(2);
           intents[0]!.aim = { x: 1, y: 0 };
-          intents[1]!.catch = active;
+          const gap = Math.abs(sim.state.ball.pos.x - sim.state.players[1]!.pos.x);
+          if (active && !pressed && gap < 2) {
+            intents[1]!.catch = true;
+            pressed = true;
+          }
           const out = sim.step(intents);
           if ((out.contests ?? []).some((c) => c.kind === 'through')) through++;
         }
@@ -322,6 +351,90 @@ describe('the fight for the ball', () => {
     expect(shots('speed', false)).toBeGreaterThan(0);
     // A defender who is reaching for it stops everything he touches.
     expect(shots('speed', true)).toBe(0);
+  });
+
+  it('makes both halves of the catch timing reachable, and says which one was missed', () => {
+    // The point of the reach model. Under the old rule ("press within ±windowSec of closest
+    // approach") the late half could not happen at all: the ball meets the body before it
+    // reaches closest approach, so every failure was "too early" and the timing was a fiction.
+    const attempt = (pressAtGap: number): { fail: string | null; caught: boolean } => {
+      const cfg = defaultConfig();
+      cfg.teamSize = 1;
+      cfg.match.spawnJitter = 0;
+      cfg.contest.block.mode = 'always'; // isolate the catch: no dice in this experiment
+      const sim = new Simulation(cfg, 4);
+      sim.state.players[0]!.pos = { x: -6, y: 0 };
+      sim.state.players[1]!.pos = { x: 4, y: 0 };
+      sim.state.ball.pos = { x: -5.15, y: 0 };
+      const charge = idleFor(2);
+      charge[0]!.charge = true;
+      charge[0]!.aim = { x: 1, y: 0 };
+      run(sim, 45, () => charge);
+      let pressed = false;
+      for (let i = 0; i < 200; i++) {
+        const intents = idleFor(2);
+        intents[0]!.aim = { x: 1, y: 0 };
+        const gap = sim.state.players[1]!.pos.x - sim.state.ball.pos.x;
+        if (!pressed && gap <= pressAtGap) {
+          intents[1]!.catch = true;
+          pressed = true;
+        }
+        sim.step(intents);
+        if (sim.state.ball.carrier === 1) return { fail: null, caught: true };
+        const fail = sim.state.players[1]!.lastCatchFail;
+        if (fail) return { fail, caught: false };
+      }
+      return { fail: null, caught: false };
+    };
+    // Grabbing at it from six metres away: the hands shut long before it arrives.
+    expect(attempt(6).fail).toBe('early');
+    // Grabbing at it a metre before it lands: caught.
+    expect(attempt(1.2).caught).toBe(true);
+    // Never grabbing at all: it hits a shut body, which is the late failure and a fumble.
+    expect(attempt(-99).fail).toBe('late');
+  });
+
+  it('never takes the ball or lets it past in silence', () => {
+    // Two different silent punishments, both fixed: a steal that nobody could hear, and a ball
+    // that slipped past a body which had just pressed a button and got nothing back.
+    const sim = rigged((c) => {
+      c.contest.steal.enabled = true;
+    });
+    place(sim, { x: 0, y: 0 }, { x: 0.9, y: 0 });
+    let stealHeard = false;
+    for (let i = 0; i < 120; i++) {
+      const out = sim.step(idleFor(2));
+      if (out.events.some((e) => e.kind === 'steal')) stealHeard = true;
+    }
+    expect(stealHeard).toBe(true);
+
+    const past = rigged((c) => {
+      c.contest.block.mode = 'speed';
+      c.contest.block.minStop = 0; // make the pass-through certain, so the test is about the sound
+      c.contest.block.speedSpan = 1;
+    });
+    past.state.players[0]!.pos = { x: -6, y: 0 };
+    past.state.players[1]!.pos = { x: 4, y: 0 };
+    past.state.ball.pos = { x: -5.15, y: 0 };
+    const charge = idleFor(2);
+    charge[0]!.charge = true;
+    charge[0]!.aim = { x: 1, y: 0 };
+    run(past, 45, () => charge);
+    let nearHeard = false;
+    for (let i = 0; i < 200; i++) {
+      const intents = idleFor(2);
+      intents[0]!.aim = { x: 1, y: 0 };
+      const out = past.step(intents);
+      if (out.events.some((e) => e.kind === 'ball-near')) {
+        nearHeard = true;
+        // And the body it went past is told why, on the same tick. (Read here rather than at the
+        // end of the loop: the ball comes off the far wall and can be picked up later, which
+        // clears the flag — as it should.)
+        expect(past.state.players[1]!.lastCatchFail).toBe('past');
+        break;
+      }
+    }
+    expect(nearHeard).toBe(true);
   });
 
   it('rings out when a runner changes direction hard, and stays quiet when a walker does', () => {

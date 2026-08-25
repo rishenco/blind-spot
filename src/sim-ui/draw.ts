@@ -43,6 +43,10 @@ export const SOUND_COLOR: Partial<Record<SoundKind, string>> = {
   throw: '#ffb703',
   'ball-hum': '#ffd166',
   'ball-wall': '#ffe8a3',
+  // Two rows added with the fight for the ball: a ball whistling past a body that did not react,
+  // and the scuffle of the ball changing hands.
+  'ball-near': '#c7b48a',
+  steal: '#5cffd0',
   sonar: '#ffffff',
   whistle: '#ff7ae0',
 };

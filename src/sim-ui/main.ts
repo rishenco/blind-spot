@@ -167,7 +167,9 @@ function feelConfig(config: SimConfig): ConstructorParameters<typeof Feel>[0] {
     minCharge: config.throwing.minCharge,
     maxCharge: config.throwing.maxCharge,
     catchRadius: config.catching.radius,
-    catchWindow: config.catching.windowSec,
+    // `windowSec` is gone: a catch is now "one press opens the hands for `reachSec`", which is
+    // the same quantity from the player's point of view — how long the grab lasts.
+    catchWindow: config.catching.reachSec,
     walkLoud: config.loudness['step-walk'],
     runLoud: config.loudness['step-run'],
     pingCooldown: config.ping.cooldownSec,

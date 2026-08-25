@@ -11,7 +11,7 @@
  * plus whatever `reactionLatencySec` adds), and it stops the chooser from re-deciding on every
  * frame, which is what actually reads as "stupid bot" when two options are nearly tied.
  */
-import { clamp, dist2, len2, norm2, sub2, timeOfClosestApproach } from '../math';
+import { clamp, dist2, len2, norm2, sub2 } from '../math';
 import {
   idleIntent,
   type BeliefCloud,
@@ -277,20 +277,26 @@ export class Bot implements Controller {
    * be dealt with this tick or it becomes a fumble — the loudest mistake in the game.
    */
   private catchReflex(frame: PerceptionFrame, intent: Intent, f: Features): void {
-    if (frame.self.hasBall || this.catchLock > 0 || !f.ball) return;
+    if (frame.self.hasBall || this.catchLock > 0 || frame.self.reaching || !f.ball) return;
     const cfg = this.ctx.config.catching;
     const rel = sub2(f.ball.pos, f.me);
     const d = len2(rel);
-    if (d > cfg.radius * 0.85) return;
     const relVel = sub2(f.ball.vel, frame.self.vel);
     const relSpeed = len2(relVel);
     if (relSpeed < cfg.slowBallSpeed) {
+      if (d > cfg.radius * 0.85) return;
       intent.catch = true;
       this.catchLock = 0.25;
       return;
     }
-    const tca = timeOfClosestApproach(rel, relVel);
-    if (Math.abs(tca) <= cfg.windowSec * 0.75) {
+    // The hands stay open for `reachSec`, so the press has to be made while the ball is still
+    // that much flight away — and closing them early is the whole of the "too soon" mistake.
+    // Aim for the middle of the window rather than its edge: the bot's own reaction is quantised
+    // to the decision tick, and it has to survive being a frame or two late.
+    const closing = -(rel.x * relVel.x + rel.y * relVel.y) / Math.max(1e-6, d);
+    if (closing <= 0) return;
+    const arrival = (d - cfg.radius * 0.5) / Math.max(1e-6, closing);
+    if (arrival <= cfg.reachSec * 0.6) {
       intent.catch = true;
       this.catchLock = 0.25;
     }

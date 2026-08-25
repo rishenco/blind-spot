@@ -21,7 +21,6 @@ import {
   lerp,
   norm2,
   scatterDir,
-  timeOfClosestApproach,
   v2,
 } from './math';
 import { makeRng, type Rng } from '../core/rng';
@@ -86,6 +85,15 @@ export interface PlayerState {
   robbedCd: number;
   /** Whether the dive in progress has already connected with somebody. */
   tackleHit: boolean;
+  /** > 0 while the hands are open after a catch press. */
+  reachT: number;
+  /** Cooldown before the hands can be opened again. */
+  reachCd: number;
+  /** Whether the ball came inside reach during the current open window. */
+  reachSawBall: boolean;
+  /** Why the last attempt on the ball failed, and when — proprioception, published to the frame. */
+  lastCatchFail: 'early' | 'late' | 'past' | null;
+  lastCatchFailT: number;
   /** Audible radius of the loudest noise this body made this tick — the "am I loud" readout. */
   loudness: number;
 }
@@ -265,6 +273,11 @@ export class Simulation {
         contestTarget: null,
         robbedCd: 0,
         tackleHit: false,
+        reachT: 0,
+        reachCd: 0,
+        reachSawBall: false,
+        lastCatchFail: null,
+        lastCatchFailT: -99,
         loudness: 0,
       });
     }
@@ -338,6 +351,11 @@ export class Simulation {
       p.contestTarget = null;
       p.robbedCd = 0;
       p.tackleHit = false;
+      p.reachT = 0;
+      p.reachCd = 0;
+      p.reachSawBall = false;
+      p.lastCatchFail = null;
+      p.lastCatchFailT = -99;
       p.loudness = 0;
       confineBody(f, p.pos, p.vel, this.config.player.radius);
     }
@@ -481,6 +499,26 @@ export class Simulation {
     p.brakeCd = Math.max(0, p.brakeCd - dt);
     p.robbedCd = Math.max(0, p.robbedCd - dt);
     p.staggerT = Math.max(0, p.staggerT - dt);
+    p.reachCd = Math.max(0, p.reachCd - dt);
+    if (p.reachT > 0) {
+      p.reachT -= dt;
+      if (p.reachT <= 0) {
+        p.reachT = 0;
+        p.reachCd = cfg.catching.reachCooldownSec;
+        // The hands closed on nothing. That is the "too early" half of the timing, and it is
+        // the half a player can only learn about if somebody tells him.
+        if (!p.reachSawBall && !p.hasBall) {
+          p.lastCatchFail = 'early';
+          p.lastCatchFailT = this.state.t;
+        }
+        p.reachSawBall = false;
+      }
+    }
+    // Opening the hands is a rising edge, and it cannot be held: one press, one window.
+    if (intent.catch && !prev.catch && p.reachT <= 0 && p.reachCd <= 0 && p.downT <= 0) {
+      p.reachT = cfg.catching.reachSec;
+      p.reachSawBall = false;
+    }
 
     const aimLen = len2(intent.aim);
     if (aimLen > 1e-6) p.aim = norm2(intent.aim, p.aim);
@@ -895,9 +933,10 @@ export class Simulation {
       b.goalValid = false;
       b.carryT = 0;
       this.placeCarriedBall(s, p);
-      // The slap of the ball changing hands: the same 5 m sound a catch makes, because that is
-      // physically what it is.
-      this.emit('catch', p.pos, p.id);
+      // The scuffle of the ball changing hands, and it carries further than a catch does: every
+      // change of possession has to be audible, or the pitch's one shared fact — where the ball
+      // is — quietly stops meaning what everybody thinks it means.
+      this.emit('steal', p.pos, p.id);
       this.touches.push({ kind: 'catch', player: p.id, fromThrower: null, fromTeam: null });
       return;
     }
@@ -1147,10 +1186,14 @@ export class Simulation {
   /**
    * Catching, fumbling and stealing — all of the ways a body and the ball can meet.
    *
-   * A catch is a timed action: the ball must be inside `catching.radius` AND the button must go
-   * down within `catching.windowSec` of the moment of closest approach. Press too early or too
-   * late and the ball is not caught but *touched*, which is the loudest ordinary event in the
-   * game. Standing in the ball's way without pressing anything fumbles it too.
+   * A catch is a timed action, and the timing lives in `catching.reachSec`: one press opens the
+   * hands for a fifth of a second, and the ball has to be inside `catching.radius` while they
+   * are open. Press too early and they shut before it arrives; press too late and it hits a shut
+   * body, which is a fumble — the loudest ordinary event in the game. Both halves of that are
+   * reachable, which the previous rule (a window around the moment of closest approach) could
+   * not manage: the ball met the body before the moment it was supposed to be timed against.
+   *
+   * A ball crawling along the floor is not a timing problem and is simply picked up.
    */
   private resolveBallContacts(intents: readonly Intent[]): void {
     const cfg = this.config;
@@ -1170,42 +1213,48 @@ export class Simulation {
 
       const relVel = { x: b.vel.x - p.vel.x, y: b.vel.y - p.vel.y };
       const relSpeed = len2(relVel);
+      const slow = relSpeed < cfg.catching.slowBallSpeed;
       const pressed = intent.catch && !prev.catch;
-      if (pressed && d <= cfg.catching.radius) {
-        const tca = timeOfClosestApproach(rel, relVel);
-        // A ball in flight has to be timed; a ball at your feet is simply picked up.
-        const inWindow =
-          relSpeed < cfg.catching.slowBallSpeed || Math.abs(tca) <= cfg.catching.windowSec;
-        if (inWindow) {
-          b.carrier = p.id;
-          b.lastToucher = p.id;
-          p.hasBall = true;
-          p.ballCd = 0;
-          this.placeCarriedBall(s, p);
-          this.touches.push({
-            kind: 'catch',
-            player: p.id,
-            fromThrower: b.lastThrower,
-            fromTeam: b.lastThrowerTeam,
-          });
-          b.lastThrower = null;
-          b.lastThrowerTeam = null;
-          this.emit('catch', p.pos, p.id);
-          return;
-        }
-        this.fumble(p, rel, d, 'mistimed');
+      const open = p.reachT > 0;
+      if (open && d <= cfg.catching.radius) p.reachSawBall = true;
+
+      if ((open || (pressed && slow)) && d <= cfg.catching.radius) {
+        b.carrier = p.id;
+        b.lastToucher = p.id;
+        p.hasBall = true;
+        p.ballCd = 0;
+        p.reachT = 0;
+        p.reachSawBall = false;
+        p.lastCatchFail = null;
+        this.placeCarriedBall(s, p);
+        this.touches.push({
+          kind: 'catch',
+          player: p.id,
+          fromThrower: b.lastThrower,
+          fromTeam: b.lastThrowerTeam,
+        });
+        b.lastThrower = null;
+        b.lastThrowerTeam = null;
+        this.emit('catch', p.pos, p.id);
         return;
       }
 
       if (d <= bodyR && relSpeed >= cfg.catching.contactFumbleMinSpeed) {
-        if (this.stopsBall(p, intent, relSpeed)) {
+        if (this.stopsBall(p, relSpeed)) {
           // Hit by a ball nobody caught: a deflection, and everyone hears the mistake.
+          p.lastCatchFail = 'late';
+          p.lastCatchFailT = s.t;
           this.fumble(p, rel, d, 'contact');
           return;
         }
-        // It went past him. Nothing happened, nothing was heard, and he cannot have a second
-        // bite at it — which is what "he did not time it" has to mean if a block is a decision.
+        // It went past him. He cannot have a second bite at it — that is what "he did not time
+        // it" has to mean if a block is a decision — but it is NOT silent: a punishment nobody
+        // can perceive is indistinguishable from a bug, and this one lands on a player who just
+        // pressed a button and got nothing. The ball whistles past, quietly, close by.
         p.ballCd = cfg.catching.cooldownSec;
+        p.lastCatchFail = 'past';
+        p.lastCatchFailT = s.t;
+        this.emit('ball-near', p.pos, BALL_ID);
         this.contests.push({ kind: 'through', player: p.id, victim: null, t: s.t });
         continue;
       }
@@ -1222,10 +1271,11 @@ export class Simulation {
    * pressing catch, or committed to a dive — still stops everything. Blocking becomes an action
    * with a cost instead of a piece of scenery.
    */
-  private stopsBall(p: PlayerState, intent: Intent, relSpeed: number): boolean {
+  private stopsBall(p: PlayerState, relSpeed: number): boolean {
     const blk = this.config.contest.block;
     if (blk.mode === 'always') return true;
-    if (blk.activeAlwaysStops && (intent.catch || p.diveT > 0)) return true;
+    // Hands open, or a body committed to a dive: he reached for it, so he gets it.
+    if (blk.activeAlwaysStops && (p.reachT > 0 || p.diveT > 0)) return true;
     const over = relSpeed - this.config.catching.contactFumbleMinSpeed;
     const pStop = clamp(1 - over / Math.max(1e-6, blk.speedSpan), blk.minStop, 1);
     if (pStop >= 1) return true;
@@ -1384,7 +1434,7 @@ export class Simulation {
         p.hasBall ? 1 : 0, p.charging ? 1 : 0, p.chargeT, p.diveT, p.recoverT, p.diveCd,
         p.pingCd, p.ballCd, p.strideAcc, p.brakeCd, p.peakSpeed, p.peakAge, p.loudness,
         p.dirRef.x, p.dirRef.y, p.dirRefNext.x, p.dirRefNext.y, p.dirRefAge, p.downT, p.staggerT, p.contestT,
-        p.contestTarget ?? -99, p.robbedCd, p.tackleHit ? 1 : 0,
+        p.contestTarget ?? -99, p.robbedCd, p.tackleHit ? 1 : 0, p.reachT, p.reachCd,
       );
     }
     const b = s.ball;

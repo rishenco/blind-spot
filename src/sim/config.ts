@@ -117,10 +117,24 @@ export interface BallConfig {
 }
 
 export interface CatchConfig {
-  /** The ball must be within this distance of the body centre when the button goes down. */
+  /** How far the hands reach. The ball has to be inside this while the hands are open. */
   radius: number;
-  /** ± window around the moment of closest approach, seconds. */
-  windowSec: number;
+  /**
+   * How long one press keeps the hands open, seconds — and the whole of what makes a catch an
+   * action with a timing rather than a proximity test.
+   *
+   * The rule it replaces was "press within ±`windowSec` of the moment of closest approach", and
+   * arithmetic killed it: a ball at 16 m/s crosses a 1.2 m reach in 150 ms, which is narrower
+   * than the ±180 ms window, so the window was never the binding constraint. Worse, the late
+   * half of it was physically unreachable — the ball meets the body (0.47 m) before it reaches
+   * closest approach, so every failed catch was "grabbed too early" and no other outcome existed.
+   *
+   * Opening a window instead makes both halves real: press too early and the hands shut before
+   * the ball arrives; press too late and it hits you with them shut, which is a fumble.
+   */
+  reachSec: number;
+  /** How long the hands stay shut after a reach lapses. Stops the button being held down. */
+  reachCooldownSec: number;
   /** A body cannot touch the ball again for this long after releasing or fumbling it. */
   cooldownSec: number;
   /**
@@ -412,6 +426,13 @@ export const DEFAULT_LOUDNESS: Record<SoundKind, number> = {
   throw: 13,
   'ball-hum': 30,
   'ball-wall': 14,
+  // A ball whistling past a body that did not react. Quiet on purpose — it is feedback for the
+  // man it went past, not an announcement to the pitch — but never silence: a mechanic that
+  // punishes you without making a sound is invisible, and invisible punishment reads as a bug.
+  'ball-near': 3.5,
+  // A change of possession is always audible. It has to be: the ball is the one thing everybody
+  // can hear, so a ball that changes hands in silence tells the whole pitch a lie.
+  steal: 9,
   sonar: 40,
   whistle: 100,
 };
@@ -446,7 +467,11 @@ export function defaultConfig(): SimConfig {
     field: {
       width: 24,
       height: 14,
-      goalWidth: 3,
+      // The concept revised both of these after the first simulation pass and the config never
+      // followed: a 3 m mouth in a 14 m wall was walk-in-and-place, and a 22 m/s release covered
+      // eight metres in 0.36 s, which is less than anybody's reaction time — a shot that fast is
+      // not a shot, it is a scoring button.
+      goalWidth: 2.5,
       creaseRadius: 4,
       wallRestitution: 0.75,
       creaseBallTimeoutSec: 1,
@@ -485,8 +510,12 @@ export function defaultConfig(): SimConfig {
       restSpeed: 0.05,
     },
     catching: {
-      radius: 1.2,
-      windowSec: 0.18,
+      // Widened from 1.2 with the reach model: at 16 m/s the ball crosses 1.6 m in 100 ms, which
+      // is the size of the "too late" half of the timing. Any tighter and the late failure is a
+      // coin toss rather than a mistake.
+      radius: 1.6,
+      reachSec: 0.22,
+      reachCooldownSec: 0.35,
       cooldownSec: 0.35,
       slowBallSpeed: 2.5,
       contactFumbleMinSpeed: 3,
@@ -498,7 +527,7 @@ export function defaultConfig(): SimConfig {
       maxCharge: 0.6,
       weakSpeed: 6,
       minSpeed: 12,
-      maxSpeed: 22,
+      maxSpeed: 16,
     },
     dive: {
       durationSec: 0.4,
@@ -538,12 +567,17 @@ export function defaultConfig(): SimConfig {
         // of the time anyway. A steal has to be something you *did*, so the radius came down
         // below the natural crowding distance and the hold went up past the time it takes to
         // run through somebody.
-        radius: 1.1,
-        holdSec: 0.7,
+        // Final numbers from the rule tournament (`npm run contest`, row `chosen`). 1.5 m for
+        // 0.5 s gave twenty-two steals a minute — a change of possession every 2.6 seconds,
+        // almost all accidental, because two bots converging on a ball are inside 1.5 m of each
+        // other most of the time anyway. At 1.0 m for a full second it is 2.2 a minute and every
+        // one of them is something somebody did.
+        radius: 1,
+        holdSec: 1,
         requirePress: false,
         minSpeed: 0,
         knockLoose: false,
-        graceSec: 1,
+        graceSec: 1.5,
       },
       tackle: {
         enabled: true,
@@ -555,9 +589,14 @@ export function defaultConfig(): SimConfig {
       collision: {
         enabled: true,
         restitution: 0.2,
-        loudSpeed: 3.2,
+        // Measured: with contact spilling the ball, the `collision` row of the rule tournament
+        // produced sixteen fumbles a minute — one every four seconds — which is exactly the
+        // "свалка" the concept's third test exists to catch. Body contact earns its place as a
+        // SCREEN: a silent body in the corridor is a wall, and running into it is loud and costs
+        // you your momentum. Costing you the ball as well was one punishment too many.
+        loudSpeed: 4.5,
         staggerSec: 0.25,
-        dropsBall: true,
+        dropsBall: false,
       },
       block: {
         mode: 'speed',

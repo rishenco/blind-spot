@@ -411,20 +411,23 @@ MECHANIC_SCENARIOS.push(
   {
     name: 'mech-steal',
     suite: 'mechanic',
-    note: 'the steal: the carrier walks, a hunter runs him down and stays on him for half a second',
+    note: 'the steal: the carrier walks it up, a hunter runs him down and then stays on his shoulder for a full second',
     expect: 'one steal; the ball changes teams and the slap is heard',
     seed: 101,
-    ticks: 200,
+    ticks: 220,
     eyes: 0,
     build: () => {
       const config = riggedConfig('steal');
       const carrier = scripted([{ for: 6, walk: [1, 0], aim: [1, 0], label: 'walking it up' }], 'carrier');
       // He has to *stay* with the carrier, not run through him: the ball is taken by half a
       // second of company, and a hunter at a sprint is inside the radius for a third of that.
+      // He has to *stay* with the carrier, not run through him: the ball is taken by a full
+      // second of company at a metre, and a hunter at a sprint is inside that for a third of it.
+      // So: close at a run, then turn and walk at his shoulder.
       const hunter = scripted(
         [
-          { for: 1.35, run: [-1, 0], aim: [-1, 0], label: 'closing him down' },
-          { for: 6, stand: true, label: 'and staying on him' },
+          { for: 1.25, run: [-1, 0], aim: [-1, 0], label: 'closing him down' },
+          { for: 6, walk: [1, 0], label: 'and staying on his shoulder' },
         ],
         'hunter',
       );
@@ -495,8 +498,8 @@ MECHANIC_SCENARIOS.push(
   {
     name: 'mech-screen',
     suite: 'mechanic',
-    note: 'the screen: a silent body in the corridor is now a wall, and running into it costs the ball',
-    expect: 'one collision, one fumble; the runner is staggered and everybody heard the thud',
+    note: 'the screen: a silent body in the corridor is a wall, and running into it costs momentum and silence',
+    expect: 'one collision, the runner staggered and audible — and he keeps the ball, because contact that also spills it turns the pitch into a fumble machine',
     seed: 104,
     ticks: 200,
     eyes: 3,
@@ -508,7 +511,9 @@ MECHANIC_SCENARIOS.push(
     measure: (m) => ({
       collisions: m.stats.players.reduce((a, p) => a + p.collisions, 0) / 2,
       fumbles: m.stats.players.reduce((a, p) => a + p.fumbles, 0),
-      ballLoose: m.sim.state.ball.carrier === null ? 1 : 0,
+      stillHasIt: m.sim.state.ball.carrier === 0 ? 1 : 0,
+      // He was silent up to the moment of contact and is the loudest thing on the pitch after it.
+      thuds: m.log.filter((e) => e.kind === 'brake').length,
     }),
   },
   {

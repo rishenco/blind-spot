@@ -86,11 +86,14 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     name: 'fumble',
-    note: 'a mistimed grab: the ball bounces off a body and the mistake is heard 20 m away',
+    note: 'a mistimed grab: the ball bounces off a body and the mistake is heard 14 m away',
     stopOn: { kind: 'fumble', lead: -6 },
     make: () => {
       const config = configFromPreset('default');
-      return { config, seed: 3, controllers: pair('striker', 'ballchaser', config.teamSize), eyes: 3 };
+      // Seed changed from 3 with the contest rules: a body on the ball's line is no longer a
+      // guaranteed fumble, so the old seed now plays out without one at all and the scenario had
+      // nothing to show. This one fumbles early and in the open.
+      return { config, seed: 9, controllers: pair('striker', 'ballchaser', config.teamSize), eyes: 3 };
     },
   },
   {
@@ -281,7 +284,9 @@ const HAND_SCENARIOS: Scenario[] = [
     playerSlot: 2,
     hands: [
       { slot: 0, script: new ThrowHand(0.45, 'passer', RECEIVER, PASS_DELAY) },
-      { slot: 2, script: new CatchHand('early', 3.2, 'receiver', RECEIVER) },
+      // Six metres, not three: the reach lasts 0.22 s and a pass covers three metres in less
+      // than that, so what used to be "far too early" is now a comfortable catch.
+      { slot: 2, script: new CatchHand('early', 6.5, 'receiver', RECEIVER) },
     ],
     make: () => ({
       config: handsConfig(),
