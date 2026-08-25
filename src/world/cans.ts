@@ -137,13 +137,16 @@ export const CAN_LIFT_SPEED = 4.5;
 export const CAN_STACK_PITCH = 0.12;
 
 /**
- * One authored can in a stack: a pose, and how far the column leans by the time it reaches this
- * can.
+ * Where one authored can starts a run. A pose and nothing else — no velocity, no orientation, no
+ * lean field.
  *
- * The lean is authored rather than random because a seeded run has to be reproducible, and it
- * exists because a perfectly plumb column reads as a rendered primitive while a leaning one
- * reads as a thing somebody balanced badly. It is 2–4 cm of drift, well under `CAN_RADIUS`, so
- * the column is still a column.
+ * A can is a point to the physics (see the header), so a pose is the whole of its state, and a
+ * stack's lean is *baked into these coordinates* rather than carried beside them. That is the
+ * distinction worth keeping: a lean is a fact about a placement, decided once by whoever
+ * authored the stack, and a can that has been kicked across the room has no lean at all. A field
+ * for it would be a second place a can's position lives, which is the one thing a resting print
+ * cannot survive — the print is drawn at the pose, and a pose that disagreed with itself would
+ * put a cairn where no can lies. That is law 2 broken at the smallest scale the game has.
  */
 export interface CanPose {
   readonly x: number;

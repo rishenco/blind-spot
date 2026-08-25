@@ -27,6 +27,7 @@
 import * as THREE from 'three';
 import { StaticWorld, aabbFromBounds } from '../core/collision';
 import { MAT_CONCRETE, MAT_DUST, MAT_METAL, MAT_STONE } from '../paint/materials';
+import { CAN_REACH, CAN_STACK_PITCH, type CanPose } from './cans';
 
 // Room shell.
 const HALF_X = 15;
@@ -42,6 +43,26 @@ export const SPAWN_YAW_DEG = -90;
 const TEST_CRATE = { x: -9.0, z: -3.2 };
 /** West end of the side-chamber partition. Everything from here to the chokepoint is doorway. */
 const CHAMBER_DOOR_X = -1.0;
+/**
+ * The side-chamber partition's two faces. `z0` is the north lane's far wall — the pinch below is
+ * measured against it, so naming it keeps the two from drifting apart. Written out rather than
+ * derived as `z0 + thickness`, because 4.8 + 0.4 is 5.2000000000000005 and a collider that moves
+ * by a float epsilon moves the room's golden hashes with it.
+ */
+const CHAMBER_Z0 = 4.8;
+const CHAMBER_Z1 = 5.2;
+
+/**
+ * The far room's landmark, as an axis and a radius rather than as three call sites.
+ *
+ * Everything else in this room is placed against a wall, which is a line the level format will
+ * always have. The tank is the one thing placed against *nothing*, and it is what the far room's
+ * two lanes fork around — so it is the anchor the north lane's can stack is measured off, and
+ * naming it is what makes "the day the tank moves, the stack moves with it" true rather than
+ * hopeful. The numbers are the ones the tower was already built from; nothing about the collider
+ * changed when they got a name.
+ */
+const TANK = { x: 8.5, z: -2.0, radius: 3.2 } as const;
 
 /*
  * ---------------------------------------------------------------------------
@@ -109,6 +130,87 @@ const APRON_X = -3.8;
  * reach unoccluded, so they are built and never unlocked — the same edge artifact every
  * abutment in this room already has, and the cheapest of the three ways to split a slab.
  */
+
+/*
+ * ---------------------------------------------------------------------------
+ * The can stack: what the loud lane charges for being run blind
+ * ---------------------------------------------------------------------------
+ *
+ * Vision §8 wants props that are "authored sound-traps, never physics clutter: sparse,
+ * deliberate placements ... at chokepoints" — read-and-route puzzles rather than obstacles.
+ * This is the room's first one, and it is placed to sharpen the fork the apron already built
+ * rather than to open a second one. North was short and loud; with a column of cans in its
+ * pinch it is short, loud, and it bites if you run it blind (`world/cans.ts`, `CAN_LIFT_SPEED`:
+ * walk into the stack and you lift a can off it, sprint into it and you boot it across the
+ * floor). South is untouched — quiet still costs exactly what it cost before, which is distance.
+ *
+ * **A stack is data, not geometry.** Nothing below enters the `StaticWorld`, and that is a rule
+ * rather than an implementation note: a static box under a dynamic prop would go on painting
+ * lattice at a place the can has since rolled away from, which is law 2 lying, and the reveal
+ * has no cheap way to retract a surface it has already drawn. The placement is authored here
+ * because placements belong to the room; what happens to a can afterwards belongs to the sim.
+ *
+ * **Where.** The pinch is the 3.6 m between the tank's north shoulder (`TANK.z + TANK.radius`)
+ * and the side-chamber partition (`CHAMBER_Z0`), and the fast line through it is the
+ * tank-hugging one — the inside of the only corner the lane has. So the column stands exactly
+ * one `CAN_REACH` off the tank's north face, dead centre of the shoulder, and both halves of
+ * what that buys are structural rather than lucky:
+ *
+ *  - **The inside of the corner is closed.** The gap between column and tank is `CAN_REACH`,
+ *    and a body needs its own radius *plus* `CAN_REACH` to pass without touching a can. Nothing
+ *    with a radius above zero fits, so the trap cannot be dodged by cutting the corner tighter.
+ *  - **The racing line runs into it.** A body hugging the tank rides its own radius off the
+ *    face, which leaves it `CAN_REACH − radius` from the column: inside reach for any radius at
+ *    all. Measured on the shipped collider, the shortest north route passes it at 0.12 m.
+ *
+ * Neither statement names 0.35 m, which is the point — both survive the next change to the
+ * player's collider. What the player gets in exchange is 1.95 m of threadable lane on the
+ * partition side: a decision, not a needle.
+ *
+ * **What it costs, and what it does not.** Going round costs almost nothing in distance — 0.2 m
+ * on the test's grid, because the lane has to climb north for the steel bench anyway. The price
+ * is commitment: the wide line has to be taken *before* the cans can be seen. Walking in from
+ * the doorway the column is inside a walk-step's 4 m paint for the last 3.7 m of the approach,
+ * which is two footfalls whatever the stance, the stride being distance-based at 1.58 m. Two
+ * footfalls is the whole warning, and that is the trade §8 asks for: read it and route, or pay
+ * in the currency this lane is already priced in — a can is `MAT_METAL`, the ×1.5 voice, going
+ * off in the middle of the room beside the landmark everything else navigates by.
+ *
+ * **The column.** Six cans on `CAN_STACK_PITCH`, which is one can tall each, so the bar is
+ * 0.72 m and every can's centre sits in the middle of its own slot. Six is deliberately more
+ * than the rack holds (`CAN_RACK_CAP` is 4): a stack is a place you take *from*, at the price
+ * of standing next to it, and never a pile you pocket in passing.
+ *
+ * The lean is 3.5 cm of drift at the top, accumulating as the running total 1+2+3+4+5 — each
+ * can set down a little further off than the one below it, which is how a hand-stacked column
+ * actually fails, and why the bottom of this one is nearly plumb and the top is not. It runs
+ * *toward the tank*, for two reasons that are not aesthetic: that is the only direction that
+ * cannot eat into the side the player has to thread, so the clearance measured at the base is
+ * the clearance for the whole column; and it is lateral to the approach, so the tilt is at its
+ * most visible from the one direction anybody ever sees this thing from. Authored, never
+ * random — a seeded run has to be reproducible.
+ */
+/** Cans in the column. */
+const CAN_STACK_COUNT = 6;
+/** Metres of horizontal drift at the top can. Under `CAN_RADIUS`, so it is still a column. */
+const CAN_STACK_LEAN = 0.035;
+
+function stackedCans(): readonly CanPose[] {
+  // One CAN_REACH off the tank's north face, on the shoulder's own centre line.
+  const baseZ = TANK.z + TANK.radius + CAN_REACH;
+  const poses: CanPose[] = [];
+  for (let i = 0; i < CAN_STACK_COUNT; i++) {
+    // The floor's top is y = 0 here and a can owns a slot one pitch tall, so a can's centre sits
+    // half a pitch into its own slot. The drift is the running total 1+2+...+i of a mis-stack
+    // that grows by a constant each can, normalised so the top of the column is CAN_STACK_LEAN.
+    const drift = (CAN_STACK_LEAN * i * (i + 1)) / (CAN_STACK_COUNT * (CAN_STACK_COUNT - 1));
+    poses.push(Object.freeze({ x: TANK.x, y: (i + 0.5) * CAN_STACK_PITCH, z: baseZ - drift }));
+  }
+  return Object.freeze(poses);
+}
+
+/** The room's one authored stack, bottom can first. Data: no box of it is in the world. */
+export const CAN_STACK: readonly CanPose[] = stackedCans();
 
 /**
  * World boxes tooling counts known geometry inside (see `Game.debugProbe`).
@@ -356,16 +458,16 @@ export function buildRoom(world: StaticWorld): Room {
    * walk through the doorway and one ping hands you the whole of it. Vision §7 calls this a
    * side-vault, and this is the shape of one.
    */
-  b.bounds(CHAMBER_DOOR_X, 0, 4.8, HALF_X, ROOM_H, 5.2, mats.wall, MAT_CONCRETE, true);
+  b.bounds(CHAMBER_DOOR_X, 0, CHAMBER_Z0, HALF_X, ROOM_H, CHAMBER_Z1, mats.wall, MAT_CONCRETE, true);
   b.box(6.0, 0, 7.5, 1.6, 1.6, 1.6, mats.prop, MAT_METAL);
   b.box(9.6, 0, 8.3, 1.2, 1.0, 1.2, mats.prop, MAT_METAL);
 
   // --- far room: the landmark. A 6.4 m wide, 6 m tall tank with a collar and a neck —
   // vision §11 wants one large silhouette per floor, because a point cloud transmits mass
   // long before it transmits detail.
-  b.tower(8.5, -2.0, 3.2, 0, 6.0, 9, mats.tank, MAT_METAL);
-  b.tower(8.5, -2.0, 3.6, 5.5, 5.85, 9, mats.tank, MAT_METAL);
-  b.box(8.5, 6.0, -2.0, 2.6, 0.9, 2.6, mats.tank, MAT_METAL);
+  b.tower(TANK.x, TANK.z, TANK.radius, 0, 6.0, 9, mats.tank, MAT_METAL);
+  b.tower(TANK.x, TANK.z, 3.6, 5.5, 5.85, 9, mats.tank, MAT_METAL);
+  b.box(TANK.x, 6.0, TANK.z, 2.6, 0.9, 2.6, mats.tank, MAT_METAL);
 
   for (const [x, z] of [
     [0.5, 7.0],
