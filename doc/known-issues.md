@@ -31,24 +31,6 @@ test, which is also what `raycastWorld` is being built to serve.
 
 ---
 
-## Live bugs
-
-### `aabbFromFootprint` leaves `mat` and `shell` undefined
-
-`src/core/collision.ts` (~line 79). Its sibling `aabbFromBounds` defaults them to `0` and
-`false`; the footprint variant omits them entirely. Both readings are *correct* per the `Aabb`
-doc comment ("absent means concrete"), so nothing is broken today.
-
-It is recorded because it is a trap with a fuse. Half the world's boxes have `mat === 0` and
-half have `mat === undefined`, so `b.mat === 0` is a test that silently answers "no" for half
-the level. M2 gives materials their first real consumer — a can off metal and a can off
-concrete are different sounds — and that is exactly the shape of code someone will write.
-
-**Owner: M2.** Either default them in the factory or make `mat` non-optional and force every
-construction site to say what it is made of. The second is better.
-
----
-
 ## Not bugs — checked and cleared
 
 Recorded so the next person does not spend the afternoon I spent.

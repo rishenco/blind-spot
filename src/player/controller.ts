@@ -26,6 +26,7 @@ import {
   type MoveResult,
   type StaticWorld,
 } from '../core/collision';
+import { MAT_CONCRETE } from '../paint/materials';
 
 export interface MovementTunables {
   crouchSpeed: number;
@@ -284,6 +285,16 @@ export interface FootstepEvent {
   readonly speed: number;
   readonly tier: StepTier;
   readonly foot: 'left' | 'right';
+  /**
+   * What the foot was on — an index into `paint/materials`. §3.9 makes this a loudness: the
+   * same stride is 1.5x on steel and 0.6x on dust, in paint and in hearing alike.
+   *
+   * It comes from the box the collision pass resolved against (`MoveResult.groundBox`), never
+   * from a fresh probe. A downward raycast would be a second opinion about which surface the
+   * foot is on, and the tick it disagrees is the tick the game reports a sound the physics did
+   * not make.
+   */
+  readonly mat: number;
 }
 
 export interface LandEvent {
@@ -294,6 +305,8 @@ export interface LandEvent {
   /** Downward speed at touchdown, m/s. */
   readonly impactSpeed: number;
   readonly stance: Stance;
+  /** What was landed *on* — see `FootstepEvent.mat`. A 14 m/s landing on steel paints 21 m. */
+  readonly mat: number;
 }
 
 export type PlayerEvent = FootstepEvent | LandEvent;
@@ -495,6 +508,25 @@ export class PlayerController {
    * instance is whoever moved last, and this one is read after `moveBody` returns.
    */
   private readonly moveResult: MoveResult = createMoveResult();
+  /**
+   * What the feet are currently standing on (§3.9), carried on every footfall and landing.
+   *
+   * Held on the controller rather than read out of `moveResult` at the emit site, because the
+   * two are not always in step: `advanceMantle` finishes a climb by setting `grounded` itself
+   * without calling `moveBody` at all, so on that one tick the move result still describes the
+   * airborne body and its `groundBox` is null — and that tick can emit a footfall, because the
+   * exit speed of a vault is enough to advance the stride. So this is updated wherever the body
+   * genuinely arrives somewhere: from `groundBox` after every move, and from the ledge itself
+   * when a climb completes.
+   *
+   * It deliberately keeps its last value while airborne. A landing is emitted on the tick the
+   * feet touch down, by which point the new surface has already been written here — and if
+   * anything ever emits a contact sound in mid-air, the surface it left is a better answer than
+   * concrete-by-default.
+   */
+  private groundMat: number = MAT_CONCRETE;
+  /** The material of the ledge the current climb is heading for — see `groundMat`. */
+  private mantleMat: number = MAT_CONCRETE;
   private readonly probeScratch: Aabb[] = [];
   private readonly listeners = new Set<PlayerEventListener>();
 
@@ -554,6 +586,9 @@ export class PlayerController {
     this.crouched = false;
     this.sprinting = false;
     this.grounded = false;
+    // A respawned body has not touched anything yet, so the surface it *used* to be on is not an
+    // answer about where it is now. The first grounded tick overwrites this.
+    this.groundMat = MAT_CONCRETE;
     this.colliderHeight = this.movement.standHeight;
     this.eyeHeight = this.movement.eyeStand;
     this.prevEyeHeight = this.eyeHeight;
@@ -744,6 +779,9 @@ export class PlayerController {
     );
 
     this.grounded = res.grounded;
+    // Before the landing is emitted, so a touchdown reports the surface it struck rather than
+    // the one it jumped from.
+    if (res.groundBox !== null) this.groundMat = res.groundBox.mat;
     if (res.landingSpeed > 0) {
       this.lastLandingSpeed = res.landingSpeed;
       this.onLanded(res.landingSpeed);
@@ -761,6 +799,7 @@ export class PlayerController {
       z: this.position.z,
       impactSpeed,
       stance: this.crouched ? 'crouch' : 'stand',
+      mat: this.groundMat,
     });
     const over = (impactSpeed - LAND_DIP_MIN_SPEED) / (LAND_DIP_FULL_SPEED - LAND_DIP_MIN_SPEED);
     if (over <= 0) return;
@@ -950,12 +989,15 @@ export class PlayerController {
     const standHeight = this.crouched ? m.crouchHeight : m.standHeight;
     let landX = 0;
     let landZ = 0;
+    let landMat = MAT_CONCRETE;
     let endCrouched = false;
     let found = false;
     for (let t = hitT; t <= scanFar + 1e-6; t += MANTLE_PROBE_STEP) {
       const px = this.position.x + dirX * t;
       const pz = this.position.z + dirZ * t;
-      if (!this.isOnLedge(candidates, px, pz, ledgeY)) continue;
+      const ledge = this.ledgeUnder(candidates, px, pz, ledgeY);
+      if (ledge === null) continue;
+      landMat = ledge.mat;
       if (canOccupy(candidates, px, ledgeY, pz, radius, standHeight)) {
         landX = px;
         landZ = pz;
@@ -992,6 +1034,7 @@ export class PlayerController {
     this.mantleDuration = this.mantleIsVault ? mt.vaultTime : mt.pullupTime;
     this.mantleFrom.copy(this.position);
     this.mantleTo.set(landX, ledgeY, landZ);
+    this.mantleMat = landMat;
     this.mantleDirX = dirX;
     this.mantleDirZ = dirZ;
     // A vault never costs momentum (sprint chains over crates); a pull-up is a committal
@@ -1009,15 +1052,25 @@ export class PlayerController {
     return true;
   }
 
-  /** True when (x, z) sits properly *on* a surface whose top is the ledge, not just near it. */
-  private isOnLedge(candidates: readonly Aabb[], x: number, z: number, ledgeY: number): boolean {
+  /**
+   * The surface (x, z) sits properly *on* — top at the ledge height, not merely near it — or
+   * `null`. Answers with the box rather than with `true` because the climb has to record what
+   * the ledge is made of: it is the surface the feet will be on when the climb ends, and
+   * `moveBody` never runs on that tick to say so (see `groundMat`).
+   */
+  private ledgeUnder(
+    candidates: readonly Aabb[],
+    x: number,
+    z: number,
+    ledgeY: number,
+  ): Aabb | null {
     for (const b of candidates) {
       if (Math.abs(b.maxY - ledgeY) > 1e-3) continue;
       if (x < b.minX + MANTLE_LANDING_MARGIN || x > b.maxX - MANTLE_LANDING_MARGIN) continue;
       if (z < b.minZ + MANTLE_LANDING_MARGIN || z > b.maxZ - MANTLE_LANDING_MARGIN) continue;
-      return true;
+      return b;
     }
-    return false;
+    return null;
   }
 
   /** Scripted climb motion: input-locked, gravity-free, but the head stays free to look. */
@@ -1044,6 +1097,10 @@ export class PlayerController {
     this.position.copy(this.mantleTo);
     this.velocity.set(this.mantleDirX * this.mantleExitSpeed, 0, this.mantleDirZ * this.mantleExitSpeed);
     this.grounded = true;
+    // The climb, not `moveBody`, is what put the feet up here, so it is also what says what they
+    // are on. Without this the first footfall off a vault carries whatever was under the body
+    // before the climb — the floor, when you are now standing on a steel crate.
+    this.groundMat = this.mantleMat;
     this.coyoteTimer = this.movement.coyoteTime;
     this.bufferTimer = 0;
     this.mantleProbeTimer = MANTLE_PROBE_INTERVAL;
@@ -1205,6 +1262,7 @@ export class PlayerController {
       speed,
       tier,
       foot: (((halfCycle % 2) + 2) % 2) === 0 ? 'left' : 'right',
+      mat: this.groundMat,
     });
   }
 

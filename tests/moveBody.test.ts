@@ -15,8 +15,10 @@ import {
   aabbFromBounds,
   createMoveResult,
   moveBody,
+  type Aabb,
   type MoveResult,
 } from '../src/core/collision';
+import { MAT_CONCRETE, MAT_METAL, MAT_STONE } from '../src/paint/materials';
 import { defaultMovementTunables } from '../src/player/controller';
 
 /**
@@ -35,7 +37,7 @@ const DT = 1 / 120;
 /** A 40 x 40 slab whose top is y = 0. */
 function flatWorld(): StaticWorld {
   const w = new StaticWorld();
-  w.add(aabbFromBounds(-20, -1, -20, 20, 0, 20));
+  w.add(aabbFromBounds(-20, -1, -20, 20, 0, 20, MAT_CONCRETE));
   return w;
 }
 
@@ -47,7 +49,7 @@ function snapshot(r: MoveResult): MoveResult {
 describe('walking into a wall', () => {
   function wallWorld(): StaticWorld {
     const w = flatWorld();
-    w.add(aabbFromBounds(2, 0, -20, 3, 3, 20));
+    w.add(aabbFromBounds(2, 0, -20, 3, 3, 20, MAT_CONCRETE));
     return w;
   }
 
@@ -105,7 +107,7 @@ describe('step-up', () => {
   /** A riser of height `h` occupying everything from x = 2 outward. */
   function riserWorld(h: number): StaticWorld {
     const w = flatWorld();
-    w.add(aabbFromBounds(2, 0, -20, 20, h, 20));
+    w.add(aabbFromBounds(2, 0, -20, 20, h, 20, MAT_CONCRETE));
     return w;
   }
 
@@ -174,8 +176,8 @@ describe('ground snap', () => {
   /** Upper floor (top y = 0) for x <= 0; a lower ledge beyond it. */
   function lipWorld(dropTop: number): StaticWorld {
     const w = new StaticWorld();
-    w.add(aabbFromBounds(-20, -1, -20, 0, 0, 20));
-    w.add(aabbFromBounds(0, -2, -20, 20, dropTop, 20));
+    w.add(aabbFromBounds(-20, -1, -20, 0, 0, 20, MAT_CONCRETE));
+    w.add(aabbFromBounds(0, -2, -20, 20, dropTop, 20, MAT_CONCRETE));
     return w;
   }
 
@@ -217,11 +219,11 @@ describe('walking down a flight of stairs', () => {
    */
   function stairsWorld(): StaticWorld {
     const w = new StaticWorld();
-    w.add(aabbFromBounds(-20, -30, -20, 0, 0, 20));
+    w.add(aabbFromBounds(-20, -30, -20, 0, 0, 20, MAT_CONCRETE));
     for (let k = 0; k < 12; k++) {
-      w.add(aabbFromBounds(k * 0.5, -30, -20, (k + 1) * 0.5, -0.25 * (k + 1), 20));
+      w.add(aabbFromBounds(k * 0.5, -30, -20, (k + 1) * 0.5, -0.25 * (k + 1), 20, MAT_CONCRETE));
     }
-    w.add(aabbFromBounds(6, -30, -20, 20, -3, 20));
+    w.add(aabbFromBounds(6, -30, -20, 20, -3, 20, MAT_CONCRETE));
     return w;
   }
 
@@ -259,8 +261,8 @@ describe('walking down a flight of stairs', () => {
     // landings stopped being reported. Same walk, but the far side is a 4 m drop instead of a
     // flight of treads — far beyond the snap tolerance, so the body genuinely goes airborne.
     const w = new StaticWorld();
-    w.add(aabbFromBounds(-20, -30, -20, 0, 0, 20));
-    w.add(aabbFromBounds(0, -30, -20, 20, -4, 20));
+    w.add(aabbFromBounds(-20, -30, -20, 0, 0, 20, MAT_CONCRETE));
+    w.add(aabbFromBounds(0, -30, -20, 20, -4, 20, MAT_CONCRETE));
     const p = new THREE.Vector3(-1, 0, 0);
     const v = new THREE.Vector3(3.5, 0, 0);
     let grounded = true;
@@ -332,7 +334,7 @@ describe('vertical resolution', () => {
 
   it('clamps the head to a ceiling and zeroes the rise', () => {
     const w = flatWorld();
-    w.add(aabbFromBounds(-20, 2, -20, 20, 3, 20));
+    w.add(aabbFromBounds(-20, 2, -20, 20, 3, 20, MAT_CONCRETE));
     const p = new THREE.Vector3(0, 0.28, 0);
     const v = new THREE.Vector3(0, 5.4, 0);
     const r = moveBody(w, p, v, DT, SHAPE, false);
@@ -357,8 +359,8 @@ describe('an inner corner (two boxes pushing at once)', () => {
   /** Two walls meeting at a right angle around (2, 2). */
   function cornerWorld(order: 'xFirst' | 'zFirst'): StaticWorld {
     const w = flatWorld();
-    const alongX = aabbFromBounds(2, 0, -20, 3, 2, 2);
-    const alongZ = aabbFromBounds(-20, 0, 2, 2, 2, 3);
+    const alongX = aabbFromBounds(2, 0, -20, 3, 2, 2, MAT_CONCRETE);
+    const alongZ = aabbFromBounds(-20, 0, 2, 2, 2, 3, MAT_CONCRETE);
     if (order === 'xFirst') {
       w.add(alongX);
       w.add(alongZ);
@@ -430,8 +432,10 @@ describe('the MoveResult out-parameter', () => {
     // another inside a single fixed update, each keeping its own flags. Two lanes of one world so
     // the bodies genuinely produce different answers rather than coincidentally matching ones.
     const w = flatWorld();
-    w.add(aabbFromBounds(2, 0, -20, 3, 3, 0)); // lane A (z <= 0): a full-height wall
-    w.add(aabbFromBounds(2, 0, 5, 20, 0.25, 20)); // lane B (z >= 5): a 0.25 m riser
+    const floor = w.boxes[0]!;
+    w.add(aabbFromBounds(2, 0, -20, 3, 3, 0, MAT_CONCRETE)); // lane A (z <= 0): a full-height wall
+    // lane B (z >= 5): a 0.25 m riser
+    const riser = w.add(aabbFromBounds(2, 0, 5, 20, 0.25, 20, MAT_CONCRETE));
 
     const outA = createMoveResult();
     const outB = createMoveResult();
@@ -459,6 +463,8 @@ describe('the MoveResult out-parameter', () => {
       hitWall: true,
       stepUp: 0,
       landingSpeed: 9,
+      // The slab it fell onto — not the wall it is pressed against.
+      groundBox: floor,
     });
     expect(snapshot(outB)).toEqual({
       grounded: true,
@@ -466,6 +472,8 @@ describe('the MoveResult out-parameter', () => {
       hitWall: false,
       stepUp: 0.25,
       landingSpeed: 0,
+      // The step-up branch: grounded on the tread it climbed, not on the floor it left.
+      groundBox: riser,
     });
 
     // Second interleaved round: A now rests against the wall, B walks on along the riser top.
@@ -477,6 +485,7 @@ describe('the MoveResult out-parameter', () => {
       hitWall: false, // `hitWall` is an edge, not a state — see the wall test above
       stepUp: 0,
       landingSpeed: 0,
+      groundBox: floor,
     });
     expect(snapshot(outB)).toEqual({
       grounded: true,
@@ -484,6 +493,8 @@ describe('the MoveResult out-parameter', () => {
       hitWall: false,
       stepUp: 0, // the climb already happened
       landingSpeed: 0,
+      // Still the riser, found by the ground snap this time rather than by the step-up.
+      groundBox: riser,
     });
   });
 
@@ -517,6 +528,7 @@ describe('the MoveResult out-parameter', () => {
       hitWall: false,
       stepUp: 0,
       landingSpeed: 0,
+      groundBox: null,
     });
   });
 });
@@ -532,6 +544,119 @@ describe('an empty world', () => {
     expect(p.z).toBe(3 + 6 * DT);
     expect(r).toEqual({
       grounded: false, hitCeiling: false, hitWall: false, stepUp: 0, landingSpeed: 0,
+      groundBox: null,
     });
+  });
+});
+
+describe('groundBox — which surface the feet are on (§3.9)', () => {
+  /**
+   * Added with material voices: how loud a footfall is now depends on what it struck, so the
+   * emitter has to know which box that was. The answer has to come from the collision pass
+   * itself — a downward raycast asking the same question a second time is a second opinion, and
+   * the tick the two disagree is a tick the game reports a sound the physics did not make.
+   */
+  it('is the very box the body landed on, not a copy of it', () => {
+    const w = new StaticWorld();
+    const slab = w.add(aabbFromBounds(-20, -1, -20, 20, 0, 20, MAT_METAL));
+    const p = new THREE.Vector3(0, 0.05, 0);
+    const v = new THREE.Vector3(0, -9, 0);
+    const r = moveBody(w, p, v, DT, SHAPE, false);
+    expect(r.grounded).toBe(true);
+    // Identity, not equality: the point of carrying the box is that `mat` is the world's own.
+    expect(r.groundBox).toBe(slab);
+    expect(r.groundBox!.mat).toBe(MAT_METAL);
+  });
+
+  it('is null while airborne, even in a result that was grounded a tick ago', () => {
+    // The staleness case, and the reason `groundBox` is cleared at the top of the call with the
+    // rest of the flags. A result that keeps last tick's floor reports a surface under a body
+    // that is nowhere near it.
+    const w = flatWorld();
+    const out = createMoveResult();
+    const p = new THREE.Vector3(0, 0.05, 0);
+    const v = new THREE.Vector3(0, -9, 0);
+    moveBody(w, p, v, DT, SHAPE, false, out);
+    expect(out.groundBox).not.toBeNull();
+
+    const pAir = new THREE.Vector3(0, 50, 0);
+    const vAir = new THREE.Vector3(0, -1, 0);
+    moveBody(w, pAir, vAir, DT, SHAPE, false, out);
+    expect(out.grounded).toBe(false);
+    expect(out.groundBox).toBeNull();
+  });
+
+  it('follows the body from one surface to the next, and reports each one', () => {
+    // Two slabs of different materials side by side. The body walks off the first and onto the
+    // second, and the answer changes on the tick the feet do — which is the whole mechanism
+    // behind "a change of timbre mid-stride is a change of surface" (§3.9).
+    const w = new StaticWorld();
+    const west = w.add(aabbFromBounds(-20, -1, -20, 0, 0, 20, MAT_CONCRETE));
+    const east = w.add(aabbFromBounds(0, -1, -20, 20, 0, 20, MAT_METAL));
+    const p = new THREE.Vector3(-1, 0, 0);
+    const v = new THREE.Vector3(4, 0, 0);
+    const seen: (number | null)[] = [];
+    for (let tick = 0; tick < 120; tick++) {
+      v.y -= 9.81 * DT;
+      const r = moveBody(w, p, v, DT, SHAPE, true);
+      seen.push(r.groundBox === null ? null : r.groundBox.mat);
+    }
+    expect(seen[0]).toBe(MAT_CONCRETE);
+    expect(seen[seen.length - 1]).toBe(MAT_METAL);
+    expect(west.mat).not.toBe(east.mat);
+    expect(seen).not.toContain(null); // never left the ground: both slabs are one flat plane
+  });
+
+  it('the step-up branch reports the tread it climbed, not the floor it left', () => {
+    // `landingSpeed` deliberately stays 0 here (a flight of stairs is one continuous stance),
+    // but the surface still changed, and the two answer different questions.
+    const w = new StaticWorld();
+    w.add(aabbFromBounds(-20, -1, -20, 20, 0, 20, MAT_CONCRETE));
+    const tread = w.add(aabbFromBounds(2, 0, -20, 20, 0.25, 20, MAT_STONE));
+    const p = new THREE.Vector3(1.63, 0, 0);
+    const v = new THREE.Vector3(3.5, 0, 0);
+    const r = moveBody(w, p, v, DT, SHAPE, true);
+    expect(r.stepUp).toBeGreaterThan(0);
+    expect(r.landingSpeed).toBe(0);
+    expect(r.groundBox).toBe(tread);
+  });
+
+  it('the ground-snap branch reports the step it settled onto', () => {
+    // Walking off a lip: the body is reattached by the snap rather than by the vertical pass,
+    // and that branch has to answer too or a footfall on the lower step goes silent-by-default.
+    const w = new StaticWorld();
+    const upper = w.add(aabbFromBounds(-20, -1, -20, 0, 0, 20, MAT_CONCRETE));
+    const lower = w.add(aabbFromBounds(0, -1, -20, 20, -0.25, 20, MAT_STONE));
+    const p = new THREE.Vector3(-0.1, 0, 0);
+    const v = new THREE.Vector3(3.5, 0, 0);
+    let last: Aabb | null = null;
+    for (let tick = 0; tick < 30; tick++) {
+      const r = moveBody(w, p, v, DT, SHAPE, true);
+      if (r.groundBox !== null) last = r.groundBox;
+    }
+    expect(upper.mat).not.toBe(lower.mat);
+    expect(last).toBe(lower);
+    expect(p.y).toBeCloseTo(-0.25, 6);
+  });
+
+  it('is non-null exactly when grounded, across every branch', () => {
+    // The invariant the emitters lean on: `grounded` without a surface would be a footfall with
+    // no material, and a surface without `grounded` would be a footfall in mid-air.
+    const w = flatWorld();
+    w.add(aabbFromBounds(2, 0, -20, 20, 0.25, 20, MAT_STONE));
+    const p = new THREE.Vector3(0, 4, 0);
+    const v = new THREE.Vector3(3.5, 0, 0);
+    let grounded = false;
+    let sawBoth = 0;
+    for (let tick = 0; tick < 240; tick++) {
+      v.y -= 9.81 * DT;
+      const r = moveBody(w, p, v, DT, SHAPE, grounded);
+      expect(r.grounded, `tick ${tick}`).toBe(r.groundBox !== null);
+      if (r.grounded !== grounded) sawBoth++;
+      grounded = r.grounded;
+    }
+    // The run really did pass through both states, so the invariant was tested and not assumed.
+    expect(sawBoth).toBeGreaterThan(0);
+    expect(grounded).toBe(true);
   });
 });

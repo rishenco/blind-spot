@@ -15,6 +15,9 @@
  *                     column). `SoundBus.canHear` is the one place it is read, and every ear in
  *                     the game reads it through that.
  *
+ * Both of them leave `emit` multiplied by the voice of whatever was struck (§3.9), which is why
+ * that multiplication lives in `emit` and not in any emitter.
+ *
  * It also carries who made it — `source` and `emitter` — and that pair is deliberately *not* a
  * viewer's reading of it. See `SoundSource` and `eventTint`.
  *
@@ -33,6 +36,8 @@
  * counts (`emittedThisTick`, `maxEmittedPerTick`), so that an emitter firing per tick instead of
  * per contact shows up as a number rather than as a mystery.
  */
+
+import { MAT_CONCRETE, materialLoudness } from './materials';
 
 /**
  * Sound classes implemented so far. `slide`, `prop-knock`, dog gaits, `detonation` and the
@@ -174,6 +179,36 @@ export const SOUND_CLASSES: Readonly<Record<SoundClass, Readonly<SoundClassProfi
   });
 
 /**
+ * Which classes are made by something striking a surface — §3.9's "all contact-made classes".
+ *
+ * This is the structural statement that **a ping is not a contact sound**. A footfall, a
+ * landing, a thrown can's impact and (at M4) a spider's foot all happen *because* a body met a
+ * surface, so the surface has a say in how loud they are. A ping is a rig emitting into the air
+ * from wherever the rig happens to be: nothing is struck, no material is involved, and scaling
+ * it by whatever the player is standing on would mean a Q-ping fired from a steel walkway
+ * reaches 18 m while the same Q-ping fired one step later on concrete reaches 12 — a deliberate
+ * act whose price moves under the player's feet for no reason they can see or predict.
+ *
+ * A `Record<SoundClass, boolean>` rather than a set of names, because the compiler then refuses
+ * a new class that has not answered the question. `emit` reads it, and reads it from *here*
+ * rather than from a bus's tunables copy, for the same reason `landingRadius` reads the frozen
+ * table: whether a sound strikes something is a fact about the class, not a knob.
+ */
+export const CONTACT_CLASSES: Readonly<Record<SoundClass, boolean>> = Object.freeze({
+  'crouch-step': true,
+  'walk-step': true,
+  'sprint-step': true,
+  landing: true,
+  'q-ping': false,
+  'e-ping': false,
+});
+
+/** True when this class is made by a body meeting a surface, and therefore has a material. */
+export function isContactClass(cls: SoundClass): boolean {
+  return CONTACT_CLASSES[cls];
+}
+
+/**
  * One simulation's own copy of the two tables above.
  *
  * The dev panel writes *here*, which is what makes two `GameSim`s in one process independent and
@@ -250,6 +285,15 @@ export interface SoundEmitSpec {
    */
   source?: SoundSource;
   emitter?: number;
+  /**
+   * What was struck, for a contact class — an index into `paint/materials`. Omitted means
+   * concrete, the ordinary surface.
+   *
+   * Naming one on a class that strikes nothing (either ping) throws, rather than being ignored:
+   * an emitter that thinks a ping has a material has misunderstood what it is emitting, and a
+   * silently discarded field is how that misunderstanding survives to the next reader.
+   */
+  mat?: number;
   /** Overrides the class profile (landings, and chip-modified pings later). */
   paintRadius?: number;
   hearingRadius?: number;
@@ -370,6 +414,37 @@ export class SoundBus {
       );
     }
     const profile = this.tunables.classes[spec.class];
+    /*
+     * §3.9 — the material's voice, applied here and nowhere else.
+     *
+     * "The multiplier scales every radius the event carries, not just the class default." That
+     * sentence is why this is a factor on the *resolved* radii rather than a different number in
+     * the class table: a landing has already computed its own 8-14 m from impact speed and a
+     * chip-modified ping will arrive with its own override, and both of those still have to be
+     * scaled by what they struck. Keeping the law at the single choke point every noise passes
+     * through is what stops each new emitter — M2's throwables, M4's spider — from having to
+     * remember it. The consequence is real and intended: a hard landing on steel is
+     * 14 x 1.5 = 21 m of paint, louder than a Q-ping, so a steel floor is a genuinely dangerous
+     * thing to drop onto.
+     *
+     * Both radii, by the same factor. They are two readings of one sound (how far it paints,
+     * how far it is heard), and a material that made a footfall paint further without making it
+     * carry further would be a surface that is loud to the player and quiet to the spider —
+     * law 2, and the exact asymmetry `canHear` exists to prevent.
+     */
+    if (spec.mat !== undefined && !isContactClass(spec.class)) {
+      throw new Error(
+        `SoundBus.emit('${spec.class}') was given mat=${spec.mat}, but '${spec.class}' strikes ` +
+          'nothing. Only contact classes have a material — see CONTACT_CLASSES.',
+      );
+    }
+    /*
+     * One enforcement point, not two. Past the refusal above, a non-contact class provably
+     * carries no material, so this resolves to concrete's 1.0 for every ping on its own — and a
+     * second `isContactClass` here would be a branch no test could ever reach, which is how an
+     * untested "safety" check ends up being the one that is wrong.
+     */
+    const loudness = materialLoudness(spec.mat ?? MAT_CONCRETE);
     let dx = spec.dirX ?? 0;
     let dy = spec.dirY ?? 0;
     let dz = spec.dirZ ?? 0;
@@ -391,8 +466,8 @@ export class SoundBus {
       x: spec.x,
       y: spec.y,
       z: spec.z,
-      paintRadius: spec.paintRadius ?? profile.paintRadius,
-      hearingRadius: spec.hearingRadius ?? profile.hearingRadius,
+      paintRadius: (spec.paintRadius ?? profile.paintRadius) * loudness,
+      hearingRadius: (spec.hearingRadius ?? profile.hearingRadius) * loudness,
       intensity: spec.intensity ?? profile.intensity,
       // A cone with no aim is a contradiction; fall back to omni rather than paint a slit.
       dirX: dx,

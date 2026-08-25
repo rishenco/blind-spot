@@ -206,7 +206,12 @@ as everything else. And it cuts both ways: the spider's footfalls carry the mate
 strike, so its voice tells you what it is walking on and therefore *where it is* — a change of
 timbre mid-stride is a change of surface (core-loop §3.2).
 
-Status: the tags exist on the colliders; nothing reads them yet. Making them audible is M1.
+Status: the multipliers are live. `SoundBus.emit` scales both radii of every contact-class
+event by the struck surface's voice, and the surface comes from the box the collision pass
+resolved against (`MoveResult.groundBox`), so what the world hears is what the body actually
+touched. Pings are not contact sounds and are not scaled — naming a material on one throws.
+What remains of M1 is making the difference *audible* rather than only visible: the synthesized
+voices themselves, and the attack-window loudness normalization described above.
 
 ## 4. Energy: the reactor
 

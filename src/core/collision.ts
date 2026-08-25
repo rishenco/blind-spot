@@ -43,6 +43,7 @@
  */
 
 import type * as THREE from 'three';
+import { MAT_CONCRETE } from '../paint/materials';
 
 export interface Aabb {
   readonly minX: number;
@@ -53,22 +54,39 @@ export interface Aabb {
   readonly maxZ: number;
   /**
    * What this box is made of — an index into `paint/materials`. Collision does not care; the
-   * rest of the game does, because a return off metal and a return off concrete are not the
-   * same sound. Absent means concrete (0), which is what most of a facility is.
+   * rest of the game does, because §3.9 gives every material a voice: a footfall on steel
+   * carries half again as far as the same footfall on concrete, in paint and in hearing alike.
+   *
+   * **Required, and it used to be optional.** `aabbFromBounds` defaulted it to `0` while
+   * `aabbFromFootprint` left it `undefined`, so half the world's boxes answered `b.mat === 0`
+   * with "yes" and half with "no" while both meant concrete. That is a trap with a fuse, and
+   * this commit is the fuse: `mat` is now read on every footfall, and a box that is silently
+   * `undefined` would be silently 1.0× — a real surface with no voice, which law 2 forbids.
+   * Every construction site says what it is made of.
    */
-  readonly mat?: number;
+  readonly mat: number;
   /**
    * True when this box *is the room* — a floor, a ceiling, an outer wall, a partition — rather
    * than a thing standing in it. Collision does not care; the reveal does, because hearing one
    * face of a crate tells you a crate is there (so all of it surfaces) while hearing one patch
    * of a wall tells you nothing whatsoever about the room on its far side.
+   *
+   * Required for the same reason as `mat`, though it is the milder half: `undefined` and
+   * `false` mean the same thing here, so the cost was a reader that had to write `b.shell ===
+   * true` and remember why.
    */
-  readonly shell?: boolean;
+  readonly shell: boolean;
 }
 
 /** Numerical slack, in metres, used for "were we above this surface" style tests. */
 const EPS = 1e-3;
 
+/**
+ * `mat` has no default on either factory, deliberately. A box is made of something, and a
+ * factory that guesses concrete for you is how half the level ended up unable to say. `shell`
+ * keeps its default because "a thing standing in the room" is the overwhelmingly common case
+ * and `false` is not a claim about physics.
+ */
 export function aabbFromBounds(
   minX: number,
   minY: number,
@@ -76,7 +94,7 @@ export function aabbFromBounds(
   maxX: number,
   maxY: number,
   maxZ: number,
-  mat = 0,
+  mat: number,
   shell = false,
 ): Aabb {
   return { minX, minY, minZ, maxX, maxY, maxZ, mat, shell };
@@ -90,6 +108,8 @@ export function aabbFromFootprint(
   sizeX: number,
   sizeY: number,
   sizeZ: number,
+  mat: number,
+  shell = false,
 ): Aabb {
   return {
     minX: centerX - sizeX / 2,
@@ -98,6 +118,8 @@ export function aabbFromFootprint(
     maxX: centerX + sizeX / 2,
     maxY: baseY + sizeY,
     maxZ: centerZ + sizeZ / 2,
+    mat,
+    shell,
   };
 }
 
@@ -227,13 +249,32 @@ export function highestTopUnder(
   floorY: number,
   ceilY: number,
 ): number {
-  let best = -Infinity;
+  const best = highestBoxUnder(candidates, x, z, radius, floorY, ceilY);
+  return best === null ? -Infinity : best.maxY;
+}
+
+/**
+ * The same search, answering with the box rather than with its height — `null` for nothing.
+ *
+ * Two names over one loop rather than two loops: the step-up pass needs the box (§3.9 wants to
+ * know what the tread is made of) and every other caller only ever wanted the number, and a
+ * second copy of the filter is a second place for the `EPS` conventions to drift.
+ */
+export function highestBoxUnder(
+  candidates: readonly Aabb[],
+  x: number,
+  z: number,
+  radius: number,
+  floorY: number,
+  ceilY: number,
+): Aabb | null {
+  let best: Aabb | null = null;
   for (const b of candidates) {
     if (b.maxY > ceilY + EPS) continue;
     if (b.maxY < floorY - EPS) continue;
-    if (b.maxY <= best) continue;
+    if (best !== null && b.maxY <= best.maxY) continue;
     if (!circleOverlapsFootprint(x, z, radius, b)) continue;
-    best = b.maxY;
+    best = b;
   }
   return best;
 }
@@ -343,6 +384,21 @@ export interface MoveResult {
    * down a stair flight or up a kerb is one continuous stance, not a landing per tread.
    */
   landingSpeed: number;
+  /**
+   * The box the feet ended the tick resting on, or `null` when the body is airborne.
+   *
+   * Non-null **exactly** when `grounded` is true — every branch that sets one sets the other,
+   * and both are cleared at the top of the call. That pairing is the point: §3.9 makes a
+   * footfall's loudness a property of the surface it struck, so the emitter needs to know which
+   * surface that was, and the only answer that cannot disagree with the physics is the box the
+   * collision pass actually resolved against. Asking again with a downward raycast would be a
+   * second opinion, and a second opinion is how a footfall ends up carrying the voice of a
+   * surface the foot did not touch — law 2, in the one place the game promises it hardest.
+   *
+   * The box itself, not a copy: it belongs to the `StaticWorld` and is valid until the world is
+   * rebuilt. Read `mat` from it in the same tick; do not store it.
+   */
+  groundBox: Aabb | null;
 }
 
 const candidateScratch: Aabb[] = [];
@@ -356,6 +412,7 @@ export function createMoveResult(): MoveResult {
     hitWall: false,
     stepUp: 0,
     landingSpeed: 0,
+    groundBox: null,
   };
 }
 
@@ -387,6 +444,8 @@ export function moveBody(
   result.hitWall = false;
   result.stepUp = 0;
   result.landingSpeed = 0;
+  // Cleared with the rest of them, so a tick that ends airborne cannot report last tick's floor.
+  result.groundBox = null;
 
   // One broadphase query covering the whole tick's swept region (plus step/snap slack).
   const endX = position.x + velocity.x * dt;
@@ -407,22 +466,23 @@ export function moveBody(
   position.y += velocity.y * dt;
 
   if (velocity.y <= 0) {
-    let bestTop = -Infinity;
+    let best: Aabb | null = null;
     for (const b of candidates) {
       if (b.maxY > prevY + EPS) continue; // we were not above it
       if (b.maxY <= position.y) continue; // we did not reach it
       if (b.minY >= position.y + height) continue;
       if (!circleOverlapsFootprint(position.x, position.z, radius, b)) continue;
-      if (b.maxY > bestTop) bestTop = b.maxY;
+      if (best === null || b.maxY > best.maxY) best = b;
     }
-    if (bestTop > -Infinity) {
-      position.y = bestTop;
+    if (best !== null) {
+      position.y = best.maxY;
       // Only the airborne→grounded edge is a landing. A body at rest re-enters this branch
       // every tick (gravity pushes it through the floor plane, the snap pulls it back), so
       // without the edge test `landingSpeed` reports `g·dt` forever. See `MoveResult`.
       if (!wasGrounded) result.landingSpeed = -velocity.y;
       velocity.y = 0;
       result.grounded = true;
+      result.groundBox = best;
     }
   } else {
     const prevHead = prevY + height;
@@ -495,16 +555,22 @@ export function moveBody(
         // Drop back down. Everything still overlapping the body up there tops out at or below
         // `liftY` (the lifted slide guaranteed it), so landing on the highest of them is by
         // construction a legal pose — no second clearance test needed.
-        const top = highestTopUnder(candidates, s.x, s.z, radius, feetY, liftY);
+        const under = highestBoxUnder(candidates, s.x, s.z, radius, feetY, liftY);
         position.x = s.x;
         position.z = s.z;
         velocity.x = s.vx;
         velocity.z = s.vz;
         result.hitWall = s.hitWall;
-        if (top > -Infinity) {
+        if (under !== null) {
+          const top = under.maxY;
           if (top > feetY) result.stepUp += top - feetY;
           position.y = top;
           result.grounded = true;
+          // A step-up is not a landing (`landingSpeed` stays 0 — walking up a flight is one
+          // continuous stance) but it *is* a change of surface, and the stair tread the foot
+          // arrives on is stone where the floor it left was concrete. So the surface is
+          // reported even though the landing is not: the two answer different questions.
+          result.groundBox = under;
           if (velocity.y < 0) velocity.y = 0;
         } else {
           // Stepped over something with nothing behind it (a rail at a platform edge):
@@ -528,17 +594,18 @@ export function moveBody(
   // Walking off a step or down a ramp: reattach to ground within the step tolerance
   // instead of going briefly airborne (which would break coyote/friction feel).
   if (!result.grounded && wasGrounded && velocity.y <= 0) {
-    let bestTop = -Infinity;
+    let best: Aabb | null = null;
     for (const b of candidates) {
       if (b.maxY > position.y + EPS) continue;
       if (b.maxY < position.y - stepHeight) continue;
       if (!circleOverlapsFootprint(position.x, position.z, radius, b)) continue;
-      if (b.maxY > bestTop) bestTop = b.maxY;
+      if (best === null || b.maxY > best.maxY) best = b;
     }
-    if (bestTop > -Infinity) {
-      position.y = bestTop;
+    if (best !== null) {
+      position.y = best.maxY;
       velocity.y = 0;
       result.grounded = true;
+      result.groundBox = best;
     }
   }
 
@@ -698,7 +765,7 @@ export interface RayHit {
 }
 
 /** The placeholder a hit carries before it has been filled in. In no world. */
-const ZERO_BOX: Aabb = aabbFromBounds(0, 0, 0, 0, 0, 0);
+const ZERO_BOX: Aabb = aabbFromBounds(0, 0, 0, 0, 0, 0, MAT_CONCRETE);
 
 /**
  * A zeroed hit, for a caller that wants one of its own. Allocate once, not per ray.

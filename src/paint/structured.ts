@@ -1094,7 +1094,7 @@ export class StructuredPaint {
       }
 
       recs.push({
-        shell: b.shell === true,
+        shell: b.shell,
         face0,
         faceN: faces.length - face0,
         dot0,

@@ -8,17 +8,60 @@
  * same footfall, and a staircase should be identifiable by ear before it has been touched.
  *
  * Nothing in the renderer branches on it yet — the Blueprint reveal draws every surface in the
- * same cyan band, which is the law. The classes are here because the world tags itself with
- * them at build time, and losing that tagging is far more expensive than keeping it.
+ * same cyan band, which is the law. What *does* branch on it is loudness: §3.9 gives every
+ * material a voice, and a voice is a multiplier on how far a contact sound carries.
  */
 
-/** Material classes the world knows about. Indexes into `MATERIAL_NAMES`. */
+/**
+ * Material classes the world knows about. Indexes into the table below.
+ *
+ * `MAT_CONCRETE` is 0 and stays 0: it is the default a box gets when nobody says otherwise, so
+ * an unstated material is the ordinary one rather than an accidentally loud one.
+ */
 export const MAT_CONCRETE = 0;
 export const MAT_METAL = 1;
 export const MAT_STONE = 2;
+/**
+ * The quiet end (§3.9), and it exists to give "go slow and stay quiet" something to pay it.
+ * Without a class *below* concrete every surface in the tower is normal-or-louder, and a
+ * routing choice with no cheap side is not a choice.
+ */
+export const MAT_DUST = 3;
+
+/**
+ * One row per material: what it is called, and how loud it is.
+ *
+ * Deliberately a single table rather than a name array beside a multiplier array. A material
+ * that has a name and no voice — or a voice under the wrong name — is exactly the drift this
+ * shape makes unavailable: there is one place to add a material, and adding it there means
+ * answering both questions at once.
+ *
+ * The multipliers are §3.9's first pass. They are loudness, so they scale *every* radius a
+ * contact event carries (`SoundBus.emit` is the one place that happens): what the surface is
+ * made of changes how far the noise paints and how far it is heard, by the same factor, because
+ * those are two readings of one sound.
+ */
+const MATERIALS: readonly Readonly<{ name: string; loudness: number }>[] = Object.freeze([
+  Object.freeze({ name: 'concrete', loudness: 1.0 }),
+  Object.freeze({ name: 'metal', loudness: 1.5 }),
+  Object.freeze({ name: 'stone', loudness: 1.15 }),
+  Object.freeze({ name: 'dust', loudness: 0.6 }),
+]);
 
 /** Index → name, so a material read out of a collider box is legible in a debug print. */
-export const MATERIAL_NAMES: readonly string[] = ['concrete', 'metal', 'stone'];
+export const MATERIAL_NAMES: readonly string[] = Object.freeze(MATERIALS.map((m) => m.name));
+
+/**
+ * The §3.9 voice of a material, as a multiplier on loudness.
+ *
+ * An index nothing recognises answers with concrete's 1.0 rather than throwing. A material id
+ * that has fallen off the end of the table is a data bug, and the useful place to catch it is
+ * the test that walks `MATERIAL_NAMES` — not a frame of gameplay, where the alternative to a
+ * plausible number is a crash mid-stride.
+ */
+export function materialLoudness(mat: number): number {
+  return MATERIALS[mat]?.loudness ?? 1;
+}
 
 /**
  * The matter palette of §3.2 — cyan-family only, forever.

@@ -178,6 +178,9 @@ export class GameSim {
         x: event.x,
         y: event.y + STEP_HEIGHT,
         z: event.z,
+        // §3.9: the surface has a say in how loud the stride is, and the controller took it off
+        // the box the collision pass resolved against — the foot's own contact, not a re-probe.
+        mat: event.mat,
       });
       return;
     }
@@ -192,8 +195,12 @@ export class GameSim {
       x: event.x,
       y: event.y + STEP_HEIGHT,
       z: event.z,
+      // An explicit radius, and it is scaled by the material anyway (§3.9: "the multiplier
+      // scales every radius the event carries"). A 14 m/s landing on steel is 14 x 1.5 = 21 m —
+      // louder than a Q-ping, which is what makes dropping onto a steel floor a decision.
       paintRadius: radius,
       intensity: 0.95 + 0.35 * ((radius - 8) / 6),
+      mat: event.mat,
     });
   };
 

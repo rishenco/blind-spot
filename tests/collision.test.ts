@@ -21,42 +21,47 @@ import {
   sweepSphereWorld,
   type Aabb,
 } from '../src/core/collision';
+import { MAT_CONCRETE, MAT_DUST } from '../src/paint/materials';
 
 /** The slack `collision.ts` calls EPS. Not exported, so it is restated here and pinned below. */
 const EPS = 1e-3;
-const UNIT = aabbFromBounds(0, 0, 0, 1, 1, 1);
+const UNIT = aabbFromBounds(0, 0, 0, 1, 1, 1, MAT_CONCRETE);
 
 describe('aabbFromBounds', () => {
-  it('passes bounds straight through and defaults mat=0, shell=false', () => {
-    expect(aabbFromBounds(-1, -2, -3, 4, 5, 6)).toEqual({
-      minX: -1, minY: -2, minZ: -3, maxX: 4, maxY: 5, maxZ: 6, mat: 0, shell: false,
+  it('passes bounds straight through and defaults shell=false', () => {
+    expect(aabbFromBounds(-1, -2, -3, 4, 5, 6, MAT_CONCRETE)).toEqual({
+      minX: -1, minY: -2, minZ: -3, maxX: 4, maxY: 5, maxZ: 6, mat: MAT_CONCRETE, shell: false,
     });
   });
 
   it('carries an explicit material and shell flag', () => {
-    const b = aabbFromBounds(0, 0, 0, 1, 1, 1, 3, true);
-    expect(b.mat).toBe(3);
+    const b = aabbFromBounds(0, 0, 0, 1, 1, 1, MAT_DUST, true);
+    expect(b.mat).toBe(MAT_DUST);
     expect(b.shell).toBe(true);
   });
 });
 
 describe('aabbFromFootprint', () => {
   it('centres on X/Z, sits its base on Y and grows upward by sizeY', () => {
-    expect(aabbFromFootprint(2, 1, 3, 2, 4, 6)).toEqual({
-      minX: 1, minY: 1, minZ: 0, maxX: 3, maxY: 5, maxZ: 6,
+    expect(aabbFromFootprint(2, 1, 3, 2, 4, 6, MAT_CONCRETE)).toEqual({
+      minX: 1, minY: 1, minZ: 0, maxX: 3, maxY: 5, maxZ: 6, mat: MAT_CONCRETE, shell: false,
     });
   });
 
-  it('omits mat and shell entirely, where aabbFromBounds defaults them', () => {
-    // Pinned because it is an inconsistency between the two constructors, not a design choice:
-    // a footprint box has `mat === undefined`, which the reveal reads as concrete by fallback
-    // rather than by declaration. Anything that starts iterating `Object.keys` on an Aabb, or
-    // structurally comparing two of them, will see the difference.
-    const f = aabbFromFootprint(0, 0, 0, 1, 1, 1);
-    expect('mat' in f).toBe(false);
-    expect('shell' in f).toBe(false);
-    expect(f.mat).toBeUndefined();
-    expect(f.shell).toBeUndefined();
+  it('states mat and shell, exactly as aabbFromBounds does', () => {
+    // This used to pin the opposite: a footprint box left both fields *absent*, so half the
+    // world answered `b.mat === 0` with "no" while meaning concrete. Now that §3.9 reads `mat`
+    // on every footfall, an absent material is a surface with no voice — so the two
+    // constructors agree, and neither will guess a material for a caller that did not say.
+    const f = aabbFromFootprint(0, 0, 0, 1, 1, 1, MAT_DUST, true);
+    expect('mat' in f).toBe(true);
+    expect('shell' in f).toBe(true);
+    expect(f.mat).toBe(MAT_DUST);
+    expect(f.shell).toBe(true);
+    // Structurally identical to the same box built the other way — the point of the change.
+    expect(aabbFromFootprint(0, 0, 0, 1, 1, 1, MAT_CONCRETE)).toEqual(
+      aabbFromBounds(-0.5, 0, -0.5, 0.5, 1, 0.5, MAT_CONCRETE),
+    );
   });
 });
 
@@ -87,14 +92,14 @@ describe('circleOverlapsFootprint', () => {
   });
 
   it('ignores Y entirely', () => {
-    const tall = aabbFromBounds(0, 100, 0, 1, 200, 1);
+    const tall = aabbFromBounds(0, 100, 0, 1, 200, 1, MAT_CONCRETE);
     expect(circleOverlapsFootprint(0.5, 0.5, 0.35, tall)).toBe(true);
   });
 });
 
 describe('canOccupy', () => {
-  const under = [aabbFromBounds(-1, -1, -1, 1, 0, 1)];
-  const over = [aabbFromBounds(-1, 1.7, -1, 1, 3, 1)];
+  const under = [aabbFromBounds(-1, -1, -1, 1, 0, 1, MAT_CONCRETE)];
+  const over = [aabbFromBounds(-1, 1.7, -1, 1, 3, 1, MAT_CONCRETE)];
 
   it('standing exactly on a surface is legal', () => {
     expect(canOccupy(under, 0, 0, 0, 0.35, 1.7)).toBe(true);
@@ -122,7 +127,7 @@ describe('canOccupy', () => {
 });
 
 describe('highestTopUnder', () => {
-  const stack = [aabbFromBounds(-1, -1, -1, 1, 0.5, 1), aabbFromBounds(-1, -1, -1, 1, 0.2, 1)];
+  const stack = [aabbFromBounds(-1, -1, -1, 1, 0.5, 1, MAT_CONCRETE), aabbFromBounds(-1, -1, -1, 1, 0.2, 1, MAT_CONCRETE)];
 
   it('returns -Infinity when the circle hangs over nothing', () => {
     expect(highestTopUnder(stack, 9, 9, 0.35, -Infinity, 10)).toBe(-Infinity);
@@ -148,7 +153,7 @@ describe('highestTopUnder', () => {
   });
 
   it('a surface exactly at the feet is found (ceilY = feetY)', () => {
-    const floor = [aabbFromBounds(-1, -1, -1, 1, 0, 1)];
+    const floor = [aabbFromBounds(-1, -1, -1, 1, 0, 1, MAT_CONCRETE)];
     expect(highestTopUnder(floor, 0, 0, 0.35, -Infinity, 0)).toBe(0);
   });
 });
@@ -156,7 +161,7 @@ describe('highestTopUnder', () => {
 describe('StaticWorld', () => {
   it('add returns the box it was given, by reference', () => {
     const w = new StaticWorld();
-    const b = aabbFromBounds(0, 0, 0, 1, 1, 1);
+    const b = aabbFromBounds(0, 0, 0, 1, 1, 1, MAT_CONCRETE);
     expect(w.add(b)).toBe(b);
     expect(w.boxes).toHaveLength(1);
     expect(w.boxes[0]).toBe(b);
@@ -190,9 +195,9 @@ describe('StaticWorld', () => {
       // boxes back in is part of the resolved position. Swapping the linear scan for a grid or
       // a BVH changes this order and therefore can change where the body ends up.
       const w = new StaticWorld();
-      const first = w.add(aabbFromBounds(0, 0, 0, 1, 1, 1));
-      const second = w.add(aabbFromBounds(-5, 0, 0, -4, 1, 1));
-      const third = w.add(aabbFromBounds(10, 0, 0, 11, 1, 1));
+      const first = w.add(aabbFromBounds(0, 0, 0, 1, 1, 1, MAT_CONCRETE));
+      const second = w.add(aabbFromBounds(-5, 0, 0, -4, 1, 1, MAT_CONCRETE));
+      const third = w.add(aabbFromBounds(10, 0, 0, 11, 1, 1, MAT_CONCRETE));
       const out: Aabb[] = [];
       w.query(-100, -100, -100, 100, 100, 100, out);
       expect(out).toEqual([first, second, third]);
@@ -202,7 +207,7 @@ describe('StaticWorld', () => {
     it('clears `out` first and returns that same array', () => {
       const w = new StaticWorld();
       w.add(UNIT);
-      const out: Aabb[] = [aabbFromBounds(0, 0, 0, 1, 1, 1)];
+      const out: Aabb[] = [aabbFromBounds(0, 0, 0, 1, 1, 1, MAT_CONCRETE)];
       expect(w.query(50, 50, 50, 51, 51, 51, out)).toBe(out);
       expect(out).toHaveLength(0);
     });
@@ -212,7 +217,7 @@ describe('StaticWorld', () => {
 describe('sweepSphereWorld', () => {
   function boxWorld(): StaticWorld {
     const w = new StaticWorld();
-    w.add(aabbFromBounds(4, -1, -1, 5, 1, 1));
+    w.add(aabbFromBounds(4, -1, -1, 5, 1, 1, MAT_CONCRETE));
     return w;
   }
 
@@ -248,7 +253,7 @@ describe('sweepSphereWorld', () => {
     // `radius` and hit with a ray-slab test, so the inflated box has SQUARE corners where the
     // true swept volume is round. Approaching a corner diagonally therefore stops early.
     const w = new StaticWorld();
-    w.add(aabbFromBounds(0, -1, 0, 2, 1, 2));
+    w.add(aabbFromBounds(0, -1, 0, 2, 1, 2, MAT_CONCRETE));
     const d = Math.SQRT1_2;
     const r = 0.3;
     const reported = sweepSphereWorld(w, -2, 0, -2, d, 0, d, 10, r);
@@ -270,7 +275,7 @@ describe('sweepSphereWorld', () => {
 
   it('reports the nearest of several boxes', () => {
     const w = boxWorld();
-    w.add(aabbFromBounds(2, -1, -1, 3, 1, 1));
+    w.add(aabbFromBounds(2, -1, -1, 3, 1, 1, MAT_CONCRETE));
     expect(sweepSphereWorld(w, 0, 0, 0, 1, 0, 0, 10, 0.2)).toBe(2 - 0.2);
   });
 });
@@ -278,7 +283,7 @@ describe('sweepSphereWorld', () => {
 describe('canOccupyWorld', () => {
   function pillarWorld(): StaticWorld {
     const w = new StaticWorld();
-    w.add(aabbFromBounds(-1, 0, -1, 1, 2, 1));
+    w.add(aabbFromBounds(-1, 0, -1, 1, 2, 1, MAT_CONCRETE));
     return w;
   }
 
@@ -300,7 +305,7 @@ describe('canOccupyWorld', () => {
     // both answers are "yes" here — but the discrepancy is real and pinned so a rewrite of the
     // broadphase cannot quietly change which of the two rules wins.
     const w = new StaticWorld();
-    w.add(aabbFromBounds(-1, -1, -1, 1, 0, 1));
+    w.add(aabbFromBounds(-1, -1, -1, 1, 0, 1, MAT_CONCRETE));
     const candidates: Aabb[] = [];
     w.query(-0.35, 0, -0.35, 0.35, 1.7, 0.35, candidates);
     expect(candidates).toHaveLength(0); // the floor never reaches canOccupy at all

@@ -121,6 +121,10 @@ function runSimulation(withPaint: boolean, seconds = SECONDS): RunResult {
         x: e.x,
         y: e.y + STEP_SOUND_HEIGHT,
         z: e.z,
+        // The harness mirrors `sim.ts`, and since §3.9 the surface is part of how loud a step
+        // is. Leaving it off would quietly run the whole determinism suite at 1.0x concrete no
+        // matter where the body went.
+        mat: e.mat,
       });
       return;
     }

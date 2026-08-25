@@ -32,11 +32,12 @@ import {
   type Aabb,
   type RayHit,
 } from '../src/core/collision';
+import { MAT_CONCRETE, MAT_METAL } from '../src/paint/materials';
 import { makeRng } from '../src/core/rng';
 import { createHeadlessGame } from '../src/game/headless';
 
 /** The unit cube centred on the origin: every face is one metre out along its own axis. */
-const CUBE = aabbFromBounds(-1, -1, -1, 1, 1, 1);
+const CUBE = aabbFromBounds(-1, -1, -1, 1, 1, 1, MAT_CONCRETE);
 
 function worldOf(...boxes: Aabb[]): StaticWorld {
   const w = new StaticWorld();
@@ -155,7 +156,7 @@ describe('raycastWorld — misses', () => {
 });
 
 describe('raycastWorld — maxDist', () => {
-  const wall = aabbFromBounds(4, -1, -1, 5, 1, 1);
+  const wall = aabbFromBounds(4, -1, -1, 5, 1, 1, MAT_CONCRETE);
 
   it('does not see a surface beyond maxDist', () => {
     expect(raycastWorld(worldOf(wall), 0, 0, 0, 1, 0, 0, 3.999)).toBeNull();
@@ -179,8 +180,8 @@ describe('raycastWorld — maxDist', () => {
 });
 
 describe('raycastWorld — nearest hit', () => {
-  const near = aabbFromBounds(2, -1, -1, 3, 1, 1);
-  const far = aabbFromBounds(6, -1, -1, 7, 1, 1);
+  const near = aabbFromBounds(2, -1, -1, 3, 1, 1, MAT_CONCRETE);
+  const far = aabbFromBounds(6, -1, -1, 7, 1, 1, MAT_CONCRETE);
 
   it('takes the nearest of several boxes whichever order the world holds them in', () => {
     for (const world of [worldOf(near, far), worldOf(far, near)]) {
@@ -191,8 +192,8 @@ describe('raycastWorld — nearest hit', () => {
   });
 
   it('takes the near face of two boxes sharing one', () => {
-    const left = aabbFromBounds(2, -1, -1, 3, 1, 1);
-    const right = aabbFromBounds(3, -1, -1, 4, 1, 1);
+    const left = aabbFromBounds(2, -1, -1, 3, 1, 1, MAT_CONCRETE);
+    const right = aabbFromBounds(3, -1, -1, 4, 1, 1, MAT_CONCRETE);
     const world = worldOf(left, right);
     const forward = raycastWorld(world, 0, 0, 0, 1, 0, 0, 100)!;
     expect(forward.t).toBe(2);
@@ -208,8 +209,8 @@ describe('raycastWorld — nearest hit', () => {
   it('gives a tie at the shared face to the first box in the world', () => {
     // Two boxes are entered at t = 0 from the plane they share; nothing tells them apart, so
     // the rule is stability, not merit. Stated so a consumer does not read meaning into it.
-    const left = aabbFromBounds(2, -1, -1, 3, 1, 1);
-    const right = aabbFromBounds(3, -1, -1, 4, 1, 1);
+    const left = aabbFromBounds(2, -1, -1, 3, 1, 1, MAT_CONCRETE);
+    const right = aabbFromBounds(3, -1, -1, 4, 1, 1, MAT_CONCRETE);
     expect(raycastWorld(worldOf(left, right), 3, 0, 0, 1, 0, 0, 100)!.box).toBe(left);
     expect(raycastWorld(worldOf(right, left), 3, 0, 0, 1, 0, 0, 100)!.box).toBe(right);
   });
@@ -219,8 +220,8 @@ describe('raycastWorld — nearest hit', () => {
     // y = 0, both entered at t = 2. The zero-distance tie above short-circuits on "nothing can
     // be nearer than a box we are already inside", so it cannot see which way the comparison
     // that settles ties is written.
-    const lower = aabbFromBounds(2, -1, -1, 3, 0, 1);
-    const upper = aabbFromBounds(2, 0, -1, 3, 1, 1);
+    const lower = aabbFromBounds(2, -1, -1, 3, 0, 1, MAT_CONCRETE);
+    const upper = aabbFromBounds(2, 0, -1, 3, 1, 1, MAT_CONCRETE);
     const first = raycastWorld(worldOf(lower, upper), 0, 0, 0, 1, 0, 0, 100)!;
     expect(first.t).toBe(2);
     expect(first.box).toBe(lower);
@@ -230,15 +231,15 @@ describe('raycastWorld — nearest hit', () => {
   it('carries the struck box itself, so material and shell survive the query', () => {
     // The whole reason `box` is in `RayHit`: a can off metal and a can off concrete are not the
     // same sound (§3.9), and the query is where that fact is available.
-    const metal = aabbFromBounds(2, -1, -1, 3, 1, 1, 1);
+    const metal = aabbFromBounds(2, -1, -1, 3, 1, 1, MAT_METAL);
     const hit = raycastWorld(worldOf(metal), 0, 0, 0, 1, 0, 0, 100)!;
     expect(hit.box).toBe(metal);
-    expect(hit.box.mat).toBe(1);
+    expect(hit.box.mat).toBe(MAT_METAL);
   });
 });
 
 describe('raycastWorld — grazing a face', () => {
-  const slab = aabbFromBounds(0, 0, 0, 2, 1, 2);
+  const slab = aabbFromBounds(0, 0, 0, 2, 1, 2, MAT_CONCRETE);
 
   it('counts a ray running exactly along the top face as a hit', () => {
     // y = 1 is the slab's top. The Y axis is parallel and only gates the box (the origin is on
@@ -349,7 +350,7 @@ describe('raycastWorld — origin at or inside a box', () => {
   });
 
   it('prefers a box it is inside over one further along', () => {
-    const far = aabbFromBounds(6, -1, -1, 7, 1, 1);
+    const far = aabbFromBounds(6, -1, -1, 7, 1, 1, MAT_CONCRETE);
     const hit = raycastWorld(worldOf(far, CUBE), 0, 0, 0, 1, 0, 0, 100)!;
     expect(hit.t).toBe(0);
     expect(hit.box).toBe(CUBE);
@@ -556,7 +557,7 @@ function randomWorld(rng: () => number, count: number): StaticWorld {
     const sy = 0.4 + rng() * 3;
     const sz = 0.4 + rng() * 3;
     world.add(
-      aabbFromBounds(cx - sx / 2, cy - sy / 2, cz - sz / 2, cx + sx / 2, cy + sy / 2, cz + sz / 2),
+      aabbFromBounds(cx - sx / 2, cy - sy / 2, cz - sz / 2, cx + sx / 2, cy + sy / 2, cz + sz / 2, MAT_CONCRETE),
     );
   }
   return world;
