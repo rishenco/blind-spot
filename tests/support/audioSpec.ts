@@ -726,3 +726,137 @@ export const HALO_DUCK = Object.freeze({
  * case where the next sound to arrive would have caused it.
  */
 export const MAX_PEAK_DBFS = -1;
+
+// ---------------------------------------------------------------------------
+// The detonation
+
+/**
+ * What the sphere's boom has to measure, and why each number is the one that was chosen.
+ *
+ * The design constraint this whole block exists to defend is §14's: **a thrown can is not a
+ * weapon**. It does no damage, it cannot stagger, and hitting the spider with one is worth what
+ * hitting a wall with one is worth. So the detonation has to read as a *device going off* — a
+ * sonic charge whose entire purpose is to make a loud noise somewhere the player is not — and
+ * not as an explosion that hurts. That distinction is mostly timbre, and timbre is mostly
+ * measurable: an explosive is identified by a shock front, which is a step edge with its energy
+ * high, and by debris, which is a noisy non-monotonic tail. The pins below are those two absences
+ * stated as numbers, plus the level law §3.3's carry column implies.
+ *
+ * Every figure is the shipped voice, rendered at unit gain through the real director on a real
+ * bus, sampled across the noise bank the way `ATTACK_LEVEL_SAMPLE` insists on. Where a
+ * comparison to another voice is quoted, that voice was measured the same way in the same run.
+ */
+export const DETONATION = Object.freeze({
+  /**
+   * How loud the boom *arrives* against each ping at the same distance, dB.
+   *
+   * §3.3 gives the sphere 32 m of carry against the E-ping's 30 and the Q-ping's 18, and calls
+   * it the loudest deliberate act in the game. `gainFor` turns carry into level, so at one
+   * listener position the three attack levels *are* the three arrival levels and no arithmetic
+   * stands in between. Measured at `NEAR_FIELD_M`: the boom −16.63 dBFS, the Q-ping −19.29, the
+   * E-ping −21.49 — so +2.67 and +4.86.
+   *
+   * The margins are floors and not equalities, and the reason is `BOOM_ATTACK_NORM`: the boom is
+   * levelled by the mix ceiling rather than by parity with a ping, because it is broadband noise
+   * and peaks 3.6 dB over its own RMS where a ping peaks 10 dB over. A ceiling-set level cannot
+   * also be an exact ratio. What must never happen is the ordering inverting — the loudest act
+   * in the game arriving under a ping — and 2 dB of floor says so with room for a retune.
+   *
+   * There is no ceiling on the margin here for a reason too: the pings are 6.6 dB apart from each
+   * other at unit gain, so no cross-kind level parity exists in this codebase to be bounded
+   * against. `peakCeilingDbfs` is what stops the boom growing without limit, and it is a better
+   * bound than an invented one because it is the constraint that actually binds.
+   */
+  overQuietPingDb: 2,
+  /** Least the boom may beat the E-ping by at equal distance, dB. Measured 4.86. */
+  overLoudPingDb: 3,
+  /**
+   * Where the worst noise slot peaks at `NEAR_FIELD_M`, dBFS, and how close it must sit.
+   *
+   * This is `BOOM_ATTACK_NORM`'s definition read back off the render. The boom carries furthest,
+   * so `gainFor` hands it the largest near-field gain in the game, and it has the highest crest
+   * of any voice — the combination is the only place in the mix where the ceiling binds. −3 is
+   * `MAX_PEAK_DBFS` with 2 dB left for whatever else lands in the same millisecond.
+   *
+   * Pinned as a *window* rather than as a ceiling because both directions are failures: over it
+   * and the loudest act in the game clips when a footstep joins it, under it and the constant has
+   * quietly drifted down and taken the margins above with it.
+   */
+  peakCeilingDbfs: -3,
+  /** How far the worst slot may sit from `peakCeilingDbfs`, dB. Measured: dead on it. */
+  peakCeilingTolDb: 0.5,
+  /**
+   * The largest sample-to-sample step the voice makes, as a fraction of its own attack RMS.
+   *
+   * The "no crack" pin, and it is normalized by RMS rather than by peak on purpose: a crest that
+   * varies with the noise slot would otherwise make the same edge read differently from render to
+   * render. Measured — the boom 0.19 on average and 0.41 on its worst slot, against the Q-ping's
+   * 0.17, the E-ping's 0.61, a landing's 0.68 and a sprint step's 0.60 (means; their worst slots
+   * reach 0.18, 0.70, 0.97 and 0.89). The boom is the second smoothest voice in the game and a
+   * third as sharp as the sound of hitting the floor, which is the shape §14 asks for: pressure,
+   * not violence.
+   *
+   * 0.5 is the bound because it is under *every* other voice's mean but the Q-ping's, so a boom
+   * that had grown an edge would have to become sharper than the E-ping to pass — and it still
+   * clears the worst measured slot by 20 %.
+   */
+  maxStepPerRms: 0.5,
+  /**
+   * The most of the attack's energy that may sit above 2 kHz, as a fraction.
+   *
+   * The other half of "no crack", and the direct one: a shock front is identified by its high
+   * band. Measured through `bandShare` — 1.0e-5 for the boom, against the E-ping's 1.8e-3, which
+   * is what a voice that *is* meant to be bright looks like, and a landing's 2.4e-4. The boom is
+   * darker up there than the sound of hitting the floor, by more than an order of magnitude.
+   *
+   * 5e-5 is five times the measurement and still five times under the landing, so it fails a
+   * voice that has grown any high band at all without being a pin on the exact filter shape.
+   */
+  attackAbove2kMax: 5e-5,
+  /**
+   * How much of the boom's attack energy sits below 250 Hz, as a fraction.
+   *
+   * The positive half of the same claim: it is not enough that the boom is *not* bright, it has
+   * to be *weighty*, and a voice can be neither — a hiss is both. Measured 0.78, between the
+   * contact voices' 0.98 and the Q-ping's 0.22. 0.7 fails a body that has drifted up out of the
+   * bottom two octaves.
+   */
+  attackBelow250Min: 0.7,
+  /**
+   * How steadily the boom's level tracks `gainFor` across the noise bank: max |deviation|, dB.
+   *
+   * The bus contract, measured where it is easiest to break. §3.9's window is 85 ms and the
+   * boom's energy is low, so a narrow low band would pass only a handful of cycles inside it and
+   * the window's RMS would be a small-sample statistic — the first draft's bandpass body varied
+   * by 1.09 dB of standard deviation and 6.53 dB of range across the 997 slots, which is level
+   * being decided by `spec.seed` instead of by distance. The shipped shelf-plus-sine body reads
+   * 0.68 dB and 3.90 dB, against the 0.47–0.51 dB the shipped contact voices already live with.
+   *
+   * Pinned on standard deviation rather than range because range is an extreme-value statistic
+   * and grows with the sample size: the same voice reads 2.5 dB of range over 48 slots and 3.9
+   * over 997, with nothing having changed.
+   */
+  levelSdMaxDb: 0.9,
+  /**
+   * How long the boom must still be audible, seconds, and how far down by then.
+   *
+   * A charge going off is a long sound and a gunshot is a short one, so duration is part of the
+   * §14 claim rather than decoration. Measured, the 100 ms window at 0.8 s sits 59.8 dB under the
+   * first, and there is still something at 1.3 s. `durationSec` is 1.4, so this also catches a
+   * voice whose envelopes have collapsed inside their own schedule.
+   */
+  audibleUntilSec: 0.8,
+  /** How far under the opening 100 ms the window at `audibleUntilSec` may sit, dB. */
+  audibleUntilMaxDropDb: 75,
+  /**
+   * The most the envelope may go *back up*, dB, once it has started falling.
+   *
+   * The "no debris" pin. Crackle, secondary bursts and rattle are all the same thing measured
+   * from outside: a tail that is not monotonic. Every layer here is one smooth `burst` and the
+   * shipped envelope falls monotonically from its first 100 ms window to its last, so the
+   * measured value is 0.00 dB at every one of the eighteen windows. A small tolerance rather than
+   * exactly 0 because the windows are RMS over a decaying noise signal and the last few are near
+   * the floor.
+   */
+  envelopeRiseMaxDb: 0.5,
+});

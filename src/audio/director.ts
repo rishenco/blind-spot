@@ -34,9 +34,15 @@ import {
 /**
  * Which builder makes the noise. Deliberately coarser than `SoundClass`: a crouch-step and a
  * landing are the same synthesis — an exciter striking a modal bank — differing only in the
- * numbers this spec carries. A ping is a different thing entirely.
+ * numbers this spec carries. A ping is a different thing entirely, and so is a detonation.
+ *
+ * `'boom'` is the third and it is not a ping with different numbers: a sonar pulse is a tone
+ * released into the air and a sphere going off is a body of pressure with no tone in its front
+ * at all (`voices.ts`'s `boomVoice` argues the shape). It exists as its own kind because a class
+ * that is not a contact still has to sound like the thing it is, and the check at the bottom of
+ * this file no longer stands in the way of one having its own builder.
  */
-export type VoiceKind = 'contact' | 'ping';
+export type VoiceKind = 'contact' | 'ping' | 'boom';
 
 /** Everything `src/audio/voices.ts` needs to make one sound, as plain data. */
 export interface VoiceSpec {
@@ -196,23 +202,25 @@ const CLASS_VOICES: Readonly<Record<SoundClass, ClassVoice>> = Object.freeze({
   'prop-impact': Object.freeze({ voice: 'contact' as const, bright: 1.45, toneHz: 200, durationSec: 0.8 }),
   'prop-knock': Object.freeze({ voice: 'contact' as const, bright: 1.45, toneHz: 260, durationSec: 0.6 }),
   /*
-   * The wind-up is a `'ping'` because `VoiceKind` has two builders and the module-load check
-   * below refuses a non-contact class the contact one — it strikes nothing, so it cannot have a
-   * struck surface's modes. That is the honest placeholder and not the shipped sound: a servo
-   * winding up is a mechanism, not a sonar pulse, and its real voice is the audio owner's commit
-   * along with the emitter that first plays it. Nothing emits this class today.
+   * The wind-up is still a `'ping'`, and that is still a placeholder: it strikes nothing, so the
+   * check below refuses it the contact builder, and a servo winding up is a mechanism rather
+   * than a sonar pulse. What has changed is only that it is now a placeholder by *choice* — the
+   * boom below took the same argument to its conclusion and got a builder of its own, so a
+   * fourth `VoiceKind` is available to the wind-up the day somebody writes the mechanism. It
+   * waits for the emitter that first plays it; nothing emits this class today.
    */
   'throw-windup': Object.freeze({ voice: 'ping' as const, bright: 1.0, toneHz: 300, durationSec: 0.5 }),
   /*
-   * The boom is a `'ping'` for the same structural reason and with the same honesty: `VoiceKind`
-   * has two builders, the check below refuses a non-contact class the contact one, and a
-   * detonation strikes no surface whose modes it could ring (`CONTACT_CLASSES` argues that at
-   * length). So this is the placeholder, not the shipped sound — a sonar pulse pitched low and
-   * run long is a recognisable *stand-in* for a boom and nothing more. The real voice is the
-   * audio owner's commit: it wants a body, a transient with no tone in it, and a tail that is
-   * the room rather than the source.
+   * The detonation, and the one class that is neither a struck surface nor a sonar pulse.
+   *
+   * `bright` opens the front (`FRONT_HZ x 1.5` ~ 2.7 kHz), `toneHz` is the body's slide and the
+   * core under it, and `durationSec` is long because a boom is the longest sound the game makes:
+   * the tail is most of a second of pressure dispersing, and cutting it short with the scheduler
+   * would make the loudest deliberate act in the game the one that ends soonest. It is not a
+   * contact class and never will be — `CONTACT_CLASSES` argues that at length — so no surface
+   * scales it and no material reaches the builder.
    */
-  'sphere-boom': Object.freeze({ voice: 'ping' as const, bright: 1.5, toneHz: 90, durationSec: 1.2 }),
+  'sphere-boom': Object.freeze({ voice: 'boom' as const, bright: 1.5, toneHz: 90, durationSec: 1.4 }),
 });
 
 /**
@@ -331,18 +339,41 @@ export function isContactVoice(cls: SoundClass): boolean {
 }
 
 /**
- * Every class in the sound table has a voice, checked at module load.
+ * Every class in the sound table has a voice, and the *contact builder* is reserved for the
+ * classes that struck something — checked at module load.
  *
- * The `Record<SoundClass, ClassVoice>` type already refuses a missing row at compile time. This
- * catches the other half — a row whose `voice` disagrees with `isContactClass`, i.e. a class the
- * bus says strikes a surface but the audio says is a ping, which would give it a material the
- * builder has no use for (or take away one it needs).
+ * The `Record<SoundClass, ClassVoice>` type already refuses a missing row at compile time. What
+ * this catches is a row whose builder disagrees with `isContactClass`, in either direction. Both
+ * are real defects and neither is visible without a render:
+ *
+ *  - **A contact class without the contact voice** loses §3.9's timbre half entirely. The bus
+ *    priced the strike by the material it struck and the ear would then never hear which
+ *    material that was — the spider's footfalls would stop saying what it is walking on, which
+ *    is the whole of §3.9's promise.
+ *  - **A non-contact class with the contact voice** is the mirror image: `contactVoice` resolves
+ *    a null material to concrete, so a ping handed to it would not crash — it would quietly
+ *    render as a footfall on a floor that was never struck. That is `assertMaterials`' refusal
+ *    read at the ear, and law 2 at the smallest scale the mixer has.
+ *
+ * It used to be one line — `isContactVoice(cls) !== isContactClass(cls)` — and the two halves are
+ * written out now because that equality claimed something that has stopped being true. It read
+ * as "the bus's contact flag *chooses* the builder", which was fair while `VoiceKind` had two
+ * members and the flag picked between them. With `'boom'` it does not: the non-contact side is a
+ * family the audio chooses from for itself, and a class moving from `'ping'` to `'boom'` is the
+ * audio's decision alone with nothing on the bus to consult. What survived is narrower and is
+ * what was always meant — a claim about *the contact builder*, not about voices in general.
  */
 for (const cls of Object.keys(SOUND_CLASSES) as SoundClass[]) {
-  if (isContactVoice(cls) !== isContactClass(cls)) {
+  if (isContactClass(cls) && !isContactVoice(cls)) {
     throw new Error(
-      `audio/director: '${cls}' is ${isContactClass(cls) ? '' : 'not '}a contact class on the ` +
-        `bus but its voice is '${CLASS_VOICES[cls].voice}'. See CONTACT_CLASSES.`,
+      `audio/director: '${cls}' strikes a surface on the bus but its voice is ` +
+        `'${CLASS_VOICES[cls].voice}', which has no modes to ring. See CONTACT_CLASSES.`,
+    );
+  }
+  if (isContactVoice(cls) && !isContactClass(cls)) {
+    throw new Error(
+      `audio/director: '${cls}' has the contact voice but strikes nothing on the bus, so it ` +
+        'would render as a footfall on a surface it never touched. See CONTACT_CLASSES.',
     );
   }
 }

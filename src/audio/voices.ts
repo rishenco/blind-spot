@@ -336,6 +336,82 @@ function fallTo(param: AudioParam, from: number, at: number, seconds: number): v
 }
 
 /**
+ * A rise to `peak` and then a fall to silence — `fallTo` with an onset in front of it.
+ *
+ * The rise is the whole reason this exists rather than being three more lines inside
+ * `boomVoice`. A gain that starts at full amplitude on one sample is a step, and a step is a
+ * click: broadband, instantaneous, and the single most weapon-like thing a synthesised
+ * detonation can do. Every layer of the boom therefore opens over milliseconds rather than over
+ * a sample, and `ONSET_SEC` is where the shortest of those is written down.
+ */
+function burst(param: AudioParam, peak: number, at: number, rise: number, fall: number): void {
+  param.setValueAtTime(1e-4, at);
+  param.exponentialRampToValueAtTime(Math.max(1e-4, peak), at + rise);
+  param.exponentialRampToValueAtTime(1e-4, at + rise + fall);
+}
+
+/**
+ * Where the detonation's front opens, Hz, before `spec.bright` scales it.
+ *
+ * Low for a bang, and that is the §14 argument made in one number. A shock front is identified
+ * by what is *above* 2 kHz; at 1350 Hz — 900 times the boom's 1.5 — with two poles over it the
+ * band that says "crack" is 20 dB down before the sound has begun, and measures at 0.01 % of the
+ * attack's energy. Raise it far and the sphere stops being a charge that goes off and starts
+ * being something that goes through a wall, which is a different game and a different design
+ * document.
+ */
+const FRONT_HZ = 900;
+
+/** How long the detonation's fastest layer takes to reach full amplitude. See `burst`. */
+const ONSET_SEC = 0.004;
+
+/**
+ * Where the detonation's body stops, Hz — the floor under the whole sound.
+ *
+ * Below about 30 Hz a small speaker moves and nothing arrives, so this band is excursion without
+ * information: it costs peak headroom, it drags the loudest event in the game towards clipping,
+ * and no player hears the difference. Cutting it is the cheapest 2 dB of headroom in the file.
+ */
+const BODY_FLOOR_HZ = 30;
+
+/**
+ * The detonation's one level constant — measured, and a normalization rather than a volume.
+ *
+ * Same job as `MaterialVoice.attackNorm` and the same rule: it is fitted once so that the level
+ * the player hears is `gainFor`'s and nothing else, and then it never varies with anything. What
+ * it is fitted *to* is different, because the boom has no siblings to be levelled against — one
+ * class, one voice, no material — so there is nothing for §3.9's invariant to equalise here.
+ *
+ * The obvious target was §3.3's carry column. It says the boom is the loudest deliberate act in
+ * the game — 32 m against the E-ping's 30 and the Q-ping's 18 — and the Q-ping is the natural
+ * reference, being the other 360° room-read, so fitting the boom's 85 ms attack onto Q's would
+ * make the whole audible difference between the two their carry ratio and nothing else. Measured
+ * over 192 stratified noise slots, that wanted 0.898.
+ *
+ * **It does not fit, and the reason is crest, not loudness.** A detonation is broadband noise
+ * and peaks about 13.6 dB over its own attack RMS; a ping is a narrow tone and peaks about 10 dB
+ * over its. Equalise their RMS and the boom's *peak* is 3.6 dB higher for free — and the boom
+ * carries furthest, so `gainFor` also hands it the largest near-field gain in the game
+ * (`EDGE_GAIN · 32 / NEAR_FIELD_M` = 0.427). At attack parity the loudest slot in the noise bank
+ * renders at −0.7 dBFS through the master, which is past `MAX_PEAK_DBFS` before a single other
+ * sound has been added to it.
+ *
+ * So the ceiling sets the constant, and 0.690461 is where the worst of the 997 noise slots peaks
+ * at exactly −3 dBFS at `NEAR_FIELD_M` — `MAX_PEAK_DBFS` with 2 dB left over for whatever else
+ * is landing in the same millisecond, which is precisely what that constant exists for. The
+ * median slot lands at −7.3 dBFS, alongside the rest of the game's voices.
+ *
+ * What that costs is 2.3 dB of attack level, and §3.3 survives it: the boom's attack sits at
+ * −7.77 dB against Q's −5.48, and once the carry radii are applied it still *arrives* 2.7 dB
+ * over the Q-ping and 4.9 dB over the E-ping at the same distance — and goes on arriving for a
+ * second, where a ping is over in a fifth of one. Peak is headroom; loudness is energy over
+ * time; the boom is the loudest act in the game on the second of those and does not need to win
+ * the first. `tests/audio/boomVoice.test.ts` asserts the ordering and the ceiling together;
+ * `DETONATION` in `tests/support/audioSpec.ts` holds the measured margins.
+ */
+const BOOM_ATTACK_NORM = 0.690461;
+
+/**
  * One contact: a seeded noise exciter through a parallel modal bank, plus a pitch-dropping thump.
  *
  * The whole of §3.9's audible half is here. `spec.bright` scales the exciter's cutoff, so a
@@ -517,6 +593,183 @@ export function pingVoice(
   air.stop(stop);
 }
 
+/**
+ * The detonation — a sphere going off, and the loudest deliberate act the game has (§3.3: 32 m
+ * of carry, against the E-ping's 30 and under the landing's effective 42).
+ *
+ * **It is a sonic charge and not a bomb**, and §14 is not being polite about that: a thrown
+ * sphere does no damage, cannot stagger, and hitting the spider with one is worth exactly what
+ * hitting a wall with one is worth. The verb is "ask a question from somewhere you are not". So
+ * the sound has to arrive as *pressure* — big, round, and over — rather than as violence, and
+ * the three things that would make it a weapon are left out on purpose:
+ *
+ *  - **No crack.** A gunshot and a grenade are identified by their shock front: a step edge with
+ *    most of its energy above 2 kHz. Everything here is lowpassed and every layer opens over
+ *    milliseconds rather than over a sample (see `burst`). Measured against the voices already
+ *    shipped, on the steepest sample-to-sample step each one makes relative to its own attack
+ *    RMS: the boom 0.19, the Q-ping 0.17, the E-ping 0.61, a landing 0.68. It is the second
+ *    smoothest thing in the game and a third as sharp as the sound of hitting the floor. And on
+ *    the spectrum it puts 1.0e-5 of its attack energy above 2 kHz, against a landing's 2.4e-4
+ *    and the E-ping's 1.8e-3 — an order of magnitude darker up there than the sound of hitting
+ *    the floor. What is left is a thing that goes *off*, not a thing that goes *through*
+ *    something.
+ *  - **No debris.** No crackle, no secondary bursts, no rattle after the fact. Four envelopes,
+ *    each one smooth and monotonic, because a device discharging is an ordered event and because
+ *    the game has no destruction to make the noise *of* (§14). It is also what makes 05's "and
+ *    nothing at all followed it" audible rather than merely true on the bus.
+ *  - **No distortion.** Nothing here is clipped or waveshaped. The grit those add is the sound of
+ *    something breaking, and nothing breaks.
+ *
+ * What is left is the shape §3.3 asks for, in three noise layers off one release — one
+ * `BufferSource` feeding all of them, for `contactVoice`'s reason: three chains from one source
+ * are one event heard three ways, where three sources are three sounds somebody has to keep in
+ * sync — plus one oscillator under them.
+ *
+ *  - **The front** — the transient, and deliberately with no tone in it. Lowpassed noise, wide
+ *    at the instant of release and dark 90 ms later, which is what the air actually does with a
+ *    pressure step. It is the layer that tells you *when* and (once there is a panner) *where*,
+ *    and it is worth 2.0 dB over the first 10 ms — audible as an edge on the front of the
+ *    sound, nowhere near loud enough to be the sound.
+ *  - **The body** — the weight, and the layer that makes the sound concussive. Noise under a
+ *    lowpass sliding from `toneHz x 4.5` down to `toneHz x 1.3`, over a fixed highpass at
+ *    `BODY_FLOOR_HZ`. **The low end is stochastic on purpose**, and it is what separates a
+ *    detonation from a landing: `contactVoice`'s thump is a pure sine because a mass arriving has
+ *    exactly one pitch, where expanding air has none.
+ *  - **The core** — one sine sliding the same way the body does, and the body's equal partner
+ *    rather than its master: measured alone, the two sit 1.3 dB apart in the attack window. It
+ *    may not go much past that. A sine loud enough to lead is a kick drum, and a player files a
+ *    kick drum under "something landed" — but it is also the only layer with no randomness in
+ *    it, so it is where the level stability the section below is about actually comes from, and
+ *    balance is the whole of the tuning.
+ *  - **The tail** — the pressure dispersing, darkening as it goes because the high end leaves
+ *    first, and the only layer still audible after 0.4 s: it is worth 15 dB across 300–800 ms
+ *    and 11 dB across 800–1400 ms, where the other three are gone. Noise, not
+ *    the sine: a detonation that ends on a tone ends on a note, and this one has to end on air.
+ *    Not a reverb either: the game has no room model, and a convolved tail would claim the same
+ *    enclosure for a boom in a bare frame and a boom in a sealed room, which is law 2 broken by
+ *    an audio effect. This tail is the source's own, and it says "big" without claiming a wall.
+ *
+ * **Why the body is a shelf and not a resonance.** The first draft made it a bandpass at
+ * `toneHz x 1.8`, which is the obvious way to write "low noise" and is wrong here for a reason
+ * worth recording. A band that narrow at 90 Hz passes about a dozen cycles inside §3.9's 85 ms
+ * attack window, so the window's RMS is a small-sample statistic. Measured across all 997 slots
+ * of the noise bank, the *same event* came out with a standard deviation of 1.09 dB and a range
+ * of 6.53 dB depending on nothing but which slot `spec.seed` picked. That is level being decided
+ * by the noise offset instead of by `gainFor`, which is the one thing a voice in this file may
+ * not do — a boom at 20 m could arrive louder than a boom at 10 m. Opening the body into a shelf
+ * between `BODY_FLOOR_HZ` and the sweep, with the sine core steadying what is left, brings that
+ * to 0.68 dB and 3.90 dB, against the 0.47–0.51 dB the shipped contact voices already live with.
+ * It buys the peak as well: at equal attack level the shelf peaks 4.1 dB lower than the band
+ * did, which is most of the headroom `BOOM_ATTACK_NORM` needed and could not otherwise have
+ * found.
+ *
+ * Level is `spec.gain` times one normalization and nothing else, exactly as everywhere else in
+ * this file — see `BOOM_ATTACK_NORM` for what that constant is and what it is not.
+ */
+export function boomVoice(
+  ctx: BaseAudioContext,
+  out: AudioNode,
+  spec: VoiceSpec,
+  when: number,
+): void {
+  const stop = when + spec.durationSec;
+
+  const sum = ctx.createGain();
+  sum.gain.value = spec.gain * BOOM_ATTACK_NORM;
+  sum.connect(out);
+
+  // One release of air, heard three ways — front, body, tail. The core is the fourth layer and
+  // the only one that is not this noise.
+
+  const air = ctx.createBufferSource();
+  air.buffer = noiseBank(ctx);
+
+  // The front. `spec.bright` scales where it opens, so the class table keeps the one knob that
+  // says how hard a thing struck; the ramp down to `toneHz * 2.5` inside 70 ms is the part that
+  // makes it a release of pressure rather than a burst of static. Two poles rather than one, for
+  // the reason under `FRONT_HZ`: 6 dB/oct leaves an audible edge above the corner, and an edge
+  // is the one thing this sound may not have.
+  const frontGain = ctx.createGain();
+  burst(frontGain.gain, 3, when, ONSET_SEC, 0.085);
+  let frontIn: AudioNode = frontGain;
+  for (let i = 0; i < 2; i++) {
+    const front = ctx.createBiquadFilter();
+    front.type = 'lowpass';
+    front.Q.value = 0.7;
+    front.frequency.setValueAtTime(FRONT_HZ * spec.bright, when);
+    front.frequency.exponentialRampToValueAtTime(spec.toneHz * 2.5, when + 0.07);
+    front.connect(frontIn);
+    frontIn = front;
+  }
+  air.connect(frontIn);
+  frontGain.connect(sum);
+
+  // The body: a shelf, two poles at each end, sliding down over 0.3 s. Two poles and not one on
+  // the lowpass because a 6 dB/oct skirt at 400 Hz still leaves 2 kHz within 20 dB, and 2 kHz is
+  // where "crack" lives; two on the highpass because one leaves the sub-30 Hz excursion
+  // `BODY_FLOOR_HZ` exists to remove. Its rise is 20 ms — slower than the front's on purpose, so
+  // the two layers do not put their peaks in the same millisecond and cost headroom for it.
+  const bodyGain = ctx.createGain();
+  burst(bodyGain.gain, 6.5, when, 0.02, 0.8);
+  let bodyIn: AudioNode = bodyGain;
+  for (let i = 0; i < 2; i++) {
+    const floor = ctx.createBiquadFilter();
+    floor.type = 'highpass';
+    floor.Q.value = 0.7;
+    floor.frequency.value = BODY_FLOOR_HZ;
+    floor.connect(bodyIn);
+    bodyIn = floor;
+  }
+  for (let i = 0; i < 2; i++) {
+    const body = ctx.createBiquadFilter();
+    body.type = 'lowpass';
+    body.Q.value = 0.7;
+    body.frequency.setValueAtTime(spec.toneHz * 4.5, when);
+    body.frequency.exponentialRampToValueAtTime(spec.toneHz * 1.3, when + 0.3);
+    body.connect(bodyIn);
+    bodyIn = body;
+  }
+  air.connect(bodyIn);
+  bodyGain.connect(sum);
+
+  // The core: one sine sliding the same way the body does, and slower and further than any
+  // thump. `contactVoice` drops its thump to 0.35x in 60 ms, which reads as an arrival; this
+  // takes 0.22 s to reach 0.4x, which reads as a volume of air letting go. 0.9 against the
+  // body's 6.5 puts the two within 1.3 dB of each other in the attack window, which is as far
+  // as the sine may go: it is the layer that steadies the level, and it is also the layer that
+  // would turn the sound into a kick drum if it led.
+  const core = ctx.createOscillator();
+  core.type = 'sine';
+  core.frequency.setValueAtTime(spec.toneHz, when);
+  core.frequency.exponentialRampToValueAtTime(spec.toneHz * 0.4, when + 0.22);
+  const coreGain = ctx.createGain();
+  burst(coreGain.gain, 0.9, when, 0.006, 0.7);
+  core.connect(coreGain);
+  coreGain.connect(sum);
+
+  // The tail. It comes up *well* after the front — 80 ms, long enough to hear as a bloom rather
+  // than as part of the strike, and short enough that it is one sound with what preceded it —
+  // and it leaves over most of a second, darkening the whole way. The delay is doing two jobs:
+  // it is what makes this the tail rather than a fourth way of saying "attack", and it keeps the
+  // loudest layer's peak out of the same millisecond as the body's, which measured 0.4 dB of
+  // headroom on its own.
+  const tail = ctx.createBiquadFilter();
+  tail.type = 'lowpass';
+  tail.Q.value = 0.7;
+  tail.frequency.setValueAtTime(spec.toneHz * 3.5, when);
+  tail.frequency.exponentialRampToValueAtTime(spec.toneHz * 1.5, when + 0.7);
+  const tailGain = ctx.createGain();
+  burst(tailGain.gain, 5, when, 0.08, spec.durationSec - 0.1);
+  air.connect(tail);
+  tail.connect(tailGain);
+  tailGain.connect(sum);
+
+  air.start(when, noiseOffset(spec.seed, spec.durationSec));
+  air.stop(stop);
+  core.start(when);
+  core.stop(stop);
+}
+
 /** Builds whichever voice the spec names, at `when` on the context's clock. */
 export function playVoice(
   ctx: BaseAudioContext,
@@ -525,6 +778,7 @@ export function playVoice(
   when: number,
 ): void {
   if (spec.voice === 'contact') contactVoice(ctx, out, spec, when);
+  else if (spec.voice === 'boom') boomVoice(ctx, out, spec, when);
   else pingVoice(ctx, out, spec, when);
 }
 

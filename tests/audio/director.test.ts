@@ -318,9 +318,11 @@ describe('what a spec says', () => {
       const spec = director.decide(emit(cls, { x: 1 }))!;
       expect(spec, cls).not.toBeNull();
       expect(spec.cls).toBe(cls);
-      expect(['contact', 'ping']).toContain(spec.voice);
-      // A contact carries a material; a ping carries none. Same statement as CONTACT_CLASSES,
-      // read off the spec the builder actually receives.
+      expect(['contact', 'ping', 'boom']).toContain(spec.voice);
+      // A contact carries a material; nothing else does. Same statement as CONTACT_CLASSES, read
+      // off the spec the builder actually receives — and note the direction: it is the *contact*
+      // half that is pinned both ways, because a non-contact class is free to have a voice kind
+      // of its own (the detonation does) but may never arrive carrying a surface.
       if (spec.voice === 'contact') expect(spec.mat, cls).not.toBeNull();
       else expect(spec.mat, cls).toBeNull();
       expect(spec.durationSec).toBeGreaterThan(0.4);

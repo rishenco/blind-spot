@@ -14,13 +14,26 @@
  * player would have heard offline, and writes `.wav` files, each with a printed annotation of
  * what happens when — so you play the file with the timeline next to it and judge.
  *
- * **A listening tool first.** The assertions below are deliberately only the "the render came out
- * broken" kind: NaN, clipping, digital silence, a voice the mixer dropped, a scene that drove the
- * simulation and produced no sound at all. Not one of them pins a level, a centroid or a decay.
- * That is `tests/audio/`'s job and it does it better than a tool run by hand ever could; a second,
- * weaker copy of it here would be a suite nobody trusts and everybody has to update. What this
- * catches is the class of failure a number cannot: the mix being wrong in a way that is obvious
- * the moment you hear it.
+ * **A listening tool first.** Almost every assertion below is the "the render came out broken"
+ * kind: NaN, clipping, digital silence, a voice the mixer dropped, a scene that drove the
+ * simulation and produced no sound at all. Pinning a level or a decay is `tests/audio/`'s job and
+ * it does it better than a tool run by hand ever could; a second, weaker copy of it here would be
+ * a suite nobody trusts and everybody has to update. What this catches is the class of failure a
+ * number cannot: the mix being wrong in a way that is obvious the moment you hear it.
+ *
+ * **Two scenes measure, and the exception has a shape.** 05 and 06 characterise the detonation,
+ * because the things worth saying about a boom are *relations between sounds in one run* and the
+ * suite cannot construct one: it renders a voice at a gain it chose, and a relation needs a
+ * simulation to throw twice at two distances it picked itself, with the arm that threw them still
+ * in the file. So 05 asks whether the two booms stand in the ratio their metres demand, whether
+ * the boom towers over the tick that launched it, and whether it decays like mass where that tick
+ * decays like a click; 06 asks whether four booms over four floors arrive at one level. None of
+ * those is a number the suite owns, and none survives a listener — a human is very good at "that
+ * was loud" and hopeless at "that was 7 dB". Only two absolute pins appear anywhere (05's shares
+ * below 120 Hz and above 2 kHz) and both are looser than `DETONATION` in
+ * `tests/support/audioSpec.ts`, on purpose: this is the same sound through the whole mixer and a
+ * 16-bit encode rather than alone at unit gain, and a tool that pinned it tighter than the suite
+ * would be the second, weaker copy this paragraph exists to refuse.
  *
  * **It is the shipped audio path, with one substitution.** The scenes mount the real
  * `AudioSystem` on the real `SoundBus` of a real `GameSim`, and the events are the ones the
@@ -40,6 +53,8 @@
  * every judgement about the voices is a judgement about the voices *plus* a tone that ducks under
  * them. Hearing them without it is the only way to tell "this material is indistinct" from "the
  * readout is masking it", and telling those two apart is the whole reason a person is listening.
+ * The measuring scenes run either way and always measure the Halo-free take — for a machine the
+ * tone is not a masker, it is an addend, and it is a large one.
  *
  * Exits non-zero if any scene fails a guard.
  */
@@ -86,6 +101,29 @@ const { MATERIAL_NAMES } = await load('/src/paint/materials.ts');
 const { canOccupy } = await load('/src/core/collision.ts');
 const { humPitch } = await load('/src/paint/halo.ts');
 const { SPHERE_RADIUS } = await load('/src/game/spheres.ts');
+/*
+ * The phonometric vocabulary, borrowed from the suite rather than rewritten here.
+ *
+ * `SAMPLE_RATE` above is deliberately *not* imported from test support, and this deliberately is,
+ * which looks like two minds until you ask what each one is. 48 kHz is a choice, and two files
+ * that make the same choice for the same reason should each own it, so that changing one does not
+ * silently drag the other. A decibel is not a choice. If this tool computed a band share its own
+ * way, the repo would hold two numbers for one fact about one sound, and the day they disagreed
+ * nobody could say which was the sound and which was the arithmetic. `audioMetrics.ts` was
+ * written to be read from anywhere — nothing in it knows what a game or a test is, and its own
+ * header names a decoded file as one of the things it measures.
+ */
+const metrics = await load('/tests/support/audioMetrics.ts');
+/*
+ * What counts as "the attack", and where the near field ends — both read from the shipped code
+ * rather than repeated here. The first is the window §3.9 normalizes over, so a scene that
+ * measured a different one would be describing a sound the synthesis never agreed to make. The
+ * second is the clamp in `gainFor`: inside it level stops following distance, and a scene that
+ * argued about the distance law without knowing where the law stops applying would be right by
+ * luck, until somebody moved a throw a metre closer.
+ */
+const { ATTACK_WINDOW_SEC } = await load('/src/audio/voices.ts');
+const { NEAR_FIELD_M } = await load('/src/audio/director.ts');
 
 // ---------------------------------------------------------------------------
 //  writing a wav
@@ -429,15 +467,13 @@ async function renderScene(scene, withHum) {
   const buffer = await target.startRendering();
   const heard = log.filter((e) => e.audible).length;
   /*
-   * Whatever this scene wants to say about its own staging, asked of the simulation after the
-   * fact. Still not a phonometric assertion: these check that the body went where the scene put
-   * it and stood on what the scene meant it to stand on. A scene that quietly staged the wrong
-   * thing renders perfectly and sounds plausible, which is exactly the failure a person playing
-   * the file is least likely to catch.
+   * `staged` and the simulation itself ride out with the render, because a scene's own guards are
+   * asked *after* the run and from the run loop rather than from here — a scene that measures its
+   * sound is handed a second render as well (see `measured`), and this function renders one.
    */
-  const staging = scene.after ? scene.after({ staged, sim: game.sim, log }) : [];
   const result = {
-    staging,
+    staged,
+    sim: game.sim,
     buffer,
     log,
     heard,
@@ -650,6 +686,10 @@ function buildScenes(world, body) {
     file: '05-throw.wav',
     title: 'the arm: a tap, a charge held to the click, and the silence after each',
     seconds: 8,
+    // Guards about a sound rather than about the staging, so a Halo-free render to measure them
+    // against. See the run loop for why that is necessary, and what the hum does to these
+    // particular numbers if you skip it.
+    measured: true,
     listenFor: [
       'One whole turn of the verb, twice, in the order a player performs it. First a tap: the arm',
       'starts with a dry tick at your own shoulder that carries 2.5 m and no further, and a sphere',
@@ -666,6 +706,12 @@ function buildScenes(world, body) {
       'The two booms are the same voice at two distances and nothing else: the boom is the',
       "sphere's own detonation, not the floor's (§3.3), so what changes between them is carry",
       'over distance and your sense of where the room is. 06 is that claim, controlled.',
+      'And the judgement the guards below cannot make for you, which is the whole point of §14:',
+      'is that a charge going off, or a weapon? It has to land as *pressure* — weight arriving,',
+      'a room-sized thump you feel the size of, decaying over a second like something that moved',
+      'air. If it ever reads as a crack, a snap or a hit — a sharp front, a bright edge, an',
+      'impact against a surface — then the loudest thing a player owns has started sounding like',
+      'a way to hurt the spider, and every player will start aiming at it instead of past it.',
     ],
     cues: [
       // A tap, level, straight down the spawn lane. `SPHERE_THROW_MIN` and no charge worth the
@@ -682,10 +728,40 @@ function buildScenes(world, body) {
       // went quiet again afterwards, and that holding longer buys nothing but noise already made.
       [4.7, release('throw')],
     ],
-    after: ({ sim, log }) => {
+    after: ({ sim, log, voices }) => {
       const winds = log.filter((e) => e.cls === 'throw-windup').map((e) => e.t);
       const booms = log.filter((e) => e.cls === 'sphere-boom');
       const after = booms.length === 0 ? [] : log.filter((e) => e.t > booms[0].t && e.t < 3.3);
+      /*
+       * The measuring apparatus, on the Halo-free render.
+       *
+       * A quarter-second rather than the attack window for the two level questions. The body of
+       * the boom is filtered noise, and one 85 ms slice of one slot of the noise bank sits up to
+       * a decibel off the class's own mean; a quarter-second holds the whole front and body and
+       * averages more of the realisation. It does not remove the difference — both booms are the
+       * same envelope over *different* slots, so what is left is a fixed per-pair offset that
+       * every window length reports identically (0.36 dB here, at 0.085 s and at 0.5 s alike).
+       * The tolerance covers that rather than pretending it away.
+       */
+      const LEVEL_WINDOW = 0.25;
+      const LEVEL_TOL_DB = 1.5;
+      /** How far into the decay the "is this a click" question is asked, and the line it draws. */
+      const DECAY_AT = 0.3;
+      const DECAY_LINE_DB = 30;
+      // The mixdown, not channel 0: spatialization is M2 and the two channels are identical
+      // today, but the day a `PannerNode` lands, a level read off one channel is a level plus a
+      // pan, and every claim below would quietly become a claim about where the sphere went.
+      const db = (t, win) => metrics.rmsDb(voices, undefined, t, t + win);
+      /** A 100 ms window `offset` into a sound, in dB relative to that sound's own attack. */
+      const rel = (t, offset) => db(t + offset, 0.1) - db(t, ATTACK_WINDOW_SEC);
+      /** The first `n` of those, as a printable line — the decay a reader can see the shape of. */
+      const shape = (t, n) =>
+        Array.from({ length: n }, (_, i) => rel(t, i * 0.1).toFixed(1)).join(' ');
+      /** The share of a sound's attack energy inside a band, 0–1. */
+      const share = (t, lo, hi) => metrics.bandShare(voices, t, t + ATTACK_WINDOW_SEC, lo, hi);
+      const tick = winds[0] ?? null;
+      const [near, far] = booms;
+      const two = booms.length === 2 && tick !== null;
       return [
         /*
          * The check that matters most in this scene, and the reason it is written down rather
@@ -728,6 +804,110 @@ function buildScenes(world, body) {
               ? `${(3.3 - (booms[0]?.t ?? 0)).toFixed(2)} s of empty room after the first boom`
               : `${after.length} event(s) after it: ${after.map((e) => e.cls).join(', ')}`,
         },
+        /*
+         * ---- and here the scene stops counting sounds and starts measuring one. ----
+         *
+         * What the three guards below have in common, and the reason they are not a second copy
+         * of `tests/audio/boomVoice.test.ts`: each is a *difference between two sounds in this
+         * one render*. The suite can build a detonation and pin it to a tenth of a decibel, but
+         * it has no simulation, so it cannot throw twice from one arm at two distances it did
+         * not choose and then ask whether the pair came out in the ratio the metres demand. That
+         * relation, and the one between the boom and the tick that launched it, is where the
+         * interesting facts about a detonation actually live.
+         *
+         * All three read the Halo-free render (`measured`, above). They are also all written to
+         * fall over cleanly on a scene that threw nothing: `two` is false, the guard fails, and
+         * the detail says which half of the scene went missing rather than reporting a decibel
+         * measured off silence.
+         */
+        {
+          /*
+           * §3.3 arriving at the ear. The boom is the sphere's own voice (no material, fixed
+           * 32 m carry), so the *only* thing that differs between these two is where the sphere
+           * was when it went off: `gainFor` is carry over distance, the carries are identical,
+           * and the prediction is the plain ratio of the metres. Both throws land well outside
+           * `NEAR_FIELD_M`, which is checked rather than assumed — inside that clamp level stops
+           * following distance at all and this guard would be passing for the wrong reason.
+           *
+           * Note what it is blind to, so nobody reads more into it than it says: a `gainFor`
+           * that ignored `hearingRadius` entirely would scale both booms the same way and sail
+           * through. The guard after this one is the one that would notice.
+           */
+          label: 'the two booms are one voice at two distances',
+          ok:
+            two &&
+            Math.min(near.d, far.d) > NEAR_FIELD_M &&
+            Math.abs(
+              db(near.t, LEVEL_WINDOW) - db(far.t, LEVEL_WINDOW) -
+                20 * Math.log10(far.d / near.d),
+            ) <= LEVEL_TOL_DB,
+          detail: !two
+            ? 'the scene did not produce two booms and a wind-up'
+            : `${(db(near.t, LEVEL_WINDOW) - db(far.t, LEVEL_WINDOW)).toFixed(2)} dB apart, ` +
+              `${(20 * Math.log10(far.d / near.d)).toFixed(2)} dB from ` +
+              `${near.d.toFixed(2)} → ${far.d.toFixed(2)} m`,
+        },
+        {
+          /*
+           * The carry column reached the mixer. A wind-up carries 2.5 m and a boom 32, and the
+           * whole of §3.3's right-hand side is worth nothing if the number never becomes a level
+           * — so the loudest deliberate act in the game has to tower over the arm that performed
+           * it, in the same file, seconds apart, at distances the scene can print.
+           *
+           * An ordering and deliberately not a law. The two are different voice kinds, and their
+           * builders are not levelled against each other: at unit gain the two *pings* alone sit
+           * 6.6 dB apart, so asserting the exact 14.5 dB their carries and distances predict
+           * would be asserting that `boomVoice` and `pingVoice` were built to a shared loudness
+           * nothing in the mixer promises. The floor is set below the gap that measures (12.6 dB)
+           * by more than any plausible retune of either voice, and above nothing at all.
+           */
+          label: 'and the boom towers over the arm that threw it',
+          ok: two && db(near.t, LEVEL_WINDOW) - db(tick, LEVEL_WINDOW) >= 8,
+          detail: !two
+            ? 'no wind-up to compare against'
+            : `boom ${db(near.t, LEVEL_WINDOW).toFixed(2)} dBFS over ${near.d.toFixed(2)} m, ` +
+              `wind-up ${db(tick, LEVEL_WINDOW).toFixed(2)} dBFS at the shoulder — ` +
+              `${(db(near.t, LEVEL_WINDOW) - db(tick, LEVEL_WINDOW)).toFixed(2)} dB`,
+        },
+        {
+          /*
+           * §14, measured: loud is not lethal. A detonation that hurt would announce it the two
+           * ways a synthesised one can — a crack on top, and a click instead of a decay — and
+           * this is both of those asked at once, with the wind-up standing in as the file's own
+           * example of each. The tick is bright where the boom is not (3 % of its attack energy
+           * below 120 Hz against the boom's 53 %) and it is *gone* where the boom is still going
+           * (37 dB down at 300 ms against the boom's 22), so one line at 30 dB separates them.
+           *
+           * The two absolute pins here are the loose ends of `DETONATION` in `audioSpec.ts` on
+           * purpose: this is the same sound through the whole mixer and a 16-bit encode rather
+           * than alone at unit gain, and a tool that pinned it tighter than the suite would be
+           * the second, weaker copy the file header refuses to become.
+           */
+          label: 'and it is a charge going off, not a weapon: weight underneath, no crack on top',
+          ok:
+            two &&
+            booms.every((b) => share(b.t, 0, 120) > 0.4) &&
+            booms.every((b) => share(b.t, 2000, 24000) < 1e-4) &&
+            share(tick, 0, 120) < 0.1 &&
+            booms.every((b) => rel(b.t, DECAY_AT) > -DECAY_LINE_DB) &&
+            rel(tick, DECAY_AT) < -DECAY_LINE_DB &&
+            // Monotone for a second: a detonation dies away, and anything that comes back up is
+            // something that survived its own contact — the negative the whole scene is built on.
+            booms.every((b) =>
+              [1, 2, 3, 4, 5, 6, 7, 8, 9].every(
+                (i) => rel(b.t, i * 0.1) < rel(b.t, (i - 1) * 0.1) + 0.5,
+              ),
+            ),
+          detail: !two
+            ? 'nothing to measure'
+            : `below 120 Hz: booms ${booms.map((b) => share(b.t, 0, 120).toFixed(2)).join('/')} ` +
+              `vs tick ${share(tick, 0, 120).toFixed(2)}; above 2 kHz ` +
+              `${booms.map((b) => share(b.t, 2000, 24000).toExponential(1)).join('/')}; ` +
+              // Four windows for the tick and six for the boom, because the fifth window after
+              // the tick is the boom: this scene throws 0.49 s after the arm starts, and a
+              // printed decay that walked into the next sound would look like a rebound.
+              `decay/100 ms ${shape(near.t, 6)} vs tick ${shape(tick, 4)}`,
+        },
       ];
     },
   });
@@ -754,6 +934,9 @@ function buildScenes(world, body) {
     file: '06-boom-materials.wav',
     title: `the same boom over ${lobs.map((m) => m.name).join(' → ')}`,
     seconds: (lobs[lobs.length - 1]?.at ?? 0) + 2.6,
+    // Measured, for one guard: the negative result this scene exists for is a statement about
+    // four *levels*, and through the Halo it would be a statement about four levels plus a tone.
+    measured: true,
     note:
       missing.length > 0
         ? `no surface in this room to throw at for: ${missing.join(', ')}`
@@ -784,8 +967,12 @@ function buildScenes(world, body) {
       [m.at + 0.45, hold('throw')],
       [m.at + 0.55, release('throw')],
     ]),
-    after: ({ log }) => {
+    after: ({ log, voices }) => {
       const booms = log.filter((e) => e.cls === 'sphere-boom');
+      /** The quarter-second the level is read over — 05's window, for 05's reason. */
+      const LEVEL_WINDOW = 0.25;
+      const levels = booms.map((b) => metrics.rmsDb(voices, undefined, b.t, b.t + LEVEL_WINDOW));
+      const spread = levels.length === 0 ? Infinity : Math.max(...levels) - Math.min(...levels);
       /** Did this boom happen over the footprint of the surface its segment staged? */
       const over = (b, surface) => {
         const box = surface.box;
@@ -839,6 +1026,30 @@ function buildScenes(world, body) {
             `${booms.length} boom(s), carrying ${carries.join(' / ')} m, ` +
             `material ${[...new Set(booms.map((b) => String(b.mat)))].join('/')}`,
         },
+        {
+          /*
+           * The same claim asked of the render instead of the log, because they can fail apart.
+           * The guard above proves the *event* named no material; this one proves nothing
+           * downstream of it invented one. A boom that reached `materialVoiceFor` on its way to
+           * the mixer would carry §3.9's multipliers into a class the table gives no column, and
+           * these four levels would spread across the whole band — metal's ×1.5 is +3.5 dB and
+           * dust's ×0.6 is −4.4, so steel and dust alone would stand 8 dB apart.
+           *
+           * What is left when nothing leaks is the noise bank: each boom draws a different slot,
+           * and one 0.25 s window of one slot sits a few tenths off the class's mean. That is the
+           * 0.9 dB these four measure, it is unordered with respect to the materials, and it is
+           * the only reason this is a tolerance rather than an equality. It cannot be tightened
+           * to zero by any means available here — two booms are bit-identical only if they draw
+           * the same slot, and the sequence counter guarantees they never do.
+           */
+          label: 'and they arrive at one level, four times',
+          ok: booms.length === lobs.length && spread < 2,
+          detail:
+            levels.length === 0
+              ? 'no booms to measure'
+              : levels.map((v, i) => `${lobs[i]?.name ?? '?'} ${v.toFixed(2)}`).join(', ') +
+                ` dBFS — ${spread.toFixed(2)} dB apart`,
+        },
       ];
     },
   });
@@ -878,6 +1089,26 @@ for (const scene of scenes) {
   const { data, clamped } = encodeWav(r.buffer);
   await writeFile(join(outDir, scene.file), data);
   const s = survey(r.buffer);
+  /*
+   * The measurement render: the same scene again with §3.8's readout off, for the scenes whose
+   * guards are about a level rather than about the staging.
+   *
+   * Not an optimisation and not a purity gesture — the hum makes the numbers wrong, and by a lot.
+   * It sits level with a walk-step's attack and ducks under events by an amount that depends on
+   * what it is ducking under, so a window taken through it is the sound plus an unknown fraction
+   * of a 55 Hz tone. Measured on 05: the two booms are 7.05 dB apart in the Halo-free render
+   * against a distance law that says 7.41, and 0.68 dB apart through the hum. The decay is worse
+   * — the same boom's envelope *rises* 6 dB over its first half-second through the hum, because
+   * what the window is following is the tone coming back up out of its duck.
+   *
+   * Safe because the scene is deterministic: same seed, same rate, same cues, and the readout is
+   * a mixer voice that no part of the simulation can hear. The two renders are the same events by
+   * construction, and the guard below checks it rather than trusting it.
+   */
+  const measure = scene.measured && withHum ? await renderScene(scene, false) : r;
+  const staging = scene.after
+    ? scene.after({ staged: r.staged, sim: r.sim, log: r.log, voices: measure.buffer })
+    : [];
 
   console.log(
     `\n[listen] ${scene.file} — ${scene.title} (${scene.seconds.toFixed(1)} s)` +
@@ -932,7 +1163,26 @@ for (const scene of scenes) {
     nearest <= 0.15,
     `peak at ${s.peakAt.toFixed(2)}s, nearest event ${nearest === Infinity ? 'none' : `${nearest.toFixed(3)}s away`}`,
   );
-  for (const c of r.staging) check(`${scene.file}: ${c.label}`, c.ok, c.detail);
+  if (measure !== r) {
+    /*
+     * The substitution, checked rather than assumed. Everything the scene goes on to say about a
+     * level is said about a render the listener never hears, and the only thing that makes that
+     * legitimate is the two renders being the same run. Same count, same classes, same instants,
+     * same metres: if the Halo ever grew a way to reach the simulation, this is the line that
+     * notices, and every number underneath it would otherwise be about a different throw.
+     */
+    const key = (e) => `${e.cls}@${e.t.toFixed(4)}/${e.d.toFixed(4)}`;
+    const same =
+      measure.log.length === r.log.length && measure.log.every((e, i) => key(e) === key(r.log[i]));
+    check(
+      `${scene.file}: the measured render is the same scene`,
+      same,
+      same
+        ? `${r.log.length} event(s), identical in both renders`
+        : `${r.log.length} event(s) with the Halo on, ${measure.log.length} with it off`,
+    );
+  }
+  for (const c of staging) check(`${scene.file}: ${c.label}`, c.ok, c.detail);
   const trip = roundTripError(r.buffer, data);
   check(
     `${scene.file}: the file is the render`,

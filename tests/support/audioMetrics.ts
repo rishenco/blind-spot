@@ -418,6 +418,56 @@ export function centroidHz(buffer: AudioBufferLike, fromSec = 0, toSec = Infinit
   return den === 0 ? NaN : num / den;
 }
 
+/**
+ * Fraction of a region's spectral energy that falls inside a frequency band, 0–1.
+ *
+ * **Measures:** where a sound's weight sits, as a share rather than as a place. `centroidHz`
+ * answers "where is the middle", which a single stray band can drag a long way; this answers "how
+ * much is up there", which is the question a claim like "this is not a crack" is actually made of.
+ * The two are complements and the detonation needs both — `DETONATION` in `audioSpec.ts` pins the
+ * share above 2 kHz *and* the share below 250 Hz, because a voice can be neither bright nor
+ * weighty and no single number says so.
+ *
+ * Energy, not magnitude: bins are squared before summing, so the answer is a power ratio and
+ * −20 dB of content reads as 1 % rather than as 10 %. Bin 0 is excluded for `centroidHz`'s
+ * reason — each frame's mean is removed before the transform, so bin 0 carries the residue of
+ * that subtraction and nothing else.
+ *
+ * Bins are assigned by their centre frequency, so a band edge landing inside a bin puts the whole
+ * bin on one side. At 48 kHz with a 4096-point frame that is 11.7 Hz of ambiguity: irrelevant at
+ * the 250 Hz and 2 kHz edges this is used at, and not something to lean on for a narrow band.
+ *
+ * Returns 0 for a silent region — a share of nothing is nothing — and throws, like `centroidHz`,
+ * when the region is too short to resolve a spectrum.
+ */
+export function bandShare(
+  buffer: AudioBufferLike,
+  fromSec: number,
+  toSec: number,
+  loHz: number,
+  hiHz: number,
+): number {
+  const [start, end] = range(buffer, fromSec, toSec);
+  const samples = region(buffer, undefined, start, end);
+  const spectrum = magnitudeSpectrum(samples, buffer.sampleRate);
+  if (spectrum === null) {
+    throw new Error(
+      `bandShare: region [${fromSec}, ${toSec}) is ${samples.length} samples; ` +
+        `at least ${MIN_FRAME} are needed to resolve a spectrum`,
+    );
+  }
+  const { mags, binHz } = spectrum;
+  let inBand = 0;
+  let total = 0;
+  for (let k = 1; k < mags.length; k++) {
+    const power = mags[k]! * mags[k]!;
+    total += power;
+    const hz = k * binHz;
+    if (hz >= loHz && hz < hiHz) inBand += power;
+  }
+  return total === 0 ? 0 : inBand / total;
+}
+
 // ---------------------------------------------------------------------------
 // pitch
 
