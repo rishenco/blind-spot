@@ -33,6 +33,8 @@ import type { SoundBus } from '../events/bus';
 import {
   ARCHETYPES,
   MATERIALS,
+  colliderBounds,
+  colliderPrims,
   sampleShape,
   shapeEdges,
   shapeSpan,
@@ -41,6 +43,9 @@ import {
 } from './shapes';
 
 export type Rapier = typeof RAPIER;
+
+/** Reused so setting a body still does not allocate a vector a thousand times a second. */
+const ZERO = { x: 0, y: 0, z: 0 };
 
 /** Loaded once, cached: the wasm is inlined in the compat build, so this is pure decode cost. */
 let rapierModule: Rapier | null = null;
@@ -69,8 +74,14 @@ export interface PropTunables {
   /**
    * How much of a body's own weight a contact has to exceed before it counts as an impact.
    * A prop standing on the floor pushes back with mg for ever, and mg for a barrel is several
-   * hundred newtons — far above any absolute threshold — so the hall used to hum with a
-   * permanent fog of "impacts" from things that were doing nothing at all.
+   * hundred newtons, so support has to be subtracted before what is left can be called a bang.
+   *
+   * This used to be set high, as a blunt way of drowning out a hall full of bodies that never
+   * settled. It no longer has that job — an untouched hall now has nothing awake in it at all,
+   * and a sleeping body raises no contact events whatsoever — so it is back to being what it
+   * should be: the line between "held up" and "hit", and nothing more. Measured both ways: the
+   * idle hall stays at exactly zero events at any setting of this, while real collisions get
+   * noticeably more of a voice.
    */
   weightSlack: number;
   /**
@@ -79,6 +90,30 @@ export interface PropTunables {
    * so the speed is remembered one tick back.
    */
   impactSpeed: number;
+  /**
+   * Speed, m/s, below which a body counts as at rest — applied both to how fast it is going and
+   * to how fast its own surface is moving under it from spin.
+   *
+   * The second half matters more than the first. A bottle or a pipe lying on its side *rolls*,
+   * at four centimetres a second, for ever: Rapier models no rolling friction, and a cylinder on
+   * a plane has nothing else to stop it. That, and not stack jitter, is what most of the
+   * never-sleeping bodies turned out to be — an idle hall of 1100 props had 25 of them quietly
+   * touring the floor, waking neighbours as they went.
+   *
+   * Ten centimetres a second is below anything a player can perceive in the dark, and it is what
+   * real junk on real concrete does anyway.
+   */
+  stillSpeed: number;
+  /**
+   * Seconds a body has to stay under that before stiction takes hold.
+   *
+   * Short, because it only has to outlast a transient: one tick of gravity already puts a
+   * genuinely falling body far above the threshold, so nothing is frozen in mid-air.
+   */
+  stillTime: number;
+  /** Air drag on every prop, per second. The concept's "трение с воздухом": nothing rolls for ever. */
+  linearDamping: number;
+  angularDamping: number;
   /**
    * How many props the hall gets. The concept wants a *lot* of junk, and the ceiling on that is
    * not physics — Rapier sleeps everything that is not moving — but the lidar mask: every prop
@@ -95,8 +130,12 @@ export function defaultPropTunables(): PropTunables {
     forcePerMetre: 26,
     maxLoudness: 34,
     perBodyGap: 0.055,
-    weightSlack: 1.5,
+    weightSlack: 0.5,
     impactSpeed: 0.22,
+    stillSpeed: 0.1,
+    stillTime: 0.15,
+    linearDamping: 0.45,
+    angularDamping: 1.1,
     cap: 1100,
   };
 }
@@ -109,6 +148,8 @@ export interface PropStats {
   impacts: number;
   /** Props caught falling out of the world and put back where the layout meant them to be. */
   rescued: number;
+  /** Ticks on which stiction took a body's residual crawl away. Debug: how load-bearing it is. */
+  stuck: number;
   stepMs: number;
   points: number;
 }
@@ -138,6 +179,12 @@ export class PropWorld {
   private readonly lastSound: Float32Array;
   /** Speed on the previous tick, and the body's own weight in newtons — the two impact gates. */
   private readonly prevSpeed: Float32Array;
+  /** Seconds each body has been below the rest threshold. Reset by any real motion. */
+  private readonly stillFor: Float32Array;
+  /** Horizontal half-extent of each body, metres — the lever arm that turns spin into rolling. */
+  private readonly rollRadius: Float32Array;
+  /** How many times a body has fallen out of the world. Three strikes and it is furniture. */
+  private readonly rescues: Uint8Array;
   private readonly weight: Float32Array;
   /** Where each prop was laid out, so one that falls out of the world can be put back. */
   private readonly spawn: Float32Array;
@@ -146,7 +193,7 @@ export class PropWorld {
   private rifle: RAPIER.RigidBody | null = null;
   private accumulator = 0;
   private time = 0;
-  private stats: PropStats = { bodies: 0, awake: 0, asleep: 0, impacts: 0, rescued: 0, stepMs: 0, points: 0 };
+  private stats: PropStats = { bodies: 0, awake: 0, asleep: 0, impacts: 0, rescued: 0, stuck: 0, stepMs: 0, points: 0 };
   private readonly vec: RAPIER.Vector3;
 
   constructor(
@@ -205,6 +252,9 @@ export class PropWorld {
     this.settleAt = new Float32Array(this.count);
     this.lastSound = new Float32Array(this.count);
     this.prevSpeed = new Float32Array(this.count);
+    this.stillFor = new Float32Array(this.count);
+    this.rollRadius = new Float32Array(this.count);
+    this.rescues = new Uint8Array(this.count);
     this.weight = new Float32Array(this.count);
     this.spawn = new Float32Array(this.count * 3);
     this.spawnRot = new Float32Array(this.count * 4);
@@ -227,23 +277,22 @@ export class PropWorld {
         R.RigidBodyDesc.dynamic()
           .setTranslation(s.x, s.y, s.z)
           .setRotation(s.rot)
-          // Enough damping that a bottle knocked over rolls a metre and stops, instead of
+          // Air drag. Enough that a bottle knocked over rolls a metre and stops, instead of
           // rolling for the rest of the session: an awake body is solver time, mask expiry and
           // an ear-catching event, all for a bottle nobody is looking at.
-          .setLinearDamping(0.22)
-          .setAngularDamping(0.85),
+          .setLinearDamping(tunables.linearDamping)
+          .setAngularDamping(tunables.angularDamping),
       );
-      for (const part of a.parts) {
+      for (const prim of colliderPrims(a.parts)) {
         let desc: RAPIER.ColliderDesc;
-        if (part.kind === 'box') {
-          desc = R.ColliderDesc.cuboid(part.hx, part.hy, part.hz).setTranslation(part.cx, part.cy, part.cz);
-        } else if (part.kind === 'ball') {
-          desc = R.ColliderDesc.ball(part.r).setTranslation(0, part.cy, 0);
+        if (prim.kind === 'box') {
+          desc = R.ColliderDesc.cuboid(prim.hx, prim.hy, prim.hz);
+        } else if (prim.kind === 'ball') {
+          desc = R.ColliderDesc.ball(prim.r);
         } else {
-          const r = ((part.r1 ?? part.r0) + part.r0) / 2;
-          const hh = Math.max(0.004, (part.y1 - part.y0) / 2);
-          desc = R.ColliderDesc.cylinder(hh, Math.max(0.004, r)).setTranslation(0, (part.y0 + part.y1) / 2, 0);
+          desc = R.ColliderDesc.cylinder(prim.hh, prim.r);
         }
+        desc.setTranslation(prim.cx, prim.cy, prim.cz);
         this.world.createCollider(
           desc
             .setDensity(mat.density)
@@ -257,6 +306,9 @@ export class PropWorld {
       this.bodies.push(body);
       // Weight in newtons, cached once: the contact that merely holds this thing up is not sound.
       this.weight[i] = body.mass() * 9.81;
+      const cb = colliderBounds(a.parts);
+      // Mean half-extent: the lever arm that turns a body's spin into speed at its own surface.
+      this.rollRadius[i] = ((cb[3]! - cb[0]!) + (cb[4]! - cb[1]!) + (cb[5]! - cb[2]!)) / 6;
       for (let c = 0; c < body.numColliders(); c++) {
         this.byCollider.set(body.collider(c).handle, i);
       }
@@ -357,6 +409,8 @@ export class PropWorld {
    * under six centimetres a second is not motion, whatever the solver still has to say about it.
    */
   private rememberSpeeds(): void {
+    const t = this.tunables;
+    const h = 1 / t.hz;
     for (let i = 0; i < this.count; i++) {
       const b = this.bodies[i]!;
       /*
@@ -368,6 +422,10 @@ export class PropWorld {
        * invisible and free, and anything that touches it later wakes it normally.
        */
       if (b.translation().y < -0.4) {
+        /*
+         * placeholder
+         */
+        this.rescues[i]! = Math.min(255, this.rescues[i]! + 1);
         this.vec.x = this.spawn[i * 3]!;
         this.vec.y = this.spawn[i * 3 + 1]!;
         this.vec.z = this.spawn[i * 3 + 2]!;
@@ -385,15 +443,52 @@ export class PropWorld {
         b.setAngvel({ x: 0, y: 0, z: 0 }, false);
         b.sleep();
         this.prevSpeed[i] = 0;
+        this.stillFor[i] = 0;
         this.stats.rescued++;
         continue;
       }
       if (b.isSleeping()) {
         this.prevSpeed[i] = 0;
+        this.stillFor[i] = 0;
         continue;
       }
       const v = b.linvel();
-      this.prevSpeed[i] = Math.hypot(v.x, v.y, v.z);
+      const w = b.angvel();
+      const speed = Math.hypot(v.x, v.y, v.z);
+      this.prevSpeed[i] = speed;
+      /*
+       * Stiction — the reason an untouched hall is now actually silent.
+       *
+       * Two things kept a hundred and fifty bodies awake for ever. Junk leaning on junk trades
+       * millimetres between its members and never satisfies Rapier's own sleep test; and a
+       * bottle or a pipe lying on its side *rolls*, at a few centimetres a second, for the rest
+       * of the session, because a cylinder on a plane has no rolling friction and Rapier does
+       * not model any. Both are below anything a player could see. Both are live contacts, and
+       * a live contact can cross the loudness threshold — which is where "something keeps
+       * clattering in the distance in an empty hall" came from.
+       *
+       * The obvious fix, calling `sleep()` on such a body, is a trap and was measured to be one:
+       * a sleeping body is infinite mass to the neighbour still leaning on it, so the contact
+       * force spikes on the very next step — more sound events, not fewer, and enough positional
+       * correction to fire props through the floor. Rescues went from 13 to 81.
+       *
+       * So instead of overruling the engine, the body is simply given the static friction that
+       * real junk on a real concrete floor has: below the threshold, its velocity is taken away
+       * rather than damped. Rapier then sees a body that is not moving and sleeps it itself —
+       * as a whole contact island, at its own pace, with no impulse anywhere.
+       */
+      const roll = Math.hypot(w.x, w.y, w.z) * this.rollRadius[i]!;
+      if (speed < t.stillSpeed && roll < t.stillSpeed) {
+        this.stillFor[i]! += h;
+        if (this.stillFor[i]! >= t.stillTime) {
+          b.setLinvel(ZERO, false);
+          b.setAngvel(ZERO, false);
+          this.prevSpeed[i] = 0;
+          this.stats.stuck++;
+        }
+      } else {
+        this.stillFor[i] = 0;
+      }
     }
   }
 
@@ -403,7 +498,19 @@ export class PropWorld {
     this.queue.drainContactForceEvents((e) => {
       const force = e.totalForceMagnitude();
       if (force < t.quietForce) return;
-      const i = this.byCollider.get(e.collider1()) ?? this.byCollider.get(e.collider2());
+      /*
+       * Both sides of the contact, not just whichever Rapier happened to list first. The gates
+       * below ask "was this body moving a tick ago", so attributing a barrel landing on a
+       * standing can to the *can* silently threw the impact away — and which of the two ends up
+       * as `collider1` is an implementation detail of the broad phase. The louder story is the
+       * one that was moving, so that is the body the event is filed under.
+       */
+      const a = this.byCollider.get(e.collider1());
+      const b = this.byCollider.get(e.collider2());
+      let i: number | undefined;
+      if (a === undefined) i = b;
+      else if (b === undefined) i = a;
+      else i = this.prevSpeed[a]! >= this.prevSpeed[b]! ? a : b;
       if (i === undefined) return;
       /*
        * Two gates, and both of them exist because of one frame: with an absolute force threshold
@@ -466,26 +573,47 @@ export class PropWorld {
   }
 
   /**
-   * Force the whole pile to rest *now*, and pretend it always was.
+   * Run the world blind until it stops moving, then declare that its resting state.
    *
-   * The layout drops things a few millimetres above their support, so the first tenth of a second
-   * of the world is a rain of small settling impacts. Nobody should hear that and no keyframe
-   * should catch it, so startup steps the world blind and then calls this: every body is put to
-   * sleep and its `settleAt` is rewound to zero, which is what makes a scan of untouched clutter
-   * permanent rather than a three-second ghost.
+   * The layout seats every prop a clean five millimetres above its support, so the first fraction
+   * of a second of the world is a rain of small settling taps. Nobody should hear that and no
+   * keyframe should catch it, so this steps the simulation with the event queue discarded until
+   * the last body has fallen asleep — usually well under a second of simulated time — and then
+   * pins the result: every body still, asleep, `settleAt` rewound to zero, and the impact counter
+   * back at nought. That last part is what makes a scan of untouched clutter permanent rather
+   * than a three-second ghost.
+   *
+   * The budget is a guard, not a target: if the hall has not gone quiet in `maxSeconds` of
+   * simulated time something is wrong with the layout, and it is better to know that from the
+   * stats than to hang the loading screen.
    */
-  settle(): void {
+  settle(maxSeconds = 6): void {
+    const steps = Math.round(maxSeconds * this.tunables.hz);
+    for (let n = 0; n < steps; n++) {
+      this.rememberSpeeds();
+      this.world.step(this.queue);
+      // Sound born before the world exists is not sound.
+      this.queue.clear();
+      let awake = 0;
+      for (let i = 0; i < this.count; i++) if (!this.bodies[i]!.isSleeping()) awake++;
+      if (awake === 0) break;
+    }
     for (let i = 0; i < this.count; i++) {
       const b = this.bodies[i]!;
-      b.setLinvel({ x: 0, y: 0, z: 0 }, false);
-      b.setAngvel({ x: 0, y: 0, z: 0 }, false);
+      b.setLinvel(ZERO, false);
+      b.setAngvel(ZERO, false);
       b.sleep();
       this.moving[i] = 0;
       this.settleAt[i] = 0;
       this.lastSound[i] = 0;
+      this.stillFor[i] = 0;
+      this.rescues[i] = 0;
     }
+    this.accumulator = 0;
     this.readBack();
     this.stats.impacts = 0;
+    this.stats.stuck = 0;
+    this.stats.rescued = 0;
     this.queue.clear();
   }
 
@@ -523,6 +651,51 @@ interface Spot {
   y: number;
   z: number;
   rot: { x: number; y: number; z: number; w: number };
+  /** Footprint radius of the seated body — what a thing stacked on top has to fit inside. */
+  radius: number;
+}
+
+/**
+ * Gap left between a prop's lowest collider point and whatever holds it up, metres.
+ *
+ * Small enough that the drop is inaudible and invisible, big enough that no prop in the hall
+ * begins its life inside another one. Zero would be better still, but floating-point placement
+ * against a solver that treats a millimetre of overlap as a shove is not worth the risk.
+ */
+const CLEARANCE = 0.005;
+
+/** Worst-case footprint radius of a shape over every yaw — what it needs to sit on something. */
+function seatRadius(b: readonly number[]): number {
+  return Math.max(
+    Math.hypot(b[0]!, b[2]!), Math.hypot(b[3]!, b[2]!),
+    Math.hypot(b[0]!, b[5]!), Math.hypot(b[3]!, b[5]!),
+  );
+}
+
+/** The AABB `b`, rotated by quaternion `q` and re-bounded. Corners, because eight is cheap. */
+function rotateBounds(
+  b: readonly number[],
+  q: { x: number; y: number; z: number; w: number },
+): [number, number, number, number, number, number] {
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let c = 0; c < 8; c++) {
+    const x = c & 1 ? b[3]! : b[0]!;
+    const y = c & 2 ? b[4]! : b[1]!;
+    const z = c & 4 ? b[5]! : b[2]!;
+    // q * v * q^-1, written out.
+    const ix = q.w * x + q.y * z - q.z * y;
+    const iy = q.w * y + q.z * x - q.x * z;
+    const iz = q.w * z + q.x * y - q.y * x;
+    const iw = -q.x * x - q.y * y - q.z * z;
+    const rx = ix * q.w + iw * -q.x + iy * -q.z - iz * -q.y;
+    const ry = iy * q.w + iw * -q.y + iz * -q.x - ix * -q.z;
+    const rz = iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x;
+    minX = Math.min(minX, rx); maxX = Math.max(maxX, rx);
+    minY = Math.min(minY, ry); maxY = Math.max(maxY, ry);
+    minZ = Math.min(minZ, rz); maxZ = Math.max(maxZ, rz);
+  }
+  return [minX, minY, minZ, maxX, maxY, maxZ];
 }
 
 /** Axis-angle quaternion, because that is the only rotation placement ever needs. */
@@ -552,6 +725,10 @@ function layout(statics: StaticWorld, seed: number, cap: number): Spot[] {
   const small = tall.filter((e) => e.span <= 0.42).map(({ a, i }) => ({ a, i }));
   const large = tall.filter((e) => e.span > 0.42).map(({ a, i }) => ({ a, i }));
 
+  // Collider bounds, once per archetype. Placement used to re-sample a whole point cloud for
+  // every candidate spot — thousands of times, for a measurement it then got wrong.
+  const bounds = ARCHETYPES.map((a) => colliderBounds(a.parts));
+
   const weighted = (list: typeof small, r: Rng): number => {
     let total = 0;
     for (const e of list) total += e.a.weight;
@@ -568,17 +745,28 @@ function layout(statics: StaticWorld, seed: number, cap: number): Spot[] {
     for (const [tx, tz, tr] of taken) {
       if (Math.hypot(x - tx, z - tz) < r + tr) return false;
     }
+    return clearOfStatics(x, y, z, r, h);
+  };
+
+  /** Does a cylinder of radius `r` and height `h` standing at (x,y,z) miss every static box? */
+  const clearOfStatics = (x: number, y: number, z: number, r: number, h: number): boolean => {
     statics.query(x - r - 0.6, y - 0.1, z - r - 0.6, x + r + 0.6, y + h, z + r + 0.6, scratch);
     return canOccupy(scratch, x, y + 0.02, z, r, h);
   };
 
   /**
-   * Seats one prop and reports the height of its top, or null if it did not fit.
+   * Seats one prop and reports the world height of the top of its colliders, or null if it did
+   * not fit.
    *
-   * `stacked` skips the clearance test: a thing put *on* another thing is deliberately sharing
-   * that column, and the physics settles the last centimetre anyway. Without it a pile is a
-   * lawn — every member elbowed out to arm's length from every other, which is what "300 props"
-   * looked like before and is not what a warehouse floor looks like.
+   * Everything here is measured off the *colliders*, rotated the way the body will actually be
+   * rotated, and seated a clean 5 mm above its support. That sounds fussy; it is the whole fix.
+   * Seating a prop by its point cloud put it centimetres into the floor, and a thousand bodies
+   * that start the session interpenetrating are a thousand bodies the solver is still pushing
+   * apart a minute later — which is what the hall's phantom background clatter was.
+   *
+   * `stacked` skips the elbow-room test against neighbours: a thing put *on* another thing is
+   * deliberately sharing that column. It does not skip the test against static geometry, because
+   * a stack growing up through a shelf is exactly the kind of buried contact that never settles.
    */
   const place = (
     archIdx: number,
@@ -589,21 +777,26 @@ function layout(statics: StaticWorld, seed: number, cap: number): Spot[] {
     stacked = false,
   ): number | null => {
     const a = ARCHETYPES[archIdx]!;
-    const cloud = sampleShape(a.parts, Math.max(a.pitch, 0.08), 1);
-    const half = Math.max(cloud.bounds[3]! - cloud.bounds[0]!, cloud.bounds[5]! - cloud.bounds[2]!) / 2;
-    const height = cloud.bounds[4]! - cloud.bounds[1]!;
+    const b = bounds[archIdx]!;
     const lying = a.rest === 'lie' || (a.rest === 'any' && r() < 0.28);
-    const radius = lying ? Math.max(half, height / 2) : half;
-    if (!stacked && !free(x, y, z, radius + 0.06, lying ? half * 2 : height)) return null;
-    if (!stacked) taken.push([x, z, radius + 0.05]);
     const yaw = r() * Math.PI * 2;
     const rot = lying
       ? mul(quat(0, 1, 0, yaw), quat(1, 0, 0, Math.PI / 2))
       : quat(0, 1, 0, yaw);
-    // Seated so the lowest point of the shape is a hair above the support.
-    const lift = lying ? half + 0.01 : -cloud.bounds[1]! + 0.01;
-    out.push({ arch: archIdx, x, y: y + lift, z, rot });
-    return y + 0.02 + (lying ? half * 2 : height);
+    const rb = rotateBounds(b, rot);
+    const radius = Math.max(rb[3]! - rb[0]!, rb[5]! - rb[2]!) / 2;
+    const height = rb[4]! - rb[1]!;
+    if (stacked) {
+      if (!clearOfStatics(x, y, z, radius, height)) return null;
+    } else {
+      if (!free(x, y, z, radius + 0.06, height)) return null;
+      taken.push([x, z, radius + 0.05]);
+    }
+    // Seated so the lowest point of the *colliders* is CLEARANCE above the support: touching,
+    // not overlapping. The settle pass at startup closes the gap in silence.
+    const lift = -rb[1]! + CLEARANCE;
+    out.push({ arch: archIdx, x, y: y + lift, z, rot, radius });
+    return y + lift + rb[4]!;
   };
 
   // --- piles -------------------------------------------------------------
@@ -627,13 +820,30 @@ function layout(statics: StaticWorld, seed: number, cap: number): Spot[] {
       let level = place(weighted(list, rng), x, y, z, rng);
       if (level === null) continue;
       placed++;
+      let support = out[out.length - 1]!;
       // Stack on top of what just landed, small things only — a barrel on a bottle is a joke,
       // a can on a barrel is a warehouse.
+      //
+      // The upper storey has to *fit* on the one below, and its offset has to stay inside the
+      // support's footprint. A can balanced half off the edge of a bottle is not a stack, it is
+      // a body that spends the session slowly toppling, waking its neighbours and chirping.
       let storeys = rangeInt(rng, 0, 3);
       while (storeys-- > 0 && level !== null && level < 2.4 && out.length < cap) {
-        const next = place(weighted(small, rng), x + range(rng, -0.06, 0.06), level, z + range(rng, -0.06, 0.06), rng, true);
+        const archIdx = weighted(small, rng);
+        const seat = seatRadius(bounds[archIdx]!);
+        if (seat > support.radius * 0.95) break;
+        const slack = Math.max(0, support.radius - seat) * 0.6;
+        const next = place(
+          archIdx,
+          support.x + range(rng, -slack, slack),
+          level,
+          support.z + range(rng, -slack, slack),
+          rng,
+          true,
+        );
         if (next === null) break;
         level = next;
+        support = out[out.length - 1]!;
         placed++;
       }
     }
