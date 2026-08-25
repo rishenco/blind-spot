@@ -264,7 +264,25 @@ export class SoundBus {
   static landingRadius(impactSpeed: number): number {
     const t =
       (impactSpeed - LANDING_MIN_IMPACT) / (LANDING_FULL_IMPACT - LANDING_MIN_IMPACT);
-    const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
+    /*
+     * NaN is answered with the floor of the band, not passed through.
+     *
+     * `t < 0 ? 0 : t > 1 ? 1 : t` is a correct clamp for every number and a trapdoor for the
+     * one value that is not one: NaN fails both comparisons and falls out the bottom unchanged,
+     * so a NaN impact speed used to produce a NaN paint radius. That does not throw. It paints
+     * nothing — every distance comparison downstream is false — and a silent landing is a law-2
+     * lie: the event was emitted, the sound was made, and the world drew none of it.
+     *
+     * So a landing whose speed we cannot measure is still a landing, and it rings out at the
+     * quietest thing a landing can be. The order matters: the NaN test has to come first, or the
+     * comparisons it is protecting against have already run.
+     *
+     * ±Infinity needs no guard and deliberately does not get one — they are not degenerate, they
+     * are the ends of the band. -Infinity clamps to 0 and +Infinity to 1, which is the loudest
+     * possible landing answering with the loudest radius in §3.3. Every input now lands inside
+     * the 8-14 m band.
+     */
+    const clamped = Number.isNaN(t) || t < 0 ? 0 : t > 1 ? 1 : t;
     const base = SOUND_CLASSES.landing.paintRadius;
     return base + (LANDING_MAX_RADIUS - base) * clamped;
   }

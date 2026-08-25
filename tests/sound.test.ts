@@ -76,10 +76,29 @@ describe('SoundBus.landingRadius', () => {
     expect(SoundBus.landingRadius(Infinity)).toBe(LANDING_MAX_RADIUS);
   });
 
-  it('SUSPECTED BUG: NaN passes straight through the clamp', () => {
-    // `t < 0 ? 0 : t > 1 ? 1 : t` leaves NaN as NaN, so a NaN impact speed produces a NaN paint
-    // radius, which would silently poison the reveal rather than failing loudly.
-    expect(SoundBus.landingRadius(NaN)).toBeNaN();
+  it('answers the band floor for NaN instead of poisoning the radius', () => {
+    // NaN fails `t < 0` and `t > 1` alike, so an ordinary clamp hands it straight back. A NaN
+    // radius does not throw — it paints nothing, because every distance test downstream is
+    // false — and a landing that was emitted, heard and not drawn is a law-2 lie. The floor of
+    // the band is the honest answer: we could not measure the impact, so it rings out as the
+    // quietest thing a landing can be.
+    expect(SoundBus.landingRadius(NaN)).toBe(base);
+  });
+
+  it('never leaves the 8-14 m band, whatever it is handed', () => {
+    // The claim the NaN case is one instance of. If a future edit reintroduces a path out of
+    // the band — a new early return, a different clamp — this names it without needing to have
+    // predicted which input finds it.
+    const nasty = [
+      NaN, Infinity, -Infinity, 0, -0, 5, 14, 1e308, -1e308, 1e-308,
+      Number.MIN_VALUE, Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER,
+    ];
+    for (const v of nasty) {
+      const r = SoundBus.landingRadius(v);
+      expect(Number.isFinite(r), `landingRadius(${v}) = ${r}`).toBe(true);
+      expect(r).toBeGreaterThanOrEqual(base);
+      expect(r).toBeLessThanOrEqual(LANDING_MAX_RADIUS);
+    }
   });
 });
 

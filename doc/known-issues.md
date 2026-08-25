@@ -33,16 +33,6 @@ test, which is also what `raycastWorld` is being built to serve.
 
 ## Live bugs
 
-### `SoundBus.landingRadius(NaN)` returns NaN
-
-`src/paint/soundEvents.ts` (~line 264). The clamp is `t < 0 ? 0 : t > 1 ? 1 : t`, and NaN
-fails both comparisons, so it falls through as NaN and poisons the radius. Every other
-degenerate input is handled. Low severity — no caller can currently produce a NaN impact
-speed — but it is one arithmetic slip upstream away from painting a NaN-radius event, and a
-NaN radius will not throw, it will just silently paint nothing.
-
-**Owner: M1**, with the landing-edge fix, since they touch the same path.
-
 ### `aabbFromFootprint` leaves `mat` and `shell` undefined
 
 `src/core/collision.ts` (~line 79). Its sibling `aabbFromBounds` defaults them to `0` and
