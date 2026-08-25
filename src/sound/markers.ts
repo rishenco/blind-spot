@@ -108,19 +108,33 @@ const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number; kind: numb
  *  - `echo`   Dark Echo's rule. One bone-white blob for everything in the world, red only for
  *             something alive that is not you. Loudness is size and brightness alone — no hue
  *             ramp at all, so a crowd of marks never turns into a colour salad.
- *  - `pulse`  the instrument reading. A soft shell races out of the epicentre over the first
- *             third of a second and dissolves, leaving a low core behind. The blob is an event
- *             with a beginning, which is the strongest possible statement that it is not a lamp.
+ *  - `pulse`  the instrument reading, and the only style in the set with a **hollow** middle.
+ *             Three thin shells leave the epicentre, cross the mark in about half a second and
+ *             dissolve at the rim, leaving a hard pinpoint and nothing else. Light fills; a
+ *             reading rings — so a hollow expanding circle is the strongest available statement
+ *             that this is not a lamp. Round one of it (one fat shell over a filled core) is
+ *             kept as `pulse-v1` for the before/after.
  *  - `bruise` cold-side thermal: deep indigo body, magenta mid, hot pink core. Occupies the one
  *             part of the colour wheel neither the lidar (cyan) nor the muzzle flash (amber) uses,
  *             so it can never be mistaken for either.
  *  - `ember`  round one: white-hot pinpoint core, amber body, deep-red rim.
  *  - `iso`    round one: a thermal camera's isotherms, violet → red → orange → yellow → white.
  *  - `coal`   round one: nearly all epicentre, almost no aura.
- *  - `bloom`  round one: no core at all, one soft monochrome haze. The human's own pick while
- *             tuning by hand, and therefore the default until he says otherwise.
+ *  - `bloom`  round one: no core at all, one soft monochrome haze. It was the default only
+ *             because it was what he happened to be tuning with by hand.
+ *  - `pulse-v1` the first answer to `pulse`, kept purely as the control for the before/after.
+ *
+ * `echo` is the default: it is the one he picked out of the seven by eye.
  */
-export type MarkerStyle = 'ember' | 'iso' | 'coal' | 'bloom' | 'echo' | 'pulse' | 'bruise';
+export type MarkerStyle =
+  | 'ember'
+  | 'iso'
+  | 'coal'
+  | 'bloom'
+  | 'echo'
+  | 'pulse'
+  | 'bruise'
+  | 'pulse-v1';
 
 export const MARKER_STYLES: readonly MarkerStyle[] = [
   'echo',
@@ -130,6 +144,7 @@ export const MARKER_STYLES: readonly MarkerStyle[] = [
   'iso',
   'coal',
   'bloom',
+  'pulse-v1',
 ];
 
 const STYLE_INDEX: Record<MarkerStyle, number> = {
@@ -140,6 +155,7 @@ const STYLE_INDEX: Record<MarkerStyle, number> = {
   echo: 4,
   pulse: 5,
   bruise: 6,
+  'pulse-v1': 7,
 };
 
 export interface MarkerTunables {
@@ -222,7 +238,12 @@ export function defaultMarkerTunables(): MarkerTunables {
     spread: 110,
     softness: 1.5,
     brightness: 1,
-    style: 'bloom',
+    /*
+     * `echo` is the human's pick out of the seven, made in the live game: "ехо визуал мне нрав".
+     * It is therefore the baseline now, and `bloom` — which was the baseline only because it was
+     * what he happened to be tuning with by hand — is one of the alternatives again.
+     */
+    style: 'echo',
   };
 }
 
@@ -358,6 +379,18 @@ const FRAGMENT = /* glsl */ `
     return c;
   }
 
+  /**
+   * One expanding shell of "pulse". "t" is where its front is, in units of the mark's radius;
+   * it is invisible before it launches and gone once it has crossed the rim. The front smears
+   * as it travels, the way a real reading loses confidence with distance.
+   */
+  float shell(float rr, float t, float gain) {
+    if (t <= 0.0 || t > 1.25) return 0.0;
+    float w = 0.055 + 0.075 * t;
+    float ring = exp(-pow((rr - t) / w, 2.0));
+    return ring * gain * (1.0 - smoothstep(0.80, 1.20, t));
+  }
+
   void main() {
     vec2 d = vQuad * 0.5;
     float ang = atan(d.y, d.x);
@@ -375,8 +408,14 @@ const FRAGMENT = /* glsl */ `
      */
     float rr = length(d) * 2.0;
     float r = rr / warp;
-    if (r > 1.0) discard;
-    float k = (1.0 - r) * smoothstep(1.0, 0.82, rr);
+    /*
+     * The cut is on the *unwarped* radius, so every style has the whole disc of the quad to draw
+     * in and "pulse" can run a shell all the way out to the rim without the warp biting a lobe
+     * out of it. The blob styles are unaffected: their "k" is clamped at zero from r >= 1
+     * outwards, which is exactly where the discard used to be.
+     */
+    if (rr > 1.0) discard;
+    float k = max(0.0, 1.0 - r) * smoothstep(1.0, 0.82, rr);
 
     float a;
     vec3 c;
@@ -427,20 +466,55 @@ const FRAGMENT = /* glsl */ `
       c = mix(c * 0.72, c, core);
     } else if (uStyle < 5.5) {
       /*
-       * pulse — the mark as an instrument reading rather than a glow. A soft shell leaves the
-       * epicentre and reaches the edge of the mark in about a third of a second, then dies,
-       * leaving a low resting core. A light does not do this; only a *report of an event* does,
-       * which is exactly what the HUD is supposed to be drawing. It also gives a crowd of marks
-       * an order in time — the newest thing in the pile is the one still ringing.
+       * pulse — the mark as an instrument *reading*, and the one style in the set that is not a
+       * blob at all.
+       *
+       * Round one of this style was "a shell races out and leaves a core behind", and the human
+       * called it близко, но тюнить надо. Looking at it next to "echo", the reason it was only
+       * close is structural rather than a matter of numbers: the shell lived 0.34 s out of a
+       * seven-second mark, so for 95% of its life the thing on screen was a soft filled disc —
+       * i.e. a dimmer "echo". It is kept as "pulse-v1" for the before/after, and this is the
+       * finished one.
+       *
+       * What it is now: **hollow**. Three thin shells leave the epicentre 0.19 s apart, cross
+       * the mark in a little over half a second and dissolve at the rim; behind them nothing is
+       * left but a hard pinpoint at the exact point of the event. No style in this file has a
+       * hollow interior, so a pulse mark cannot be mistaken for any of the others at any age,
+       * and — the part that matters for law 2 — a hollow ring can never be read as something
+       * glowing: light fills, a reading rings.
+       *
+       * The shells are true circles while every blob style is a lopsided silhouette, which is
+       * the same argument from the other side: a device draws circles, matter does not.
        */
-      float t = clamp(vAge / 0.34, 0.0, 1.0);
-      float front = t;
-      float shell = exp(-pow((rr - front) / 0.30, 2.0)) * (1.0 - t) * smoothstep(1.05, 0.9, rr);
-      float core = pow(k, uSoftness * 1.4);
-      a = shell * 0.85 + core * (0.30 + 0.35 * vHeat);
-      vec3 warm = mix(vColor, vec3(1.0, 0.86, 0.70), 0.4);
-      c = mix(warm * 0.75, vec3(1.0, 0.95, 0.88), shell * 0.8);
-    } else {
+      /*
+       * The shells run on a *lightly* warped radius — a third of the lopsidedness the blob
+       * styles get. Perfectly concentric circles with a dot in the middle stop reading as a
+       * reading and start reading as a gunsight, which is the one association this game cannot
+       * afford; a few percent of wobble is enough to break it while the shape stays a circle.
+       */
+      float rw = rr / (1.0 + (warp - 1.0) * 0.34);
+      float travel = vAge / 0.56;
+      float shells =
+          shell(rw, travel, 1.00) +
+          shell(rw, travel - 0.34, 0.62) +
+          shell(rw, travel - 0.68, 0.38);
+      /*
+       * The residue. The layer is a decaying hit-map of the last few seconds, so a pulse mark
+       * still has to say "something happened *here*" long after it has stopped ringing — but as
+       * a pinpoint, not as an area, because an area is the thing that reads as illumination.
+       */
+      float pip = exp(-pow(rr / 0.085, 2.0)) * (0.24 + 0.48 * vHeat);
+      a = shells * (0.70 + 0.55 * vHeat) + pip;
+      /*
+       * Near-monochrome, faintly cold, and deliberately not on the source hue ramp: the whole
+       * point of the style is that it is an instrument's opinion, and an instrument does not
+       * change colour according to what it heard. The one distinction it keeps is "echo"'s:
+       * something alive that is not you comes back on the red side.
+       */
+      vec3 read = vec3(0.84, 0.94, 0.90);
+      vec3 alien = vec3(1.00, 0.52, 0.46);
+      c = mix(read, alien, step(1.5, vKind));
+    } else if (uStyle < 6.5) {
       /*
        * bruise — the cold side of the wheel. The muzzle flash is the only real light in this game
        * and it is amber; the lidar owns cyan. Anything warm the sound layer draws is competing
@@ -457,6 +531,18 @@ const FRAGMENT = /* glsl */ `
       a = body * 0.68 + core * 0.52 * vHeat;
       c = mix(deep, mid, smoothstep(0.0, 0.5, body));
       c = mix(c, hot, core * vHeat);
+    } else {
+      /*
+       * pulse-v1 — round one of "pulse", kept only so the before/after can be looked at in the
+       * live game as well as in the keyframes. One fat shell over the first third of a second
+       * and a filled core for the remaining six and a half.
+       */
+      float t1 = clamp(vAge / 0.34, 0.0, 1.0);
+      float shellOld = exp(-pow((rr - t1) / 0.30, 2.0)) * (1.0 - t1) * smoothstep(1.05, 0.9, rr);
+      float coreOld = pow(k, uSoftness * 1.4);
+      a = shellOld * 0.85 + coreOld * (0.30 + 0.35 * vHeat);
+      vec3 warm = mix(vColor, vec3(1.0, 0.86, 0.70), 0.4);
+      c = mix(warm * 0.75, vec3(1.0, 0.95, 0.88), shellOld * 0.8);
     }
 
     /*

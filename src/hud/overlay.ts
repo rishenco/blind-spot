@@ -2,33 +2,77 @@
  * The player's own HUD layer: the direction he was bitten from, the noise compass, and the
  * frame going dark when he is hurt.
  *
- * A separate 2D canvas over the WebGL one, and not DOM: everything here is arcs on a ring, and
- * three canvas strokes are cheaper and far easier to keep honest than a dozen transformed
- * divs. It costs nothing when there is nothing to draw — the frame is cleared once and the
- * function returns before it touches a path.
+ * A separate 2D canvas over the WebGL one, and not DOM: everything here is soft fields and a
+ * handful of strokes, and a couple of canvas fills are cheaper and far easier to keep honest
+ * than a dozen transformed divs. It costs nothing when there is nothing to draw — the frame is
+ * cleared once and the function returns before it touches a path.
  *
- * **Where it sits, and why.** Both rings are centred on the reticle, at 42% and 74% of the
- * shorter half-axis. That is the empty middle of the screen: the debug panel lives in the top
- * left, the spider-state panel in the top right, the hint line along the bottom. This layer must
- * never become a third slab of text stacked on those two — on `out/spiders/03-rally-truth.png`
- * the existing two already overprint each other, and adding a third would make the frame
- * unreadable instead of merely crowded. So: no text (except the one word when you are down),
- * no boxes, no corners.
+ * ## Why this file was rewritten: what actually broke the immersion
+ *
+ * The M5 version drew one thing, one way: two mathematically exact rings centred on the
+ * reticle, at 42% and 74% of the half-axis, in saturated orange. The player's verdict was that
+ * it looked "стеклом поверх игры", and the reasons are nameable, not a matter of opacity:
+ *
+ *  1. **Perfect circles.** There is not one circle in this game. The hall is boxes, the lidar
+ *     is dots, the sound layer is lopsided blobs. A `ctx.arc` at a constant radius is the only
+ *     Euclidean object on screen and the eye finds it instantly and files it under "menu".
+ *  2. **Always there, always identical.** Same radius, same thickness, same hue, every time,
+ *     with no lag, no drift and no noise. A device that never errs is not a device; it is a
+ *     label. The lore in `concept.md` says the HUD is a *прибор* — so it is allowed to lag,
+ *     to quantise, to smear, to be attached to a physical piece of glass in front of a face.
+ *  3. **Pinned to the pixel grid.** When a bite knocks the head, the entire world lurches and
+ *     the HUD does not move by a pixel. That single mismatch is the whole "stuck on the
+ *     monitor" feeling, and it is free to fix.
+ *  4. **It owns the muzzle flash's hue.** Saturated amber-orange is the colour of the only real
+ *     light in the game. A HUD painted in it is competing with illumination, and the brain
+ *     files warm+bright as "fire", i.e. as part of the world, i.e. as a lie.
+ *  5. **Vector-crisp.** Antialiased strokes with butt caps are the only hard-edged clean
+ *     geometry in a frame otherwise made of blur and speckle. It reads as a second renderer.
+ *
+ * So this file no longer has *a* look. It has four, switchable at runtime (GUI → player / hud →
+ * look, or `bs.vitals.hudStyle(name)`), the way the sound-marker styles were offered — because
+ * the last time a look was argued about, the human picked from seven and not from one polished
+ * guess. Each is a different theory of what the HUD *is*, not a different opacity:
+ *
+ *  - `visor`  it is a physical piece of glass in front of his face. Nothing is drawn as a
+ *             shape; heat and dirt bloom into the corner the event came from, off-centre and
+ *             lopsided, and the whole layer *lags* the head when he is hit — glass has mass.
+ *             No circle, no ring, no line anywhere in it.
+ *  - `sonar`  it is a device with a refresh rate. It is stale: readings step at 4 Hz, snapped
+ *             to 32 sectors and three brightness levels, so a bite appears a beat *after* it
+ *             lands. Thin, dim, colourless ticks. It reads as an instrument because it is
+ *             visibly worse than the truth.
+ *  - `bone`   there is no instrument. The only thing on screen is the dark closing in, and it
+ *             closes in harder from the side that hurt him, and it breathes with a pulse that
+ *             quickens as he bleeds out. Zero marks, zero lines, zero colour: the most literal
+ *             possible reading of law 1.
+ *  - `ring`   the M5 layer, kept verbatim so the other three can be judged against the thing
+ *             that was rejected rather than against memory.
  *
  * **Why nothing here is a red flash.** The default frame of this game is black; anything
  * full-screen and bright is instantly the loudest thing that has ever been on it, and it wipes
  * the lidar map, the marks and the muzzle flash out of the player's eye for half a second. So
- * the response to a bite goes the other way: the edge of the frame *closes down*. The only
- * saturated colour on screen is the wedge itself, and it is a wedge, not a wash.
+ * the response to a bite goes the other way in every style: the edge of the frame *closes
+ * down*. Nothing in this file brightens a pixel by more than a smear at the rim.
+ *
+ * Determinism: the only stochastic-looking things are `hash()` of an event id against the
+ * quantised clock, so a keyframe replays every flicker and every lobe to the pixel.
  */
 import type { PlayerVitals, DamageMark } from './vitals';
 
+/** The four theories. See the file header for what each one is arguing. */
+export type HudStyle = 'visor' | 'sonar' | 'bone' | 'ring';
+
+export const HUD_STYLES: readonly HudStyle[] = ['visor', 'sonar', 'bone', 'ring'];
+
 export interface HudLayerTunables {
-  /** Damage-wedge ring radius, as a fraction of half the shorter screen axis. */
+  /** Which look. Undecided on purpose — the human picks by eye, as with the marker styles. */
+  style: HudStyle;
+  /** Damage-wedge ring radius, as a fraction of half the shorter screen axis. `ring` only. */
   wedgeRadius: number;
-  /** Angular half-width of a wedge, degrees. */
+  /** Angular half-width of a wedge, degrees. `ring` only. */
   wedgeSpreadDeg: number;
-  /** Wedge thickness in CSS pixels at full strength. */
+  /** Wedge thickness in CSS pixels at full strength. `ring` only. */
   wedgeThickness: number;
   /** How dark the frame's edge goes at a fresh bite, 0..1. */
   stingDark: number;
@@ -36,16 +80,30 @@ export interface HudLayerTunables {
   lowDark: number;
   /** Overall opacity of everything on this layer. */
   brightness: number;
+  /**
+   * How far the layer swings when the head is knocked, in pixels per radian of flinch. The
+   * layer moves *against* the punch: the head goes, the heavy glass follows late. Zero pins it
+   * back to the pixel grid, which is exactly the thing that broke the immersion.
+   */
+  lagPx: number;
+  /** `sonar`: readings per second. Low on purpose — the staleness is the characterisation. */
+  refreshHz: number;
+  /** `sonar`: how many sectors a bearing is rounded to. */
+  sectors: number;
 }
 
 export function defaultHudLayerTunables(): HudLayerTunables {
   return {
+    style: 'visor',
     wedgeRadius: 0.42,
     wedgeSpreadDeg: 26,
     wedgeThickness: 7,
     stingDark: 0.62,
     lowDark: 0.34,
     brightness: 1,
+    lagPx: 620,
+    refreshHz: 4,
+    sectors: 32,
   };
 }
 
@@ -69,6 +127,29 @@ export interface CompassDraw {
 
 const DEG = Math.PI / 180;
 
+/** Everything one style needs for one frame, resolved once by `draw`. */
+interface Frame {
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
+  half: number;
+  marks: readonly DamageMark[];
+  notches: readonly CompassNotch[];
+  compass: CompassDraw;
+  /** 0..1 how far the edge has closed in, before any style-specific shaping. */
+  dark: number;
+  down: boolean;
+  degrade: number;
+  time: number;
+  yaw: number;
+  vitals: PlayerVitals;
+  /** Bearing of the newest live bite in screen space, or null. */
+  hurtFrom: number | null;
+  /** 0..1 freshness of that bite. */
+  hurtHot: number;
+}
+
 export class PlayerHudLayer {
   /** Master switch for the whole layer. */
   visible = true;
@@ -88,8 +169,8 @@ export class PlayerHudLayer {
     parent: HTMLElement = document.body,
   ) {
     this.canvas = document.createElement('canvas');
-    // z-index 9: under the debug HUD (10) so a panel is never obscured by a wedge, over the
-    // WebGL canvas so the ring is not eaten by the black clear.
+    // z-index 9: under the debug HUD (10) so a panel is never obscured by the layer, over the
+    // WebGL canvas so it is not eaten by the black clear.
     this.canvas.style.cssText =
       'position:fixed;inset:0;width:100%;height:100%;display:block;pointer-events:none;z-index:9';
     parent.append(this.canvas);
@@ -102,8 +183,8 @@ export class PlayerHudLayer {
   resize(): void {
     const w = Math.max(1, window.innerWidth);
     const h = Math.max(1, window.innerHeight);
-    // One device pixel per CSS pixel is plenty for a handful of soft arcs, and it keeps the
-    // per-frame clear off the list of things that could ever cost a millisecond.
+    // One device pixel per CSS pixel is plenty for soft fields, and it keeps the per-frame
+    // clear off the list of things that could ever cost a millisecond.
     this.dpr = 1;
     this.width = w;
     this.height = h;
@@ -118,8 +199,17 @@ export class PlayerHudLayer {
     this.canvas.style.display = on ? 'block' : 'none';
   }
 
+  setStyle(style: HudStyle): void {
+    this.tunables.style = style;
+    this.dirty = true;
+  }
+
+  get style(): HudStyle {
+    return this.tunables.style;
+  }
+
   /**
-   * One frame. `yaw` is the *render* camera's yaw, so the wedge tracks a head turn with no lag,
+   * One frame. `yaw` is the *render* camera's yaw, so a bearing tracks a head turn with no lag,
    * and `time` is the render clock, so a fade is smooth between simulation ticks.
    */
   draw(vitals: PlayerVitals, yaw: number, time: number, notches: readonly CompassNotch[], compass: CompassDraw): void {
@@ -146,59 +236,363 @@ export class PlayerHudLayer {
     ctx.clearRect(0, 0, w, h);
     this.dirty = true;
 
-    const cx = w * 0.5;
-    const cy = h * 0.5;
-    const half = Math.min(w, h) * 0.5;
+    const newest = marks.length > 0 ? marks[marks.length - 1]! : null;
+    const life = vitals.tunables.markLife;
+    const hot = newest === null ? 0 : Math.max(0, 1 - (time - newest.at) / life);
 
-    if (dark > 0.001 || down) this.drawEdge(cx, cy, w, h, down ? Math.max(dark, 0.86) : dark);
-    if (notches.length > 0) this.drawCompass(cx, cy, half, notches, compass, degrade, time);
-    for (const m of marks) this.drawWedge(cx, cy, half, m, vitals, yaw, t, time);
-    if (down) this.drawDown(cx, cy);
+    const f: Frame = {
+      cx: w * 0.5,
+      cy: h * 0.5,
+      w,
+      h,
+      half: Math.min(w, h) * 0.5,
+      marks,
+      notches,
+      compass,
+      dark: down ? Math.max(dark, 0.86) : dark,
+      down,
+      degrade,
+      time,
+      yaw,
+      vitals,
+      hurtFrom: newest === null ? null : screenAngle(newest.bearing, yaw),
+      hurtHot: hot * hot,
+    };
+
+    /*
+     * The lag. The head is knocked; the kit strapped to it arrives late and swings the other
+     * way. One `translate` + `rotate` for the whole layer, and it is the single cheapest thing
+     * in this file that stops it reading as a decal on the monitor. `ring` is deliberately
+     * excluded — it is the exhibit of what was wrong, and pinning it is half of what was wrong.
+     */
+    const punch = vitals.viewPunch;
+    const lag = t.style === 'ring' ? 0 : t.lagPx;
+    ctx.save();
+    if (lag !== 0 && (punch.yaw !== 0 || punch.pitch !== 0 || punch.roll !== 0)) {
+      ctx.translate(f.cx + punch.yaw * lag, f.cy - punch.pitch * lag);
+      ctx.rotate(-punch.roll * 0.55);
+      ctx.translate(-f.cx, -f.cy);
+    }
+
+    switch (t.style) {
+      case 'visor':
+        this.drawVisor(f);
+        break;
+      case 'sonar':
+        this.drawSonar(f);
+        break;
+      case 'bone':
+        this.drawBone(f);
+        break;
+      default:
+        this.drawRing(f);
+        break;
+    }
+    ctx.restore();
+    if (f.down) this.drawDown(f.cx, f.cy);
+  }
+
+  // =========================================================================
+  // visor — a physical piece of glass. No shapes, only stains.
+  // =========================================================================
+
+  /**
+   * Nothing in here is a figure. A bite is heat soaking into the glass off in the corner it
+   * came from; a noise is a faint smudge at the rim. Each stain is three overlapping lobes at
+   * seeded offsets that drift slowly, so no two are the same shape and none of them is round —
+   * which is the entire answer to "it looks like a menu".
+   *
+   * The vignette is pushed *away* from the bite, so the dark closes in from the side that hurt
+   * him. Direction is carried by the shape of the darkness as much as by the stain.
+   */
+  private drawVisor(f: Frame): void {
+    const t = this.tunables;
+    const b = t.brightness;
+
+    if (f.dark > 0.001) {
+      const push = f.hurtFrom === null ? 0 : 0.16 * f.hurtHot;
+      this.edge(
+        f,
+        f.dark,
+        f.hurtFrom === null ? 0 : Math.sin(f.hurtFrom) * push * f.half,
+        f.hurtFrom === null ? 0 : -Math.cos(f.hurtFrom) * push * f.half,
+        [22, 6, 5],
+      );
+    }
+
+    // Noise first, damage over it: a bite is the more urgent stain and must not be buried.
+    for (const n of f.notches) {
+      let s = n.strength * f.compass.brightness;
+      if (f.degrade > 0) {
+        const frame = Math.floor(f.time * 18);
+        if (hash(n.seq, frame) < f.degrade * 0.55) continue;
+        s *= 1 - f.degrade * 0.35 * hash(n.seq, frame + 7);
+      }
+      if (s <= 0.01) continue;
+      const [r, g, bl] = n.color;
+      // Desaturated hard: the muzzle flash owns saturated amber, and the compass borrowing it
+      // is one of the things that made the layer read as light rather than as a reading.
+      this.stain(f, n.angle, 0.86, f.half * 0.5, r * 0.75 + 60, g * 0.7 + 60, bl * 0.7 + 62, 0.075 * s * b, n.seq);
+    }
+
+    for (const m of f.marks) {
+      const age = Math.min(1, Math.max(0, (f.time - m.at) / f.vitals.tunables.markLife));
+      const fade = (1 - age) * (1 - age);
+      if (fade <= 0.004) continue;
+      const bite = Math.min(1.4, m.amount / Math.max(1, f.vitals.tunables.biteDamage));
+      const a = screenAngle(m.bearing, f.yaw);
+      // Two passes, both soft: a wide dirty bleed and a smaller hotter core, pushed further out
+      // so the pair reads as one lopsided smear rather than as two circles.
+      this.stain(f, a, 0.74, f.half * (0.95 + 0.25 * bite), 150, 44, 30, 0.3 * fade * b, m.seq);
+      this.stain(f, a, 0.9, f.half * (0.45 + 0.14 * bite), 255, 132, 96, 0.26 * fade * b, m.seq + 977);
+    }
   }
 
   /**
-   * The frame closing in. A radial gradient that is fully transparent across the middle two
-   * thirds and reaches `amount` at the corners — the visual of tunnel vision, and the only
-   * full-screen element on the layer. It never brightens a pixel.
+   * One stain: three seeded lobes around a point pushed `reach` of the way to the rim in
+   * direction `angle`. Filled through the bounding box of each lobe, never the whole screen, so
+   * twenty of them is still a few hundred thousand pixels and not twenty megapixels.
    */
-  private drawEdge(cx: number, cy: number, w: number, h: number, amount: number): void {
+  private stain(
+    f: Frame,
+    angle: number,
+    reach: number,
+    radius: number,
+    r: number,
+    g: number,
+    b: number,
+    alpha: number,
+    seed: number,
+  ): void {
+    if (alpha <= 0.002) return;
     const ctx = this.ctx;
-    const outer = Math.hypot(w, h) * 0.5;
+    // Reach is measured to the frame edge along the bearing, not on a circle: a stain on the
+    // glass sits at the edge of the *frame*, and a 16:9 frame is not round.
+    const sx = Math.sin(angle);
+    const sy = -Math.cos(angle);
+    const span = Math.min(
+      Math.abs(sx) < 1e-3 ? 1e9 : (f.w * 0.5) / Math.abs(sx),
+      Math.abs(sy) < 1e-3 ? 1e9 : (f.h * 0.5) / Math.abs(sy),
+    );
+    const px = f.cx + sx * span * reach;
+    const py = f.cy + sy * span * reach;
+
+    for (let i = 0; i < 3; i++) {
+      const h1 = hash(seed, i * 31 + 1);
+      const h2 = hash(seed, i * 31 + 2);
+      // A slow drift, so the stain is never quite still. Two decimal Hz: felt, not seen.
+      const drift = Math.sin(f.time * (0.23 + 0.11 * h1) + h2 * 6.283) * radius * 0.09;
+      const ox = px + (h1 - 0.5) * radius * 0.85 + drift;
+      const oy = py + (h2 - 0.5) * radius * 0.85 - drift * 0.6;
+      const rad = radius * (0.55 + 0.6 * hash(seed, i * 31 + 3));
+      const a = alpha * (i === 0 ? 1 : 0.6);
+      const grd = ctx.createRadialGradient(ox, oy, 0, ox, oy, rad);
+      grd.addColorStop(0, `rgba(${r | 0},${g | 0},${b | 0},${a.toFixed(4)})`);
+      grd.addColorStop(0.4, `rgba(${r | 0},${g | 0},${b | 0},${(a * 0.34).toFixed(4)})`);
+      grd.addColorStop(1, `rgba(${r | 0},${g | 0},${b | 0},0)`);
+      ctx.fillStyle = grd;
+      ctx.fillRect(ox - rad, oy - rad, rad * 2, rad * 2);
+    }
+  }
+
+  // =========================================================================
+  // sonar — a device with a refresh rate, and a bad one.
+  // =========================================================================
+
+  /**
+   * Everything here is computed from a *quantised* clock and a quantised bearing. The reading
+   * is therefore always a little stale and always a little wrong, which is the cheapest and
+   * most convincing way to say "this is a machine's opinion, not the world".
+   *
+   * It is also the dimmest and the thinnest of the four: single hue, three brightness steps,
+   * two-pixel ticks, and no ring drawn between them, so at rest the screen is empty.
+   */
+  private drawSonar(f: Frame): void {
+    const t = this.tunables;
+    const ctx = this.ctx;
+    const step = 1 / Math.max(0.5, t.refreshHz);
+    const qt = Math.floor(f.time / step) * step;
+    const sectors = Math.max(4, Math.round(t.sectors));
+    const snap = (a: number): number => (Math.round((a / (Math.PI * 2)) * sectors) / sectors) * Math.PI * 2;
+    // Three levels. A device with a bar readout does not have 256 of them.
+    const quant = (v: number): number => Math.min(1, Math.max(0, Math.ceil(v * 3) / 3));
+
+    if (f.dark > 0.001) this.edge(f, quant(f.dark) * 0.9, 0, 0, [10, 10, 12]);
+
+    ctx.save();
+    ctx.lineCap = 'butt';
+
+    // The noise readout: one tick per sector that had an event by the last refresh.
+    const rn = f.half * f.compass.radius;
+    for (const n of f.notches) {
+      const age = f.time - qt;
+      // Stale on purpose: a reading is drawn at the strength it had at the last refresh.
+      let s = quant(n.strength * f.compass.brightness * (1 - 0.25 * (age / step)));
+      if (f.degrade > 0) {
+        if (hash(n.seq, Math.floor(qt * t.refreshHz)) < f.degrade * 0.55) continue;
+        s = quant(s * (1 - f.degrade * 0.4));
+      }
+      if (s <= 0.01) continue;
+      const a = snap(n.angle);
+      // Colourless. The only hue in this style is the faint green cast of a phosphor readout,
+      // and it is nowhere near the amber the flash owns.
+      this.tick(f.cx, f.cy, rn, a, 7 + 5 * s, 2, `rgba(176,204,186,${(s * 0.5 * t.brightness).toFixed(3)})`);
+    }
+
+    // The damage readout: a stack of three ticks at the sector the bite came from, which is
+    // both coarser and later than the truth — you get the beat, not the bearing.
+    for (const m of f.marks) {
+      const age = Math.min(1, Math.max(0, (qt - m.at) / f.vitals.tunables.markLife));
+      if (age <= 0) continue; // not yet refreshed: the device has not noticed
+      const s = quant((1 - age) * (1 - age));
+      if (s <= 0.01) continue;
+      const a = snap(screenAngle(m.bearing, f.yaw));
+      const rd = f.half * 0.58;
+      // A stack of three, longest first: the closest a bar readout gets to saying "hard".
+      for (let i = 0; i < 3; i++) {
+        this.tick(f.cx, f.cy, rd + i * 8, a, 9 - i * 2, 2, `rgba(222,146,126,${(s * 0.8 * t.brightness).toFixed(3)})`);
+      }
+    }
+    ctx.restore();
+  }
+
+  /** One radial tick: a short segment pointing out along `angle`. No arcs anywhere. */
+  private tick(cx: number, cy: number, r: number, angle: number, len: number, width: number, style: string): void {
+    const ctx = this.ctx;
+    const sx = Math.sin(angle);
+    const sy = -Math.cos(angle);
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(cx + sx * r, cy + sy * r);
+    ctx.lineTo(cx + sx * (r + len), cy + sy * (r + len));
+    ctx.stroke();
+  }
+
+  // =========================================================================
+  // bone — there is no instrument.
+  // =========================================================================
+
+  /**
+   * The extreme reading of law 1: nothing is drawn at all, ever. The only element is the dark,
+   * and it carries all three messages by shape alone —
+   *
+   *  - it closes in *harder from the side the bite came from*, so direction survives;
+   *  - it leans in from the bearing of a noise, so the compass survives as a pressure rather
+   *    than a marker;
+   *  - it breathes, at a rate that climbs from 1.0 Hz healthy to 1.9 Hz at the floor, so how
+   *    badly he is hurt is felt rather than read.
+   *
+   * A hit is the one moment it is allowed to be strong. At rest, with full health and nothing
+   * making noise, this style renders literally zero pixels.
+   */
+  private drawBone(f: Frame): void {
+    const v = f.vitals;
+    // The heartbeat: a sharp systolic kick and a long slack, not a sine — a sine reads as a
+    // fade, and this has to read as a body.
+    const hz = 1.0 + 0.9 * (1 - v.healthFrac);
+    const phase = (f.time * hz) % 1;
+    const beat = Math.exp(-phase * 7) * 0.55 + Math.exp(-Math.max(0, phase - 0.28) * 9) * 0.3;
+    const pulseAmt = (0.12 + 0.5 * f.degrade) * beat;
+
+    const base = f.dark;
+    const amt = Math.min(0.95, base + pulseAmt * (base > 0.001 || f.marks.length > 0 ? 1 : 0));
+    const push = f.hurtFrom === null ? 0 : 0.3 * f.hurtHot;
+    if (amt > 0.001) {
+      this.edge(
+        f,
+        amt,
+        f.hurtFrom === null ? 0 : Math.sin(f.hurtFrom) * push * f.half,
+        f.hurtFrom === null ? 0 : -Math.cos(f.hurtFrom) * push * f.half,
+        // Pure black, no dried-blood tint: this style's whole claim is that it never adds a
+        // photon, and the keyframe pass checks it as a number against the layer-off frame.
+        [0, 0, 0],
+      );
+    }
+
+    // A noise leans the dark in from its bearing. It never brightens anything — the channel is
+    // told by *subtraction*, which is the one thing a black game has in unlimited supply.
+    for (const n of f.notches) {
+      let s = n.strength * f.compass.brightness;
+      if (f.degrade > 0) {
+        const frame = Math.floor(f.time * 18);
+        if (hash(n.seq, frame) < f.degrade * 0.55) continue;
+      }
+      if (s <= 0.02) continue;
+      s = Math.min(1, s);
+      this.lobe(f, n.angle, f.half * 0.95, 0.4 * s);
+    }
+  }
+
+  /** A soft wedge of extra darkness pressing in from `angle`. Bounded fill, never full-screen. */
+  private lobe(f: Frame, angle: number, radius: number, alpha: number): void {
+    const ctx = this.ctx;
+    const sx = Math.sin(angle);
+    const sy = -Math.cos(angle);
+    const span = Math.min(
+      Math.abs(sx) < 1e-3 ? 1e9 : (f.w * 0.5) / Math.abs(sx),
+      Math.abs(sy) < 1e-3 ? 1e9 : (f.h * 0.5) / Math.abs(sy),
+    );
+    const px = f.cx + sx * span * 1.05;
+    const py = f.cy + sy * span * 1.05;
+    const grd = ctx.createRadialGradient(px, py, 0, px, py, radius);
+    grd.addColorStop(0, `rgba(0,0,0,${alpha.toFixed(3)})`);
+    grd.addColorStop(0.5, `rgba(0,0,0,${(alpha * 0.42).toFixed(3)})`);
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grd;
+    ctx.fillRect(px - radius, py - radius, radius * 2, radius * 2);
+  }
+
+  // =========================================================================
+  // ring — the M5 layer, kept as the control.
+  // =========================================================================
+
+  private drawRing(f: Frame): void {
+    const t = this.tunables;
+    if (f.dark > 0.001) this.edge(f, f.dark, 0, 0, [26, 4, 4]);
+    if (f.notches.length > 0) this.drawCompassRing(f);
+    for (const m of f.marks) this.drawWedge(f, m, t);
+  }
+
+  /**
+   * The frame closing in. A radial gradient that is fully transparent across the middle and
+   * reaches `amount` at the corners — the visual of tunnel vision, and the only full-screen
+   * element on the layer. It never brightens a pixel. `ox/oy` offsets its centre, which is how
+   * `visor` and `bone` make the dark come in from a direction.
+   */
+  private edge(f: Frame, amount: number, ox: number, oy: number, mid: [number, number, number]): void {
+    const ctx = this.ctx;
+    const cx = f.cx + ox;
+    const cy = f.cy + oy;
+    const outer = Math.hypot(f.w, f.h) * 0.5;
     const g = ctx.createRadialGradient(cx, cy, outer * (0.34 - 0.1 * amount), cx, cy, outer);
     g.addColorStop(0, 'rgba(0,0,0,0)');
     // A hint of dried blood in the middle stop rather than a red screen: at full strength this
     // is about a 6% red lift on pixels that are already 60% black.
-    g.addColorStop(0.62, `rgba(26,4,4,${(amount * 0.5).toFixed(3)})`);
+    g.addColorStop(0.62, `rgba(${mid[0]},${mid[1]},${mid[2]},${(amount * 0.5).toFixed(3)})`);
     g.addColorStop(1, `rgba(0,0,0,${amount.toFixed(3)})`);
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillRect(0, 0, f.w, f.h);
   }
 
   /**
    * The bite wedge: a thick arc on the inner ring, at the world bearing of whatever bit you,
    * re-projected onto the screen every frame so it slides round as you turn to face it.
    */
-  private drawWedge(
-    cx: number,
-    cy: number,
-    half: number,
-    mark: DamageMark,
-    vitals: PlayerVitals,
-    yaw: number,
-    t: HudLayerTunables,
-    time: number,
-  ): void {
-    const life = vitals.tunables.markLife;
-    const age = Math.min(1, Math.max(0, (time - mark.at) / life));
+  private drawWedge(f: Frame, mark: DamageMark, t: HudLayerTunables): void {
+    const life = f.vitals.tunables.markLife;
+    const age = Math.min(1, Math.max(0, (f.time - mark.at) / life));
     // Fades fast at first and then lingers: you are told immediately, and reminded quietly.
     const fade = (1 - age) * (1 - age);
     if (fade <= 0.004) return;
 
-    const bite = Math.min(1.4, mark.amount / Math.max(1, vitals.tunables.biteDamage));
-    const angle = screenAngle(mark.bearing, yaw);
-    const r = half * t.wedgeRadius;
+    const bite = Math.min(1.4, mark.amount / Math.max(1, f.vitals.tunables.biteDamage));
+    const angle = screenAngle(mark.bearing, f.yaw);
+    const r = f.half * t.wedgeRadius;
     const spread = t.wedgeSpreadDeg * DEG * (0.75 + 0.35 * bite);
     const ctx = this.ctx;
+    const cx = f.cx;
+    const cy = f.cy;
 
     ctx.save();
     ctx.lineCap = 'butt';
@@ -210,8 +604,7 @@ export class PlayerHudLayer {
     ctx.strokeStyle = `rgba(255,138,96,${(0.85 * fade * t.brightness).toFixed(3)})`;
     ctx.lineWidth = t.wedgeThickness * (0.7 + 0.5 * bite);
     arc(ctx, cx, cy, r, angle, spread);
-    // A short spur pointing inward, at the exact bearing. The arc says "over there"; the spur
-    // says "exactly there", and together they survive being glanced at.
+    // A short spur pointing inward, at the exact bearing.
     ctx.lineWidth = 2;
     ctx.strokeStyle = `rgba(255,210,180,${(0.7 * fade * t.brightness).toFixed(3)})`;
     ctx.beginPath();
@@ -224,41 +617,30 @@ export class PlayerHudLayer {
   /**
    * The noise ring. Every notch is one event that happened out of frame; nothing is drawn for
    * the ring itself, so an empty ring is genuinely empty screen and law 1 holds.
-   *
-   * The low-health failure is here rather than in the model: a hurt player's set drops notches
-   * and stutters the ones it keeps. The dropout is `hash(seq, frame)`, a pure function of the
-   * event id and the simulation clock, so a keyframe replays it exactly.
    */
-  private drawCompass(
-    cx: number,
-    cy: number,
-    half: number,
-    notches: readonly CompassNotch[],
-    c: CompassDraw,
-    degrade: number,
-    time: number,
-  ): void {
+  private drawCompassRing(f: Frame): void {
     const ctx = this.ctx;
-    const r = half * c.radius;
+    const c = f.compass;
+    const r = f.half * c.radius;
     const spread = c.widthDeg * DEG;
-    const frame = Math.floor(time * 18);
+    const frame = Math.floor(f.time * 18);
     ctx.save();
     ctx.lineCap = 'butt';
-    for (const n of notches) {
+    for (const n of f.notches) {
       let s = n.strength * c.brightness;
-      if (degrade > 0) {
+      if (f.degrade > 0) {
         const noise = hash(n.seq, frame);
-        if (noise < degrade * 0.55) continue; // the set drops it entirely
-        s *= 1 - degrade * 0.35 * hash(n.seq, frame + 7);
+        if (noise < f.degrade * 0.55) continue; // the set drops it entirely
+        s *= 1 - f.degrade * 0.35 * hash(n.seq, frame + 7);
       }
       if (s <= 0.01) continue;
       const [cr, cg, cb] = n.color;
       ctx.strokeStyle = `rgba(${cr},${cg},${cb},${(s * 0.24).toFixed(3)})`;
       ctx.lineWidth = c.thickness * 3;
-      arc(ctx, cx, cy, r, n.angle, spread * 1.3);
+      arc(ctx, f.cx, f.cy, r, n.angle, spread * 1.3);
       ctx.strokeStyle = `rgba(${cr},${cg},${cb},${(s * 0.9).toFixed(3)})`;
       ctx.lineWidth = c.thickness;
-      arc(ctx, cx, cy, r, n.angle, spread);
+      arc(ctx, f.cx, f.cy, r, n.angle, spread);
     }
     ctx.restore();
   }

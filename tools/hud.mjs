@@ -124,6 +124,9 @@ await page.goto(url);
 await page.waitForFunction(() => window.bs !== undefined, null, { timeout: 30000 });
 await call('audio', false);
 await call('hud', false);
+// Read before anything is switched: the style the game boots with is itself a deliverable.
+const bootMarkerStyle = await call('markerStyle');
+const bootHudStyle = await page.evaluate(() => window.bs.vitals.hudStyles()[0]);
 await advance(3, 8);
 notes.push(
   'seed 20260824, fixed 120 Hz step, damage model: 100 hp, 14 hp a bite, 0.35 s of grace ' +
@@ -401,6 +404,189 @@ check(
   'a noise in frame is not duplicated on the ring',
   front.drawn === 0 && front.blips > 0,
   `${front.blips} live blip(s), ${front.drawn} drawn`,
+);
+
+// ===========================================================================
+// 6. The look of the HUD. The player's verdict on the M5 layer was that it
+//    "по визуалу ломает иммершн", so this section is not a demo of a feature —
+//    it is a menu. One identical tick, one identical bite, one identical noise
+//    behind him, through all four theories of what the HUD is. He picks.
+// ===========================================================================
+await call('vitals.reset');
+await call('vitals.health', 100);
+await call('pose', HOME.x, HOME.z, 90);
+await call('clear');
+await call('spiders.spawn', 0);
+await advance(0.6, 4);
+await playerCam(90, 0);
+await call('vitals.compass', true);
+// Something behind him to put on the compass, and something to the side, so every style has to
+// draw both of the things it draws.
+const NOISY = await propInArc(100, 175, 6, 15);
+if (NOISY !== null) await call('disturb', NOISY.x, NOISY.y + 0.2, NOISY.z, 2.6, 6);
+await call('vitals.biteFrom', -145);
+// A third of a second after the bite: long enough that `sonar` has had a refresh tick and the
+// flinch is still swinging, which is the moment all four looks differ most.
+await advance(0.33, 2);
+
+await call('vitals.layer', false);
+await redraw();
+const lookOff = await shot(
+  '10-look-none.png',
+  'the control for the four frames below: the same tick with the player layer switched off entirely. Whatever the next four frames ' +
+    'show, they show it against this',
+);
+await call('vitals.layer', true);
+
+const looks = {};
+for (const [name, file, note] of [
+  [
+    'visor',
+    '11-look-visor.png',
+    'visor — the HUD is a physical piece of glass in front of his face. There is not one shape in it: the bite is heat soaking into ' +
+      'the corner it came from, lopsided and off-centre, the noise behind him is a faint smudge at the rim, and the whole layer swings ' +
+      'against the flinch because glass has mass. The dark closes in harder from the side that hurt him, so the bearing survives ' +
+      'without a marker',
+  ],
+  [
+    'sonar',
+    '12-look-sonar.png',
+    'sonar — the HUD is a device with a bad refresh rate. Bearings are snapped to 32 sectors, brightness to three levels, and the ' +
+      'whole readout steps at 4 Hz, so a bite is reported a beat after it lands. Thin colourless ticks, no ring drawn between them. ' +
+      'It reads as an instrument precisely because it is visibly worse than the truth',
+  ],
+  [
+    'bone',
+    '13-look-bone.png',
+    'bone — there is no instrument at all. Nothing is drawn, ever: the only element is the dark, it closes in harder from the side he ' +
+      'was bitten from, it leans in from the bearing of a noise, and it breathes at a rate that climbs as he bleeds. The most literal ' +
+      'reading of law 1 in the set — at full health with a quiet hall it renders zero pixels',
+  ],
+  [
+    'ring',
+    '14-look-ring.png',
+    'ring — the M5 layer, unchanged, so the other three are judged against the thing that was rejected and not against memory. Two ' +
+      'mathematically exact circles centred on the reticle in the muzzle flash’s own hue, pinned to the pixel grid while the head ' +
+      'is knocked. Everything in this frame that reads as "interface stuck on top of the game" is on that list',
+  ],
+]) {
+  await call('vitals.hudStyle', name);
+  await redraw();
+  const img = await shot(file, note);
+  looks[name] = { lit: litFraction(img), mean: meanLuminance(img) };
+}
+check(
+  'all four looks draw the same event differently',
+  new Set(Object.values(looks).map((l) => l.lit.toFixed(4))).size === 4,
+  Object.entries(looks)
+    .map(([k, v]) => `${k} lit ${v.lit.toFixed(4)}`)
+    .join(', '),
+);
+check(
+  'and none of them is a bright screen',
+  Object.values(looks).every((l) => l.lit < 0.35),
+  Object.entries(looks)
+    .map(([k, v]) => `${k} ${v.lit.toFixed(4)}`)
+    .join(', '),
+);
+check(
+  'bone only ever subtracts light',
+  looks.bone.mean <= meanLuminance(lookOff) + 0.01,
+  `bone mean ${looks.bone.mean.toFixed(2)} against ${meanLuminance(lookOff).toFixed(2)} with the layer off`,
+);
+check('and the HUD look the game boots with is offered first', bootHudStyle === 'visor', `boots as ${bootHudStyle}`);
+notes.push(
+  'what broke the immersion in the M5 HUD, named rather than tuned: perfect circles (the only Euclidean object in a game made of ' +
+    'boxes, dots and blobs), a look that never changes and never lags, being pinned to the pixel grid while the head is knocked, and ' +
+    'owning the muzzle flash’s own hue. Frames 11-14 are four different answers, switchable in the GUI (player / hud → look).',
+);
+
+// ===========================================================================
+// 7. The sound layer: `echo` is his pick and is now the default, and `pulse` is
+//    finished. The law that is easy to break here is law 2 — the layer draws
+//    events, it does not light the room — so the section ends by switching it
+//    off and proving the same frame is black.
+// ===========================================================================
+await call('vitals.layer', false);
+await call('vitals.compass', false);
+await call('vitals.reset');
+await call('pose', HOME.x, HOME.z, 90);
+await call('clear');
+await advance(0.5, 4);
+await playerCam(90, 0);
+
+// Three real props in front of him, knocked over at the same tick, so every style is drawing the
+// identical set of events at the identical age.
+const TARGETS = [];
+for (const [lo, hi] of [[-40, -8], [-8, 12], [12, 44]]) {
+  const t = await propInArc(lo, hi, 4, 12);
+  if (t !== null) TARGETS.push(t);
+}
+check('the hall has something to knock over in front of him', TARGETS.length >= 2, `${TARGETS.length} props found`);
+for (const t of TARGETS) await call('disturb', t.x, t.y + 0.2, t.z, 2.4, 7);
+// A quarter of a second in: `pulse`'s shells are mid-flight, which is the only moment that
+// tells the two versions of it apart.
+await advance(0.26, 2);
+
+const styleShots = {};
+for (const [name, file, note] of [
+  [
+    'echo',
+    '15-marks-echo.png',
+    'echo — his pick out of the seven, and the default from this commit on. Hue is identity and never quantity: everything the world ' +
+      'does is one bone-white, anything alive that is not you is red, and loudness is carried by size and burn alone',
+  ],
+  [
+    'pulse-v1',
+    '16-pulse-before.png',
+    'pulse, before. One fat shell over the first third of a second and then a filled core for the remaining six and a half seconds — ' +
+      'which is why it was only "близко": for 95% of a mark’s life it was a dimmer echo, not a different channel',
+  ],
+  [
+    'pulse',
+    '17-pulse-after.png',
+    'pulse, after. Hollow. Three thin shells leave the epicentre and cross the mark in about half a second, and behind them nothing is ' +
+      'left but a hard pinpoint at the exact point of the event. Nothing else in the set has a hollow middle, and a hollow ring is the ' +
+      'strongest available statement that this is a reading and not a lamp: light fills, an instrument rings',
+  ],
+]) {
+  await call('markerStyle', name);
+  await redraw();
+  const img = await shot(file, note);
+  styleShots[name] = { lit: litFraction(img), mean: meanLuminance(img) };
+}
+check(
+  'the finished pulse is not a variation of echo',
+  styleShots.pulse.lit < styleShots.echo.lit * 0.5,
+  `the same three events: echo fills ${(styleShots.echo.lit * 100).toFixed(2)}% of the frame as soft blobs, ` +
+    `pulse only ${(styleShots.pulse.lit * 100).toFixed(2)}% as thin travelling shells`,
+);
+check(
+  'and the finished one is hollow where the old one was filled',
+  styleShots.pulse.lit < styleShots['pulse-v1'].lit * 0.7,
+  `the same three events cover ${(styleShots['pulse-v1'].lit * 100).toFixed(2)}% of the frame as filled discs and ` +
+    `${(styleShots.pulse.lit * 100).toFixed(2)}% as rings`,
+);
+
+check('echo is the style the game boots with', bootMarkerStyle === 'echo', `booted as ${bootMarkerStyle}`);
+
+// The law. Same tick, same three collapsed stacks, the sound layer switched off: if any pixel
+// survives, something in this layer has been lighting the room.
+await call('markerStyle', 'echo');
+await call('markers', false);
+await redraw();
+const dark = await shot(
+  '18-marks-off-black.png',
+  'the identical tick with the sound layer switched off. It is black to the last pixel, which is the proof of law 2: the marks draw ' +
+    'the *fact* that three stacks went over in front of him and light nothing — no wall, no floor, no shadow. Everything visible in ' +
+    'frames 15-17 is the event itself and none of it is illumination',
+);
+check('with the sound layer off the same frame is pure black', litFraction(dark) === 0, `lit ${litFraction(dark).toFixed(6)}, mean ${meanLuminance(dark).toFixed(4)}`);
+await call('markers', true);
+await call('vitals.layer', true);
+notes.push(
+  'law 2 checked as a number, not as an opinion: frame 18 is the same simulation tick as 15-17 with the sound layer switched off, ' +
+    'and it is black to the last pixel.',
 );
 
 // ===========================================================================

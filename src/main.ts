@@ -14,6 +14,7 @@ import GUI from 'lil-gui';
 import { Input } from './core/input';
 import { Loop } from './core/loop';
 import { AudioStage, defaultAudioTunables } from './audio/audio';
+import { renderAll as renderAudioScenes } from './audio/offline';
 import { SoundBus } from './events/bus';
 import { Hud, type HelpRow } from './debug/hud';
 import { Lidar, defaultLidarTunables } from './lidar/lidar';
@@ -30,6 +31,8 @@ import { GATE_TARGET, HALL, LANDMARKS, buildHall } from './world/hall';
 import { PropWorld, defaultPropTunables, loadRapier } from './props/props';
 import { PropReveal } from './props/reveal';
 import { DynamicPaint } from './lidar/dynamic';
+import { BodyUnion } from './lidar/bodies';
+import { SpiderBodies } from './spiders/bodies';
 import { ARCHETYPES } from './props/shapes';
 import {
   MARKER_STYLES,
@@ -39,12 +42,20 @@ import {
 } from './sound/markers';
 import { FIRE_MODES, Rifle, defaultRifleTunables, type FireMode, type Shot } from './weapon/rifle';
 import { MuzzleFlash, defaultFlashTunables } from './weapon/flash';
+import { RifleViewModel, defaultViewModelTunables } from './weapon/viewmodel';
 import { ShotTracers } from './weapon/tracers';
 import { Swarm, defaultSpiderTunables } from './spiders/swarm';
 import { SpiderOverlay } from './spiders/overlay';
 import { PlayerVitals, defaultVitalsTunables } from './hud/vitals';
 import { NoiseCompass, defaultCompassTunables } from './hud/compass';
-import { PlayerHudLayer, defaultHudLayerTunables, screenAngle, type CompassNotch } from './hud/overlay';
+import {
+  PlayerHudLayer,
+  defaultHudLayerTunables,
+  screenAngle,
+  HUD_STYLES,
+  type CompassNotch,
+  type HudStyle,
+} from './hud/overlay';
 
 type ViewMode = 'player' | 'third' | 'top';
 
@@ -67,6 +78,7 @@ const HELP: HelpRow[] = [
   { keys: 'J', action: 'debug: refill the lidar' },
   { keys: 'G', action: 'debug: tuning panel' },
   { keys: 'O', action: 'noise compass on/off — bearings to noises you cannot see' },
+  { keys: 'P', action: 'debug: spider overlay — state, goal, belief, above each spider' },
   { keys: 'I', action: 'debug: damage feedback (wedge, flinch, dark edge) on/off' },
   { keys: 'Z', action: 'debug: take a bite — from the nearest spider, else from behind' },
   { keys: 'R', action: 'respawn' },
@@ -74,7 +86,7 @@ const HELP: HelpRow[] = [
 ];
 
 const HINT =
-  'WASD move · Shift run · Ctrl crouch · F lidar ping · E/LMB shoot · X fire mode · O compass · Y hold flash · U tracers · L lights · V view · G tuning · H help';
+  'WASD move · Shift run · Ctrl crouch · F lidar ping · E/LMB shoot · X fire mode · O compass · Y hold flash · P spiders · U tracers · L lights · V view · G tuning · H help';
 
 /** Where the muzzle is relative to the eye, metres — matches the rifle's collider box. */
 const MUZZLE_AHEAD = 0.55;
@@ -142,6 +154,12 @@ class App {
   private rifle: Rifle | null = null;
   /** The one real light in the game. Always in the scene; dark, and free, until a shot. */
   private readonly flash = new MuzzleFlash(defaultFlashTunables());
+  /**
+   * The gun in your hands (M4d). It is a child of the camera and it is lit by the flash and by
+   * nothing else — with no flash in flight it is switched off, which is the only way a
+   * viewmodel is allowed to exist under law 1.
+   */
+  private readonly rifleView = new RifleViewModel(defaultViewModelTunables());
   /** Debug overlay: where the hitscans actually went. Off by default (law 1). */
   private readonly tracers = new ShotTracers(64);
   /** Shots that left the barrel this tick. Reused; a burst is at most one round per tick. */
@@ -261,6 +279,10 @@ class App {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.scene.add(this.flash.object);
     this.scene.add(this.tracers.object);
+    // The viewmodel is held in view space, so the camera has to be part of the graph for its
+    // children to be drawn at all.
+    this.scene.add(this.camera);
+    this.camera.add(this.rifleView.object);
     this.hall.reveal.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) {
@@ -301,8 +323,13 @@ class App {
     const R = await loadRapier();
     const t0 = performance.now();
     this.props = new PropWorld(R, this.hall.world, this.bus, this.seed, defaultPropTunables());
+    // The pack. Its own seed stream, so how long you survive cannot perturb the layout RNG.
+    // Built before the lidar because the lidar scans spiders as bodies like any other.
+    this.spiders = new Swarm(this.hall.world, this.bus, this.seed, defaultSpiderTunables());
     this.dyn = new DynamicPaint(
-      this.props,
+      // Clutter and spiders as one flat body list: spiders are matter, so they are scanned by
+      // the same pass, with the same cloud mechanics, and the lidar knows nothing about them.
+      new BodyUnion(this.props, new SpiderBodies(this.spiders)),
       this.hall.world,
       defaultAgeRamp(),
       this.paint.tunables,
@@ -327,8 +354,6 @@ class App {
     this.rifle = new Rifle(this.bus, this.props, this.seed, defaultRifleTunables());
     this.propsMs = performance.now() - t0;
 
-    // The pack. Its own seed stream, so how long you survive cannot perturb the layout RNG.
-    this.spiders = new Swarm(this.hall.world, this.bus, this.seed, defaultSpiderTunables());
     this.spiders.setProps(this.props);
     /*
      * The contract with the pack, and the whole of it: a spider that lands a bite says so, with
@@ -492,6 +517,8 @@ class App {
     for (const shot of this.shotBuf) {
       this.flash.trigger(shot.ox, shot.oy, shot.oz, shot.time);
       this.tracers.add(shot);
+      // The rifle is a ray and knows nothing about spiders; the swarm owns its own hitboxes.
+      this.spiders?.shoot(shot.ox, shot.oy, shot.oz, shot.ex, shot.ey, shot.ez);
     }
   }
 
@@ -641,9 +668,29 @@ class App {
      */
     const envelope = this.flash.sample(renderTime);
     this.setFlashReveal(envelope > 0);
+    /*
+     * The rifle in your hands. Everything it needs is the flash's own light — the position it
+     * was pinned at and the candela left in it this frame — so there is exactly one number that
+     * decides whether a gun exists on screen, and it is the envelope. In the top and third-person
+     * debug views it is switched off outright: a viewmodel seen from outside the head is a prop
+     * floating in the hall, which is the very thing this must not become.
+     */
+    {
+      const first = this.view === 'player';
+      const gunPunch = this.rifle?.viewPunch;
+      const lp = this.flash.light.position;
+      const cp = this.camera.position;
+      this.rifleView.update(
+        first && this.lightsOn,
+        first ? this.flash.light.intensity : 0,
+        lp.x, lp.y, lp.z,
+        cp.x, cp.y, cp.z,
+        gunPunch?.pitch ?? 0, gunPunch?.back ?? 0,
+      );
+    }
     this.renderer.shadowMap.needsUpdate = this.flash.takeShadowUpdate();
 
-    if (this.spiders !== null) this.spiderOverlay.sync(this.spiders);
+    if (this.spiders !== null) this.spiderOverlay.sync(this.spiders, camera);
 
     const renderStart = performance.now();
     this.renderer.render(this.scene, camera);
@@ -998,15 +1045,39 @@ class App {
     gun.add(fl, 'shadowSize', [128, 256, 512, 1024]).onChange(() => this.flash.applyShadowSize());
     gun.add(fl, 'flareSize', 0, 2, 0.05);
     gun.add(fl, 'flareGain', 0, 4, 0.05);
-    gun.add(r, 'risePitchDeg', 0, 3, 0.02);
-    gun.add(r, 'riseYawDeg', 0, 2, 0.02);
+    /*
+     * The weight of the shot. The human asked for "чуть потяжелее" and the two halves of that
+     * are deliberately separate knobs: `rise*` really moves where the barrel points and is the
+     * price he pays, `punch*` is only the body flinching and is free. Both are here so he can
+     * find the line between them by hand rather than by argument.
+     */
+    gun.add(r, 'risePitchDeg', 0, 3, 0.02).name('aim kick: pitch (the price)');
+    gun.add(r, 'riseYawDeg', 0, 2, 0.02).name('aim kick: yaw');
     gun.add(r, 'recoverRate', 1, 40, 0.5);
-    gun.add(r, 'recoverFraction', 0, 1, 0.02);
-    gun.add(r, 'punchPitchDeg', 0, 6, 0.1);
+    gun.add(r, 'recoverDelay', 0, 0.5, 0.01);
+    gun.add(r, 'recoverFraction', 0, 1, 0.02).name('how much comes back');
+    gun.add(r, 'punchPitchDeg', 0, 6, 0.1).name('view punch: pitch');
+    gun.add(r, 'punchYawDeg', 0, 3, 0.05).name('view punch: yaw');
+    gun.add(r, 'punchBackM', 0, 0.3, 0.005).name('view punch: shove back');
     gun.add(r, 'punchDecay', 2, 40, 0.5);
     gun.add(r, 'spreadPerShot', 0, 2, 0.02);
     gun.add(r, 'gunshotLoudness', 10, 200, 1);
     gun.add(r, 'hitImpulse', 0, 30, 0.5);
+    // The mesh in your hands. `visible` is a measuring switch, not a play switch: the gun is
+    // already invisible whenever nothing is lighting it.
+    const vm = this.rifleView.tunables;
+    gun.add(vm, 'visible').name('rifle mesh');
+    gun.add(vm, 'albedo', 0, 1, 0.02).onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'gain', 0, 0.03, 0.0005);
+    gun.add(vm, 'exposure', 0.2, 5, 0.05).onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'rim', 0, 2, 0.05).onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'wrap', 0, 2, 0.05).onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'kickBack', 0, 3, 0.05).name('mesh kick: back');
+    gun.add(vm, 'kickPitch', 0, 3, 0.05).name('mesh kick: pitch');
+    gun.add(vm, 'cant', -0.8, 0.8, 0.01).name('hold: to the shoulder').onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'tilt', -0.6, 0.6, 0.01).name('hold: below the sight line').onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'roll', -0.6, 0.6, 0.01).name('hold: roll').onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'scale', 0.2, 1.4, 0.02).name('hold: size').onChange(() => this.rifleView.applyLook());
     gun.open();
 
     /*
@@ -1017,6 +1088,14 @@ class App {
      */
     const me = gui.addFolder('player / hud');
     const vt = this.vitals.tunables;
+    /*
+     * The look is undecided on purpose, exactly as with the marker styles: four different
+     * theories of what a HUD *is* in this game, judged by eye and not by argument. See the
+     * header of src/hud/overlay.ts for what each one claims and for what was wrong with `ring`.
+     */
+    me.add(this.playerHud.tunables, 'style', HUD_STYLES as unknown as string[])
+      .name('look')
+      .onChange((v: HudStyle) => this.playerHud.setStyle(v));
     me.add(this.vitals, 'enabled').name('damage');
     me.add(this.vitals, 'effects').name('flinch');
     me.add(this.playerHud, 'showDamage').name('wedge + dark edge');
@@ -1033,7 +1112,11 @@ class App {
     me.add(vt, 'tremorDeg', 0, 4, 0.05);
     me.add(vt, 'lowHealth', 0, 1, 0.05);
     me.add(vt, 'markLife', 0.4, 8, 0.1);
-    me.add(this.playerHud.tunables, 'wedgeRadius', 0.15, 1, 0.01);
+    me.add(this.playerHud.tunables, 'lagPx', 0, 1600, 20).name('flinch lag (px/rad)');
+    me.add(this.playerHud.tunables, 'refreshHz', 1, 20, 0.5).name('sonar refresh');
+    me.add(this.playerHud.tunables, 'sectors', 8, 96, 1).name('sonar sectors');
+    me.add(this.playerHud.tunables, 'brightness', 0, 2, 0.05);
+    me.add(this.playerHud.tunables, 'wedgeRadius', 0.15, 1, 0.01).name('ring: radius');
     me.add(this.playerHud.tunables, 'stingDark', 0, 1, 0.02);
     me.add(this.playerHud.tunables, 'lowDark', 0, 1, 0.02);
     me.open();
@@ -1054,6 +1137,12 @@ class App {
     const ear = gui.addFolder('audio');
     ear.add(this.audio.tunables, 'volume', 0, 1, 0.02).onChange((v: number) => this.audio.setVolume(v));
     ear.add(this.audio.tunables, 'maxLatency', 0.05, 1, 0.05);
+    // The shot's aftermath, tuned by ear: how far the hall drops behind the blast and how long
+    // it takes to climb back.
+    ear.add(this.audio.tunables, 'deafDepth', 0, 1, 0.02);
+    ear.add(this.audio.tunables, 'deafSeconds', 0, 2, 0.05);
+    ear.add(this.audio.tunables, 'deafCutoff', 150, 8000, 10);
+    ear.add(this.audio.tunables, 'tinnitus', 0, 0.2, 0.005);
     ear.close();
   }
 
@@ -1132,6 +1221,7 @@ class App {
         for (const shot of this.shotBuf) {
           this.flash.trigger(shot.ox, shot.oy, shot.oz, shot.time);
           this.tracers.add(shot);
+          this.spiders?.shoot(shot.ox, shot.oy, shot.oz, shot.ex, shot.ey, shot.ez);
         }
         return this.shotBuf.length > 0 ? { ...this.shotBuf[0]! } : null;
       },
@@ -1160,6 +1250,16 @@ class App {
         if (this.rifle === null) return null;
         Object.assign(this.rifle.tunables, patch);
         return { ...this.rifle.tunables };
+      },
+      /** Debug/keyframes: the rifle mesh on or off, to measure what it adds to a flash frame. */
+      viewmodel: (on?: boolean) => {
+        if (on !== undefined) this.rifleView.tunables.visible = on;
+        return this.rifleView.tunables.visible;
+      },
+      viewmodelTune: (patch: Partial<Record<string, number | boolean>>) => {
+        Object.assign(this.rifleView.tunables, patch);
+        this.rifleView.applyLook();
+        return { ...this.rifleView.tunables };
       },
       tracers: (on: boolean) => {
         this.tracers.setVisible(on);
@@ -1196,11 +1296,24 @@ class App {
         this.hall.world.boxes.map((b) => [b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ]),
       touch: (on: boolean) => this.touch.setVisible(on),
       audio: (on: boolean) => this.audio.setEnabled(on),
+      /**
+       * Offline proof of the mixer: renders the fixed audio scenes through the same synthesis
+       * the player hears and hands back WAVs. `tools/audio.mjs` is the only caller. Needs no
+       * device and no gesture, and touches nothing in the simulation.
+       */
+      audioRender: (opts?: Record<string, unknown>) => renderAudioScenes(opts ?? {}),
+      audioTune: (patch: Partial<Record<string, number>>) => {
+        Object.assign(this.audio.tunables, patch);
+        if ('volume' in patch) this.audio.setVolume(this.audio.tunables.volume);
+        return { ...this.audio.tunables };
+      },
       markers: (on: boolean) => this.markers.setVisible(on),
       radii: (on: boolean) => this.markers.setRadiusVisible(on),
       /** Which of the four looks to draw the marks in. Free to switch: it is one uniform. */
-      markerStyle: (name: MarkerStyle) => {
-        this.markers.setStyle(name);
+      markerStyle: (name?: MarkerStyle) => {
+        // Reading it is what the keyframe pass needs first — it has to record the default the
+        // game boots with before it starts switching looks about.
+        if (name !== undefined) this.markers.setStyle(name);
         return this.markers.style;
       },
       markerStyles: () => [...MARKER_STYLES],
@@ -1284,6 +1397,12 @@ class App {
           this.playerHud.showDamage = on;
           return on;
         },
+        /** Which of the four looks the player's layer draws in. One switch, no rebuild. */
+        hudStyle: (name: HudStyle) => {
+          this.playerHud.setStyle(name);
+          return this.playerHud.style;
+        },
+        hudStyles: () => [...HUD_STYLES],
         layer: (on: boolean) => {
           this.playerHud.setVisible(on);
           return this.playerHud.visible;
@@ -1329,6 +1448,11 @@ class App {
           held: this.flash.holding,
           life: this.flash.tunables.life,
           shadows: this.flash.tunables.shadows,
+        },
+        gun: {
+          mesh: this.rifleView.tunables.visible,
+          lit: this.rifleView.lit,
+          energy: this.rifleView.energy,
         },
         aim: { yawDeg: (this.player.yaw * 180) / Math.PI, pitchDeg: (this.player.pitch * 180) / Math.PI },
         dyn: this.dyn?.getStats() ?? null,
