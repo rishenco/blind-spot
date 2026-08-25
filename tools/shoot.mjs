@@ -144,6 +144,17 @@ function pixelDiff(a, b, rect = FRAME) {
 }
 
 const pct = (v) => `${(v * 100).toFixed(2)}%`;
+/*
+ * A ratio of two measurements, for the lines that report one reading against another.
+ *
+ * Both of these exist because the readings they format are the readings a broken build makes,
+ * and a broken build is where the line has to stay readable: divide the mean of a black frame
+ * by the mean of a black frame and the report says `NaN%`, or `Infinity×` if only the
+ * denominator is black. The check itself is unaffected either way — this is about the sentence
+ * the failure prints, which is the only thing anyone reads when it does.
+ */
+const pct2 = (a, b) => (b > 0 ? pct(a / b) : 'n/a');
+const times = (a, b) => (b > 0 ? `${(a / b).toFixed(1)}×` : 'unmeasurably more than');
 const wait = (ms) => page.waitForTimeout(ms);
 const state = () => page.evaluate(() => window.__blindspot.getState());
 const spread = (values) => Math.max(...values) - Math.min(...values);
@@ -1054,12 +1065,37 @@ const freshBuf = await shot('11-fresh.png');
 const fresh = photo(freshBuf);
 const beforeAge = await state();
 
-// The paint clock has a debug multiplier on T so ageing can be watched without waiting a
-// minute for it. Ticks are counted at the scaled clock, not guessed at: 20 s of ageing is 20 s
-// of ageing whatever the frame rate, so `fresh → aged` is now the same drop every run.
+/*
+ * The paint clock has a debug multiplier on T so ageing can be watched without waiting a minute
+ * for it. Ticks are counted at the scaled clock, not guessed at, so the ages below are the same
+ * ages every run whatever the frame rate.
+ *
+ * Two photographs, at two named ages, because the ramp has three stages and one photograph can
+ * only ever be of one of them. The old reading was a single shot at 20 s against a
+ * `coldSeconds` of 60 — a picture taken mid-ramp, of paint still on its way down, and called
+ * "aged". It was then tested against a one-sided floor, which any brightness above zero passes.
+ * Between them those two facts let `skeletonAlpha` be set to zero — §3.6's law deleted, the map
+ * going black behind the player — with this suite and the Node suite both green. The
+ * arithmetic side of that hole is closed in `tests/ageRamp.test.ts`; this is the pixel side, and
+ * it needs to photograph the stage the law is about.
+ *
+ * So: 10 s is the middle of the ramp (the cyan → navy stage runs 2-20 s) and 70 s is past the
+ * end of it (`coldSeconds` 60), which is the memory skeleton itself and nothing else. Both
+ * readings are bands rather than floors. A floor cannot tell "settled on the skeleton" from
+ * "still cooling towards it", and it is the *ceiling* that catches a ramp which never finishes.
+ */
 await setTimeScale(10);
 const clock0 = Number((await state()).paintTime);
-await stepUntil((s) => Number(s.paintTime) - clock0 >= 20, ticksFor(25000), 8);
+await stepUntil((s) => Number(s.paintTime) - clock0 >= 10, ticksFor(25000), 4);
+await setTimeScale(1);
+await step(ticksFor(250));
+const midBuf = await shot('11b-cooling.png');
+const mid = photo(midBuf);
+const midAge = Number((await state()).paintTime) - clock0;
+// ×60 for the rest of it: the last stage is 40 s of paint clock wide and nothing in it needs
+// resolving finer than the ×10 leg above did.
+await setTimeScale(60);
+await stepUntil((s) => Number(s.paintTime) - clock0 >= 70, ticksFor(25000), 4);
 await setTimeScale(1);
 await step(ticksFor(250));
 const agedBuf = await shot('12-aged.png');
@@ -1068,13 +1104,51 @@ const afterAge = await state();
 check(
   'what was heard cools with age',
   aged.mean < fresh.mean * 0.75,
-  `mean ${fresh.mean.toFixed(2)} → ${aged.mean.toFixed(2)}/255 over ` +
+  `mean ${fresh.mean.toFixed(2)} → ${mid.mean.toFixed(2)} → ${aged.mean.toFixed(2)}/255 over ` +
     `${(Number(afterAge.paintTime) - clock0).toFixed(0)} s`,
 );
 check(
+  'and it cools through a middle rather than off a cliff (§3.2)',
+  mid.mean > fresh.mean * 0.2 && mid.mean < fresh.mean * 0.9,
+  `at ${midAge.toFixed(0)} s: mean=${mid.mean.toFixed(2)}/255 (${pct(mid.mean / fresh.mean)} ` +
+    `of fresh, ${times(mid.mean, aged.mean)} the skeleton) lit=${pct(mid.lit)}`,
+);
+check(
   'and settles on a memory skeleton rather than on nothing',
-  aged.mean > fresh.mean * 0.02 && aged.lit > 0.005,
+  aged.mean > fresh.mean * 0.02 && aged.mean < fresh.mean * 0.1 && aged.lit > 0.005,
   `mean=${aged.mean.toFixed(3)}/255 (${pct(aged.mean / fresh.mean)} of fresh) lit=${pct(aged.lit)}`,
+);
+/*
+ * And then the load-bearing word of §3.6: *permanent*.
+ *
+ * A band around the 70 s reading can say the picture is faint. It cannot say the picture has
+ * stopped, and those are different claims with the same photograph behind them — a ramp whose
+ * last stage is ten minutes long is also faint at 70 s, only 1.8× brighter than a settled one,
+ * which is inside any band wide enough to be worth setting. So the second half of the question
+ * is asked the only way a photograph can ask it: take the same picture again much later and
+ * require that nothing moved. At the skeleton, two shots 130 s of paint clock apart are the
+ * same shot. On a ramp still cooling they are not, and the gap between them is the ramp's
+ * remaining travel, whatever its shape.
+ */
+await setTimeScale(60);
+await stepUntil((s) => Number(s.paintTime) - clock0 >= 200, ticksFor(25000), 4);
+await setTimeScale(1);
+await step(ticksFor(250));
+const stillBuf = await shot('12b-still-there.png');
+const still = photo(stillBuf);
+const lateAge = Number((await state()).paintTime) - clock0;
+check(
+  'and stays there: the skeleton is a floor, not a slower fade (§3.6)',
+  // `aged.mean > 0` is not redundant with the check above it: two black frames are also two
+  // frames that agree, and "nothing moved" has to mean the picture held rather than that there
+  // was no picture to move.
+  aged.mean > 0 &&
+    Math.abs(still.mean - aged.mean) <= aged.mean * 0.05 &&
+    Math.abs(still.lit - aged.lit) <= 0.005,
+  `mean ${aged.mean.toFixed(3)} at ${(Number(afterAge.paintTime) - clock0).toFixed(0)} s → ` +
+    `${still.mean.toFixed(3)}/255 at ${lateAge.toFixed(0)} s ` +
+    `(${pct2(Math.abs(still.mean - aged.mean), aged.mean)} apart) · ` +
+    `lit ${pct(aged.lit)} → ${pct(still.lit)}`,
 );
 check(
   'ageing unlocks nothing and forgets nothing (§3.6)',

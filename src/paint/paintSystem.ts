@@ -184,8 +184,18 @@ const EVENT_COLORS: Record<SoundClass, number> = {
 
 /** How many event-layer markers can be alive at once. */
 const EVENT_CAPACITY = 512;
-/** Event marker fade, seconds (§3.2 asks for 2.5-6 s). */
-const EVENT_FADE = 2.5;
+/**
+ * Event marker fade, seconds (§3.2 asks for 2.5-6 s).
+ *
+ * Exported because it bounds something outside its own layer. The event marker and the matter
+ * layer's white band are the same claim made twice — "this happened just now" — one at the
+ * origin of the sound and one across the geometry it reached. If the white band outlived the
+ * marker, geometry would still be shouting *new* after the sound that painted it had gone, and
+ * the two layers §3.2 keeps deliberately separate would be telling the player different times
+ * for the same event. So this is the ceiling on `AgeRamp.freshSeconds`, and
+ * `tests/ageRamp.test.ts` holds the ramp to it.
+ */
+export const EVENT_FADE = 2.5;
 /** Event marker diameter, world metres. */
 const EVENT_SIZE = 0.55;
 

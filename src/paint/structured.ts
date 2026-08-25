@@ -52,7 +52,12 @@ import * as THREE from 'three';
 import { raySlabEnter, type StaticWorld } from '../core/collision';
 import { DEFAULT_LATTICE_SEED, makeRng } from '../core/rng';
 import type { SoundEvent } from './soundEvents';
-import type { AgeRamp } from './ageRamp';
+import {
+  RAMP_ALPHA_COOL_END,
+  RAMP_ALPHA_FRESH_END,
+  RAMP_ALPHA_NEW,
+  type AgeRamp,
+} from './ageRamp';
 import { ACCENT_GOLD, MATTER_COLD, MATTER_FRESH, MATTER_MID } from './materials';
 
 // ---------------------------------------------------------------------------
@@ -140,6 +145,15 @@ function rawColor(hex: number): THREE.Color {
 }
 
 /**
+ * A JS number as a GLSL float literal — `1` has to reach the compiler as `1.0` or it is an int
+ * and `mix(vec3, vec3, int)` does not exist. Only used for the ramp's alpha stops, which are
+ * authored in TypeScript so that the Node oracle and the shader read the same four numbers.
+ */
+function glslFloat(value: number): string {
+  return Number.isInteger(value) ? `${value}.0` : `${value}`;
+}
+
+/**
  * A (floor, feather) pair per item, set to "unbounded": reach any age, at full strength.
  *
  * What an item that has never been refreshed carries, and what a refresh landing dead centre
@@ -177,7 +191,15 @@ const RING_GLSL = /* glsl */ `
   }
 `;
 
-/** The age ramp (§3.2), shared by both layers — dots and contours cool as one picture. */
+/**
+ * The age ramp (§3.2), shared by both layers — dots and contours cool as one picture.
+ *
+ * The times arrive as a uniform and the alpha stops are interpolated in from `ageRamp.ts`, which
+ * is what stops this from being a *second* statement of the ramp. `tests/ageRamp.test.ts`
+ * interrogates the same four stops through `rampAlpha`, so the numbers the Node suite asserts
+ * and the numbers this compiler sees cannot drift apart; what remains mirrored by hand is the
+ * three-branch shape, and that half is photographed by `tools/shoot.mjs` §06.
+ */
 const RAMP_GLSL = /* glsl */ `
   uniform vec3  uRampTimes;
   uniform float uSkeletonAlpha;
@@ -189,15 +211,15 @@ const RAMP_GLSL = /* glsl */ `
     if (age < uRampTimes.x) {
       float t = age / max(0.001, uRampTimes.x);
       col = mix(uFresh, uMid, t * t);
-      alpha = mix(1.0, 0.9, t);
+      alpha = mix(${glslFloat(RAMP_ALPHA_NEW)}, ${glslFloat(RAMP_ALPHA_FRESH_END)}, t);
     } else if (age < uRampTimes.y) {
       float t = (age - uRampTimes.x) / max(0.001, uRampTimes.y - uRampTimes.x);
       col = mix(uMid, uCold, t);
-      alpha = mix(0.9, 0.42, t);
+      alpha = mix(${glslFloat(RAMP_ALPHA_FRESH_END)}, ${glslFloat(RAMP_ALPHA_COOL_END)}, t);
     } else {
       float t = clamp((age - uRampTimes.y) / max(0.001, uRampTimes.z - uRampTimes.y), 0.0, 1.0);
       col = uCold;
-      alpha = mix(0.42, uSkeletonAlpha, t);
+      alpha = mix(${glslFloat(RAMP_ALPHA_COOL_END)}, uSkeletonAlpha, t);
     }
   }
 `;
