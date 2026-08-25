@@ -39,7 +39,13 @@ Law-adjacent commitments — not laws, but consequences of them we have locked i
   bus (`src/paint/soundEvents.ts`); the paint system and the audio mixer are both subscribers
   to that same stream. The *same* event paints the world and makes the noise, so sight and
   hearing can never disagree — a sound with no paint, or paint with no sound, is impossible to
-  produce. Audio itself is **unbuilt** (milestone M1); the bus ships.
+  produce. Both subscribers ship: the reveal and the synthesized mixer (`src/audio/`) read the
+  same events, and every voice the mixer builds takes its level from the event's own hearing
+  radius. There is exactly one sound in the game that is not on the bus — §3.8's Halo hum — and
+  it is not an exception to this. The law forbids a sound *the world makes* that paints nothing;
+  the hum is the rig's own gauge, has no position and no emitter, is audible to nobody but its
+  pilot, and nothing in the world can hear it. A hum with a place in the world would be a
+  violation, which is why it is not given one.
 - **No canned walk cycles** (law 2). Enemy movement animation is procedural, contact-driven IK
   — never a keyframed cycle. A keyframed cycle foot-slides, and a sliding foot would emit a
   footfall sound (and therefore paint geometry) at a point where no foot actually touched
@@ -153,13 +159,17 @@ A ring around the reticle whose brightness equals your current audible radius, p
 hum pitch. You always know exactly how loud you are. Non-negotiable: the genre's most-repeated
 complaint is "I can't tell when I'm detectable."
 
-The hum's **pitch** is the readout, not its volume: `55·√(r/1.5)` Hz, mapping a 1.5 m crouch
-radius to 55 Hz — felt more than heard — and a 24 m sprint to 220 Hz, insistent. It glides
-continuously rather than stepping between stances, because the ring is continuous and the two
-must never disagree; quantizing the hum into gears would hide exactly the in-between states
-where you most want to know how loud you are. Level stays low and near-constant (≈ −21 dBFS)
-and ducks under events, so the information rides on pitch and the tone can sit under everything
-without fatiguing. A volume slider is an accessibility control, not a retreat — the ring remains
+The hum's **pitch** is the readout, not its volume: `55·√(r/1.5)` Hz, where `r` is the radius at
+which you can be **heard** — §3.3's right-hand column, scaled by the material you are standing on
+(§3.9) — not the radius you paint. 1.5 m is the formula's reference and the pitch floor, not a
+stance: a crouch-step on concrete carries 2 m and sits at 63 Hz, felt more than heard, and a
+24 m sprint reaches 220 Hz, insistent. Loud ground pushes past that — a sprint on metal carries
+36 m and rings at 269 Hz — which is the point: the ring and the hum report the radius the world
+actually hears, so the surface under your feet moves the readout. It glides continuously rather
+than stepping between stances, because the ring is continuous and the two must never disagree;
+quantizing the hum into gears would hide exactly the in-between states where you most want to
+know how loud you are. Level stays low and near-constant (≈ −21 dBFS) and ducks under events, so
+the information rides on pitch and the tone can sit under everything without fatiguing. A volume slider is an accessibility control, not a retreat — the ring remains
 the guaranteed readout. **Playtest gate:** if more than half of testers mute it, the stepped
 variant is the prepared fallback.
 
@@ -223,8 +233,9 @@ survives the only condition the game is ever played in: one walk-step on concret
 2184 dots of floor and one on dust 673, and the screenshots are a lit room against a puddle at
 your own feet (`tools/shoot.mjs` §08).
 
-What remains of M1 is making the difference *audible* rather than only visible: the synthesized
-voices themselves, and the attack-window loudness normalization described above.
+The difference is now audible as well as visible: `src/audio/voices.ts` synthesizes the four
+voices and normalizes each one's attack as described above, and the invariant is asserted in
+`tests/audio/materialVoices.test.ts` at every stance, not only at the one the fit was made at.
 
 ## 4. Energy: the reactor
 

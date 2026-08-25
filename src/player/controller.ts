@@ -312,6 +312,20 @@ export interface LandEvent {
 export type PlayerEvent = FootstepEvent | LandEvent;
 export type PlayerEventListener = (event: PlayerEvent) => void;
 
+/**
+ * Which of §3.3's three step classes a gait belongs to — the gait ladder, in one function.
+ *
+ * Exported and separate from the emitter because §3.8's Halo has to answer the same question
+ * *between* footfalls: "how loud am I right now" is the class of the footfall the body is in the
+ * middle of making, and the readout must be able to name it without waiting for the foot to land.
+ * A second copy of the sprint threshold on the readout side would put the ring a gait behind the
+ * sound on exactly the frames the player is deciding whether to commit.
+ */
+export function stepTierFor(speed: number, crouched: boolean, m: MovementTunables): StepTier {
+  if (crouched) return 'crouch';
+  return speed > (m.walkSpeed + m.sprintSpeed) / 2 ? 'sprint' : 'walk';
+}
+
 const DEG2RAD = Math.PI / 180;
 const TWO_PI = Math.PI * 2;
 const HALF_PI = Math.PI / 2;
@@ -324,6 +338,13 @@ const LAND_DIP_FULL_SPEED = 13;
 const LAND_DIP_ATTACK = 50;
 /** Below this horizontal speed the body keeps whatever heading it already had, m/s. */
 const FACING_MIN_SPEED = 0.25;
+/**
+ * Below this horizontal speed the stride does not advance and no footfall is laid down, m/s.
+ *
+ * Named because two things read it now: the stride phase, and §3.8's Halo, which has to answer
+ * "how loud am I" with *nothing* when the body is making no contact at all.
+ */
+const STRIDE_MIN_SPEED = 0.05;
 /** Exponential rate (1/s) that de-spikes the raw yaw rate before it drives roll. */
 const YAW_RATE_SMOOTH = 14;
 /** Spacing between ledge probes while airborne with jump held, seconds. */
@@ -679,6 +700,44 @@ export class PlayerController {
 
   get landingSpeed(): number {
     return this.lastLandingSpeed;
+  }
+
+  /**
+   * True while the body is actually laying down footfalls: grounded, not mid-climb, and moving.
+   *
+   * The stride advance reads it, and so does the Halo — which is why it is a getter rather than
+   * three conditions repeated at two call sites. A body that is standing still, in the air, or
+   * being carried through a mantle is making no contact noise, and §3.8's readout has to say so.
+   */
+  get striding(): boolean {
+    return (
+      this.grounded &&
+      !this.mantleActive &&
+      Math.hypot(this.velocity.x, this.velocity.z) > STRIDE_MIN_SPEED
+    );
+  }
+
+  /**
+   * The step class the body is laying down right now, or `null` while it is laying down none.
+   *
+   * §3.8's Halo is the caller: this plus `groundMaterial` is everything the readout needs to ask
+   * the bus how far the body currently carries.
+   */
+  get stepTier(): StepTier | null {
+    if (!this.striding) return null;
+    return stepTierFor(
+      Math.hypot(this.velocity.x, this.velocity.z),
+      this.crouched,
+      this.movement,
+    );
+  }
+
+  /**
+   * What the feet are on — an index into `paint/materials` (§3.9). See `groundMat` for why it is
+   * the collision pass's answer and never a fresh probe.
+   */
+  get groundMaterial(): number {
+    return this.groundMat;
   }
 
   /** Current render-only landing dip, metres (0 when settled). Exposed for tooling/HUD. */
@@ -1117,14 +1176,16 @@ export class PlayerController {
     const m = this.movement;
     const b = this.bob;
     const speed = Math.hypot(this.velocity.x, this.velocity.z);
-    const striding = this.grounded && !this.mantleActive;
+    // The bob envelope fades in from a standstill, so it is on its feet the moment the body is
+    // grounded — one condition short of `striding`, which also asks whether it is moving.
+    const onItsFeet = this.grounded && !this.mantleActive;
 
     const speedScale = clamp01(speed / Math.max(0.01, m.sprintSpeed));
-    const target = striding ? speedScale * (this.crouched ? b.crouchScale : 1) : 0;
+    const target = onItsFeet ? speedScale * (this.crouched ? b.crouchScale : 1) : 0;
     this.bobGain += (target - this.bobGain) * smoothFactor(b.blendRate, dt);
     if (this.bobGain < 1e-4 && target === 0) this.bobGain = 0;
 
-    if (striding && speed > 0.05) {
+    if (this.striding) {
       // Distance-based, so the stride tracks speed continuously instead of snapping between
       // gaits: `strideFreq` names the cycle rate at sprint and the stride length follows.
       const strideLength = m.sprintSpeed / Math.max(0.05, b.strideFreq);
@@ -1247,13 +1308,8 @@ export class PlayerController {
   }
 
   private emitFootstep(halfCycle: number, speed: number): void {
-    const m = this.movement;
     this.stepCount++;
-    const tier: StepTier = this.crouched
-      ? 'crouch'
-      : speed > (m.walkSpeed + m.sprintSpeed) / 2
-        ? 'sprint'
-        : 'walk';
+    const tier = stepTierFor(speed, this.crouched, this.movement);
     this.emit({
       type: 'footstep',
       x: this.position.x,

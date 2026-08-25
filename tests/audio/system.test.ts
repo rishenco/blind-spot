@@ -17,12 +17,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { OfflineAudioContext } from 'node-web-audio-api';
 import { hasNaN, peakInfo, rmsDb, type AudioBufferLike } from '../support/audioMetrics';
-import { MAX_PEAK_DBFS } from '../support/audioSpec';
+import { HALO_DUCK, HALO_PEAK_DBFS, MAX_PEAK_DBFS } from '../support/audioSpec';
 import { TEST_SAMPLE_RATE } from '../support/audioRender';
 import { AudioSystem, DEFAULT_MASTER_GAIN } from '../../src/audio/system';
 import { type ListenerState } from '../../src/audio/director';
 import { createHeadlessGame } from '../../src/game/headless';
-import { MAT_METAL } from '../../src/paint/materials';
+import { MAT_DUST, MAT_METAL } from '../../src/paint/materials';
 import { PLAYER_EMITTER_ID, SoundBus, type SoundEmitSpec } from '../../src/paint/soundEvents';
 
 const AT_ORIGIN: ListenerState = { x: 0, y: 0, z: 0, range: 18, emitter: PLAYER_EMITTER_ID };
@@ -201,6 +201,107 @@ describe('what it builds, when the browser lets it', () => {
     const m = mounted();
     for (let i = 0; i < 5; i++) m.audio.unlock();
     expect(m.contexts()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * §3.8's hum is the one sound here that is not an event, and this block is about the seam.
+ *
+ * `haloHum.test.ts` measures the voice — its pitch, its level, how far it ducks. What only this
+ * file can answer is whether the mixer *asks* it to: the hum is built out of a readout the
+ * simulation publishes, and it ducks because a voice was built, so both couplings live here.
+ */
+describe('the Halo hum rides along (§3.8)', () => {
+  const HUM_SEC = 1.5;
+  const humming = (radius = 11) => {
+    const m = mounted('running', { seconds: HUM_SEC });
+    m.audio.unlock();
+    m.audio.setHaloRadius(radius);
+    return m;
+  };
+
+  /** Before a gesture there is no context, so there is nothing to hum through — and no throw. */
+  it('waits for audio the same way every other sound does', async () => {
+    const m = mounted('suspended', { seconds: HUM_SEC });
+    m.audio.setHaloRadius(24);
+    expect(m.audio.humming).toBe(false);
+    m.audio.unlock();
+    m.audio.setHaloRadius(24);
+    expect(m.audio.humming).toBe(false);
+    expect(m.audio.lastFailure).toBeNull();
+    expect(rmsDb(await m.render(), undefined, 0, HUM_SEC)).toBeLessThan(-120);
+  });
+
+  /**
+   * One hum, however many frames push a radius into it.
+   *
+   * A second oscillator bank stacked on the first would be +6 dB and rising, and would go
+   * unnoticed for exactly as long as nobody looked at a meter — which is why the assertion is on
+   * the level rather than on a private field.
+   */
+  it('builds one hum and feeds it, rather than one per frame', async () => {
+    const m = mounted('running', { seconds: HUM_SEC });
+    m.audio.unlock();
+    for (let i = 0; i < 40; i++) m.audio.setHaloRadius(11);
+    expect(m.audio.humming).toBe(true);
+    const peak = peakInfo(await m.render());
+    expect(Math.abs(peak.peakDb - HALO_PEAK_DBFS.value)).toBeLessThanOrEqual(HALO_PEAK_DBFS.tol);
+  });
+
+  /**
+   * A voice the mixer built ducks the hum; one it did not build does not.
+   *
+   * The event is deliberately a whisper — a crouch-step on dust carries 1.2 m (§3.3 × §3.9) and
+   * is emitted just inside that — so what the window measures is the hum moving and not the
+   * footstep arriving. The far one is outside the same 1.2 m: the bus never lets it through, no
+   * voice is built, and the hum must not flinch, because a readout that dipped for sounds the
+   * player cannot hear would be reporting the world rather than the rig.
+   */
+  it('steps aside for an audible event and ignores one nobody heard', async () => {
+    const quiet = (x: number) =>
+      ({ class: 'crouch-step', x, y: 0, z: 0, source: 'player', emitter: PLAYER_EMITTER_ID, mat: MAT_DUST }) as const;
+
+    const undisturbed = rmsDb(await humming().render(), undefined, 0.03, 0.09);
+
+    const near = humming();
+    near.emit(quiet(1.19));
+    expect(near.audio.played).toBe(1);
+    expect(rmsDb(await near.render(), undefined, 0.03, 0.09) - undisturbed)
+      .toBeLessThan(-HALO_DUCK.minDepthDb);
+
+    const far = humming();
+    far.emit(quiet(40));
+    expect(far.audio.played).toBe(0);
+    expect(Math.abs(rmsDb(await far.render(), undefined, 0.03, 0.09) - undisturbed))
+      .toBeLessThan(0.01);
+  });
+
+  /**
+   * The hum only ever adds to the mix — it can never make an event quieter than it was alone.
+   *
+   * That is the shape of "ducks under events" that matters. A duck automated on the master bus
+   * would attenuate the very footstep it was making room for, and the mix with the hum in it
+   * would come out *below* the mix without: a mixer quietly deciding that a step landing while
+   * the player is moving is worth less than one landing in silence.
+   */
+  it('never makes an event quieter than it would have been alone', async () => {
+    const withHum = humming(24);
+    withHum.emit(step(0, MAT_METAL));
+    const withoutHum = mounted('running', { seconds: HUM_SEC });
+    withoutHum.audio.unlock();
+    withoutHum.emit(step(0, MAT_METAL));
+    expect(peakInfo(await withHum.render()).peakDb)
+      .toBeGreaterThan(peakInfo(await withoutHum.render()).peakDb);
+  });
+
+  /** Disposal ends it. Every other voice is a strike already scheduled to stop; this one is not. */
+  it('is stopped when the system is disposed', async () => {
+    const m = humming();
+    expect(m.audio.humming).toBe(true);
+    m.audio.dispose();
+    expect(m.audio.humming).toBe(false);
   });
 });
 

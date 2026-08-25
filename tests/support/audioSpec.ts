@@ -102,9 +102,9 @@ export const MATERIAL_FINGERPRINTS = Object.freeze({
       tol: 3,
       why: 'One strike, on one noise slice, at the level the director gave it. It sits 6.3 dB '
         + 'under concrete where the law promises 4.4, and that gap is *this render*, not a '
-        + 'deviation: dust has the widest per-strike spread of the four (5.86 dB peak-to-peak, '
+        + 'deviation: dust has the widest per-strike spread of the four (7.57 dB peak-to-peak, '
         + 'see ATTACK_LEVEL_SAMPLE) because it is nearly all exciter and has almost no modal '
-        + 'ring to steady it. Averaged over the sample the law holds to 0.31 dB. This pin is '
+        + 'ring to steady it. Averaged over the sample the law holds to 0.09 dB. This pin is '
         + 'gain-staging, and ±3 dB is what that job needs.',
     },
   },
@@ -247,42 +247,109 @@ export const CENTROID_SPLIT_HZ = Object.freeze({
  *
  * The seeds are `Math.round(i * NOISE_SLOTS / strikes)` and the stratification is the part that
  * is easy to get wrong. `voices.ts` maps consecutive seeds to bank offsets ~1.3 ms apart while
- * the attack window is 85 ms, so sixteen consecutive seeds read ~98 % the same audio and are
- * barely one sample: from seed 200 they put metal 0.78 dB off its multiplier, from seed 500 they
+ * the attack window is 85 ms, so consecutive seeds read ~98 % the same audio and are barely one
+ * sample: sixteen of them from seed 200 put metal 0.78 dB off its multiplier, and from seed 500
  * put a stance 1.01 dB off. From seed 0 they land at 0.16 dB and everything passes, which is why
- * the simplification survives being tried. Spread across the whole bank, sixteen strikes land
- * within 0.1 dB of a 332-strike estimate wherever they start.
+ * the simplification survives being tried.
  *
  * **Do not simplify this into a single render.** A one-strike version of the loudness test
  * passes or fails on which noise slice it happened to read — see the `bodyRmsDb` pins above,
- * where the same law that holds to 0.31 dB over the sample reads 1.9 dB off on one strike.
+ * where the same law that holds to 0.36 dB over the sample reads 1.9 dB off on one strike.
  */
 export const ATTACK_LEVEL_SAMPLE = Object.freeze({
-  /** Strikes per material. 16 is where the estimate stops moving; see the note above. */
-  strikes: 16,
+  /**
+   * Strikes per material, stratified across the whole bank.
+   *
+   * **Measured, and the previous 16 was not.** Every seed in the bank was tabulated once and the
+   * estimator run over it at every sample size and at sixteen offsets within a stratum, so what
+   * follows is the estimator's own error separated from the law's:
+   *
+   * | strikes | worst \|residual\| over 16 phases |
+   * |---|---|
+   * | 16 | 1.396 dB |
+   * | 32 | 0.761 |
+   * | 64 | 0.619 |
+   * | 96 | 0.466 |
+   * | 128 | 0.549 |
+   * | 192 | **0.383** |
+   * | 256 | 0.384 |
+   * | 384 | 0.370 |
+   *
+   * The converged residual — every one of the 997 seeds — is 0.359 dB, at `landing`/dust, and it
+   * is the `bright` leak `BRIGHT_LEAK_MAX_DB` already documents rather than anything new. So 192
+   * is where the estimate stops moving: past it the number is the law's residual and nothing of
+   * the estimator's is left. 16 was not that point and never was. It sat at 1.396 dB worst — over
+   * `acrossStancesToleranceDb`, twice over `toleranceDb` — and passed only because the shipped
+   * offset happens to be a lucky one, landing at 0.305 where its neighbours reach 1.4. A sample
+   * whose passing depends on which stratum offset it starts from is not measuring the law; it is
+   * spending the tolerance the law is supposed to be judged against.
+   *
+   * The table is a tabulation, not a model: shifting the seeds by the offset it names as the
+   * worst one and running this suite for real reproduces its 1.396 dB to six figures, and doing
+   * the same at 192 changes nothing that fails.
+   */
+  strikes: 192,
   /** When the first strike lands in the render, seconds. */
   firstAtSec: 0.05,
   /**
-   * Seconds between strikes. 0.2 is longer than every attack window and short enough that all
-   * four stances of all four materials render in a couple of seconds.
+   * How many strikes share one render.
+   *
+   * Cost, and only cost. Every scheduled voice is processed for the whole of the render it is in,
+   * so `strikes` strikes in one render of length `spacingSec × strikes` is quadratic work: at 192
+   * it is a 38 s render carrying 192 voices, sixteen times over. Cut into chunks it is linear.
+   * Measured, as whole-file wall time: **12.5 s at 8 per render against 232 s at 192**. Without
+   * this, raising `strikes` would have cost four minutes a run.
+   *
+   * That it does not move the answer had to be checked rather than assumed, because chunking
+   * changes what each strike has ringing behind it: the first strike of every chunk starts in
+   * silence. Running the whole file at `strikesPerRender: 1` — the extreme of that, every strike
+   * alone in its own render — moves metal's estimate by 0.005 dB and every other material's by
+   * 0.0001 dB, against a tolerance of 0.5. Metal is the one that moves because metal is the one
+   * that is still ringing; see `spacingSec` for the same effect measured directly.
+   */
+  strikesPerRender: 8,
+  /**
+   * Seconds between strikes.
+   *
+   * 0.2 is longer than every attack window, and it is deliberately *not* longer than metal's
+   * 0.30–0.38 s modes: a strike therefore lands with the previous one still ringing about 32 dB
+   * down inside its 85 ms window, which looks like a systematic bias in favour of exactly the
+   * materials that ring.
+   *
+   * Measured, and it is not one. The same 96-seed sample rendered at 0.2 s, at 0.5 s, at 1.0 s
+   * and one-strike-per-render agrees to 0.0036 dB on metal's estimate and to 0.0001 dB on every
+   * other material's — three orders of magnitude under `toleranceDb`. Per strike the effect
+   * reaches 0.096 dB on metal, but its sign follows the phase the ring happens to be at, so it
+   * averages out rather than accumulating: metal's mean shifts −0.004 dB at `walk-step` and
+   * +0.004 at `landing`. Widening the spacing would triple the render time to buy that.
    */
   spacingSec: 0.2,
   /**
    * Measured peak-to-peak spread of the individual strikes at this sample, walk-step, dB.
    *
    * Recorded because it is the reason the sample exists, and because the *ordering* is itself a
-   * result: dust scatters most because it is nearly all exciter, metal and concrete less, stone
-   * least. Nothing asserts these exactly — `maxSpreadDb` is the guard.
+   * result: dust and metal scatter most — dust because it is nearly all exciter with no modal
+   * ring to steady it, metal because its Q~146 mode is driven by a slice of the burst close to
+   * one degree of freedom — while concrete and stone sit at half that. Nothing asserts these
+   * exactly; `maxSpreadDb` is the guard.
+   *
+   * They roughly doubled for metal when `strikes` went from 16 to 192, which is what a
+   * peak-to-peak *should* do when a sample gets twelve times bigger: the extremes of a
+   * distribution are found by looking, and 16 strikes had not looked. The spread is a property
+   * of the material, and the old numbers were an underestimate of it.
    */
-  spreadDb: Object.freeze({ concrete: 2.3, metal: 3.0, stone: 2.1, dust: 5.9 }),
+  spreadDb: Object.freeze({ concrete: 2.54, metal: 6.89, stone: 2.64, dust: 7.57 }),
   /**
    * The ceiling any single material's spread must stay under, dB.
    *
-   * 8 against a measured worst of 5.9. Not a tolerance on a pinned value — a smoke alarm. If a
-   * material's strike-to-strike scatter grows past this, sixteen strikes are no longer enough
-   * to estimate its mean and every number below it in this file is being read off noise.
+   * 12 against a measured worst of 9.07 (crouch-step on dust, the quietest and most
+   * exciter-dominated combination the game has). Not a tolerance on a pinned value — a smoke
+   * alarm. If a material's strike-to-strike scatter grows past this, `strikes` strikes are no
+   * longer enough to estimate its mean and every number below it in this file is being read off
+   * noise. It moved with `strikes` for the reason `spreadDb` gives, not because anything got
+   * noisier.
    */
-  maxSpreadDb: 8,
+  maxSpreadDb: 12,
 });
 
 /**
@@ -308,10 +375,15 @@ export const MATERIAL_LOUDNESS_LAW = Object.freeze({
   /**
    * Tolerance at `walk-step`, dB — the stance the attack normalizations were fitted at.
    *
-   * Worst measured residual there is 0.176 dB (metal). ±0.5 is three times that: tight enough
-   * that a material whose multiplier was applied twice (metal would be +3.5 dB out) or not at
-   * all fails immediately, loose enough to survive a modal retune that shifts where the attack
-   * window's energy sits.
+   * Worst measured residual there is 0.085 dB (dust), and the whole of that is the law: the
+   * estimator's own contribution at `strikes` = 192 is under 0.03 dB. ±0.5 is six times it:
+   * tight enough that a material whose multiplier was applied twice (metal would be +3.5 dB out)
+   * or not at all fails immediately, loose enough to survive a modal retune that shifts where
+   * the attack window's energy sits.
+   *
+   * It reads 0.176 dB at the previous `strikes` = 16, and that is the entry worth keeping: the
+   * difference between the two is not the voices changing, it is sixteen strikes reporting their
+   * own sampling error as the material's residual.
    */
   toleranceDb: 0.5,
   /**
@@ -319,9 +391,11 @@ export const MATERIAL_LOUDNESS_LAW = Object.freeze({
    *
    * Wider than the walk tolerance because the fit is at one `bright` and the stances span 0.55
    * to 1.6 of it, so a little of the exciter's cutoff move leaks into the level. Worst measured
-   * residual anywhere is 0.305 dB (dust, landing) and it grows monotonically with `bright`,
+   * residual anywhere is 0.357 dB (dust, landing) and it grows monotonically with `bright`,
    * which is the leak being visible rather than hidden. See BRIGHT_LEAK_MAX_DB for the bound on
-   * the leak itself.
+   * the leak itself. That number is now the *converged* one — every seed in the bank gives
+   * 0.359 — where at `strikes` = 16 it read 0.305 at the shipped offset and 1.40 two offsets
+   * away, which is the sampling error wearing the law's name.
    *
    * **0.7 and not 1.0, and a mutation chose the number.** Deleting metal's attack normalization
    * outright — `attackNorm: 1.104115` back to 1, which is the whole of §3.9's machinery for that
@@ -355,33 +429,46 @@ export const BRIGHT_LEAK_MAX_DB = 0.35;
  * The Halo's radius → pitch calibration: audible radius in metres against the hum's fundamental.
  *
  * §3.8 is non-negotiable about the player always knowing how loud they are, and pitch is the
- * readout. These three rows are the three movement tiers of §3.3 read through
- * `haloProbe.humPitch`: crouch (2 m), walk (11 m), sprint (24 m).
+ * readout. These three rows are the three movement tiers of §3.3 read through `paint/halo`'s
+ * `humPitch`: crouch (2 m), walk (11 m), sprint (24 m) — the **hearing** radii of §3.3's
+ * right-hand column on concrete, which is what the Halo reports.
+ *
+ * `windowSec` is where each tier sits in `haloHum.test.ts`'s timeline, and it moved when the
+ * fixture went: the hum is now driven the way the game drives it, one `setRadius` per 60 Hz
+ * frame through §3.8's real glide, so a plateau needs ~1.2 s (about seven glide constants) to
+ * have settled before the pitch means anything. The windows also dodge the near-unison's beat
+ * nulls, which are 2.25 s apart at the crouch end and where `estimateF0` correctly answers "no
+ * pitch here" rather than guessing.
  */
 export const HALO_PITCH_POINTS = Object.freeze([
-  { radiusM: 2, hz: 63.51, windowSec: [0.6, 1.4] },
-  { radiusM: 11, hz: 148.94, windowSec: [2.7, 3.4] },
-  { radiusM: 24, hz: 220.0, windowSec: [4.7, 5.4] },
+  { radiusM: 2, hz: 63.51, windowSec: [0.6, 1.5] },
+  { radiusM: 11, hz: 148.94, windowSec: [3.2, 4.1] },
+  { radiusM: 24, hz: 220.0, windowSec: [5.8, 6.7] },
 ] as const);
 
 /**
  * How far a measured hum pitch may sit from `humPitch`, in cents.
  *
- * Measured error is +1 to +5 cents, and it is *not* estimator error — `estimateF0` reads a pure
- * sine to within 0.1 cents. It is the hum's own 0.7 % detuned second oscillator pulling the
+ * Measured error is +2.7 to +5.8 cents, and it is *not* estimator error — `estimateF0` reads a
+ * pure sine to within 0.1 cents. It is the hum's own 0.7 % detuned second oscillator pulling the
  * composite period sharp by roughly its share of the mix. 25 cents is an eighth of a semitone:
  * far tighter than anything audible as a wrong reading, far looser than the beat.
+ *
+ * It is also the tolerance the plateau assertion uses at half width, and that one has teeth: a
+ * hum that stopped scheduling a ramp while the radius held still reads **169 cents sharp** for
+ * the whole plateau, because the next ramp then interpolates from the far side of it.
  */
 export const HALO_PITCH_TOLERANCE_CENTS = 25;
 
 /**
  * The hum's peak level, dBFS.
  *
- * §3.8 now states this as law — "level stays low and near-constant (≈ −21 dBFS) and ducks under
+ * §3.8 states this as law — "level stays low and near-constant (≈ −21 dBFS) and ducks under
  * events, so the information rides on pitch and the tone can sit under everything without
- * fatiguing" — so it is a design quantity and not an accident of the fixture's gain. The render
- * peaks at −21.01. RMS at the plateaus runs 6–13 dB below that, since a 63 Hz fundamental and a
- * 220 Hz one meet the 520 Hz lowpass differently.
+ * fatiguing" — so it is a design quantity, and `HALO_LEVEL` in `src/audio/halo.ts` is set to land
+ * on it rather than the other way round. The swept render peaks at −21.01. RMS at the plateaus
+ * runs 6–13 dB below that, since a 63 Hz fundamental and a 220 Hz one meet the 520 Hz lowpass
+ * differently.
  */
 export const HALO_PEAK_DBFS = Object.freeze({
   value: -21.0,
@@ -395,10 +482,35 @@ export const HALO_PEAK_DBFS = Object.freeze({
  *
  * If level tracked radius too, a player could not hear their own Halo over their own footsteps
  * at the sprint end, which is exactly the tier where the reading matters most. Measured spread
- * across the three plateaus is ~7 dB and most of that is the lowpass at 520 Hz attenuating the
- * quiet end's 63 Hz fundamental less than its partials.
+ * across the three plateaus is 5.8 dB and none of it is intended: it is the 520 Hz lowpass
+ * meeting a 63 Hz fundamental differently from a 220 Hz one. 10 dB leaves room for a filter
+ * retune and still fails a hum whose level followed its pitch.
  */
 export const HALO_LEVEL_SPREAD_MAX_DB = 10;
+
+/**
+ * How the hum gets out of the way of an event — §3.8's "ducks under events".
+ *
+ * The reason the duck exists is masking: the hum is the only continuous tone in the game, and
+ * what it would sit on top of is footfalls, which are the player's primary source of geometry
+ * (§3.3: "moving fast **is** scanning"). A readout that costs you the thing it is reporting on
+ * is a bad trade, so it steps aside for every voice the mixer builds.
+ *
+ * Measured, at the hum's own gain: −9.1 dB at the floor, recovered to within 0.01 dB by 0.9 s,
+ * and 0.03 dB of effect on anything else sharing the master. `bleedMaxDb` is the one with teeth
+ * — a duck automated on the master bus instead of on the hum would attenuate the very event it
+ * was making room for, by about 10 dB.
+ */
+export const HALO_DUCK = Object.freeze({
+  /** Least dip the hum must show while an event is landing, dB. Measured 9.1. */
+  minDepthDb: 6,
+  /** By when the hum must be back, seconds after the event. Measured: 0.01 dB out at 0.9 s. */
+  recoveredBySec: 0.9,
+  /** How close to undisturbed "back" means, dB. */
+  recoveredWithinDb: 0.5,
+  /** How much the duck may move anything else in the mix, dB. Measured 0.03. */
+  bleedMaxDb: 0.2,
+});
 
 // ---------------------------------------------------------------------------
 // Mix hygiene

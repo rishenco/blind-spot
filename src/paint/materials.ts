@@ -64,6 +64,22 @@ export function materialLoudness(mat: number): number {
 }
 
 /**
+ * The loudest voice any surface has — metal's ×1.5 today.
+ *
+ * Exists because §3.8's Halo has to have a top: the readout maps an audible radius onto a pitch
+ * and a ring brightness, and the loudest thing a stance can be is a sprint on the loudest
+ * surface in this table. Derived rather than written down as 1.5 so that adding a louder
+ * material raises the readout's ceiling with it — a Halo whose top end was a literal would
+ * silently saturate on the new surface, which is exactly the "I cannot tell how loud I am"
+ * failure §3.8 calls non-negotiable.
+ */
+export function maxMaterialLoudness(): number {
+  let max = 0;
+  for (const material of MATERIALS) if (material.loudness > max) max = material.loudness;
+  return max;
+}
+
+/**
  * The matter palette of §3.2 — cyan-family only, forever.
  *
  * The cold end is a *rendered* navy, not a paint-chip navy: it is multiplied by the skeleton's

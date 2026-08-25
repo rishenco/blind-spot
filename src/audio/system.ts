@@ -12,6 +12,14 @@
  * the graph, and what is left here is the two things only a live browser has — a context, and a
  * user gesture to start it with.
  *
+ * **The one sound that is not an event, and why it is not a hole in §1.** §3.8's Halo hum runs
+ * here too (`setHaloRadius`), and it never touches the bus. That is not an exception to "one bus,
+ * two senses" because the hum is not a thing that happens in the world: it is the rig's own gauge,
+ * audible to nobody but its pilot, painting nothing and heard by nothing. The law it would break
+ * is the one about *the world* — a sound with no paint — and the test that keeps it honest is
+ * that the hum has no position, no emitter and no carry radius to give it one. What it does need
+ * from the mixer is the master bus and a notification on every voice, so it can duck.
+ *
  * **The autoplay policy is handled by not having a context.** Every browser refuses to start
  * audio before a user gesture, and the usual arrangement — construct an `AudioContext` up front
  * and resume it later — costs a console warning on load in Chromium and a suspended context that
@@ -27,6 +35,7 @@
  */
 
 import { AudioDirector, type ListenerState, type VoiceSpec } from './director';
+import { HaloHum } from './halo';
 import { playVoice } from './voices';
 import type { SoundBus, SoundEvent } from '../paint/soundEvents';
 
@@ -90,6 +99,15 @@ export class AudioSystem {
   private master: GainNode | null = null;
   /** Set once a factory has answered `null` — there is no audio here and asking again is noise. */
   private unavailable = false;
+
+  /**
+   * §3.8's hum, built on the first `setHaloRadius` after audio comes up.
+   *
+   * Lazy and not built in `unlock`, because the hum is a *readout* and this class is a mixer: a
+   * caller that never asks for a Halo — a test measuring one footstep, a tool rendering one
+   * ping — should get exactly the sounds it asked for and no drone underneath them.
+   */
+  private hum: HaloHum | null = null;
 
   private playedCount = 0;
   private droppedCount = 0;
@@ -191,6 +209,10 @@ export class AudioSystem {
     }
     try {
       playVoice(ctx, master, spec, ctx.currentTime);
+      // §3.8: the hum "ducks under events". Every voice, not just loud ones — the hum is a
+      // constant tone and constant tones mask, so what it has to get out of the way of is
+      // whatever just arrived, at whatever level the director gave it.
+      this.hum?.duck(ctx.currentTime);
       this.playedCount++;
     } catch (error) {
       // A graph that will not build must not take the frame down with it. Counted as dropped and
@@ -198,6 +220,39 @@ export class AudioSystem {
       this.failure = String(error);
       this.droppedCount++;
     }
+  }
+
+  /**
+   * Tell §3.8's hum how loud the player currently is — the glided radius from `GameSim.halo`.
+   *
+   * Called every frame and cheap enough to be: the hum builds itself the first time, and after
+   * that this is one exponential ramp per partial. A radius, not a pitch, because `humPitch` is
+   * the one map and both faces of the readout have to go through it.
+   *
+   * Silently does nothing while audio is not live — the ring is still showing the same number,
+   * which is precisely why §3.8 calls the ring the guaranteed readout.
+   */
+  setHaloRadius(radiusM: number): void {
+    const ctx = this.ctx;
+    const master = this.master;
+    if (ctx === null || master === null || ctx.state !== 'running') return;
+    if (this.hum === null) {
+      try {
+        this.hum = new HaloHum(ctx, master, { radiusM });
+        return;
+      } catch (error) {
+        // Same rule as `play`: a graph that will not build is recorded, never logged, and never
+        // takes the frame with it. The player loses the hum and keeps the ring.
+        this.failure = String(error);
+        return;
+      }
+    }
+    this.hum.setRadius(radiusM, ctx.currentTime);
+  }
+
+  /** Whether §3.8's hum has been built and is still running. */
+  get humming(): boolean {
+    return this.hum !== null && this.hum.running;
   }
 
   /** Whether audio is live: a context exists and the browser is letting it run. */
@@ -232,6 +287,10 @@ export class AudioSystem {
 
   dispose(): void {
     this.unsubscribe();
+    // The one voice that would otherwise outlive the game: everything else is a strike that has
+    // already been scheduled to end, and the hum runs until told not to.
+    this.hum?.stop();
+    this.hum = null;
     const closable = this.ctx as (BaseAudioContext & { close?: () => Promise<void> }) | null;
     if (closable !== null && typeof closable.close === 'function') {
       closable.close().catch(() => {

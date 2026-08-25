@@ -38,6 +38,7 @@ import {
   defaultMovementTunables,
   defaultThirdPersonTunables,
   type PlayerEvent,
+  type StepTier,
 } from '../player/controller';
 import {
   LANDING_MIN_IMPACT,
@@ -52,6 +53,7 @@ import {
   defaultPerceptionTunables,
   defaultWaveTunables,
 } from '../paint/paintSystem';
+import { Halo } from '../paint/halo';
 import { defaultAgeRamp } from '../paint/ageRamp';
 import { defaultStructuredTunables } from '../paint/structured';
 import { PROBE_REGIONS, SPAWN, SPAWN_YAW_DEG, buildRoom, type Room } from '../world/room';
@@ -71,6 +73,17 @@ export const E_PING_HEIGHT = 1.5;
  * not the floor: the strike rings up through the chassis and radiates from about knee height.
  */
 const STEP_HEIGHT = 0.65;
+
+/**
+ * Which sound class a gait tier makes — the one place the two vocabularies meet.
+ *
+ * The body speaks in `StepTier` (what the legs are doing) and the bus speaks in `SoundClass`
+ * (what §3.3 prices). Both the footstep emitter and §3.8's Halo have to cross that line, and
+ * they have to cross it the same way or the readout reports a class the world never emits.
+ */
+export function stepClassOf(tier: StepTier): SoundClass {
+  return tier === 'crouch' ? 'crouch-step' : tier === 'sprint' ? 'sprint-step' : 'walk-step';
+}
 
 /**
  * Debug-only paint clock multipliers, cycled with T.
@@ -113,6 +126,15 @@ export class GameSim {
   readonly sound: SoundTunables = defaultSoundTunables();
   readonly bus = new SoundBus(this.sound);
   readonly paint: PaintSystem;
+
+  /**
+   * §3.8's self-readout — the ring's brightness and the hum's pitch, as one glided number.
+   *
+   * On the simulation and not on the browser half, even though both of its faces are presentation:
+   * the *quantity* is a fact about the body and the sound table, and a headless run can therefore
+   * assert on it. It emits nothing and nothing in the world reads it.
+   */
+  readonly halo = new Halo();
 
   private readonly unsubscribeBus: () => void;
   private readonly unsubscribePlayer: () => void;
@@ -169,10 +191,8 @@ export class GameSim {
 
   private onPlayerEvent = (event: PlayerEvent): void => {
     if (event.type === 'footstep') {
-      const cls: SoundClass =
-        event.tier === 'crouch' ? 'crouch-step' : event.tier === 'sprint' ? 'sprint-step' : 'walk-step';
       this.bus.emit({
-        class: cls,
+        class: stepClassOf(event.tier),
         source: 'player',
         emitter: PLAYER_EMITTER_ID,
         x: event.x,
@@ -238,6 +258,23 @@ export class GameSim {
     this.pingCooldown = PING_COOLDOWN;
   }
 
+  /**
+   * How far away the body can be heard right now, metres — §3.3's right-hand column for the
+   * gait it is currently in, on the surface it is currently on, with §3.9's voice applied.
+   *
+   * Zero while the body is silent (still, airborne, mid-climb), which is the honest answer and
+   * the most important single reading the Halo gives: nothing can hear you.
+   *
+   * Every part of the number comes from somewhere that already had to be right — the tier from
+   * the controller's own gait ladder, the surface from the box the collision pass resolved
+   * against, the radius from the bus that will emit the footfall. Nothing here recomputes §3.9.
+   */
+  audibleRadius(): number {
+    const tier = this.player.stepTier;
+    if (tier === null) return 0;
+    return this.bus.carryRadius(stepClassOf(tier), this.player.groundMaterial);
+  }
+
   private syncListener(): void {
     const p = this.player.position;
     this.paint.setListener(p.x, p.y + E_PING_HEIGHT, p.z);
@@ -263,6 +300,12 @@ export class GameSim {
    *
    * Each of those five is pinned by a test in `tests/headless.test.ts`; each was checked by
    * making the reordering and watching the right test go red.
+   *
+   * The Halo is advanced after all of it, and is the one thing here that is not part of that
+   * order: it emits nothing, so it cannot disturb what anything else hears, and reading it last
+   * is what makes it describe the tick that just ran rather than the one before. It is advanced
+   * on the *raw* `dt` and not the paint clock — T scales how fast the world's memory ages, and
+   * how loud the player is right now is not a thing that ages.
    */
   tick(dt: number, input: GameInputSource): void {
     this.paintTime += dt * TIME_SCALES[this.timeScaleIndex]!;
@@ -283,6 +326,7 @@ export class GameSim {
     }
 
     this.player.update(dt, input);
+    this.halo.advance(this.audibleRadius(), dt);
   }
 
   // ---- readouts ------------------------------------------------------------
@@ -353,6 +397,13 @@ export class GameSim {
       eConeDeg: this.sound.classes['e-ping'].coneAngleDeg,
       eRange: this.sound.classes['e-ping'].paintRadius,
       hearingRange: this.paint.perception.hearingRange,
+      // --- the Halo (§3.8). `haloRadius` is the glided reading both faces of the readout are
+      // drawn from; `haloTarget` is where it is heading, so a driver can see the glide happening
+      // rather than only its endpoints.
+      haloRadius: this.halo.radius,
+      haloTarget: this.halo.targetRadius,
+      haloHz: this.halo.pitchHz,
+      haloBrightness: this.halo.brightness,
       // --- the wave
       waveLive: diag.waveLive,
       waveFront: diag.waveFront,

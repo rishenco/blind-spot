@@ -280,6 +280,18 @@ export class Game {
 
     this.sim.tick(dt, this.input);
 
+    /*
+     * §3.8's two faces, both fed from the tick that just moved the readout.
+     *
+     * One `Halo`, read twice on the same line, so the ring and the hum cannot report different
+     * frames. Every frame and not on the HUD's tenth-of-a-second timer below: §3.8 says the
+     * readout glides rather than stepping between stances, and a ring refreshed at 10 Hz beside
+     * a hum that glides at 60 is exactly the disagreement the doc rules out — visible on the one
+     * as a staircase the other does not have.
+     */
+    this.audio.setHaloRadius(this.sim.halo.radius);
+    this.ctx.hud.setHalo(this.sim.halo.brightness);
+
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) {
       this.hudTimer = 0.1;
