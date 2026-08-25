@@ -226,6 +226,29 @@ export function materialVoiceFor(cls: SoundClass, mat: number | null | undefined
 }
 
 /**
+ * A radius has to be a positive, finite number of metres, or the event is not a sound.
+ *
+ * Written as `!(r > 0)` rather than `r <= 0`, and the difference is the whole point: NaN fails
+ * every comparison it is given, so `r <= 0` waves it through and `!(r > 0)` catches it. That is
+ * the same trapdoor `SoundBus.landingRadius` guards against downstream, arriving here by the
+ * emitter's front door instead.
+ *
+ * Zero is rejected alongside the impossible values, and deliberately: an emitter asking for a
+ * radius of zero is asking for half a sound, and half a sound is the one thing §1 promises the
+ * bus cannot carry. There is no legitimate caller — a noise nobody can hear and nothing can see
+ * is not a quiet noise, it is an absent one, and the way to emit nothing is to emit nothing.
+ */
+function assertRadius(cls: SoundClass, field: string, radius: number): void {
+  if (!(radius > 0) || radius === Infinity) {
+    throw new Error(
+      `SoundBus.emit('${cls}') resolved ${field}=${radius}. Every radius must be a positive, ` +
+        'finite number of metres: the paint and the sound are two readings of one event, and a ' +
+        'radius that is zero, negative or non-finite makes them disagree (see vision.md §1).',
+    );
+  }
+}
+
+/**
  * One simulation's own copy of the two tables above.
  *
  * The dev panel writes *here*, which is what makes two `GameSim`s in one process independent and
@@ -505,6 +528,36 @@ export class SoundBus {
      */
     const mat = contact ? spec.mat ?? MAT_CONCRETE : null;
     const loudness = materialVoiceFor(spec.class, spec.mat);
+    /*
+     * Both radii, checked before anything is allowed to carry them.
+     *
+     * §1's "one bus, two senses" says a sound with no paint — or paint with no sound — is
+     * impossible to produce. Wiring both subscribers to one stream makes that true of the
+     * *plumbing*; it says nothing about the *numbers*, and the numbers are the half an emitter
+     * supplies. Unchecked, the override path breaks the claim three separate ways, all measured:
+     *
+     *  - `paintRadius: 0` emits a voice at a real footstep's gain and unlocks nothing. That is
+     *    the law's own counterexample, produced through the public API in one line.
+     *  - `paintRadius: NaN` unlocks 36 250 dots where a walk-step unlocks 1 838 — it paints the
+     *    room and everything past it, because every downstream reject test has the shape
+     *    `if (tooFar) continue`, and NaN fails that comparison, so nothing is ever rejected.
+     *    Not painting *less*: painting *twenty times more*.
+     *  - `hearingRadius: Infinity` hands the mixer a gain of `Infinity`.
+     *
+     * So the boundary rejects rather than repairs. A silent clamp would leave the violation
+     * possible and merely quiet, which is worse than a crash: it is a law broken in a way nobody
+     * can see. This follows the material check just above it — an emitter that names a radius it
+     * does not mean has misunderstood what it is emitting, exactly as one that gives a ping a
+     * surface has, and a misunderstanding survives to the next reader only if it is swallowed.
+     *
+     * Resolved values, not the overrides, so one predicate covers the class table too: those
+     * numbers are live on the dev panel, and a slider dragged to zero is the same bug arriving
+     * by a different road.
+     */
+    const paintRadius = (spec.paintRadius ?? profile.paintRadius) * loudness;
+    const hearingRadius = (spec.hearingRadius ?? profile.hearingRadius) * loudness;
+    assertRadius(spec.class, 'paintRadius', paintRadius);
+    assertRadius(spec.class, 'hearingRadius', hearingRadius);
     let dx = spec.dirX ?? 0;
     let dy = spec.dirY ?? 0;
     let dz = spec.dirZ ?? 0;
@@ -527,8 +580,8 @@ export class SoundBus {
       y: spec.y,
       z: spec.z,
       mat,
-      paintRadius: (spec.paintRadius ?? profile.paintRadius) * loudness,
-      hearingRadius: (spec.hearingRadius ?? profile.hearingRadius) * loudness,
+      paintRadius,
+      hearingRadius,
       intensity: spec.intensity ?? profile.intensity,
       // A cone with no aim is a contradiction; fall back to omni rather than paint a slit.
       dirX: dx,
@@ -618,9 +671,13 @@ export class SoundBus {
      *
      * `t < 0 ? 0 : t > 1 ? 1 : t` is a correct clamp for every number and a trapdoor for the
      * one value that is not one: NaN fails both comparisons and falls out the bottom unchanged,
-     * so a NaN impact speed used to produce a NaN paint radius. That does not throw. It paints
-     * nothing — every distance comparison downstream is false — and a silent landing is a law-2
-     * lie: the event was emitted, the sound was made, and the world drew none of it.
+     * so a NaN impact speed used to produce a NaN paint radius. That does not throw, and what it
+     * does instead is the opposite of harmless. Every reject test downstream has the shape
+     * `if (tooFar) continue`, and NaN fails *that* comparison too, so nothing is ever rejected:
+     * a NaN radius does not paint nothing, it paints everything. Measured, it unlocks 36 250 dots
+     * where an honest walk-step unlocks 1 838 — the room, and the rooms past it, floodlit by a
+     * landing whose speed we could not read. That is the law-2 lie in its loudest form: the world
+     * drew geometry no sound reached.
      *
      * So a landing whose speed we cannot measure is still a landing, and it rings out at the
      * quietest thing a landing can be. The order matters: the NaN test has to come first, or the

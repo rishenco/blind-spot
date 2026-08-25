@@ -82,9 +82,10 @@ export const HALO_GLIDE_SEC = 0.18;
  * The radius, clamped into the range the readout can express.
  *
  * NaN answers with the floor rather than passing through, for the reason `SoundBus.landingRadius`
- * gives about the same trapdoor: a NaN radius does not throw, it silently makes every downstream
- * comparison false and the readout goes dead — and a dead readout is precisely the complaint
- * §3.8 exists to answer.
+ * gives about the same trapdoor: NaN fails every comparison it is given, so it slips through any
+ * clamp written as a pair of them. Here the consequence is a readout that goes dead rather than
+ * one that goes wrong — `humPitch` would hand the oscillator a NaN frequency — and a dead readout
+ * is precisely the complaint §3.8 exists to answer.
  */
 function clampRadius(radiusM: number): number {
   if (!(radiusM > HALO_REFERENCE_M)) return HALO_REFERENCE_M;

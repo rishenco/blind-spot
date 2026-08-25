@@ -219,11 +219,21 @@ describe('SoundBus.emit', () => {
     expect(bus.emit({ class: 'q-ping', x: 0, y: 0, z: 0, waveSpeed: 0.5 }).waveSpeed).toBe(0.5);
   });
 
-  it('does not clamp position or radii — the bus stamps, it does not sanitise', () => {
+  /**
+   * Position is stamped; radii are checked. The split is not an inconsistency, it is the line
+   * between a value that can be strange and one that can be wrong.
+   *
+   * A sound 1000 km away is a *legitimate* sound at an unhelpful place: both senses agree it is
+   * inaudible, they agree for the same reason, and nothing about §1 is bent by it. A radius of
+   * −3 is not a place, it is a claim about how far the event reaches, and the two subscribers
+   * answer it differently — which is the one thing the bus exists to prevent. So the bus stamps
+   * what it is told about *where*, and refuses what it is told about *how far*.
+   */
+  it('stamps a position as given, however far away it is', () => {
     const bus = new SoundBus();
-    const e = bus.emit({ class: 'q-ping', x: -1e6, y: 0, z: 0, paintRadius: -3 });
+    const e = bus.emit({ class: 'q-ping', x: -1e6, y: 0, z: 0 });
     expect(e.x).toBe(-1e6);
-    expect(e.paintRadius).toBe(-3);
+    expect(e.paintRadius).toBe(SOUND_CLASSES['q-ping'].paintRadius);
   });
 });
 
@@ -503,5 +513,82 @@ describe('eventTint — amber vs green (§3.2)', () => {
     expect(eventTint(step('prop', PLAYER_EMITTER_ID), PLAYER_EMITTER_ID)).toBe('prop');
     expect(eventTint(step('world', PLAYER_EMITTER_ID), PLAYER_EMITTER_ID)).toBe('prop');
     expect(eventTint(step('world', NO_EMITTER), NO_EMITTER)).toBe('prop');
+  });
+});
+
+/**
+ * The radii are the half of §1 the wiring cannot guarantee.
+ *
+ * "One bus, two senses" is usually read as a claim about plumbing — one stream, two subscribers,
+ * so neither can be fed something the other was not. That much the architecture does enforce.
+ * What it never enforced is the *numbers* on the event, and those come from the emitter: before
+ * this guard, `paintRadius: 0` produced a mixer voice at a real footstep's gain while unlocking
+ * nothing (a sound with no paint, written in one line through the public API), and
+ * `paintRadius: NaN` unlocked 36 250 dots against a walk-step's 1 838, because every reject test
+ * downstream is `if (tooFar) continue` and NaN fails it — so the trapdoor floodlights the map
+ * instead of darkening it.
+ *
+ * These assert the rejection, not the repair. A clamp would keep the violation reachable and
+ * merely quiet, and a law that fails silently is worse than one that throws.
+ */
+describe('a radius is positive, finite metres, or it is not a sound (§1)', () => {
+  const at = { x: 0, y: 0, z: 0 } as const;
+
+  for (const field of ['paintRadius', 'hearingRadius'] as const) {
+    for (const bad of [0, -1, -0.0001, NaN, Infinity, -Infinity]) {
+      it(`rejects ${field}=${String(bad)}`, () => {
+        const bus = new SoundBus();
+        expect(() => bus.emit({ class: 'walk-step', ...at, [field]: bad })).toThrow(
+          /positive, finite/,
+        );
+        bus.dispose();
+      });
+    }
+
+    it(`rejects a dev-panel slider that drags ${field} to zero`, () => {
+      const bus = new SoundBus();
+      bus.tunables.classes['walk-step'][field] = 0;
+      expect(() => bus.emit({ class: 'walk-step', ...at })).toThrow(/positive, finite/);
+      bus.dispose();
+    });
+  }
+
+  it('nothing is emitted when a radius is refused — the counter does not move', () => {
+    const bus = new SoundBus();
+    const heard: number[] = [];
+    bus.subscribe((e) => heard.push(e.seq));
+    const before = bus.emitted;
+    expect(() => bus.emit({ class: 'walk-step', ...at, paintRadius: NaN })).toThrow();
+    expect(bus.emitted).toBe(before);
+    expect(heard).toEqual([]);
+    bus.dispose();
+  });
+
+  it('the seq is not burned by a refused emit — the next honest sound gets it', () => {
+    const bus = new SoundBus();
+    const first = bus.emit({ class: 'walk-step', ...at });
+    expect(() => bus.emit({ class: 'walk-step', ...at, paintRadius: 0 })).toThrow();
+    const next = bus.emit({ class: 'walk-step', ...at });
+    expect(next.seq).toBe(first.seq + 1);
+    bus.dispose();
+  });
+
+  it('every shipped class passes its own defaults, on every material', () => {
+    const bus = new SoundBus();
+    for (const cls of Object.keys(SOUND_CLASSES) as Array<keyof typeof SOUND_CLASSES>) {
+      const mats = cls.endsWith('ping') ? [undefined] : [0, 1, 2, 3];
+      for (const mat of mats) {
+        expect(() => bus.emit({ class: cls, ...at, ...(mat === undefined ? {} : { mat }) })).not.toThrow();
+      }
+    }
+    bus.dispose();
+  });
+
+  it('the quietest real sound in the game is still a sound — a dust crouch-step survives', () => {
+    const bus = new SoundBus();
+    const e = bus.emit({ class: 'crouch-step', ...at, mat: 3 });
+    expect(e.paintRadius).toBeGreaterThan(0);
+    expect(e.hearingRadius).toBeGreaterThan(0);
+    bus.dispose();
   });
 });
