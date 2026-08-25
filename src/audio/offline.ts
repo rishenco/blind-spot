@@ -167,6 +167,8 @@ export interface RenderOptions {
   deafSeconds?: number;
   deafCutoff?: number;
   tinnitus?: number;
+  /** Render only these scenes, by name — the main keyframe run takes a two-scene subset. */
+  only?: readonly string[];
 }
 
 export interface RenderResult {
@@ -415,6 +417,10 @@ function encodeWav(buf: AudioBuffer): string {
 /** Everything the tool needs, in one call: every scene, in order. */
 export async function renderAll(opts: RenderOptions = {}): Promise<RenderResult[]> {
   const out: RenderResult[] = [];
-  for (const s of SCENES) out.push(await renderScene(s, opts));
+  const wanted = opts.only;
+  for (const s of SCENES) {
+    if (wanted !== undefined && !wanted.includes(s.name)) continue;
+    out.push(await renderScene(s, opts));
+  }
   return out;
 }
