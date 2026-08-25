@@ -454,7 +454,6 @@ describe('the preview: `arcPoints` (law 2)', () => {
       for (let i = 1; i < n; i++) {
         expect(stepBallistic(empty, body, DT, { gravity: BALLISTIC_GRAVITY, skin: 1e-3 }, out))
           .toBeNull();
-        expect(arc[i * 3]! - body.x).toBeLessThan(1e-4);
         expect(Math.abs(arc[i * 3]! - body.x)).toBeLessThan(1e-4);
         expect(Math.abs(arc[i * 3 + 1]! - body.y)).toBeLessThan(1e-4);
         expect(Math.abs(arc[i * 3 + 2]! - body.z)).toBeLessThan(1e-4);
