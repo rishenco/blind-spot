@@ -214,12 +214,16 @@ async function attackLevels(cls: SoundClass, mat: PinnedMaterial): Promise<numbe
  * ones are stretched. The mean of squared amplitude is the physical quantity, and it is what
  * "how loud is this material, typically" means.
  *
- * Do not "simplify" this to a mean of decibels — no assertion below will stop you. Swapping it
- * leaves every test in this file passing, and the reason is only that the bias is smaller than
- * the tolerance and not that it is absent: the converged worst residual goes from 0.359 dB to
- * 0.611 dB, all of it on dust, because the bias scales with a material's spread and dust has the
- * widest. That is a quarter of §3.9's half-decibel budget spent on an estimator being wrong,
- * which is exactly the thing this batch raised the strike count to stop paying for.
+ * Do not "simplify" this to a mean of decibels. It used to be the case that nothing here would
+ * stop you: swapping it left every render-backed test in this file passing, because the bias is
+ * smaller than the tolerance and not because it is absent — the converged worst residual goes
+ * from 0.359 dB to 0.611 dB, all of it on dust, since the bias scales with a material's spread
+ * and dust has the widest. That is a quarter of §3.9's half-decibel budget spent on an estimator
+ * being wrong, which is exactly what raising the strike count was meant to stop paying for.
+ *
+ * The last block in this file now catches it, in arithmetic rather than in a render — see "the
+ * power mean is the estimator". The bias was always too small for a tolerance to see; the fix
+ * was to stop asking a tolerance and check the definition instead.
  */
 const powerMeanDb = (levels: readonly number[]): number =>
   10 * Math.log10(levels.reduce((sum, db) => sum + 10 ** (db / 10), 0) / levels.length);
@@ -541,5 +545,44 @@ describe("§3.9's loudness law: the multiplier is the whole of the difference", 
         `${cls} (bright ${AUDIO_CLASS_VOICES[cls].bright}) leaks ${leak.toFixed(3)} dB of level`,
       ).toBeLessThanOrEqual(BRIGHT_LEAK_MAX_DB);
     }
+  });
+});
+
+/**
+ * The estimator itself, checked against arithmetic rather than against a render.
+ *
+ * Every number in the block above is a `powerMeanDb` of a sample, so the whole loudness law is
+ * only as true as this one line is. Its own docstring says "no assertion below will stop you"
+ * from simplifying it to a mean of decibels — that was accurate when written, and these tests
+ * are what make it false. Killing that mutation does not need a render, because the mean of
+ * squared amplitude is not a measurement: it is a definition, and a definition can be checked
+ * by hand.
+ *
+ * This is not testing the test. `powerMeanDb` is a helper with one job and a closed-form answer;
+ * pinning it against numbers computed on paper is the same thing every other pin in this file
+ * does, minus the noise.
+ */
+describe('the power mean is the estimator, and it is not a mean of decibels', () => {
+  it('averages power, not logarithms', () => {
+    // 0 dB is amplitude² = 1, 20 dB is 100. Mean power 50.5 → 10·log10(50.5) = 17.0332 dB.
+    // A mean of decibels would answer 10 — off by seven, which no tolerance in this file
+    // would tolerate if it were ever asserted on.
+    expect(powerMeanDb([0, 20])).toBeCloseTo(17.0332, 3);
+  });
+
+  it('leaves a constant sample alone', () => {
+    // The one input both estimators agree on, which is exactly why it cannot be the only case.
+    for (const db of [-40, -12.5, 0, 6]) expect(powerMeanDb([db, db, db])).toBeCloseTo(db, 10);
+  });
+
+  it('never reads below the mean of decibels, and reads strictly above it when the sample spreads', () => {
+    // Jensen, in the direction that matters: the loud strikes carry the energy. This is the
+    // property the docstring describes as a low bias, stated as something a test can hold.
+    const meanDb = (v: readonly number[]): number => v.reduce((a, b) => a + b, 0) / v.length;
+    const spread = [-50, -30, -10, 0];
+    expect(powerMeanDb(spread)).toBeGreaterThan(meanDb(spread));
+    // And the gap grows with the spread, which is why dust — the widest — pays the most for it.
+    const wider = [-70, -30, -10, 0];
+    expect(powerMeanDb(wider) - meanDb(wider)).toBeGreaterThan(powerMeanDb(spread) - meanDb(spread));
   });
 });
