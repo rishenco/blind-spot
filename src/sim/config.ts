@@ -161,6 +161,12 @@ export interface PerceptionConfig {
   /** Localisation error grows with distance: sigma = perMeter · d, capped. */
   localizationSigmaPerMeter: number;
   localizationSigmaCap: number;
+  /**
+   * Hearing is anisotropic: you know the *direction* of a sound much better than its distance.
+   * This scales the across-bearing component of the error (1 = a round blob, 0.25 = an ellipse
+   * four times longer along the line of hearing than across it).
+   */
+  localizationBearingFactor: number;
   /** Strip `sourceId` from opponents' sounds (data association becomes the listener's problem). */
   anonymousSources: boolean;
   /** Delay between a sound happening and the observer receiving it. Humans need ~0.2–0.3 s. */
@@ -197,6 +203,13 @@ export interface AiConfig {
   beliefDecay: number;
   /** How greedy the policy is: 0 = first acceptable action, 1 = full search. */
   decisionQuality: number;
+  /**
+   * How many past observations of a continuous emitter a bot is allowed to keep and average.
+   * The simulation does not read it — it is reserved here because the research pass identified
+   * unbounded averaging of the ball's hum as the one honesty hole that no perception knob can
+   * close on its own (the correlated error above closes most of it, this bounds the rest).
+   */
+  observationMemory: number;
   /** Free-form room for whatever the belief layer turns out to need. */
   [key: string]: number | boolean | string;
 }
@@ -313,6 +326,7 @@ export function defaultConfig(): SimConfig {
       hearingScale: 1,
       localizationSigmaPerMeter: 0.06,
       localizationSigmaCap: 1.5,
+      localizationBearingFactor: 0.25,
       anonymousSources: true,
       reactionLatencySec: 0,
       truthLeak: 0,
@@ -324,6 +338,7 @@ export function defaultConfig(): SimConfig {
     ai: {
       beliefDecay: 0.5,
       decisionQuality: 1,
+      observationMemory: 12,
     },
   };
 }
@@ -358,6 +373,7 @@ export const PRESETS: Record<string, () => SimConfig> = {
   omniscient: () => {
     const c = defaultConfig();
     c.perception.localizationSigmaPerMeter = 0;
+    c.perception.localizationBearingFactor = 1;
     c.perception.anonymousSources = false;
     c.perception.truthLeak = 1;
     c.perception.hearingScale = 10;

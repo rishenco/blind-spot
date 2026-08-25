@@ -91,7 +91,7 @@ export class Perceiver {
       const d = dist2(me.pos, ev.pos);
       // Your own noise you always know about; everything else has to reach you.
       if (!self && d > ev.intensity * p.hearingScale) continue;
-      const obs = this.localise(ev, d, self, false);
+      const obs = this.localise(ev, me.pos, d, self, false);
       heard.push(obs);
       this.queue.push({ deliverAt: ev.t + p.reactionLatencySec, event: obs });
     }
@@ -187,26 +187,44 @@ export class Perceiver {
     };
   }
 
+  /**
+   * Draws one localisation error, shaped like hearing actually is: long along the line to the
+   * source, short across it. You can point at a sound; you cannot tell how far away it is.
+   */
+  private anisotropicOffset(from: Vec2, to: Vec2, d: number, sigma: number): Vec2 {
+    const radial = gauss(this.rng) * sigma;
+    const tangential = gauss(this.rng) * sigma * this.cfg.perception.localizationBearingFactor;
+    if (d < 1e-6) return { x: radial, y: tangential };
+    const ux = (to.x - from.x) / d;
+    const uy = (to.y - from.y) / d;
+    return { x: ux * radial - uy * tangential, y: uy * radial + ux * tangential };
+  }
+
   /** Sigma of the hearing error at distance `d`, in metres. */
   private sigmaAt(d: number): number {
     const p = this.cfg.perception;
     return Math.min(p.localizationSigmaCap, p.localizationSigmaPerMeter * d);
   }
 
-  private localise(ev: SoundEvent, d: number, self: boolean, relayed: boolean): ObservedEvent {
+  private localise(
+    ev: SoundEvent,
+    from: Vec2,
+    d: number,
+    self: boolean,
+    relayed: boolean,
+  ): ObservedEvent {
     const p = this.cfg.perception;
     const exact = self || p.exactKinds.includes(ev.kind);
     const sigma = exact ? 0 : this.sigmaAt(d);
     let x = ev.pos.x;
     let y = ev.pos.y;
     if (sigma > 0) {
-      const nx = ev.pos.x + gauss(this.rng) * sigma;
-      const ny = ev.pos.y + gauss(this.rng) * sigma;
+      const off = this.anisotropicOffset(from, ev.pos, d, sigma);
       // truthLeak blends the true position back in. 0 = honest; it exists to be measured
       // against, not to be switched on quietly.
-      const k = clamp(p.truthLeak, 0, 1);
-      x = nx + (ev.pos.x - nx) * k;
-      y = ny + (ev.pos.y - ny) * k;
+      const k = 1 - clamp(p.truthLeak, 0, 1);
+      x = ev.pos.x + off.x * k;
+      y = ev.pos.y + off.y * k;
     }
     return {
       t: ev.t + p.reactionLatencySec,
@@ -263,11 +281,23 @@ export class Perceiver {
       // longer sharpens the estimate only as much as the emitter's own movement allows.
       const a = clamp(p.emitterNoiseSmoothing, 0, 1);
       const fresh = Math.sqrt(Math.max(0, 1 - a * a));
+      // The walk lives in (radial, tangential) coordinates; it is rotated into the world below,
+      // so the error stays an ellipse pointing at the emitter even as the emitter moves.
       off.x = off.x * a + gauss(this.rng) * fresh;
-      off.y = off.y * a + gauss(this.rng) * fresh;
-      const k = clamp(p.truthLeak, 0, 1);
-      const x = em.pos.x + off.x * sigma * (1 - k);
-      const y = em.pos.y + off.y * sigma * (1 - k);
+      off.y = off.y * a + gauss(this.rng) * fresh * p.localizationBearingFactor;
+      const k = 1 - clamp(p.truthLeak, 0, 1);
+      let ex = off.x * sigma * k;
+      let ey = off.y * sigma * k;
+      if (d > 1e-6) {
+        const ux = (em.pos.x - myPos.x) / d;
+        const uy = (em.pos.y - myPos.y) / d;
+        const rx = ux * ex - uy * ey;
+        const ry = uy * ex + ux * ey;
+        ex = rx;
+        ey = ry;
+      }
+      const x = em.pos.x + ex;
+      const y = em.pos.y + ey;
       out.push({
         id: em.id,
         kind: em.kind,

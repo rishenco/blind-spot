@@ -108,7 +108,7 @@ export const SCENARIOS: Scenario[] = [
   {
     name: 'ping-instant',
     note: 'the same ping with waveSpeed = ∞ — the whole snapshot lands on one tick, for comparison',
-    ticks: 30,
+    ticks: 8,
     make: () => {
       const config = configFromPreset('default');
       config.ping.waveSpeed = Infinity;
@@ -135,8 +135,8 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     name: 'ping-self',
-    note: 'the same ping seen by the pinger: the snapshot it bought, mid-flight',
-    ticks: 18,
+    note: 'the travelling front, seen by the pinger 0.1 s in: near geometry has resolved, far geometry has not',
+    ticks: 8,
     make: () => {
       const config = configFromPreset('default');
       const prober = scripted(
@@ -189,11 +189,11 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     name: 'silence',
-    note: 'two statues: the pane opposite them is empty, because a body that makes no sound is not there',
+    note: 'a striker hunting two statues: its pane holds its own noise and the ball, and not one trace of either opponent',
     ticks: 120,
     make: () => {
       const config = configFromPreset('default');
-      return { config, seed: 2, controllers: pair('striker', 'statue', config.teamSize), eyes: 2 };
+      return { config, seed: 2, controllers: pair('striker', 'statue', config.teamSize), eyes: 0 };
     },
   },
 ];

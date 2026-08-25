@@ -521,6 +521,14 @@ const hb = {
   draw() {
     render();
   },
+  /** Pane rectangles in CSS pixels, so a keyframe check can measure inside one pane only. */
+  rects() {
+    const box = (c: HTMLCanvasElement) => {
+      const r = c.getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+    };
+    return { truth: box(truthCanvas), eyes: box(eyesCanvas) };
+  },
   timeline() {
     return live.match.timeline.map((e) => ({ tick: e.tick, t: e.t, kind: e.kind, label: e.label }));
   },
