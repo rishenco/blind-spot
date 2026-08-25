@@ -21,7 +21,7 @@ import { BloomChain, defaultBloomTunables, isSoftwareRenderer } from '../paint/p
 import { REVEAL_BACKGROUND } from '../world/room';
 import { PLAYER_EMITTER_ID } from '../paint/soundEvents';
 import type { ListenerState } from '../audio/director';
-import { GameSim } from './sim';
+import { GameSim, Q_PING_HEIGHT } from './sim';
 
 const HINT =
   'WASD move · Q ping · E beam · L reveal · B bloom · T clock · K clear · V view · R respawn · H help';
@@ -336,7 +336,10 @@ export class Game {
     this.sim.player.applyToCamera(this.ctx.camera, alpha);
     this.sim.paint.updateView(this.ctx.camera, this.ctx.renderer);
     const p = this.sim.player.renderPosition;
-    this.rigMarker.position.set(p.x, p.y + 1.15, p.z);
+    // On `Q_PING_HEIGHT` rather than a literal of its own: the reactor is the thing that
+    // radiates the 360° pulse, so the dot you can see and the point the pulse leaves from
+    // are one fact. Two copies of it would let the drawn rig drift off its own sonar.
+    this.rigMarker.position.set(p.x, p.y + Q_PING_HEIGHT, p.z);
     this.rigMarker.visible = this.sim.player.viewBlend > 0.05;
   }
 

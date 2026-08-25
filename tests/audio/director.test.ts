@@ -174,6 +174,31 @@ describe('how loud, at a distance', () => {
     expect(gainFor(dusty, dusty.hearingRadius)).toBeLessThan(EDGE_GAIN);
   });
 
+  it('charges for height: a floor above is a distance, not a discount', () => {
+    /*
+     * The gain law's third dimension, asserted on the gain rather than on the number the spec
+     * reports afterwards. `decide` measures the distance once and both the level and
+     * `spec.distance` are drawn from it, so a self-consistency check — "the gain matches the
+     * distance it says it used" — cannot tell a 3D measurement from a 2D one that happens to be
+     * quoted honestly. `tests/hearing.test.ts` makes the 3D claim about `canHear`; this is the
+     * same claim about how loud the thing that got through the gate arrives.
+     *
+     * It matters at tower scale rather than in this room. §3.4 gives the loud class a bleed
+     * through floors, which is the whole reason the vertical axis exists: an event one storey up
+     * is *far*, and a mixer that measured only the floor plan would put it at the listener's ear
+     * — a footfall on the ceiling arriving at the level of your own boots.
+     */
+    const eightUp = new AudioDirector(ORIGIN).decide(emit('walk-step', { y: 8 }));
+    const eightAlong = new AudioDirector(ORIGIN).decide(emit('walk-step', { x: 8 }));
+    // A walk-step carries 11 m and the ear reaches 18, so 8 m is audible whichever way it lies.
+    expect(eightUp, 'a walk-step 8 m overhead is inside both halves of the gate').not.toBeNull();
+    expect(eightAlong).not.toBeNull();
+    expect(eightUp!.gain).toBeCloseTo(eightAlong!.gain, 12);
+    // And neither is riding the near-field clamp, which is exactly how a dropped axis hides: a
+    // 2D distance of zero clamps to 1.5 m and reads as the loudest a walk-step can ever be.
+    expect(eightUp!.gain).toBeLessThan(gainFor(emit('walk-step'), 0));
+  });
+
   it('is loudest at your own feet, and that is the ceiling of the whole mix', () => {
     // `NEAR_FIELD_M` is ear-to-foot, so nothing outranks your own step on the same surface.
     const loudest = Math.max(

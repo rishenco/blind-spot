@@ -118,8 +118,28 @@ export function haloRingAlpha(brightness: number): number {
  * exists because `setHalo` is called every frame (§3.8's ring is continuous, so it cannot ride
  * the HUD's tenth-of-a-second timer) and a per-frame string assignment to `style.opacity` is the
  * one allocation this file otherwise does not make.
+ *
+ * Which side of one 8-bit step it falls on is the whole of it, and that is why it is exported
+ * and asserted rather than left as a private tuning digit. Below a step this is an optimisation,
+ * invisible by construction: every write it suppresses would have painted the pixel that is
+ * already there. At or above a step it is no longer an optimisation but a *quantization of the
+ * readout* — the ring stops gliding and starts clicking through roughly 1/ε rungs, sixteen of
+ * them across the 0.18–1 span at 0.05 — and that is exactly §3.8's stepped variant, which the
+ * doc parks behind a playtest gate ("if more than half of testers mute it, the stepped variant
+ * is the prepared fallback") and does not ship.
+ *
+ * Moving the digit is a change nothing else in the build can see, which is measured rather than
+ * assumed: at 0.05 the node suite and the browser suite are both green, and `tools/shoot.mjs`
+ * reads back the same crouch/walk/sprint ring means it always has. It cannot see it because it
+ * only ever reads the ring *settled*, and an elision leaves a settled reading within ε of the
+ * truth. The stepping lives in the transit between stances — §3.8's 0.18 s glide — and nothing
+ * photographs that.
+ *
+ * The string this guards is rounded to three decimals, a coarser grid than 1/2000 — but 1/1000
+ * is itself well under 1/255, so the bound that matters is the compositor's either way, and the
+ * compositor's is the one `tests/halo.test.ts` holds.
  */
-const HALO_ALPHA_EPSILON = 0.0005;
+export const HALO_ALPHA_EPSILON = 0.0005;
 
 
 export class Hud {

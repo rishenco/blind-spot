@@ -38,7 +38,7 @@ import {
 } from '../src/paint/soundEvents';
 import { createHeadlessGame, type HeadlessGame } from '../src/game/headless';
 import { TIME_SCALES, stepClassOf } from '../src/game/sim';
-import { HALO_RING_MIN_ALPHA, haloRingAlpha } from '../src/ui/hud';
+import { HALO_ALPHA_EPSILON, HALO_RING_MIN_ALPHA, haloRingAlpha } from '../src/ui/hud';
 import { HALO_PITCH_POINTS, HALO_PITCH_TOLERANCE_CENTS } from './support/audioSpec';
 
 const STEP_CLASSES = ['crouch-step', 'walk-step', 'sprint-step'] as const;
@@ -690,6 +690,47 @@ describe('the ring is the guaranteed readout (§3.8)', () => {
     for (const b of [1, 1.5, 1e9, Number.POSITIVE_INFINITY]) {
       expect(haloRingAlpha(b)).toBeCloseTo(1, 12);
     }
+  });
+
+  it('elides writes below what a compositor can show, instead of quantizing the glide', () => {
+    /*
+     * §3.8 says the readout "glides continuously rather than stepping between stances", and the
+     * stepped variant is the fallback it parks behind a playtest gate — not the shipped
+     * behaviour. `Hud.setHalo` skips the DOM write when the opacity has moved less than
+     * `HALO_ALPHA_EPSILON`, which makes that one constant the only place in the build where the
+     * glide can be turned into steps by moving a digit.
+     *
+     * The digit's entire meaning is which side of one 8-bit alpha step it lands on. Below a
+     * step, every suppressed write would have painted the pixel that is already on the screen:
+     * an optimisation the eye cannot reach. At or above a step, states the eye *can* tell apart
+     * collapse into one another and the ring arrives in roughly 1/ε rungs — sixteen across its
+     * span at 0.05 — which is the prepared fallback shipped by accident.
+     *
+     * Nothing else in either suite can see that, which was checked rather than assumed: at 0.05
+     * all 509 node tests pass and `tools/shoot.mjs` reads back its crouch, walk and sprint ring
+     * means unchanged to the digit. The constant's only observable is a style string,
+     * `haloRingAlpha` is pure and never reaches it, and the browser suite only ever photographs
+     * the ring *settled* — where an elision leaves the reading within ε of the truth. The
+     * stepping is in the transit between stances, and nothing takes a picture of that.
+     */
+    const EIGHT_BIT_STEP = 1 / 255;
+    expect(HALO_ALPHA_EPSILON).toBeGreaterThan(0);
+    expect(HALO_ALPHA_EPSILON).toBeLessThan(EIGHT_BIT_STEP);
+  });
+
+  it('still writes for one metre of carry at the deafest end of the dial', () => {
+    // The same bound stated in the units the player moves the readout in, and the reason the
+    // one above is not merely arithmetic about pixels. `humPitch` is a square root, so the ring
+    // is at its least sensitive at the top of the range: a metre of extra carry buys less
+    // opacity at 42 m than anywhere else on the dial. If a metre *there* cannot clear the
+    // elision, then nowhere near the loud end can, and the ring goes quiet exactly where §3.8
+    // says a player is most in need of an answer — while a landing on steel is ringing out.
+    const alphaAt = (r: number) => haloRingAlpha(haloBrightness(r));
+    const perMetreAtTheTop = alphaAt(HALO_MAX_RADIUS_M) - alphaAt(HALO_MAX_RADIUS_M - 1);
+    expect(perMetreAtTheTop).toBeGreaterThan(0);
+    expect(perMetreAtTheTop).toBeGreaterThan(HALO_ALPHA_EPSILON);
+    // And it is the shallowest metre there is, so this is the worst case and not a lucky one.
+    expect(alphaAt(3) - alphaAt(2)).toBeGreaterThan(perMetreAtTheTop);
   });
 
   it('orders the three stances the way the pitch does, end to end', () => {

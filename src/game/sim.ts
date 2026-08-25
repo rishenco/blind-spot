@@ -61,8 +61,43 @@ import { PROBE_REGIONS, SPAWN, SPAWN_YAW_DEG, buildRoom, type Room } from '../wo
 
 /** Shared ping cooldown, seconds (§3.5). */
 const PING_COOLDOWN = 0.75;
-/** Where a ping is emitted from, metres above the feet. */
-const Q_PING_HEIGHT = 1.15;
+/**
+ * Where the Q-ping leaves the rig, metres above the feet: the reactor, not the head.
+ *
+ * The two pings do not share an origin, and the difference is a claim rather than a leftover.
+ * The E-ping is *aimed* — it carries the look vector — so it has no freedom at all: it must
+ * leave from the point the aim leaves from, which is `E_PING_HEIGHT`, the ears. The Q-ping is
+ * 360° (§3.5) and has no aim to be pinned to, so the only thing that can fix its origin is which
+ * part of the chassis radiates it. That part is the reactor (§2, "a robot powered by an internal
+ * reactor"), and this is the height the reactor is at: `game.ts` hangs the rig marker — the one
+ * thing ever drawn that sound did not reveal — on this same constant. It is exported so those
+ * are one fact instead of two literals that happen to agree.
+ *
+ * Two things go wrong if it is raised to the head. The pulse and the beam become one lantern in
+ * two shapes, and the room-read stops being a *body* reading the room from where the body is.
+ * And at 1.5 m it leaves a crouched rig entirely — `crouchHeight` is 1.2 — so §3.5's panic
+ * button, the ping you press from behind cover, would radiate from a point the rig does not
+ * occupy: law 2's "every blip and sound has a real physical source", missed by 30 cm. The beam's
+ * origin does not follow the crouch either, but it is pinned to the aim and has no choice; the
+ * pulse has a choice, and this is it.
+ *
+ * It is also the horizon a 360° ping paints from: raised, the rays graze the floor later and
+ * clear more of the low crates, so every dot the room hands back moves. That consequence has a
+ * witness — the whole-room golden in `tests/raycast.test.ts` — but a golden fails on any change
+ * to geometry or emission and is regenerated whenever one is legitimate, so it stops guarding
+ * this number at the moment it would matter. The claim above is asserted on its own terms in
+ * `tests/headless.test.ts`.
+ */
+export const Q_PING_HEIGHT = 1.15;
+/**
+ * Where the E-ping leaves the rig, metres above the feet — and where the ears are.
+ *
+ * One constant doing both jobs on purpose. `syncListener` puts the paint listener here, so the
+ * beam leaves from the point that does the hearing and cannot drift away from it; and
+ * `NEAR_FIELD_M` in `audio/director.ts` is this height read as a distance — ear to sole, which
+ * is what makes the player's own footfall the reference level of the whole mix. Split them and
+ * the aim, the ears and the mix's reference are three numbers that can disagree.
+ */
 export const E_PING_HEIGHT = 1.5;
 /**
  * Where a footfall radiates from, metres above the contact point.

@@ -15,8 +15,9 @@
 
 import { describe, expect, it } from 'vitest';
 import { createHeadlessGame } from '../src/game/headless';
-import { E_PING_HEIGHT, GameSim } from '../src/game/sim';
+import { E_PING_HEIGHT, GameSim, Q_PING_HEIGHT } from '../src/game/sim';
 import { MATERIAL_NAMES } from '../src/paint/materials';
+import { defaultMovementTunables } from '../src/player/controller';
 import { SOUND_CLASSES, WAVE_SPEEDS, type SoundClassProfile } from '../src/paint/soundEvents';
 
 describe('the headless environment', () => {
@@ -172,6 +173,63 @@ describe('a ping, headless', () => {
     game.input.tapKey('KeyQ');
     game.step();
     expect(Number(game.sim.debugState().soundEvents)).toBe(events);
+    game.sim.dispose();
+  });
+});
+
+describe('where a ping leaves the rig', () => {
+  /*
+   * §3.5 gives the two pings different *shapes* and the same reach. The code gives them
+   * different origins as well, and until this block existed nothing said so on purpose: the
+   * only witness to `Q_PING_HEIGHT` was the whole-room dot-count golden in
+   * `tests/raycast.test.ts`, which fails on any change to geometry or emission and is
+   * regenerated whenever one is legitimate — i.e. it stops guarding the number at exactly the
+   * moment a real regression would ride through with it.
+   *
+   * So the claim is asserted in its own terms instead. The beam has no freedom: it carries the
+   * look vector, so it leaves from the point the look and the ears share. The pulse does have
+   * freedom, and the code spends it on the reactor — the height `game.ts` draws the rig marker
+   * at, off this same constant.
+   */
+  it('radiates the pulse from the reactor and the beam from the ears', () => {
+    const move = defaultMovementTunables();
+    // A point on the body, in *both* stances — 1.15 against a 1.2 m crouched collider, with 5 cm
+    // to spare. §3.5 calls Q the panic button, which is the ping you press from behind cover, and
+    // a 360° pulse radiating from above a crouched rig's own head would be a sound with nothing
+    // at its origin (law 2). `E_PING_HEIGHT` clears the crouched collider and is exempt only
+    // because it has no choice: move it off the aim and the beam stops answering where you look.
+    expect(Q_PING_HEIGHT).toBeGreaterThan(0);
+    expect(Q_PING_HEIGHT).toBeLessThanOrEqual(move.crouchHeight);
+    expect(move.crouchHeight).toBeLessThan(move.standHeight);
+    // And below the ears, so the room-read and the look-around are not one lantern in two shapes.
+    expect(Q_PING_HEIGHT).toBeLessThan(E_PING_HEIGHT);
+  });
+
+  it('emits each ping at the height it claims, through the key that fires it', () => {
+    // The constants above are only worth bounding if they are the heights the bus actually
+    // receives. Driven by key edges rather than by `firePing`, so this is the path a player's
+    // keyboard takes, and read off the body the tick started with — see the test above.
+    const game = createHeadlessGame();
+    const p = game.sim.player.position;
+
+    const feetAtQ = p.y;
+    game.input.tapKey('KeyQ');
+    game.step();
+    expect(game.sim.bus.lastEvent?.class).toBe('q-ping');
+    expect(game.sim.bus.lastEvent?.y).toBeCloseTo(feetAtQ + Q_PING_HEIGHT, 12);
+
+    // §3.5's 0.75 s between pings; one simulated second clears it.
+    game.run(1);
+    const feetAtE = p.y;
+    game.input.tapKey('KeyE');
+    game.step();
+    expect(game.sim.bus.lastEvent?.class).toBe('e-ping');
+    expect(game.sim.bus.lastEvent?.y).toBeCloseTo(feetAtE + E_PING_HEIGHT, 12);
+
+    // And a real distance apart on the chassis, measured inside the running game rather than
+    // off the table: reactor to ears is 35 cm, and a separation that shrank to a few centimetres
+    // would mean the two emitters had merged in everything but the constant's name.
+    expect(game.sim.bus.lastEvent!.y - (feetAtE + Q_PING_HEIGHT)).toBeGreaterThan(0.3);
     game.sim.dispose();
   });
 });
