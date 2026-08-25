@@ -33,9 +33,10 @@
  * noise bank, and a single strike's level lands 2–6 dB from its own mean depending on which
  * slice it got. So this file measures two different things two different ways. The fingerprint —
  * timbre — is one render, because timbre is a shape and a shape is stable. The loudness law of
- * §3.9 is a *sample* of sixteen strikes spread across the bank, because loudness is an
- * expectation. `ATTACK_LEVEL_SAMPLE` says why in full, and the first test of the last describe
- * block demonstrates the trap rather than asserting around it.
+ * §3.9 is a *sample* of many strikes spread across the bank, because loudness is an expectation.
+ * `ATTACK_LEVEL_SAMPLE` says why in full — including how many strikes "many" is and how that was
+ * measured — and the first test of the last describe block demonstrates the trap rather than
+ * asserting around it.
  *
  * Everything here renders the shipped voices — `src/audio/voices.ts`, through the real
  * `AudioDirector`, on real `SoundBus` events. The fixture these numbers used to come from is
@@ -160,15 +161,17 @@ const body = (mat: PinnedMaterial): number =>
  * The seeds, stratified across the whole noise bank.
  *
  * `Math.round(i * NOISE_SLOTS / strikes)` and not `i`: consecutive seeds map to bank offsets
- * ~1.3 ms apart while the attack window is 85 ms, so sixteen consecutive seeds read ~98 % the
- * same audio and are barely one measurement.
+ * ~1.3 ms apart while the attack window is 85 ms, so consecutive seeds read ~98 % the same audio
+ * and are barely one measurement.
  *
  * That is measurable rather than theoretical, and the measurement is the reason this line is
  * not the obvious one. Sixteen consecutive seeds put metal's walk residual at −0.78 dB from
  * seed 200, +0.62 dB from seed 800, and a stance at 1.01 dB from seed 500 — outside both
  * tolerances. From seed 0 they land at −0.16 dB and the suite passes, which is the trap: the
- * simplification looks fine exactly where somebody would try it. Stratified, sixteen strikes sit
- * within 0.1 dB of a 332-strike estimate wherever they start.
+ * simplification looks fine exactly where somebody would try it.
+ *
+ * Stratifying is necessary and was not sufficient: `ATTACK_LEVEL_SAMPLE.strikes` carries the
+ * measurement of how many stratified strikes it takes before the estimator stops contributing.
  *
  * `NOISE_SLOTS` comes from `voices.ts` rather than being re-declared here, because a test that
  * invented its own slot count would be sampling a distribution the code does not have.
@@ -178,27 +181,45 @@ const SAMPLE_SEEDS: readonly number[] = Array.from(
   (_, i) => Math.round((i * NOISE_SLOTS) / ATTACK_LEVEL_SAMPLE.strikes),
 );
 
-/** The attack level of each strike in one sample, dBFS. */
+/**
+ * The attack level of each strike in one sample, dBFS.
+ *
+ * Rendered in chunks of `strikesPerRender` rather than all at once, which is a cost decision and
+ * nothing else — see that field for the measurement, both of what it saves and of the thing it
+ * could have changed and does not.
+ */
 async function attackLevels(cls: SoundClass, mat: PinnedMaterial): Promise<number[]> {
-  const { firstAtSec, spacingSec, strikes } = ATTACK_LEVEL_SAMPLE;
-  const buffer = await renderOffline(firstAtSec + spacingSec * strikes, (ctx, master) => {
-    SAMPLE_SEEDS.forEach((seed, i) => {
-      playVoice(ctx, master, specFor(cls, mat, seed), firstAtSec + spacingSec * i);
+  const { firstAtSec, spacingSec, strikesPerRender } = ATTACK_LEVEL_SAMPLE;
+  const out: number[] = [];
+  for (let from = 0; from < SAMPLE_SEEDS.length; from += strikesPerRender) {
+    const chunk = SAMPLE_SEEDS.slice(from, from + strikesPerRender);
+    const buffer = await renderOffline(firstAtSec + spacingSec * chunk.length, (ctx, master) => {
+      chunk.forEach((seed, i) => {
+        playVoice(ctx, master, specFor(cls, mat, seed), firstAtSec + spacingSec * i);
+      });
     });
-  });
-  return SAMPLE_SEEDS.map((_, i) => {
-    const at = firstAtSec + spacingSec * i;
-    return rmsDb(buffer, undefined, at, at + ATTACK_WINDOW_SEC);
-  });
+    chunk.forEach((_, i) => {
+      const at = firstAtSec + spacingSec * i;
+      out.push(rmsDb(buffer, undefined, at, at + ATTACK_WINDOW_SEC));
+    });
+  }
+  return out;
 }
 
 /**
  * The expected level of a sample, dB — a power mean, not a mean of decibels.
  *
  * Averaging decibels averages logarithms, which biases the answer low by roughly the variance:
- * the two loud strikes that carry most of the energy are compressed into the mean while the two
- * quiet ones are stretched. The mean of squared amplitude is the physical quantity, and it is
- * what "how loud is this material, typically" means.
+ * the loud strikes that carry most of the energy are compressed into the mean while the quiet
+ * ones are stretched. The mean of squared amplitude is the physical quantity, and it is what
+ * "how loud is this material, typically" means.
+ *
+ * Do not "simplify" this to a mean of decibels — no assertion below will stop you. Swapping it
+ * leaves every test in this file passing, and the reason is only that the bias is smaller than
+ * the tolerance and not that it is absent: the converged worst residual goes from 0.359 dB to
+ * 0.611 dB, all of it on dust, because the bias scales with a material's spread and dust has the
+ * widest. That is a quarter of §3.9's half-decibel budget spent on an estimator being wrong,
+ * which is exactly the thing this batch raised the strike count to stop paying for.
  */
 const powerMeanDb = (levels: readonly number[]): number =>
   10 * Math.log10(levels.reduce((sum, db) => sum + 10 ** (db / 10), 0) / levels.length);
@@ -428,9 +449,13 @@ describe("§3.9's loudness law: the multiplier is the whole of the difference", 
    *
    * The normalizations were fitted at `walk-step`, so this is where a fit that only worked at
    * one brightness would show. Stances span `bright` 0.55 to 1.6; the worst residual anywhere is
-   * 0.305 dB, and it grows with `bright`, which is the exciter's cutoff leaking a little level.
-   * `acrossStancesToleranceDb` is wider than the walk tolerance for exactly that reason and no
-   * other.
+   * 0.357 dB (dust at `landing`), and it grows with `bright`, which is the exciter's cutoff
+   * leaking a little level. `acrossStancesToleranceDb` is wider than the walk tolerance for
+   * exactly that reason and no other.
+   *
+   * That 0.357 is now the *law's* residual and not the sample's: the same figure computed over
+   * every seed in the bank is 0.359. It is the number this assertion is meant to be about, and
+   * at the previous sample size it was not — see `ATTACK_LEVEL_SAMPLE.strikes`.
    */
   it.each(STANCES)('%s carries every multiplier too', (cls) => {
     const base = attackDb(cls, 'concrete');
@@ -484,11 +509,11 @@ describe("§3.9's loudness law: the multiplier is the whole of the difference", 
    * The sample is only an estimate if the strikes scatter less than the sample can average out.
    *
    * A smoke alarm rather than a pinned value: if a material's strike-to-strike spread grows past
-   * `maxSpreadDb`, sixteen strikes stop being enough to estimate its mean and every number in
-   * this block is being read off noise. Dust is the widest at ~5.9 dB, because it is nearly all
-   * exciter and has no modal ring to steady it.
+   * `maxSpreadDb`, the sample stops being enough to estimate its mean and every number in this
+   * block is being read off noise. Dust is the widest at ~7.6 dB here, because it is nearly all
+   * exciter and has no modal ring to steady it; metal is close behind for the opposite reason.
    */
-  it.each(MATERIALS)('%s scatters little enough for sixteen strikes to mean something', (mat) => {
+  it.each(MATERIALS)('%s scatters little enough for the sample to mean something', (mat) => {
     const xs = levels('walk-step', mat);
     expect(Math.max(...xs) - Math.min(...xs)).toBeLessThan(ATTACK_LEVEL_SAMPLE.maxSpreadDb);
   });

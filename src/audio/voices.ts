@@ -63,9 +63,11 @@ interface MaterialVoice {
    * **Fitted against a sample of strikes, never against one render.** The exciter reads a slice
    * of the noise bank, and one strike's attack sits 2–6 dB from its own mean depending which
    * slice it got — so a norm fitted to a single seed is fitted to that seed's noise. These three
-   * are power means over sixteen strikes spread across `NOISE_SLOTS`, which is also how the test
-   * measures them; the numbers each moved 4–5 % when that replaced the single-render fit they
-   * were first derived from. Concrete is 1 by definition — it is the reference.
+   * are power means over sixteen strikes spread across `NOISE_SLOTS`; the numbers each moved
+   * 4–5 % when that replaced the single-render fit they were first derived from. The test now
+   * measures over a larger sample than the fit used (`ATTACK_LEVEL_SAMPLE.strikes`, and see its
+   * comment for why), and these three values survived that: refitting is not what closed the
+   * gap, and none of them has needed to move. Concrete is 1 by definition — it is the reference.
    */
   readonly attackNorm: number;
 }
