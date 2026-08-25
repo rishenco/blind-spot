@@ -1198,6 +1198,101 @@ check(
 );
 
 // ===========================================================================
+//  08  material: the same stride on the loud floor and on the quiet one (§3.9)
+//
+//  Last, and deliberately so. Everything above is paced in ticks so that a screenshot describes
+//  a *moment*, and the strictest assertion in the file compares two frames pixel for pixel. The
+//  age a dot is drawn at is `paintTime - stamp`, and how much simulated time has already gone by
+//  when that subtraction happens is not free of rounding: inserting this walk earlier moved one
+//  pixel of that pair by one level out of 255. So the surface test goes after the tests it would
+//  otherwise perturb, and perturbs nothing.
+// ===========================================================================
+// §3.9's routing choice, in pixels — the only question worth asking about a stealth surface is
+// whether the player can tell, and the player is in the dark. Dust is ×0.6, so the same
+// walk-step paints 2.4 m instead of 4; paint falls off with distance from the origin, so the
+// floor that comes back is not 60 % of the concrete one but nearer a third of it.
+//
+// Both samples are one footstep onto a cleared map, so what is measured is that step and not
+// the walk that got there. Both are taken in the far room, a few metres apart on the same
+// north-south lane at x ~ 3.8 — west of the tank, east of the chokepoint wall, open floor
+// either side of the door-line — so that what differs between the two frames is the surface and
+// not the architecture. The lane is walked in two legs, east to the sample point and then due
+// south across `APRON_Z` onto the dust, because pointing at the apron from anywhere further
+// east means pointing through the tank.
+//
+// The walk has to *stop* for each sample. A held key fires the next footfall a stride later,
+// which starts a second wave over the first, so how much of the picture is one step and how
+// much is two would come down to where in the stride the map happened to be cleared — the one
+// thing the reading must not depend on. So the key goes up the instant the event lands, before
+// the ink is allowed to settle, and 0.26 m of deceleration is far short of the 1.58 m to the
+// next footfall. The body is then let come to a stop before the ink settles, so that both
+// frames are shot from a standing camera — head bob is a function of speed, and a photograph
+// of the same floor from two different heights is not a photograph of the floor.
+async function oneStepOnACleanMap() {
+  await clearMap();
+  const before = Number((await state()).lastEventSeq);
+  await page.keyboard.down('w');
+  const stepped = await stepUntil((s) => Number(s.lastEventSeq) > before, ticksFor(3000), 1);
+  await page.keyboard.up('w');
+  await stepUntil((s) => Number(s.speed) === 0, ticksFor(2000), 1);
+  await settleInk();
+  return stepped;
+}
+
+await respawn();
+await clearMap();
+await pitchBy(-22, sens);
+await page.keyboard.down('w');
+await stepUntil((s) => Number(s.x) > 2, ticksFor(12000), 4);
+await page.keyboard.up('w');
+await step(1);
+const concreteStep = await oneStepOnACleanMap();
+const onSlab = await state();
+const concreteBuf = await shot('04b-step-on-concrete.png');
+const concreteFloor = photo(concreteBuf, FLOOR_BAND, []);
+
+const beforeTurn = await state();
+await turnTo(yawTo(Number(beforeTurn.x), Number(beforeTurn.z), Number(beforeTurn.x), -9), sens);
+await page.keyboard.down('w');
+await stepUntil((s) => Number(s.z) < -4.5, ticksFor(12000), 4);
+await page.keyboard.up('w');
+await step(1);
+const dustStep = await oneStepOnACleanMap();
+const onApron = await state();
+const dustBuf = await shot('04c-step-on-dust.png');
+const dustFloor = photo(dustBuf, FLOOR_BAND, []);
+
+console.log(
+  `  step on concrete at (${Number(onSlab.x).toFixed(1)}, ${Number(onSlab.z).toFixed(1)}): ` +
+    `r=${Number(concreteStep.lastEventRadius).toFixed(2)} m, ` +
+    `${concreteStep.structLastDots} dots, floor band mean=${concreteFloor.mean.toFixed(3)}\n` +
+    `  step on dust at (${Number(onApron.x).toFixed(1)}, ${Number(onApron.z).toFixed(1)}): ` +
+    `r=${Number(dustStep.lastEventRadius).toFixed(2)} m, ${dustStep.structLastDots} dots, ` +
+    `floor band mean=${dustFloor.mean.toFixed(3)}`,
+);
+check(
+  'the apron is dust underfoot, and the bus says so in metres',
+  Math.abs(Number(concreteStep.lastEventRadius) - 4) < 1e-6 &&
+    Math.abs(Number(dustStep.lastEventRadius) - 2.4) < 1e-6,
+  `${Number(concreteStep.lastEventRadius).toFixed(3)} m on concrete, ` +
+    `${Number(dustStep.lastEventRadius).toFixed(3)} m on dust — ×` +
+    `${(Number(dustStep.lastEventRadius) / Number(concreteStep.lastEventRadius)).toFixed(3)}`,
+);
+check(
+  'and the quiet step hands back a fraction of the floor',
+  Number(dustStep.structLastDots) > 50 &&
+    Number(dustStep.structLastDots) < Number(concreteStep.structLastDots) * 0.5,
+  `${dustStep.structLastDots} dots off the dust step against ` +
+    `${concreteStep.structLastDots} off the concrete one`,
+);
+check(
+  'and you can see the difference in the dark, which is the only place it matters',
+  dustFloor.mean < concreteFloor.mean * 0.75 && dustFloor.mean > 0.05,
+  `floor band mean ${dustFloor.mean.toFixed(3)}/255 on dust against ` +
+    `${concreteFloor.mean.toFixed(3)}/255 on concrete`,
+);
+
+// ===========================================================================
 //  report
 // ===========================================================================
 check(
