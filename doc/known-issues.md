@@ -43,6 +43,38 @@ Recorded so the next person does not spend the afternoon I spent.
   They agree. `StaticWorld.query` uses non-`EPS` bounds and a square footprint, both of which
   make it a strict superset of what `canOccupy` treats as blocking; `canOccupy` then filters
   with the tighter `EPS` and circle tests. Superset-then-filter is the correct arrangement.
+- **Screenshot numbers that still differ between runs are the host, not the game.** The suite
+  used to drift against itself badly: two runs of byte-identical code disagreed on 39 of 56
+  assertions, all 14 screenshots differed byte for byte, and `a settled drawing is cyan-family
+  (§3.2)` swung between 74 % and 98 % against an 80 % bar — failing on luck twice in one day and
+  costing two sessions to rule out as a real regression. The cause was pacing: `tools/shoot.mjs`
+  drove the game for wall-clock durations while `core/loop.ts` *drops* any frame longer than
+  `maxFrameSeconds` rather than banking it, so under software GL the simulated time behind
+  `await wait(800)` was a measurement of how busy the machine was. The driver is on the tick
+  clock now — `Loop.suspend`/`Loop.step` hold the display clock still and advance the fixed
+  timestep an exact number of ticks, `main.ts` exposes that as `window.__blindspot.stepTicks(n)`
+  (inert unless a test calls it), and the run steps up to a fixed origin tick before its first
+  assertion, so the paint clock behind every screenshot is the same number every time. Everything
+  else is deliberately unchanged: the real single-file build, the real WebGL renderer, real key
+  and mouse events, real frames drawn throughout. Only the pacing is the driver's.
+  What that bought, measured over five runs of the same build: **thirteen of the fourteen
+  screenshots are identical pixel for pixel between runs** across the measurement window, and
+  **59 of 65 assertions read the same numbers to the digit**. Every one of the six that move is
+  the host being measured on purpose — three are costs in milliseconds (the boot frame rate, the
+  lattice build, the Q-ping's ray time, whose dot and segment counts beside it are identical),
+  one is the boot tick count the handshake reports absorbing, and two are §07, which keeps the
+  wall clock deliberately because `six beams back to back keep the frame rate up` is a statement
+  about this host's frame rate and amortised chunk cost. That section's screenshot is the
+  fourteenth, and inherits its clock, which is why its assertion is the one property that does
+  not care: nothing clips.
+  Two assertions hold it there, and both fail if the pacing is put back — measured, by re-pacing
+  a copy of the driver onto the wall clock. `the same script twice paints the same instant` runs
+  the Q-ping sequence twice in one session and requires the two frames to be pixel-identical
+  (0 of 252,000 px differ on the tick clock; 13,416 differ on the wall clock, and mean luminance
+  moves 0.0467 against a 0.005 bar). `the driver and the loop agree on what a tick is` catches
+  the tick rate — or the tick the run starts from — drifting from the loop's, and reads
+  `stepping=false` outright if the driver stops driving. So do not "fix" a flake here by widening
+  a threshold: check first whether the stretch that produced it is still on the tick clock.
 
 ---
 
@@ -66,42 +98,6 @@ finished work.
 ---
 
 ## Infrastructure
-
-### The browser screenshot suite is not reproducible against itself
-
-`tools/shoot.mjs` drives the game for **wall-clock** durations, while `src/core/loop.ts`
-(line 64) *discards* any frame longer than `maxFrameSeconds` (0.25 s) rather than simulating
-it in bulk. Under a software GL renderer, frames routinely exceed that. So the amount of
-simulated time behind a given `await wait(800)` depends on how busy the machine was.
-
-Measured: two consecutive `npm run shoot` runs of byte-identical code drifted on **39 of 56
-assertions**, and **14 of 14 screenshots differed byte-for-byte** — including the frame that
-is entirely black.
-
-This is why the Node characterization tests exist and why they, not the screenshots, are the
-bit-identity oracle. `shoot.mjs` remains valuable — it is the only thing that exercises the
-real renderer, the real GPU path and the real event loop — but it is a **threshold** test,
-and it must be read as pass/fail with margin, never as a set of numbers to diff.
-
-Do not "fix" this by widening thresholds until two runs agree. The honest fix is to drive the
-simulation by tick count rather than by wall clock, which is now possible: `GameSim` runs
-headless and `ScriptedInput` plays a deterministic timeline.
-
-The assertion currently closest to the edge is **`a settled drawing is cyan-family (§3.2)`**
-(`tools/shoot.mjs`, ~line 628), which needs `coolFraction > 0.8`. Measured across six runs of
-two byte-identical builds it reads 79.81 / 88.07 / 98.03 and 97.43 / 86.66 / 88.82 — an ~18
-point swing against 7 points of margin, and it has already failed once at 79.81 on code that was
-otherwise 62/62. The mechanism is the same one: the amount of simulated time behind the
-screenshot decides how much of the warm event layer has faded and how many contours are still
-flashing, so an unlucky frame is caught mid-flash and reads warm.
-
-Recorded by name so the next person to see it fail checks this entry before bisecting. It is
-also the reason not to reach for the easy fix — lowering the threshold to 0.75 buys one more
-point of luck and hides the next regression. The frame genuinely is cyan-family; the test just
-cannot say *when* it is looking.
-
-**Owner: unscheduled.** Worth doing before the suite grows much larger — and this assertion is
-the clock on it.
 
 ### `dotGeometry.setDrawRange(0, dots)` with `frustumCulled = false`
 

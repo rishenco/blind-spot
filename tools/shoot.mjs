@@ -11,6 +11,11 @@
  * known?"). Every assertion is therefore either "the body did the thing" (state), "the room knows
  * what it should and nothing more" (probe) or "the frame looks the way it should" (pixels).
  *
+ * The driver owns the clock: it holds the display clock still and advances the simulation by
+ * exact numbers of fixed ticks (`stepTicks`), so a screenshot is a photograph of a named instant
+ * rather than of whatever a busy machine managed in 800 ms. See "Pacing" below for why, and §07
+ * for the one measurement that is deliberately still made against the wall clock.
+ *
  * Exits non-zero on any page error, console error, or failed assertion.
  */
 
@@ -67,9 +72,16 @@ page.on('request', (req) => {
 });
 
 const shot = async (name) => {
+  // Two frames, so the picture is of the tick that was just stepped rather than of the one the
+  // compositor had already presented. Cheap here and worth being sure about: the whole point of
+  // stepping is that a screenshot names an instant.
+  await page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+  );
   const buf = await page.screenshot();
+  const s = await state();
   await writeFile(join(outDir, name), buf);
-  console.log(`[shoot] wrote ${name}`);
+  console.log(`[shoot] wrote ${name} at tick ${s.simTicks}`);
   return buf;
 };
 
@@ -106,6 +118,30 @@ function photo(buf, rect = FRAME, holes = FRAME_HOLES) {
 }
 /** Splits a screenshot's lit pixels into the cool (cyan) and warm (gold) families. */
 const hues = (buf, rect = CANVAS) => hueFamilies(decodePng(buf), rect);
+/**
+ * Counts the pixels two screenshots disagree about inside `rect`, and by how much at worst.
+ *
+ * `rect` is FRAME rather than CANVAS for the same reason the measurements use it: FRAME is the
+ * window with no DOM in it, and the HUD prints a frame rate. Two runs that draw the byte-identical
+ * picture still disagree over the ~100 pixels that spell "9.1" — measured, and the whole of the
+ * difference between two runs' screenshots outside §07.
+ */
+function pixelDiff(a, b, rect = FRAME) {
+  const x = decodePng(a);
+  const y = decodePng(b);
+  let pixels = 0;
+  let worst = 0;
+  for (let row = rect.y; row < rect.y + rect.h; row++) {
+    for (let col = rect.x; col < rect.x + rect.w; col++) {
+      const i = (row * x.width + col) * 4;
+      let d = 0;
+      for (let c = 0; c < 3; c++) d = Math.max(d, Math.abs(x.data[i + c] - y.data[i + c]));
+      if (d > 0) pixels++;
+      if (d > worst) worst = d;
+    }
+  }
+  return { pixels, of: rect.w * rect.h, worst };
+}
 
 const pct = (v) => `${(v * 100).toFixed(2)}%`;
 const wait = (ms) => page.waitForTimeout(ms);
@@ -113,23 +149,85 @@ const state = () => page.evaluate(() => window.__blindspot.getState());
 const spread = (values) => Math.max(...values) - Math.min(...values);
 const mean = (values) => values.reduce((a, b) => a + b, 0) / Math.max(1, values.length);
 
+/*
+ * ===========================================================================
+ *  Pacing: the suite's unit of time is the tick, not the millisecond
+ * ===========================================================================
+ *
+ * `core/loop.ts` drops any frame longer than 0.25 s rather than banking it, so under software GL
+ * — where frames routinely run longer than that — the amount of *simulated* time behind a given
+ * `await wait(800)` is a fact about how busy the machine was. Screenshots taken that way are
+ * pictures of an unknown instant, which is why this suite used to drift on most of its
+ * assertions across runs of byte-identical builds.
+ *
+ * So the driver stops the display clock (`stepTicks` suspends it on first use) and asks for
+ * exact numbers of fixed ticks instead. Everything else is unchanged and deliberately so: the
+ * page is the real single-file build, the renderer is the real WebGL renderer, input is real key
+ * and mouse events, and frames keep being drawn the whole time. Only the pacing is the driver's.
+ *
+ * Two things still belong to wall time and say so where they are used: the frame rate, and the
+ * cost of the amortised unlock pass. `resumeClock()` hands the clock back for those.
+ */
+
+/** The loop's fixed timestep. Asserted against the page at boot. */
+const TICK_HZ = 120;
+/**
+ * The tick every run starts its first assertion from.
+ *
+ * Boot itself has to run on the display clock — the lattice build is a real hitch, and the frame
+ * rate reported below is about real frames — so the tick the suspension lands on belongs to the
+ * host (80-95 of them here). Rather than measure everything from that moving origin, the driver
+ * steps up to this fixed one first: the paint clock behind every screenshot is then the same
+ * number in every run, which is what makes age-dependent readings comparable between runs and
+ * not merely stable within one. Generous headroom over the observed boot; a host fast enough to
+ * overrun it fails the handshake loudly instead of drifting quietly.
+ */
+const BOOT_TICK = 600;
+/** Ticks covering `ms` of simulated time — for reading the intent of the old wall-clock waits. */
+const ticksFor = (ms) => Math.max(1, Math.round((ms * TICK_HZ) / 1000));
+/** Advances the simulation by exactly `n` ticks and returns the state after them. */
+const step = (n = 0) => page.evaluate((k) => window.__blindspot.stepTicks(k), n);
+/** Hands the simulation back to the display clock. */
+const resumeClock = () => page.evaluate(() => window.__blindspot.resumeTicks());
+
+/**
+ * Steps until `pred` holds, in blocks, and returns the state it stopped on.
+ *
+ * The replacement for `poll`: same shape, but the budget is simulated ticks rather than
+ * milliseconds, so where it stops is a fact about the build. `block` is the granularity — the
+ * predicate can only be seen to flip on a block boundary, which is fine as long as the boundary
+ * is the same on every host, and it is.
+ */
+async function stepUntil(pred, maxTicks = 2400, block = 8) {
+  let s = await step(0);
+  let spent = 0;
+  while (!pred(s) && spent < maxTicks) {
+    s = await step(block);
+    spent += block;
+  }
+  return s;
+}
+
 const check = (label, ok, detail) => {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
   if (!ok) failures.push(label);
 };
 
-/** Holds a set of keys for `ms`, then releases them. */
-async function hold(keys, ms) {
+/** Holds a set of keys for `ticks` of simulated time, then releases them. */
+async function hold(keys, ticks) {
   for (const k of keys) await page.keyboard.down(k);
-  await wait(ms);
+  await step(ticks);
   for (const k of keys) await page.keyboard.up(k);
+  // One tick with the keys up, so the release is in the simulation before anything is read.
+  await step(1);
 }
 
 /**
- * Polls the live state until `pred` holds (or the budget runs out).
+ * Polls the *live* state until `pred` holds (or the wall-clock budget runs out).
  *
- * Headless software rendering only manages 5-20 fps, so anything shorter than ~200 ms of sim —
- * a jump arc, a respawn — has to be caught by polling rather than by sleeping a fixed amount.
+ * Only for the stretches that deliberately run on the display clock — boot, and the frame-rate
+ * measurement in §07. Everywhere else the question "has it happened yet" is asked of the tick
+ * count instead, with `stepUntil`.
  */
 async function poll(pred, budgetMs = 4000) {
   const deadline = Date.now() + budgetMs;
@@ -139,42 +237,30 @@ async function poll(pred, budgetMs = 4000) {
 }
 
 /**
- * Samples the read-only state once per rendered frame, from inside the page.
+ * Samples the read-only state every `every` ticks, `count` times.
  *
- * View effects (head bob, the landing dip) live on the render camera, and a driver-side poll
- * adds a CDP round-trip per sample. Sampling in a rAF loop instead pins the sample rate to the
- * actual frame rate, which is the best any observer can do.
+ * View effects (head bob, the landing dip) live on the render camera, which `Loop.step` poses at
+ * the end of every step — so a sample taken straight after a step describes the tick that just
+ * ran. This used to sample once per rendered frame, which measured the same thing at whatever
+ * rate software GL happened to manage: same measurement, but the sample times were the host's.
  */
-function sampleFrames(ms, minFrames = 0) {
-  return page.evaluate(
-    ([duration, wanted]) =>
-      new Promise((done) => {
-        const out = [];
-        const t0 = performance.now();
-        const tick = () => {
-          const s = window.__blindspot.getState();
-          const t = performance.now() - t0;
-          out.push({
-            t,
-            camY: s.camY,
-            camRoll: s.camRoll,
-            steps: s.steps,
-            y: s.y,
-            dip: s.landDip,
-            grounded: s.grounded,
-            speed: s.speed,
-            boom: s.boom,
-          });
-          // The window is a duration *and* a frame count: a 700 ms window that returned two
-          // samples is not a short measurement of the thing, it is no measurement of the thing.
-          const enough = t >= duration && out.length >= wanted;
-          if (!enough && t < duration * 4 + 2000) requestAnimationFrame(tick);
-          else done(out);
-        };
-        requestAnimationFrame(tick);
-      }),
-    [ms, minFrames],
-  );
+async function sampleTicks(count, every) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const s = await step(every);
+    out.push({
+      tick: Number(s.simTicks),
+      camY: s.camY,
+      camRoll: s.camRoll,
+      steps: s.steps,
+      y: s.y,
+      dip: s.landDip,
+      grounded: s.grounded,
+      speed: s.speed,
+      boom: s.boom,
+    });
+  }
+  return out;
 }
 
 /**
@@ -184,6 +270,11 @@ function sampleFrames(ms, minFrames = 0) {
  * starting from the centre, so the gesture is split into chunks that each stay on screen. Every
  * chunk is its own press/drag/release and the look handler measures per-gesture deltas, so the
  * rotations simply add up.
+ *
+ * The gesture is delivered with the simulation stopped, so the whole drag lands on one tick. The
+ * input layer accumulates look deltas until a tick consumes them and the controller applies them
+ * linearly, so this is the same rotation the same drag would produce spread over twenty frames —
+ * arriving at a known tick instead of at an unknown number of them.
  */
 async function dragLook(degrees, sensitivity) {
   const total = degrees / sensitivity;
@@ -197,12 +288,11 @@ async function dragLook(degrees, sensitivity) {
     await page.mouse.down();
     for (let i = 1; i <= 16; i++) {
       await page.mouse.move(startX + (dir * chunk * i) / 16, 360);
-      await wait(6);
     }
     await page.mouse.up();
-    await wait(40);
     remaining -= chunk;
   }
+  await step(1);
 }
 
 /** Pitches the view by dragging vertically. Dragging down looks down, hence the sign. */
@@ -212,10 +302,9 @@ async function pitchBy(degrees, sensitivity) {
   await page.mouse.down();
   for (let i = 1; i <= 10; i++) {
     await page.mouse.move(640, 360 + (dy * i) / 10);
-    await wait(6);
   }
   await page.mouse.up();
-  await wait(120);
+  await step(1);
 }
 
 /** Turns to an absolute yaw by dragging. Dragging right lowers yaw, hence the sign. */
@@ -225,26 +314,21 @@ async function turnTo(targetDeg, sensitivity) {
   while (delta > 180) delta -= 360;
   while (delta < -180) delta += 360;
   if (Math.abs(delta) > 0.5) await dragLook(-delta, sensitivity);
-  await wait(120);
+  await step(1);
 }
 
 /** Yaw, in the controller's convention, that points from one XZ spot at another. */
 const yawTo = (fromX, fromZ, toX, toZ) =>
   (Math.atan2(-(toX - fromX), -(toZ - fromZ)) * 180) / Math.PI;
 
-/**
- * Presses R and waits for the reset to actually land. Headless software rendering runs at
- * 5-20 fps, so a fixed sleep is not enough: poll the respawn counter instead.
- */
+/** Presses R and steps the one tick that consumes it. */
 async function respawn() {
   const before = Number((await state()).respawnCount);
   await page.keyboard.press('r');
-  await page.waitForFunction(
-    (n) => Number(window.__blindspot.getState().respawnCount) > n,
-    before,
-    { timeout: 5000, polling: 30 },
-  );
-  await wait(80); // one more frame, so velocity readings are the post-respawn ones
+  const after = await stepUntil((s) => Number(s.respawnCount) > before, 8, 1);
+  if (Number(after.respawnCount) <= before) {
+    check('respawn lands', false, `respawnCount stuck at ${after.respawnCount}`);
+  }
 }
 
 /**
@@ -256,17 +340,35 @@ async function respawn() {
  * picture of a ping in progress — a fine thing to assert on deliberately (see "one front"), and
  * a terrible thing to assert on by accident.
  */
-const settle = (budgetMs = 12000) =>
-  poll((s) => s.waveLive === false && Number(s.structPending) === 0, budgetMs);
+const settle = (budgetTicks = 1200) =>
+  stepUntil((s) => s.waveLive === false && Number(s.structPending) === 0, budgetTicks, 4);
 
 /**
  * ...and for the contour strokes as well. They start at the front rather than a phase behind it,
  * but a stroke still takes `inkSeconds` to draw itself, so the last few are still going when the
  * wave stops.
  */
-async function settleInk(budgetMs = 40000) {
-  await settle(budgetMs);
-  return poll((s) => Number(s.structPendingEdges) === 0, budgetMs);
+async function settleInk(budgetTicks = 1200) {
+  await settle(budgetTicks);
+  return stepUntil((s) => Number(s.structPendingEdges) === 0, budgetTicks, 4);
+}
+
+/**
+ * ...and for the ramp to have carried the drawing out of its ice-white band.
+ *
+ * A frame is "settled" for a question about *colour* only once the white band is behind it: a
+ * dot's first two seconds (`ageRamp.freshSeconds`) are ice-white, which is neither hue family,
+ * and §3.2's claim is about the cyan the ramp cools into. Wall-clock pacing used to leave this
+ * to luck — the old suite's settle took as many seconds of simulated time as the host felt like
+ * giving it, which is exactly why the cyan-family assertion read anywhere from 74 % to 98 %
+ * across runs of identical builds. Named and paid for, it is the same number every time.
+ */
+const WHITE_BAND_SECONDS = 2; // src/paint/ageRamp.ts, `freshSeconds`
+async function settleColour() {
+  await settleInk();
+  // Half again past the band, so that nudging `freshSeconds` moves the reading rather than
+  // landing the screenshot exactly on the boundary it is trying to be clear of.
+  return step(ticksFor(WHITE_BAND_SECONDS * 1.5 * 1000));
 }
 
 /**
@@ -277,6 +379,30 @@ async function settleInk(budgetMs = 40000) {
  * zeroed statistics belonging to whatever event actually landed last.
  */
 async function ping(cls) {
+  await stepUntil((s) => Number(s.pingCooldown) === 0, ticksFor(2000), 4);
+  const before = Number((await state()).soundEvents);
+  await page.keyboard.press(cls === 'q-ping' ? 'q' : 'e');
+  const landed = await stepUntil(
+    (x) => Number(x.soundEvents) > before && x.lastEvent === cls,
+    8,
+    1,
+  );
+  check(
+    `${cls} landed`,
+    Number(landed.soundEvents) > before && landed.lastEvent === cls,
+    `soundEvents ${before} -> ${landed.soundEvents}, lastEvent=${landed.lastEvent}`,
+  );
+  await settle();
+  return state();
+}
+
+/**
+ * The wall-clock ping, for §07 only.
+ *
+ * Same gesture as `ping`, driven by the display clock: the amortised unlock pass has to be left
+ * to amortise over real frames there, because how much it costs per frame is the measurement.
+ */
+async function pingLive(cls) {
   await poll((s) => Number(s.pingCooldown) === 0, 6000);
   const before = Number((await state()).soundEvents);
   await page.keyboard.press(cls === 'q-ping' ? 'q' : 'e');
@@ -286,15 +412,14 @@ async function ping(cls) {
     Number(landed.soundEvents) > before && landed.lastEvent === cls,
     `soundEvents ${before} -> ${landed.soundEvents}, lastEvent=${landed.lastEvent}`,
   );
-  await settle();
-  await wait(180); // one more frame, so the screenshot has the new geometry in it
+  await poll((s) => s.waveLive === false && Number(s.structPending) === 0, 12000);
   return state();
 }
 
-/** Empties the map and waits for it to actually be empty. */
+/** Empties the map and steps the tick that consumes the keystroke. */
 async function clearMap() {
   await page.keyboard.press('k');
-  await poll((s) => Number(s.structUnlockedDots) === 0, 4000);
+  await stepUntil((s) => Number(s.structUnlockedDots) === 0, 8, 1);
 }
 
 /** Counts what the reveal knows inside one of the room's named world boxes. */
@@ -312,7 +437,7 @@ async function setTimeScale(target) {
     const before = Number((await state()).paintTimeScale);
     if (before === target) return;
     await page.keyboard.press('t');
-    await poll((s) => Number(s.paintTimeScale) !== before, 3000);
+    await stepUntil((s) => Number(s.paintTimeScale) !== before, 8, 1);
   }
   const s = await state();
   check(`paint clock reached x${target}`, Number(s.paintTimeScale) === target, `x${s.paintTimeScale}`);
@@ -321,8 +446,7 @@ async function setTimeScale(target) {
 const setReveal = async (on) => {
   if ((await state()).reveal === on) return;
   await page.keyboard.press('l');
-  await poll((s) => s.reveal === on, 3000);
-  await wait(200);
+  await stepUntil((s) => s.reveal === on, 8, 1);
 };
 
 // `?look=drag` pins the build to the drag-look fallback: pointer lock is unreliable in headless
@@ -336,14 +460,27 @@ await page.waitForFunction(() => window.__blindspot !== undefined, null, { timeo
 await poll((s) => s.structBuilt === true, 30000);
 await wait(500);
 
-const loaded = await state();
+// Boot is over, and with it the last of the wall clock. From here the driver owns the clock:
+// every wait below is a number of simulated ticks, so every screenshot is of a named instant.
+const booted = await state();
+const bootTicks = Number((await step(0)).simTicks);
+// Step up to the canonical origin, so the paint clock behind every screenshot below is the same
+// number in every run rather than "however many ticks this host managed during boot".
+const loaded = await step(BOOT_TICK - bootTicks);
 const sens = Number(loaded.sensitivity);
 console.log('[shoot] initial state', JSON.stringify(loaded));
 
 // ===========================================================================
 //  01  the game boots into the dark
 // ===========================================================================
-check('renderer running', Number(loaded.fps) > 0, `fps=${Number(loaded.fps).toFixed(1)}`);
+// Boot ran on the display clock, so this is a real frame rate off real frames.
+check('renderer running', Number(booted.fps) > 0, `fps=${Number(booted.fps).toFixed(1)}`);
+check(
+  'the driver and the loop agree on what a tick is',
+  Number(loaded.simHz) === TICK_HZ && loaded.stepping === true && Number(loaded.simTicks) === BOOT_TICK,
+  `${loaded.simHz} Hz, stepping=${loaded.stepping}, at tick ${loaded.simTicks} of ${BOOT_TICK} ` +
+    `(${bootTicks} ran on the display clock during boot)`,
+);
 check(
   'the reveal lattice is precomputed at boot',
   loaded.structBuilt === true && Number(loaded.structDots) > 10000,
@@ -384,7 +521,6 @@ await setReveal(true);
 // --- look ------------------------------------------------------------------
 const beforeLook = await state();
 await dragLook(90, sens);
-await wait(250);
 const afterLook = await state();
 let dYaw = Number(afterLook.yawDeg) - Number(beforeLook.yawDeg);
 while (dYaw > 180) dYaw -= 360;
@@ -407,10 +543,13 @@ for (const [label, keys, want, tol] of [
   await respawn();
   await page.keyboard.down(keys[keys.length - 1]);
   for (const k of keys.slice(0, -1)) await page.keyboard.down(k);
-  const top = await poll((s) => Number(s.speed) > want - tol, 4000);
-  const held = await state();
+  // Up to speed, then a fixed quarter second more, so what is read is the steady state rather
+  // than whatever point of the acceleration curve the host happened to sample. Short on purpose:
+  // the spawn heading is clear as far as the chokepoint doorway and no further.
+  const top = await stepUntil((s) => Number(s.speed) > want - tol, ticksFor(1500), 4);
+  const held = await step(ticksFor(250));
   for (const k of keys) await page.keyboard.up(k);
-  await wait(150);
+  await step(1);
   check(
     `${label} reaches ${want} m/s`,
     Math.abs(Number(held.speed) - want) < tol,
@@ -421,10 +560,10 @@ for (const [label, keys, want, tol] of [
 await respawn();
 const standing = await state();
 await page.keyboard.down('c');
-const crouched = await poll((s) => s.stance === 'crouch', 3000);
-await wait(250);
-const crouchedCam = await state();
+const crouched = await stepUntil((s) => s.stance === 'crouch', ticksFor(1000), 1);
+const crouchedCam = await step(ticksFor(250));
 await page.keyboard.up('c');
+await step(1);
 check(
   'crouching lowers the eye',
   crouched.stance === 'crouch' && Number(standing.camY) - Number(crouchedCam.camY) > 0.35,
@@ -438,15 +577,15 @@ check(
 await respawn();
 await page.keyboard.down('Shift');
 await page.keyboard.down('w');
-await poll((s) => Number(s.speed) > 5, 4000);
+await stepUntil((s) => Number(s.speed) > 5, ticksFor(1500), 4);
 await page.keyboard.down('Space');
-// The arc is a handful of headless frames, so poll it rather than sleeping and hoping.
+// The arc is walked a tick at a time: at 120 Hz the apex is sampled to within a millimetre, and
+// the same tick is the apex on every host.
 let apex = 0;
 let sawAir = false;
 let landed = null;
-const jumpDeadline = Date.now() + 4000;
-while (Date.now() < jumpDeadline) {
-  const s = await state();
+for (let i = 0; i < ticksFor(4000); i++) {
+  const s = await step(1);
   apex = Math.max(apex, Number(s.y));
   if (s.grounded === false) sawAir = true;
   else if (sawAir) {
@@ -457,7 +596,7 @@ while (Date.now() < jumpDeadline) {
 await page.keyboard.up('Space');
 await page.keyboard.up('w');
 await page.keyboard.up('Shift');
-await wait(250);
+await step(1);
 check(
   'a running jump leaves the ground',
   sawAir && apex > 0.6,
@@ -472,13 +611,16 @@ check(
 // --- head bob and the landing dip -------------------------------------------
 await respawn();
 await page.keyboard.down('w');
-const bob = await sampleFrames(1400, 10);
+// 1.4 s of walking, sampled every 8 ticks: 21 poses of the render camera, at the same 21 instants
+// on every host.
+const bob = await sampleTicks(21, 8);
 await page.keyboard.up('w');
+await step(1);
 const bobbing = bob.filter((f) => f.speed > 2);
 check(
   'the camera bobs while walking',
   bobbing.length > 5 && spread(bobbing.map((f) => f.camY)) > 0.01,
-  `${spread(bobbing.map((f) => f.camY)).toFixed(4)} m of camY spread over ${bobbing.length} moving frames`,
+  `${spread(bobbing.map((f) => f.camY)).toFixed(4)} m of camY spread over ${bobbing.length} moving poses`,
 );
 check(
   'and footsteps come out of that stride',
@@ -489,8 +631,7 @@ check(
 // --- collision ---------------------------------------------------------------
 await respawn();
 await turnTo(90, sens); // -X, into the west wall
-await hold(['w'], 2500);
-await wait(200);
+await hold(['w'], ticksFor(2500));
 const stopped = await state();
 check(
   'the wall stops the body',
@@ -505,9 +646,9 @@ await respawn();
 const atSpawnForStairs = await state();
 await turnTo(yawTo(Number(atSpawnForStairs.x), Number(atSpawnForStairs.z), -14.2, -7.5), sens);
 await page.keyboard.down('w');
-const atFoot = await poll((s) => Number(s.z) < -7.0, 15000);
+const atFoot = await stepUntil((s) => Number(s.z) < -7.0, ticksFor(15000), 8);
 await page.keyboard.up('w');
-await wait(200);
+await step(1);
 check(
   'the foot of the stairs is reachable',
   Number(atFoot.z) < -7.0 && Number(atFoot.x) < -13.5,
@@ -515,11 +656,11 @@ check(
 );
 await turnTo(-90, sens); // +X, up the flight
 await page.keyboard.down('w');
-// Poll for the deck rather than holding a fixed time: the deck ends at x = -5.2, and a walk
-// long enough to be safe on a slow host is a walk that steps off the end of it and falls.
-const climbed = await poll((s) => Number(s.y) > 2.4, 10000);
+// Walk until the deck rather than for a fixed distance: the deck ends at x = -5.2, and a walk
+// long enough to be sure of arriving is a walk that steps off the end of it and falls.
+const climbed = await stepUntil((s) => Number(s.y) > 2.4, ticksFor(10000), 8);
 await page.keyboard.up('w');
-await wait(250);
+await step(1);
 check(
   'the flight is walkable up to its deck',
   Number(climbed.y) > 2.0,
@@ -533,11 +674,11 @@ await respawn();
 const atSpawnForCrate = await state();
 await turnTo(yawTo(Number(atSpawnForCrate.x), Number(atSpawnForCrate.z), -9.0, -3.2), sens);
 await page.keyboard.down('w');
-await poll((s) => Math.hypot(Number(s.x) + 9.0, Number(s.z) + 3.2) < 1.4, 12000);
+await stepUntil((s) => Math.hypot(Number(s.x) + 9.0, Number(s.z) + 3.2) < 1.4, ticksFor(12000), 4);
 await page.keyboard.press('Space');
-const onCrate = await poll((s) => Number(s.y) > 0.9, 5000);
+const onCrate = await stepUntil((s) => Number(s.y) > 0.9, ticksFor(5000), 2);
 await page.keyboard.up('w');
-await wait(250);
+await step(1);
 check(
   'a 1 m crate is vaulted, not bumped into',
   Number(onCrate.y) > 0.9,
@@ -547,8 +688,8 @@ check(
 // --- third person ----------------------------------------------------------------
 await respawn();
 await page.keyboard.press('v');
-const third = await poll((s) => Number(s.viewBlend) > 0.99, 5000);
-await wait(250);
+const third = await stepUntil((s) => Number(s.viewBlend) > 0.99, ticksFor(5000), 2);
+await step(ticksFor(250));
 const thirdBuf = await shot('02-third-person.png');
 check(
   'V pulls the camera out to a boom',
@@ -557,7 +698,7 @@ check(
 );
 check('and the lit view still draws', photo(thirdBuf).lit > 0.3, `lit=${pct(photo(thirdBuf).lit)}`);
 await page.keyboard.press('v');
-await poll((s) => Number(s.viewBlend) < 0.01, 5000);
+await stepUntil((s) => Number(s.viewBlend) < 0.01, ticksFor(5000), 2);
 
 const revealBuf = await shot('03-reveal.png');
 const reveal = photo(revealBuf);
@@ -584,11 +725,11 @@ check(
   `pitch=${Number((await state()).pitchDeg).toFixed(1)}°`,
 );
 await page.keyboard.down('w');
-await wait(2200);
+await step(ticksFor(2200));
 const walkBuf = await shot('04-footsteps.png');
 const walking = await state();
 await page.keyboard.up('w');
-await wait(250);
+await step(1);
 check(
   'walking draws the floor',
   Number(walking.structUnlockedDots) > 500 && String(walking.lastEvent).endsWith('step'),
@@ -607,7 +748,7 @@ await respawn();
 await clearMap();
 await pitchBy(12, sens);
 const qState = await ping('q-ping');
-await settleInk(60000);
+await settleColour();
 const qBuf = await shot('05-q-ping.png');
 const q = photo(qBuf);
 check(
@@ -623,23 +764,73 @@ check(
 );
 // §3.2, on a frame whose contours have finished flashing: the matter layer is cyan, and only
 // cyan, whatever the surface is made of.
+//
+// The bar was 0.8 while the reading was a lottery between 74 % and 98 %; on the tick clock it is
+// 98.01 % in every run, so the margin can go back to being about the picture. Tightened on five
+// runs of evidence, not on one.
 const qHue = hues(qBuf);
 check(
   'a settled drawing is cyan-family, always (§3.2)',
-  qHue.coolFraction > 0.8 && qHue.warmFraction < 0.02,
+  qHue.coolFraction > 0.9 && qHue.warmFraction < 0.02,
   `cool=${pct(qHue.coolFraction)} warm=${pct(qHue.warmFraction)} of ${qHue.lit} lit px`,
 );
 
+/*
+ * ...and the same drawing again, from the same script.
+ *
+ * This is the assertion the tick-driven pacing exists for. Every number above is a measurement
+ * of a *moment* — how far the front got, how much of the warm flash has faded, how many contours
+ * are still drawing themselves — and driven by wall clock the moment behind a screenshot was
+ * whatever the host managed in 800 ms. Run twice, the same script then produced different
+ * pictures, and the assertion nearest the edge (cyan-family, above) drifted eighteen points
+ * across runs of byte-identical builds and failed on luck. Driven by ticks, the same script
+ * describes the same instant, and the two pictures have to agree. If this ever fails, nothing
+ * below it means what it says.
+ *
+ * The cooldown is waited out *before* the sequence starts, so the repeat spends the same number
+ * of ticks between the respawn and the ping as the original did.
+ */
+await stepUntil((x) => Number(x.pingCooldown) === 0, ticksFor(2000), 4);
+await respawn();
+await clearMap();
+await pitchBy(12, sens);
+await ping('q-ping');
+await settleColour();
+const qBuf2 = await shot('05b-q-ping-again.png');
+const q2 = photo(qBuf2);
+const qHue2 = hues(qBuf2);
+const dMean = Math.abs(q2.mean - q.mean);
+const dLit = Math.abs(q2.lit - q.lit);
+const dCool = Math.abs(qHue2.coolFraction - qHue.coolFraction);
+const dPix = pixelDiff(qBuf, qBuf2);
+/*
+ * The bar is exact, because the answer turned out to be exact: the two frames are identical
+ * pixel for pixel over the whole measurement window, in five runs out of five, and so are the
+ * other twelve screenshots compared against a different run of the same script. Re-paced onto
+ * the wall clock this same pair reads Δ0.0559 of mean luminance, eleven times a bar that is
+ * otherwise never off zero. The aggregates are kept beside the pixel count so that a failure
+ * says *how* the two disagree — a shifted front and a warmer flash look nothing alike.
+ */
+check(
+  'the same script twice paints the same instant',
+  dPix.pixels === 0 && dMean < 0.005 && dLit < 0.0002 && dCool < 0.001,
+  `mean ${q.mean.toFixed(3)} vs ${q2.mean.toFixed(3)} (Δ${dMean.toFixed(4)}), ` +
+    `lit ${pct(q.lit)} vs ${pct(q2.lit)}, cool ${pct(qHue.coolFraction)} vs ` +
+    `${pct(qHue2.coolFraction)} · ${dPix.pixels} of ${dPix.of} px differ in frame` +
+    `${dPix.pixels > 0 ? `, worst ${dPix.worst}/255` : ''}`,
+);
+
 // --- the shared cooldown (§3.5) --------------------------------------------------
-// Fired back to back with no waiting in between, so the test does not depend on how long a
-// software-GL screenshot happens to take.
-await poll((s) => Number(s.pingCooldown) === 0, 4000);
+// One tick apart: the Q lands, and the E arrives 8 ms later, well inside the 0.75 s the cooldown
+// is supposed to hold the door shut. Fired back to back on the wall clock this used to be a race
+// between two keystrokes and one frame, and on a slow host both landed on the same tick — where
+// what refuses the E is `firePing`'s else-branch, not the cooldown the assertion names.
+await stepUntil((s) => Number(s.pingCooldown) === 0, ticksFor(2000), 4);
 const beforeCooldown = Number((await state()).soundEvents);
 await page.keyboard.press('q');
+await step(1);
 await page.keyboard.press('e');
-await poll((s) => Number(s.soundEvents) > beforeCooldown, 4000);
-await wait(200);
-const cooling = await state();
+const cooling = await step(1);
 check(
   'a second ping inside the 0.75 s cooldown is refused',
   Number(cooling.soundEvents) === beforeCooldown + 1 && cooling.lastEvent === 'q-ping',
@@ -650,7 +841,7 @@ check(
 await respawn();
 await clearMap();
 const eState = await ping('e-ping');
-await settleInk(60000);
+await settleInk();
 const eBuf = await shot('06-e-beam.png');
 check(
   'the beam fires once the cooldown expires',
@@ -683,7 +874,7 @@ const crateZ = (regions.crateFront[2] + regions.crateFront[5]) / 2;
 const atSpawn = await state();
 await turnTo(yawTo(Number(atSpawn.x), Number(atSpawn.z), crateX, crateZ), sens);
 await ping('e-ping');
-await settleInk(60000);
+await settleInk();
 const crateFront = await probeRegion('crateFront');
 const crateBack = await probeRegion('crateBack');
 const crateBuf = await shot('07-whole-object.png');
@@ -712,7 +903,7 @@ check('the crate reads on screen', photo(crateBuf).lit > 0.005, `lit=${pct(photo
 await respawn();
 await clearMap();
 const fromMain = await ping('e-ping');
-await settleInk(60000);
+await settleInk();
 const chamberBefore = await probeRegion('chamber');
 const chamberCrateBefore = await probeRegion('chamberCrate');
 await shot('08-outside-the-chamber.png');
@@ -738,14 +929,14 @@ check(
  * question from, so the beam below is fired from a spot with an actual line down the chamber.
  */
 await page.keyboard.down('w');
-const pastChoke = await poll((s) => Number(s.x) > -2.6, 25000);
+const pastChoke = await stepUntil((s) => Number(s.x) > -2.6, ticksFor(25000), 8);
 await page.keyboard.up('w');
-await wait(200);
+await step(1);
 await turnTo(180, sens); // +Z
 await page.keyboard.down('w');
-const inChamber = await poll((s) => Number(s.z) > 8.4, 25000);
+const inChamber = await stepUntil((s) => Number(s.z) > 8.4, ticksFor(25000), 8);
 await page.keyboard.up('w');
-await wait(200);
+await step(1);
 check(
   'the doorway is walkable',
   Number(inChamber.z) > 8.4 && Number(pastChoke.x) > -2.6,
@@ -755,7 +946,7 @@ await turnTo(-90, sens); // +X, down the length of the chamber
 // Wiped first, so the answer below can only be the one ping fired from inside.
 await clearMap();
 await ping('e-ping');
-await settleInk(60000);
+await settleInk();
 const chamberAfter = await probeRegion('chamber');
 const chamberCrateAfter = await probeRegion('chamberCrate');
 const chamberBuf = await shot('09-inside-the-chamber.png');
@@ -780,27 +971,28 @@ check('and the chamber reads on screen', photo(chamberBuf).lit > 0.005, `lit=${p
 //  The ring *is* the front: it displaces and burns the lattice as it passes, and a contour
 //  starts drawing itself the moment the front reaches it. Everything is asserted where the front
 //  is, not globally, because near the origin the drawing has long finished by the time the ring
-//  is out at the doorjamb — which is what "at the front" means. The clock runs at ×0.1 so a
-//  0.48 s crossing is five seconds of wall time.
+//  is out at the doorjamb — which is what "at the front" means. The clock runs at ×0.1, which
+//  buys the sampler ten ticks of front travel where it would otherwise have one.
 // ===========================================================================
 await respawn();
 await clearMap();
 await setTimeScale(0.1);
-await poll((s) => Number(s.pingCooldown) === 0, 8000);
+await stepUntil((s) => Number(s.pingCooldown) === 0, ticksFor(2000), 4);
 const beforeFront = Number((await state()).soundEvents);
 await page.keyboard.press('q');
-await poll((s) => Number(s.soundEvents) > beforeFront && s.lastEvent === 'q-ping', 8000);
+await stepUntil((s) => Number(s.soundEvents) > beforeFront && s.lastEvent === 'q-ping', 8, 1);
 
 let inFlight = null;
 let jambAtRing = null;
 let dotFront = Number.NaN;
 let inkFront = Number.NaN;
-// Bounded by wall time, not by an iteration count: a state read plus a region probe is a few
-// milliseconds and the front takes five seconds to cross, so a count large enough on one host
-// is a count that gives up halfway on the next.
-const frontDeadline = Date.now() + 60000;
-while (Date.now() < frontDeadline) {
-  const s = await state();
+// Two ticks per sample: at ×0.1 that is ~8 cm of front travel, so where the jamb lights and
+// where its first contour closes are read to the same centimetre on every host. This used to be
+// bounded by wall time, and how finely it sampled — and therefore both numbers below — was a
+// measure of how fast the host could round-trip a state read and a region probe.
+const frontBudget = ticksFor(12000);
+for (let spent = 0; spent < frontBudget; spent += 2) {
+  const s = await step(2);
   const j = await probeRegion('jamb');
   const front = s.waveLive === true ? Number(s.waveFront) : Number(s.waveRange);
   if (Number.isNaN(dotFront) && j.drawn > 20) dotFront = front;
@@ -848,7 +1040,7 @@ check(
     `${(Number(inFlight.structRippleMax) * 100).toFixed(1)} cm of a ` +
     `${(Number(inFlight.structRipple) * 100).toFixed(1)} cm amplitude`,
 );
-await settleInk(60000);
+await settleInk();
 await setTimeScale(1);
 
 // ===========================================================================
@@ -857,18 +1049,19 @@ await setTimeScale(1);
 await respawn();
 await clearMap();
 await ping('q-ping');
-await settleInk(60000);
+await settleInk();
 const freshBuf = await shot('11-fresh.png');
 const fresh = photo(freshBuf);
 const beforeAge = await state();
 
 // The paint clock has a debug multiplier on T so ageing can be watched without waiting a
-// minute for it. Poll the clock rather than sleeping a guessed amount.
+// minute for it. Ticks are counted at the scaled clock, not guessed at: 20 s of ageing is 20 s
+// of ageing whatever the frame rate, so `fresh → aged` is now the same drop every run.
 await setTimeScale(10);
 const clock0 = Number((await state()).paintTime);
-await poll((s) => Number(s.paintTime) - clock0 >= 20, 25000);
+await stepUntil((s) => Number(s.paintTime) - clock0 >= 20, ticksFor(25000), 8);
 await setTimeScale(1);
-await wait(250);
+await step(ticksFor(250));
 const agedBuf = await shot('12-aged.png');
 const aged = photo(agedBuf);
 const afterAge = await state();
@@ -897,10 +1090,10 @@ check(
 // white band (`stepFloor`), and only fully in the middle of its own radius (`featherStart`), and
 // the restamp itself must be invisible — the displayed age may not jump.
 await page.keyboard.down('w');
-await wait(700);
+await step(ticksFor(700));
 await page.keyboard.up('w');
-const stepped = await poll((s) => String(s.lastEvent).endsWith('step'), 8000);
-await settleInk(30000);
+const stepped = await stepUntil((s) => String(s.lastEvent).endsWith('step'), ticksFor(2000), 4);
+await settleInk();
 const afterStep = await state();
 console.log(
   `  footfall: floor ${Number(afterStep.structLastFloor).toFixed(2)} s · ` +
@@ -928,8 +1121,11 @@ check(
 );
 
 // --- K forgets everything ----------------------------------------------------------
+// The body first: it is still coasting to a stop from the walk above, and a footfall after the
+// wipe repaints the floor. On the wall clock this settled itself, because everything between
+// here and there took whole seconds of real time.
+await stepUntil((s) => Number(s.speed) < 0.01, ticksFor(2000), 4);
 await clearMap();
-await wait(250);
 const cleared = await state();
 const clearedBuf = await shot('13-cleared.png');
 check(
@@ -947,9 +1143,19 @@ check(
 // ===========================================================================
 await respawn();
 await clearMap();
+/*
+ * The one stretch that is genuinely about wall time, so it gets the wall clock back.
+ *
+ * Both halves of the assertion below are measurements of *this host*: the frame rate the
+ * software rasteriser manages under load, and how much of a millisecond budget one chunk of the
+ * amortised unlock pass actually spends. Stepping would answer neither — a stepped tick settles
+ * its unlock pass in full by design, which is the right thing everywhere except here, where the
+ * amortisation is the thing under test. This is a threshold test and is meant to be read as one.
+ */
+await resumeClock();
 const cost = [];
 for (let i = 0; i < 6; i++) {
-  const s = await ping('e-ping');
+  const s = await pingLive('e-ping');
   cost.push({
     total: Number(s.structLastMs),
     worst: Number(s.structLastChunkMs),
@@ -958,7 +1164,7 @@ for (let i = 0; i < 6; i++) {
     dots: Number(s.structLastDots),
   });
 }
-await settleInk(60000);
+await poll((s) => s.waveLive === false && Number(s.structPendingEdges) === 0, 40000);
 const stressed = await state();
 console.log(
   `  ${mean(cost.map((c) => c.total)).toFixed(1)} ms per beam ` +
@@ -972,6 +1178,17 @@ check(
   `fps=${Number(stressed.fps).toFixed(1)} on software GL, worst chunk ` +
     `${Math.max(...cost.map((c) => c.worst)).toFixed(1)} ms`,
 );
+// Back on the driver's clock for the picture. The frame rate above is a measurement of the
+// host; the screenshot is a photograph of the game, and only one of the two wants the host in
+// it. What the six beams unlocked is already settled, so this only pins *when* it is looked at.
+//
+// It cannot pin *when they were fired*, though: the six went out on the display clock, spaced by
+// whatever it was doing, so their paint ages differ by a little from run to run and the numbers
+// printed below move with them (mean 8.8-10.9 across five runs, against nothing in the assertion
+// that reads mean). This is the one screenshot in the suite that inherits §07's wall clock, and
+// the assertion is deliberately the one property that does not care: nothing clips.
+await step(0);
+await settleInk();
 const stressBuf = await shot('14-six-beams.png');
 const stress = photo(stressBuf);
 check(
