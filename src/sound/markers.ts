@@ -78,6 +78,11 @@ const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number; kind: numb
   // metal handled, not powder burnt.
   reload: { color: 0xffb060, gain: 0.9, kind: KIND_SELF },
   spider: { color: 0xff9ec0, gain: 1, kind: KIND_ALIEN },
+  // M7 hook — a minimal, required addition, not a design pass on this file: `radio` is a new
+  // `SoundSource` (see `src/events/bus.ts`), and `SOURCE_LOOK` is a `Record<SoundSource, …>`, so
+  // leaving it out would not compile. Cool white-blue, `KIND_WORLD`: it is an object making
+  // noise in the hall, not the player's own body and not something alive.
+  radio: { color: 0xbfe0ff, gain: 1, kind: KIND_WORLD },
 };
 
 /**

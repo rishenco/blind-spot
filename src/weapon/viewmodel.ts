@@ -53,6 +53,15 @@
  * What the contour *does* borrow from the solid is depth: the mesh is drawn colour-less into the
  * depth buffer first, so the far side of the receiver does not show through the near side. You
  * cannot feel through your own rifle.
+ *
+ * **M7 addendum — the radio.** Strapped to the side of the handguard, drawn in exactly the
+ * contour channel above and nothing else: it never gets a solid/lit pass, because the spec is
+ * explicit that this is a felt object, not a lit one (`doc/proto/m7-radio.md`, "рисуется тем же
+ * контуром"). `setRadio()` is a second small method rather than new `update()` parameters, so
+ * every existing caller of `update()` is untouched. Its indicator dot reuses the *same*
+ * `uBright` the rifle's own contour just computed that frame — the dot only ever multiplies that
+ * by 0 or 1 (off vs. lit), so it can never leak the one thing law 2 and the spec both forbid it
+ * to show: signal clarity. Off/blinking/steady is the whole vocabulary.
  */
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -280,6 +289,12 @@ export class RifleViewModel implements TouchSink {
   private readonly contour: THREE.LineSegments;
   private readonly occluder: THREE.Mesh;
   private readonly contourMaterial: THREE.ShaderMaterial;
+  /** M7: the radio's own contour + depth mask, and its indicator dot. Hidden until picked up. */
+  private readonly radioGeometry: THREE.BufferGeometry;
+  private readonly radioContour: THREE.LineSegments;
+  private readonly radioOccluder: THREE.Mesh;
+  private readonly indicatorMesh: THREE.Mesh;
+  private readonly indicatorMaterial: THREE.ShaderMaterial;
   private readonly rest = new THREE.Vector3();
   private lastEnergy = 0;
   /** Set by the touch layer: is the tactile channel on at all, and how bright is it up close. */
@@ -348,7 +363,76 @@ export class RifleViewModel implements TouchSink {
     this.occluder.frustumCulled = false;
     this.occluder.renderOrder = -1;
 
-    this.body.add(this.mesh, this.occluder, this.contour);
+    // M7 — the radio, strapped to the side of the handguard (the handguard box above sits at
+    // local z=0.28, spanning roughly z 0.16..0.40) — clear of the front sight post at z=0.176
+    // (that post is centred on x=0 and never reaches past x=0.006; the radio starts at x=0.035)
+    // and the receiver cluster from z=0.43 on, so its silhouette reads on its own instead of
+    // disappearing into either. A first pass sized it to match the rifle's own small accessories
+    // (the rear sight block) and it measured out to a real but sub-pixel difference on screen —
+    // legible to the diff check, invisible to a human glancing at the frame, which is the one
+    // thing a proof frame may never be. Sized up a second time, deliberately bigger than its
+    // realistic strapped-on-a-handguard proportions would suggest, specifically so a person
+    // scanning the screenshot sees a chunky attached case with an antenna, not another sliver of
+    // the rifle's own silhouette. Contour-only, same reasoning as the rifle's own: it is felt,
+    // never lit.
+    const radioParts: THREE.BufferGeometry[] = [
+      box(0.054, 0.11, 0.047, 0.062, 0.045, 0.235),  // body
+      tube(0.006, 0.13, 0.235, 0.105, 0.062),        // antenna
+    ];
+    const radioMerged = mergeGeometries(radioParts, false);
+    for (const p of radioParts) p.dispose();
+    if (radioMerged === null) throw new Error('rifle viewmodel: radio merge failed');
+    radioMerged.computeVertexNormals();
+    this.radioGeometry = radioMerged;
+    this.radioContour = new THREE.LineSegments(
+      new THREE.EdgesGeometry(radioMerged, 20),
+      this.contourMaterial,
+    );
+    this.radioContour.frustumCulled = false;
+    this.radioOccluder = new THREE.Mesh(radioMerged, new THREE.MeshBasicMaterial({
+      colorWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 2,
+    }));
+    this.radioOccluder.frustumCulled = false;
+    this.radioOccluder.renderOrder = -1;
+    this.radioContour.visible = false;
+    this.radioOccluder.visible = false;
+
+    // The indicator dot: a filled quad, not an edge — it is a readout, not a crease of the case.
+    // Same unlit shader as the contour, so it is exempt from law 2 in exactly the same way.
+    this.indicatorMaterial = new THREE.ShaderMaterial({
+      vertexShader: EDGE_VERT,
+      fragmentShader: EDGE_FRAG,
+      uniforms: {
+        uColor: { value: grey.clone() },
+        uBright: { value: 0 },
+      },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    // Sized to actually read in a screenshot, not just to exist: the (now enlarged) body's front
+    // face sits at z=0.2115, so the dot is pulled just proud of it (z=0.204) to avoid z-fighting
+    // with the occluder, at roughly a third of the body's own face — big enough to be the first
+    // thing a human notices change between "off" and "ready", never so big it reads as a second
+    // light source of its own. Offset off the body's own centre line (x=0.042 vs the body/antenna
+    // centre at x=0.062) so its silhouette does not fall directly behind the antenna mast, which
+    // runs the full height of the front face right through the middle.
+    const dotGeom = box(0.045, 0.045, 0.015, 0.042, 0.06, 0.2);
+    this.indicatorMesh = new THREE.Mesh(dotGeom, this.indicatorMaterial);
+    this.indicatorMesh.frustumCulled = false;
+    this.indicatorMesh.visible = false;
+
+    this.body.add(
+      this.mesh,
+      this.occluder,
+      this.contour,
+      this.radioContour,
+      this.radioOccluder,
+      this.indicatorMesh,
+    );
     this.object.add(this.body);
     this.object.visible = false;
     this.applyLook();
@@ -453,10 +537,38 @@ export class RifleViewModel implements TouchSink {
     this.body.rotation.x = t.tilt + punchPitch * t.kickPitch;
   }
 
+  /**
+   * M7. Call once per frame, right after `update()` — it reads the tactile brightness `update()`
+   * just computed for the rifle's own contour and reuses it verbatim, so the radio fades with
+   * touch distance exactly like the gun does and never needs a brightness law of its own.
+   *
+   * `indicatorState` is the three-state readout from `Radio.indicator()`; `blinkOn` is
+   * `Radio.blinkOn(now)` — a sim-time phase, computed by the caller so this method stays a pure
+   * function of its arguments. Brightness is only ever multiplied by 0 or 1: the dot cannot leak
+   * clarity because clarity never reaches this method at all.
+   */
+  setRadio(present: boolean, indicatorState: 'off' | 'settling' | 'ready', blinkOn: boolean): void {
+    const felt = this.contour.visible;
+    const show = present && felt;
+    this.radioContour.visible = show;
+    this.radioOccluder.visible = show;
+    this.indicatorMesh.visible = show;
+    if (!show) return;
+    const lit = indicatorState === 'ready' || (indicatorState === 'settling' && blinkOn);
+    this.indicatorMaterial.uniforms.uBright!.value = lit
+      ? this.contourMaterial.uniforms.uBright!.value
+      : 0;
+  }
+
   dispose(): void {
     this.mesh.geometry.dispose();
     this.contour.geometry.dispose();
+    this.radioGeometry.dispose();
+    this.radioContour.geometry.dispose();
     (this.occluder.material as THREE.Material).dispose();
+    (this.radioOccluder.material as THREE.Material).dispose();
+    this.indicatorMesh.geometry.dispose();
+    this.indicatorMaterial.dispose();
     this.contourMaterial.dispose();
     this.material.dispose();
   }

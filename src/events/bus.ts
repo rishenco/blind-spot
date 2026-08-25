@@ -29,7 +29,14 @@ export type SoundSource =
    * character without having to guess from loudness.
    */
   | 'reload'
-  | 'spider';
+  | 'spider'
+  /**
+   * The M7 radio (ground unit or carried). One source for both: on the ground it pings
+   * unconditionally so it can be found in the dark; carried, it only pings while switched on,
+   * at which point the player becomes the loudest thing in the hall. Loudness tells the two
+   * states apart the way 'reload' is told apart from 'gunshot' — no new field needed.
+   */
+  | 'radio';
 
 /**
  * What a spider noise *is*, when the emitter is a spider.

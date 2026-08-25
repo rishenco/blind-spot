@@ -50,6 +50,7 @@ import { ShotTracers } from './weapon/tracers';
 import { Swarm, defaultSpiderTunables } from './spiders/swarm';
 import { SpiderOverlay } from './spiders/overlay';
 import { PlayerVitals, defaultVitalsTunables } from './hud/vitals';
+import { Radio, defaultRadioTunables } from './radio/radio';
 import { NoiseCompass, defaultCompassTunables } from './hud/compass';
 import {
   PlayerHudLayer,
@@ -76,7 +77,8 @@ const HELP: HelpRow[] = [
   { keys: 'U', action: 'debug: hitscan tracers — where the bullets really went' },
   { keys: 'L', action: 'debug: darkness off (lights on)' },
   { keys: 'V', action: 'debug: view — player / third / top' },
-  { keys: 'T', action: 'debug: touch layer on/off' },
+  { keys: 'T', action: 'radio power switch (picking it up is automatic, just walk over it)' },
+  { keys: 'C', action: 'debug: touch layer on/off' },
   { keys: 'M', action: 'sound markers on/off' },
   { keys: 'N', action: 'debug: audibility radius of each sound event' },
   { keys: 'K', action: 'debug: clear the accumulated map' },
@@ -87,16 +89,19 @@ const HELP: HelpRow[] = [
   { keys: 'P', action: 'debug: spider overlay — state, goal, belief, above each spider' },
   { keys: 'I', action: 'debug: damage feedback (wedge, flinch, dark edge) on/off' },
   { keys: 'Z', action: 'debug: take a bite — from the nearest spider, else from behind' },
-  { keys: 'Backspace', action: 'respawn' },
+  { keys: 'Backspace', action: 'respawn (debug) · after death or the gate: restart, same seed' },
+  { keys: 'Enter', action: 'after death or the gate: restart with a new seed' },
   { keys: 'H', action: 'this help' },
 ];
 
 const HINT =
-  'WASD move · Shift run · Ctrl crouch · F lidar ping · Q/LMB shoot · R reload · E take/throw · X fire mode · O compass · Y hold flash · P spiders · U tracers · L lights · V view · G tuning · H help';
+  'WASD move · Shift run · Ctrl crouch · F lidar ping · Q/LMB shoot · R reload · E take/throw · T radio · X fire mode · O compass · Y hold flash · P spiders · U tracers · L lights · V view · G tuning · H help';
 
 /** Where the muzzle is relative to the eye, metres — matches the rifle's collider box. */
 const MUZZLE_AHEAD = 0.55;
 const MUZZLE_DROP = 0.14;
+/** How close to `GATE_TARGET` counts as "reached it", metres. */
+const GATE_REACH = 2.5;
 
 /** How much of the loudness scale each thing the body does is worth, in metres of notice. */
 const STEP_LOUDNESS: Record<string, number> = { crouch: 3, walk: 9, sprint: 16 };
@@ -211,6 +216,18 @@ class App {
   private readonly vitals = new PlayerVitals(defaultVitalsTunables());
   /** Fourth bus subscriber: bearings to noises whose marks are off-screen. Off by default. */
   private readonly compass = new NoiseCompass(this.bus, defaultCompassTunables());
+  /**
+   * M7 — the reason to go anywhere. A fifth bus emitter (not a subscriber): it pings the shared
+   * bus like every other physical noise, and the marker layer / spider hearing pick it up with
+   * zero changes of their own. See `src/radio/radio.ts` for the whole design.
+   */
+  private readonly radio = new Radio(defaultRadioTunables());
+  /** The round (M7 "Раунд целиком"): a beginning, a wave timer, and exactly one of two endings. */
+  private roundState: 'playing' | 'won' | 'dead' = 'playing';
+  /** Slider-backed wave knobs — kept here because `spawn()` is the only public entry point
+   *  `swarm.ts` offers, and it is destructive (see the task report's deviations section). */
+  private readonly wave = { cap: 24, intervalS: 60, step: 6 };
+  private nextWaveAt = 60;
   private readonly playerHud = new PlayerHudLayer(defaultHudLayerTunables());
   /** Rebuilt per frame from the live blips. Never grows past the compass's own capacity. */
   private readonly notches: CompassNotch[] = [];
@@ -454,6 +471,36 @@ class App {
       this.spiders.update(dt, this.time);
     }
 
+    // M7 — the round. Everything below is a no-op once it has ended: the point of a death or a
+    // win is that the black hall stops asking anything more of you until you restart.
+    if (this.roundState === 'playing') {
+      this.radio.update(dt, this.time, this.bus, this.player.position);
+
+      // Reinforcements, roughly once a minute, capped and kept off the player's back. `spawn()`
+      // is the swarm's only public entry point and it rebuilds the whole pack rather than adding
+      // to it — see the report's deviations section for why a wave is a re-spawn here, not a
+      // true reinforcement.
+      if (this.spiders !== null && this.time >= this.nextWaveAt) {
+        this.nextWaveAt = this.time + this.wave.intervalS;
+        const st = this.spiders.tunables;
+        st.count = Math.min(this.wave.cap, st.count + this.wave.step);
+        this.spiders.spawn(st.count, this.player.position);
+      }
+
+      if (!this.vitals.alive) {
+        this.roundState = 'dead';
+      } else if (this.radio.carried) {
+        const p = this.player.position;
+        const dGate = Math.hypot(p.x - GATE_TARGET.x, p.z - GATE_TARGET.z);
+        if (dGate < GATE_REACH) this.roundState = 'won';
+      }
+    }
+    if (this.roundState === 'dead') {
+      // Reused, not reinvented: the same pass the gunshot already drives, pinned above 1 every
+      // tick so `advance()`'s exponential decay never gets a chance to run before the next pin.
+      this.concussion.setLevel(1.6, this.time);
+    }
+
     /*
      * The body. Its aim kick and its tremor move the *real* heading — being bitten costs you
      * your aim, not just a shake — so they are applied here, in the simulation, and clamped
@@ -486,11 +533,17 @@ class App {
     const i = this.input;
     // Browsers refuse to start an AudioContext outside a gesture, so the first key the player
     // presses — any key — is what turns the world audible.
-    if (i.anyKeyPressed()) this.audio.resume();
+    if (i.anyKeyPressed()) {
+      this.audio.resume();
+      this.radio.resume();
+    }
     if (i.wasKeyPressed('KeyF')) this.pendingFire = true;
     if (i.wasKeyPressed('KeyL')) this.setLights(!this.lightsOn);
     if (i.wasKeyPressed('KeyV')) this.cycleView();
-    if (i.wasKeyPressed('KeyT')) this.touch.setVisible(!this.touch.visible);
+    // M7 took `T` for the radio's own switch (process.md: "геймплей важнее дебага"); the touch
+    // debug toggle that used to live here moved to `C`, the one still-unused letter.
+    if (i.wasKeyPressed('KeyT')) this.radio.toggle(this.time);
+    if (i.wasKeyPressed('KeyC')) this.touch.setVisible(!this.touch.visible);
     if (i.wasKeyPressed('KeyM')) this.markers.setVisible(!this.markers.visible);
     if (i.wasKeyPressed('KeyN')) this.markers.setRadiusVisible(!this.markers.radiusVisible);
     if (i.wasKeyPressed('KeyK')) this.clearMap();
@@ -503,12 +556,25 @@ class App {
     if (i.wasKeyPressed('KeyR')) this.rifle?.beginReload();
     if (i.wasKeyPressed('KeyE')) this.toggleCarry();
     if (i.wasKeyPressed('Backspace')) {
-      this.player.respawn();
-      this.rifle?.resetRecoil();
-      this.rifle?.refillMag();
-      this.carry?.dropInPlace();
-      this.vitals.reset();
-      this.compass.clear();
+      if (this.roundState === 'playing') {
+        this.player.respawn();
+        this.rifle?.resetRecoil();
+        this.rifle?.refillMag();
+        this.carry?.dropInPlace();
+        this.vitals.reset();
+        this.compass.clear();
+      } else {
+        // M7: dead or through the gate — same seed, so the hall you just learned is the hall
+        // you get to try again on. A fresh App instance is the honest way to reset the wasm
+        // world, the pack and the clutter together; a full reload is the least code that can do
+        // it without three subsystems drifting out of sync with each other.
+        this.restartRound(this.seed);
+      }
+    }
+    if (i.wasKeyPressed('Enter') && this.roundState !== 'playing') {
+      // A new seed is a fresh round's choice of layout, not simulation state — the same
+      // exemption `process.md` already grants continuous audio playback its real-time clock.
+      this.restartRound(Date.now() % 100000000);
     }
     if (i.wasKeyPressed('KeyX')) this.cycleFireMode();
     if (i.wasKeyPressed('KeyY')) this.flash.setHold(!this.flash.holding);
@@ -517,6 +583,18 @@ class App {
     if (i.wasKeyPressed('KeyO')) this.compass.enabled = !this.compass.enabled;
     if (i.wasKeyPressed('KeyI')) this.playerHud.showDamage = !this.playerHud.showDamage;
     if (i.wasKeyPressed('KeyZ')) this.biteMe();
+  }
+
+  /**
+   * M7's restart. Full page reload rather than an in-place teardown: the wasm world, the pack,
+   * the clutter and the round state would otherwise have to be reset in lock-step by hand, and
+   * a stray leftover is exactly the kind of bug a "just reload" approach makes structurally
+   * impossible. The seed becomes the URL's own `?seed=`, so "same seed" is simply not touching it.
+   */
+  private restartRound(seed: number): void {
+    const url = new URL(location.href);
+    url.searchParams.set('seed', String(seed));
+    location.href = url.toString();
   }
 
   /**
@@ -774,6 +852,9 @@ class App {
         cp.x, cp.y, cp.z,
         gunPunch?.pitch ?? 0, gunPunch?.back ?? 0,
       );
+      // The radio, strapped to the handguard — same contour, same felt/solid gate `update()`
+      // just computed. Its own method so no other caller of `update()` has to change.
+      this.rifleView.setRadio(this.radio.carried, this.radio.indicator(renderTime), this.radio.blinkOn(renderTime));
       // And the thing in the other hand, drawn in the same tactile alphabet the rifle uses.
       this.heldView?.update(this.carry?.holding ?? -1, first);
     }
@@ -1000,6 +1081,13 @@ class App {
         'flash',
         `${this.flash.count} · ${(this.flash.envelope * 100) | 0}%${this.flash.holding ? ' · HELD' : ''}${this.tracers.visible ? ` · ${this.tracers.count} tracers` : ''}`,
       ],
+      [
+        'radio',
+        !this.radio.carried
+          ? 'on the floor · broadcasting'
+          : `carried · ${this.radio.powered ? this.radio.indicator(this.time) : 'off'}`,
+      ],
+      ['round', `${this.roundState} · next wave ${Math.max(0, this.nextWaveAt - this.time).toFixed(0)}s · pack cap ${this.wave.cap}`],
     ]);
 
     this.hud.setPerf([
@@ -1026,9 +1114,14 @@ class App {
       ['calls', `${this.renderer.info.render.calls}`],
     ]);
 
-    this.hud.setCapturePrompt(
-      this.harness || this.input.isCapturing ? null : 'click to capture the mouse',
-    );
+    let prompt: string | null =
+      this.harness || this.input.isCapturing ? null : 'click to capture the mouse';
+    if (this.roundState === 'dead') {
+      prompt = 'DOWN — Backspace: restart, same seed · Enter: restart, new seed';
+    } else if (this.roundState === 'won') {
+      prompt = 'THROUGH THE GATE — Backspace: restart, same seed · Enter: restart, new seed';
+    }
+    this.hud.setCapturePrompt(prompt);
   }
 
   private nearestLandmark(x: number, z: number): string {
@@ -1358,6 +1451,24 @@ class App {
     cc.add(ct2, 'pulse', 0.2, 8, 0.1);
     cc.add(ct2, 'ghost', 0, 0.5, 0.02);
     cc.close();
+
+    // M7 — the radio and the round it turns the prototype into.
+    const rd = gui.addFolder('radio (M7)');
+    const rt = this.radio.tunables;
+    rd.add(rt, 'pickupRadius', 0.2, 3, 0.1).name('pickup radius, m');
+    rd.add(rt, 'captureSeconds', 0.2, 8, 0.1).name('switch-on delay, s');
+    rd.add(rt, 'pingInterval', 0.1, 3, 0.05).name('ping interval, s');
+    rd.add(rt, 'groundLoudness', 5, 90, 1).name('ground ping, m of notice');
+    rd.add(rt, 'carryLoudness', 5, 120, 1).name('carried ping, m of notice');
+    rd.add(rt, 'clarityNear', 0, 30, 0.5).name('clear inside, m from gate');
+    rd.add(rt, 'clarityFar', 10, 90, 1).name('pure noise beyond, m from gate');
+    rd.add(rt, 'blinkHz', 0.5, 6, 0.1).name('indicator blink rate');
+    rd.add(rt, 'noiseGain', 0, 0.3, 0.005).name('hiss volume');
+    rd.add(rt, 'melodyGain', 0, 0.3, 0.005).name('melody volume');
+    rd.add(this.wave, 'cap', 4, 60, 1).name('spider pop. cap');
+    rd.add(this.wave, 'intervalS', 10, 180, 5).name('wave interval, s');
+    rd.add(this.wave, 'step', 1, 20, 1).name('spiders added per wave');
+    rd.close();
   }
 
   private applyLook(): void {
@@ -1543,6 +1654,9 @@ class App {
         // not inherit the ammunition — or the can — that the previous scenario left behind.
         this.rifle?.refillMag();
         this.carry?.dropInPlace();
+        // M7: a scenario that teleports must not inherit whether a previous step picked up or
+        // switched on the radio — same reasoning as the mag refill and the dropped can above it.
+        this.radio.reset();
         this.player.setSpawn(new THREE.Vector3(x, y, z), yawDeg);
         // The ping direction is read off the camera, so the camera has to already be there.
         this.player.applyToCamera(this.camera, 0);
@@ -1603,6 +1717,57 @@ class App {
         set: (level: number) => {
           this.concussion.setLevel(level, this.time);
           return this.concussion.charge;
+        },
+      },
+      /** M7. `tools/radio.mjs`'s whole surface: pickup/switch state and the clarity numbers. */
+      radio: {
+        state: () => {
+          const pos = this.radio.position(this.player.position);
+          return {
+            carried: this.radio.carried,
+            powered: this.radio.powered,
+            indicator: this.radio.indicator(this.time),
+            clarity: this.radio.lastComputedClarity,
+            position: pos.toArray(),
+            distanceToGate: Math.hypot(pos.x - GATE_TARGET.x, pos.z - GATE_TARGET.z),
+          };
+        },
+        /** Clarity as a pure function of a world point — for the "gate vs. far corner" numbers,
+         *  without having to actually walk the player there first. */
+        clarityAt: (x: number, z: number) => this.radio.clarity(new THREE.Vector3(x, 0, z)),
+        toggle: () => {
+          this.radio.toggle(this.time);
+          return this.radio.powered;
+        },
+        setCarried: (on: boolean) => {
+          this.radio.setCarried(on);
+          return this.radio.carried;
+        },
+        tune: (patch: Partial<Record<string, number>>) => {
+          Object.assign(this.radio.tunables, patch);
+          return { ...this.radio.tunables };
+        },
+      },
+      /** M7. The round machine itself: state, the wave clock and the two restart forms. */
+      round: {
+        state: () => this.roundState,
+        wave: () => ({ ...this.wave, nextAt: this.nextWaveAt, count: this.spiders?.tunables.count ?? 0 }),
+        tune: (patch: Partial<typeof this.wave>) => {
+          Object.assign(this.wave, patch);
+          return { ...this.wave };
+        },
+        /** Force a result, for scenarios that need to photograph the ending without playing
+         *  the whole round to reach it. */
+        force: (state: 'playing' | 'won' | 'dead') => {
+          this.roundState = state;
+          return this.roundState;
+        },
+        /** The URL a restart would navigate to — read, never navigated, so a keyframe run can
+         *  check the seed logic without actually leaving the page mid-scenario. */
+        restartUrl: (sameSeed: boolean) => {
+          const url = new URL(location.href);
+          url.searchParams.set('seed', String(sameSeed ? this.seed : 0));
+          return url.toString();
         },
       },
       audioTune: (patch: Partial<Record<string, number>>) => {
@@ -1782,6 +1947,12 @@ class App {
           bySource: Object.fromEntries(this.bus.countsBySource()),
         },
         gate: Math.hypot(this.player.position.x - GATE_TARGET.x, this.player.position.z - GATE_TARGET.z),
+        radio: {
+          carried: this.radio.carried,
+          powered: this.radio.powered,
+          clarity: this.radio.lastComputedClarity,
+        },
+        round: this.roundState,
         frameMs: this.perf,
         calls: this.renderer.info.render.calls,
       }),
