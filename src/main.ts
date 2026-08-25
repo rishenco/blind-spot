@@ -340,6 +340,8 @@ class App {
     this.dyn.setWindow(this.look.windowRadius, this.look.refreshSeconds);
     this.scene.add(this.dyn.object);
     this.touch.attach(this.dyn);
+    // The third thing the hand can feel is the rifle it is holding — same channel, same switch.
+    this.touch.attach(this.rifleView);
     this.propReveal = new PropReveal(this.props);
     this.propReveal.object.traverse((o) => {
       const mesh = o as THREE.Mesh;
@@ -681,6 +683,7 @@ class App {
       const lp = this.flash.light.position;
       const cp = this.camera.position;
       this.rifleView.update(
+        first,
         first && this.lightsOn,
         first ? this.flash.light.intensity : 0,
         lp.x, lp.y, lp.z,
@@ -1071,6 +1074,8 @@ class App {
     gun.add(vm, 'gain', 0, 0.03, 0.0005);
     gun.add(vm, 'exposure', 0.2, 5, 0.05).onChange(() => this.rifleView.applyLook());
     gun.add(vm, 'rim', 0, 2, 0.05).onChange(() => this.rifleView.applyLook());
+    gun.add(vm, 'feel', 0, 6, 0.05).name('by touch: how bright');
+    gun.add(vm, 'feelEdge', 0.5, 6, 0.1).name('by touch: contour vs body').onChange(() => this.rifleView.applyLook());
     gun.add(vm, 'wrap', 0, 2, 0.05).onChange(() => this.rifleView.applyLook());
     gun.add(vm, 'kickBack', 0, 3, 0.05).name('mesh kick: back');
     gun.add(vm, 'kickPitch', 0, 3, 0.05).name('mesh kick: pitch');
@@ -1456,6 +1461,7 @@ class App {
           mesh: this.rifleView.tunables.visible,
           lit: this.rifleView.lit,
           energy: this.rifleView.energy,
+          felt: this.rifleView.felt,
         },
         aim: { yawDeg: (this.player.yaw * 180) / Math.PI, pitchDeg: (this.player.pitch * 180) / Math.PI },
         dyn: this.dyn?.getStats() ?? null,

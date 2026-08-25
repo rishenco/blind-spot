@@ -35,6 +35,8 @@ const whiteFraction = (img, threshold = 100) => whiteFractionRect(img, whole(img
 const hueFamilies = (img, rect) => hueFamiliesRect(img, rect);
 /** A named window of the frame, so a caption's claim can be measured where the eye looks. */
 const litIn = (img, rect) => litFractionRect(img, rect).fraction;
+/** Where the gun is drawn in a 1280x720 frame: the lower right quadrant, with margin. */
+const GUN_RECT = { x: 660, y: 400, w: 620, h: 320 };
 
 const htmlPath = resolve(process.argv[2] ?? 'dist/index.html');
 const outDir = resolve(process.argv[3] ?? 'out');
@@ -163,6 +165,12 @@ notes.push(
   `hall ${boot.boxes} boxes · ${boot.stats.paint.dots} dots · ${boot.stats.paint.edges} edge segments · lattice build ${boot.buildMs.toFixed(0)} ms`,
 );
 await call('hud', false);
+// The rifle is held in the same frame as everything else, and the tactile channel draws it
+// whenever the hand is on — which, in play, is always. Every scenario below except M4d's own is
+// a claim about the hall, so the viewmodel is put away here for the same reason the HUD is: an
+// instrument measuring the sound layer should not be measuring the gun in the corner of the
+// lens. M4d switches it back on for frames 40-44 and off again afterwards.
+await call('viewmodel', false);
 // No device, no ears, nothing to prove: the audio stage would otherwise open an AudioContext the
 // moment the first synthetic key press lands, and spend frame budget we are here to measure.
 await call('audio', false);
@@ -1201,9 +1209,7 @@ await call('tracers', false);
 // free lamp in a game whose first law is that there are no free lamps.
 // ===========================================================================
 
-/** Where the gun is drawn in a 1280x720 frame: the lower right quadrant, with margin. */
-const GUN_RECT = { x: 660, y: 400, w: 620, h: 320 };
-
+await call('viewmodel', true);
 await call('markers', false);
 await call('tracers', false);
 await call('touch', false);
@@ -1266,6 +1272,10 @@ const f37 = await shot(
 check('the truth frame shows the same gun', meanLuminance(f37) > 0,
   `mean ${meanLuminance(f37).toFixed(1)}`);
 await call('lights', false);
+// Leaving the debug lights hands the tactile layer back on (that is what `setLights` does), and the
+// hand can now draw the rifle by itself — which is the next frame's subject, not this one's. The
+// claim being photographed here is "no flash, no hand, nothing", so the hand is put away first.
+await call('touch', false);
 
 // --- 38 and with the flash out, there is no gun ----------------------------
 await call('flashHold', false);
@@ -1280,12 +1290,75 @@ check('the gun goes out with the flash',
   `mesh still enabled=${gunDark.gun.mesh}, lit=${gunDark.gun.lit}, energy=${gunDark.gun.energy}`);
 check('and black stays black where it was', litIn(f38, GUN_RECT) < 0.005,
   `lit inside the hold rectangle ${litIn(f38, GUN_RECT).toFixed(5)} — was ${litIn(f36, GUN_RECT).toFixed(3)} in the flash`);
+// --- 43/44 the hand knows its own barrel ------------------------------------
+// concept.md, on the tactile channel: «серый тактильный контур в ~0.5 м от игрока и от дула».
+// The rifle is the one object the hand is always on, so it is registered as a TouchSink like the
+// props and the hall are — same switch, same channel, no private path. It is drawn whole rather
+// than clipped to the reach sphere, because the reach test models not knowing the world, and the
+// player does know the thing he is holding.
+await call('pose', 0, 6, 200);
+await call('aim', 200, -38);
+await call('touch', true);
+await advance(0.5, 3);
+const f43 = await shot(
+  '43-rifle-by-touch.png',
+  'total darkness — no flash, no lidar ping, no marker. The rifle is drawn by the tactile channel alone: a flat grey contour with no falloff across it, because it is felt, not lit. Below it the floor’s own touch dots, the same channel reaching the same ~0.5 m, are bright pinpoints — the two must not look alike: dots are matter the hand found, the contour is the thing the hand is holding',
+);
+const gunFelt = await stats();
+check('the tactile layer is what draws the rifle here',
+  gunFelt.gun.lit === true && gunFelt.gun.energy === 0 && gunFelt.gun.felt > 0,
+  `energy=${gunFelt.gun.energy} (no flash at all), felt=${gunFelt.gun.felt.toFixed(2)}`);
+
+// Control: switch the mesh off with the touch layer still on. The floor dots must survive
+// untouched — if they dim, the gun was lighting the room, and law 2's neighbour would be broken.
+await call('viewmodel', false);
+await call('draw');
+const f43off = decodePng(await page.screenshot({ timeout: 180000 }));
+await call('viewmodel', true);
+await call('draw');
+const spill = (() => {
+  let n = 0;
+  for (let y = 0; y < f43.height; y++) {
+    const inRow = y >= GUN_RECT.y && y < GUN_RECT.y + GUN_RECT.h;
+    for (let x = 0; x < f43.width; x++) {
+      if (inRow && x >= GUN_RECT.x && x < GUN_RECT.x + GUN_RECT.w) continue;
+      const i = (y * f43.width + x) * f43.channels;
+      const a = (f43.data[i] + f43.data[i + 1] + f43.data[i + 2]) / 3;
+      const b = (f43off.data[i] + f43off.data[i + 1] + f43off.data[i + 2]) / 3;
+      if (Math.abs(a - b) > 2) n++;
+    }
+  }
+  return n;
+})();
+check('and it lights nothing but itself',
+  litIn(f43, GUN_RECT) > litIn(f43off, GUN_RECT) && spill === 0,
+  `hold rectangle ${litIn(f43off, GUN_RECT).toFixed(5)} → ${litIn(f43, GUN_RECT).toFixed(5)} with the mesh on, ` +
+    `and ${spill} pixels outside it moved by more than 1/255 — the floor's own touch dots are bit-identical ` +
+    `with the rifle drawn and with it switched off, because the contour is a colour on its own surface and not a light`);
+
+// --- 44 hand off the trigger, nothing at all -------------------------------
+await call('touch', false);
+await advance(0.3, 2);
+const f44 = await shot(
+  '44-rifle-not-felt.png',
+  'the same pose with the tactile channel switched off. The floor dots go, and so does the rifle: it has no light of its own to fall back on. Two channels can draw the gun — the flash and the hand — and with both out it is switched off, not dimmed',
+);
+const gunNumb = await stats();
+check('with the hand off, the rifle is gone too',
+  gunNumb.gun.lit === false && gunNumb.gun.felt === 0 && meanLuminance(f44) < 0.01,
+  `felt=${gunNumb.gun.felt}, lit=${gunNumb.gun.lit}, whole frame mean ${meanLuminance(f44).toFixed(4)}`);
+await call('pose', ...VISTA);
+await call('aim', ...VISTA_AIM);
+await call('viewmodel', false);
+
 notes.push(
   `M4d rifle: the mesh is lit by the muzzle flash and by nothing else — with the flash out it is switched ` +
     `invisible, not dimmed (frames 40-42). In the flash frame it covers ${(gunCover * 100).toFixed(1)}% of the ` +
     `rectangle it is held in; the whole-frame mean moves ${(flashWith - flashWithout).toFixed(2)} of 255 ` +
     `(${flashWithout.toFixed(2)} → ${flashWith.toFixed(2)}), and that is pure occlusion: the mesh adds no light ` +
-    `and is in no shadow map.`,
+    `and is in no shadow map. The second thing that can draw it is the hand: it is a TouchSink like the props, ` +
+    `so the tactile channel feels its own barrel in complete darkness (frame 43) and drops it again with the rest ` +
+    `of the hand (frame 44).`,
 );
 
 // --- what a flash frame costs ----------------------------------------------

@@ -37,6 +37,8 @@
  */
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { TOUCH_GREY } from '../lidar/structured';
+import type { TouchSink } from '../touch/touch';
 
 export interface ViewModelTunables {
   /** Master switch. Off is for measuring what the mesh costs, not for playing. */
@@ -57,6 +59,21 @@ export interface ViewModelTunables {
   exposure: number;
   /** Grazing-edge term, so the silhouette still reads where the normal faces away. */
   rim: number;
+  /**
+   * How brightly the *tactile* channel draws the gun, as a fraction of the touch layer's own
+   * near-hand alpha. This is the second and only other thing allowed to make the rifle visible,
+   * and it is not a lamp: it is the same channel that already draws the crate you are leaning
+   * on, asking the same question about the nearest object there is.
+   *
+   * Unlike everything else the hand draws, the gun is drawn *whole* rather than by radius —
+   * the human's call, and the right one: the reach test exists because you only know the piece
+   * of the world your hand happens to be on, and that reasoning simply does not apply to the
+   * one object you are holding in both hands and have carried all night. Ты её знаешь на ощупь
+   * целиком.
+   */
+  feel: number;
+  /** How much of the felt gun is edge rather than surface. Higher = more contour, less body. */
+  feelEdge: number;
   /**
    * How much of a *ball* the flash is treated as. A muzzle flash is a fistful of burning
    * powder, not a mathematical point, and the difference matters here and nowhere else: the
@@ -107,6 +124,8 @@ export function defaultViewModelTunables(): ViewModelTunables {
     gain: 0.0018,
     exposure: 1.15,
     rim: 0.25,
+    feel: 2.2,
+    feelEdge: 1.6,
     wrap: 0.55,
     kickBack: 0.55,
     kickPitch: 0.8,
@@ -140,6 +159,9 @@ uniform float uExposure;
 uniform float uRim;
 uniform float uWrap;
 uniform float uDebug;
+uniform float uFeel;
+uniform float uFeelEdge;
+uniform vec3 uFeelColor;
 varying vec3 vWorld;
 varying vec3 vNormal2;
 void main() {
@@ -160,6 +182,15 @@ void main() {
   float rim = pow(1.0 - max(dot(n, toEye), 0.0), 3.0) * uRim;
   vec3 c = vec3(uAlbedo) * uLightColor * atten * (ndl + rim);
   c = vec3(1.0) - exp(-c * uExposure);
+  /*
+   * The tactile channel. Not light: it adds nothing to the scene, throws nothing, and reaches
+   * exactly as far as the gun's own surface. It is drawn the touch layer's grey, mostly as
+   * contour — a hard edge term plus a thin wash of body, which is the same "серый тактильный
+   * контур" the hall gets, on the one object the player is holding. It is switched by the same
+   * switch as the rest of the hand: touch off, gun gone.
+   */
+  float edge = pow(1.0 - max(dot(n, toEye), 0.0), uFeelEdge);
+  c += uFeelColor * uFeel * (0.22 + 0.78 * edge);
   // Debug lights only (the L key). Never on in the game.
   c += uDebug * uAlbedo * (0.30 + 0.70 * max(dot(n, toEye), 0.0));
   gl_FragColor = vec4(c, 1.0);
@@ -206,7 +237,7 @@ function buildGeometry(): THREE.BufferGeometry {
   return merged;
 }
 
-export class RifleViewModel {
+export class RifleViewModel implements TouchSink {
   readonly tunables: ViewModelTunables;
   /** Add this to the *camera*: the gun is held in view space, like every viewmodel ever. */
   readonly object = new THREE.Group();
@@ -214,6 +245,9 @@ export class RifleViewModel {
   private readonly material: THREE.ShaderMaterial;
   private readonly rest = new THREE.Vector3();
   private lastEnergy = 0;
+  /** Set by the touch layer: is the tactile channel on at all, and how bright is it up close. */
+  private feltOn = false;
+  private feltAlpha = 0;
 
   constructor(tunables: ViewModelTunables = defaultViewModelTunables()) {
     this.tunables = tunables;
@@ -230,6 +264,9 @@ export class RifleViewModel {
         uRim: { value: tunables.rim },
         uWrap: { value: tunables.wrap },
         uDebug: { value: 0 },
+        uFeel: { value: 0 },
+        uFeelEdge: { value: tunables.feelEdge },
+        uFeelColor: { value: new THREE.Color(TOUCH_GREY) },
       },
       transparent: false,
       depthWrite: true,
@@ -256,6 +293,7 @@ export class RifleViewModel {
     this.material.uniforms.uExposure!.value = t.exposure;
     this.material.uniforms.uRim!.value = t.rim;
     this.material.uniforms.uWrap!.value = t.wrap;
+    this.material.uniforms.uFeelEdge!.value = t.feelEdge;
     // x stays at zero on purpose: the muzzle has to sit exactly where the flash is born, so
     // the gun is swung to the shoulder by rotating it about that point, not by sliding it.
     this.rest.set(t.side, -t.drop, -t.ahead);
@@ -267,6 +305,31 @@ export class RifleViewModel {
     return this.object.visible;
   }
 
+  /** How much of the gun the hand is currently drawing, 0 when the tactile channel is off. */
+  get felt(): number {
+    return this.feltOn ? this.tunables.feel * this.feltAlpha : 0;
+  }
+
+  // --- TouchSink ------------------------------------------------------------
+  // The rifle registers with the touch layer exactly like the hall's mask and the props do, and
+  // is asked the same three questions. It answers the first two and ignores the third: there is
+  // no reach test to run, because the gun is not somewhere in the world for the hand to find —
+  // it is the thing the hand is holding.
+
+  setTouchVisible(on: boolean): void {
+    this.feltOn = on;
+  }
+
+  setHand(_x: number, _y: number, _z: number, _span: number, _range: number, near: number): void {
+    this.feltAlpha = near;
+  }
+
+  revealTouch(): number {
+    // Nothing is *discovered* here — you have not just found your own rifle — so this reports
+    // no newly felt points and keeps the hand's own statistics honest.
+    return 0;
+  }
+
   get energy(): number {
     return this.lastEnergy;
   }
@@ -276,11 +339,15 @@ export class RifleViewModel {
    * is its candela already multiplied by the envelope — zero when there is no flash, which is
    * the whole law in one argument.
    *
+   * `inView` is false in the top and free-camera debug views: a viewmodel seen from outside the
+   * head is a prop floating in the hall, which is the one thing it must never become.
+   *
    * `punch` is the render-only recoil the camera is already applying; the gun takes a little
    * more of it than the head does, which is where the weight in "отдача потяжелее" is felt
    * without costing the player a single degree of extra aim.
    */
   update(
+    inView: boolean,
     debugLit: boolean,
     intensity: number,
     lightX: number, lightY: number, lightZ: number,
@@ -290,10 +357,12 @@ export class RifleViewModel {
     const t = this.tunables;
     const energy = Math.max(0, intensity) * t.gain;
     this.lastEnergy = energy;
-    const on = t.visible && (energy > 1e-4 || debugLit);
+    const feel = inView ? this.felt : 0;
+    const on = inView && t.visible && (energy > 1e-4 || debugLit || feel > 1e-3);
     this.object.visible = on;
     if (!on) return;
     const u = this.material.uniforms;
+    u.uFeel!.value = feel;
     u.uEnergy!.value = energy;
     u.uDebug!.value = debugLit ? 0.75 : 0;
     (u.uLightPos!.value as THREE.Vector3).set(lightX, lightY, lightZ);

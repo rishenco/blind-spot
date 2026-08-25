@@ -24,7 +24,7 @@
 import type { StructuredPaint } from '../lidar/structured';
 
 /**
- * A second mask the hand also writes into. The props are a separate buffer from the hall (they
+ * Another surface the hand also writes into. The props are a separate buffer from the hall (they
  * move; the hall does not), but feeling around is one gesture and must not know the difference:
  * put your hand on a barrel and you feel the barrel, not "the dynamic layer".
  */
@@ -82,7 +82,7 @@ export class TouchLayer {
   private on = true;
   private dirty = true;
   private stats: TouchStats = { near: 0, remembered: 0, segments: 0, rebuilds: 0 };
-  private extra: TouchSink | null = null;
+  private readonly extra: TouchSink[] = [];
 
   constructor(
     private readonly paint: StructuredPaint,
@@ -91,9 +91,15 @@ export class TouchLayer {
     this.tunables = tunables;
   }
 
-  /** Adds the prop mask to what the hand can feel. Called once, after the props exist. */
+  /**
+   * Adds another surface to what the hand can feel. The props register here once they exist,
+   * and so does the rifle — concept.md's tactile channel is "контур в ~0.5 м от игрока **и от
+   * дула**", and the thing nearest the muzzle is the gun the muzzle belongs to. A sink is asked
+   * the same questions in the same order as the hall's own mask; nothing here knows or cares
+   * what is on the other end.
+   */
   attach(sink: TouchSink): void {
-    this.extra = sink;
+    this.extra.push(sink);
     sink.setTouchVisible(this.on);
   }
 
@@ -104,7 +110,7 @@ export class TouchLayer {
   setVisible(value: boolean): void {
     this.on = value;
     this.paint.setTouchVisible(value);
-    this.extra?.setTouchVisible(value);
+    for (const sink of this.extra) sink.setTouchVisible(value);
   }
 
   getStats(): TouchStats {
@@ -135,7 +141,7 @@ export class TouchLayer {
     const span = Math.max(0, y - foot);
     this.paint.setHand(x, foot, z, span);
     this.paint.setTouchLook(t.range, t.nearAlpha, t.memoryAlpha);
-    this.extra?.setHand(x, foot, z, span, t.range, t.nearAlpha);
+    for (const sink of this.extra) sink.setHand(x, foot, z, span, t.range, t.nearAlpha);
 
     const moved = Math.hypot(x - this.lastX, y - this.lastY, z - this.lastZ);
     if (!this.dirty && moved < t.rebuildStep) return;
@@ -147,7 +153,7 @@ export class TouchLayer {
     // The write has to cover the reach plus the drift allowance, or a point would be felt a
     // re-query late and pop in behind the hand.
     let fresh = this.paint.revealTouch(x, foot, z, span, t.range + t.rebuildStep);
-    fresh += this.extra?.revealTouch(x, foot, z, span, t.range + t.rebuildStep) ?? 0;
+    for (const sink of this.extra) fresh += sink.revealTouch(x, foot, z, span, t.range + t.rebuildStep);
     const s = this.paint.getStats();
     this.stats = {
       near: fresh,
