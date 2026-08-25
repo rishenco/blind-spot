@@ -122,8 +122,14 @@ export function defaultStructuredTunables(): StructuredTunables {
 
 // ---------------------------------------------------------------------------
 
-/** Birth stamp meaning "nothing was ever known here". */
-const NEVER = -1e9;
+/**
+ * Birth stamp meaning "nothing was ever known here".
+ *
+ * Exported because the lattice is no longer the only thing stamped with it: `paint/prints.ts`
+ * lays a handful of dots that are not on any surface and rides the same shader, the same ramp
+ * and the same sentinel. One number, so "never heard" cannot mean two things in one draw call.
+ */
+export const NEVER_HEARD = -1e9;
 /** How many recent events can still be rippling at once. */
 const WAVE_SLOTS = 8;
 /** Slack for "strictly inside another box", metres. */
@@ -166,9 +172,37 @@ function unbounded(items: number): Float32Array<ArrayBuffer> {
 }
 
 /** The shader's smoothstep, so the CPU mirror of the ease cannot drift from the GPU's. */
-function smoothstep(edge0: number, edge1: number, x: number): number {
+export function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
   return t * t * (3 - 2 * t);
+}
+
+/**
+ * The age an item is displaying this instant, under the exact curve the dot shader runs.
+ *
+ * A free function rather than a method because it is the *policy*, not this class's copy of it.
+ * `paint/prints.ts` stamps its dots into the same shader with the same dual stamp, and a second
+ * hand-written mirror of these four lines is a second answer to "how old does that look" — free
+ * to drift from the one on screen, and drifting silently. There is one curve; anything that
+ * writes a stamp asks it here.
+ *
+ * `refreshSeconds` is passed in because it belongs to the wave (`WaveTunables`), which owns the
+ * ease for both backends and pushes it in through `applyLook`.
+ */
+export function displayedAge(
+  birth: number,
+  prior: number,
+  floor: number,
+  feather: number,
+  now: number,
+  refreshSeconds: number,
+): number {
+  const ageNew = now - birth;
+  if (prior <= -1e8) return ageNew;
+  const ageOld = now - prior;
+  const target = Math.min(ageOld, Math.max(ageNew, floor));
+  const s = smoothstep(0, Math.max(0.001, refreshSeconds), ageNew) * feather;
+  return ageOld + (target - ageOld) * s;
 }
 
 /**
@@ -281,6 +315,21 @@ const DOT_VERTEX = /* glsl */ `
   attribute float aAccent;
   // x = the youngest age the newest refresh may reach here, y = how much of it this dot gets.
   attribute vec2  aRefresh;
+  /*
+   * Per-dot size multiplier, and the lattice does not carry it.
+   *
+   * The lattice is a hundred thousand dots that are all the same size, so a per-dot float for it
+   * would be 400 KB saying "1" — which is why the geometry omits the attribute and the
+   * material's defaultAttributeValues answers 1 for every vertex that lacks it. The consumer is
+   * paint/prints.ts: a resting print is a cairn whose centre dot is larger than its ring, and
+   * form is the only encoding a print is allowed (§3.2 forbids geometry taking a source's hue).
+   *
+   * The zero fallback below is not defensive noise. If the default-attribute path ever stopped
+   * firing, an absent attribute reads as 0 and *every dot in the game* would collapse to nothing
+   * — a black screen bought for one number. Reading zero as one costs a comparison and makes the
+   * failure invisible instead of total.
+   */
+  attribute float aScale;
 
   varying vec3  vColor;
   varying float vAlpha;
@@ -373,7 +422,8 @@ const DOT_VERTEX = /* glsl */ `
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     float depth = max(0.001, -mv.z);
     float cooled = clamp(age / max(0.001, uRampTimes.z), 0.0, 1.0);
-    float want = uSizeWorld * mix(1.0, uSkeletonSize, cooled) * (1.0 + hot * uProbeSize)
+    float scale = aScale > 0.0 ? aScale : 1.0;
+    float want = uSizeWorld * scale * mix(1.0, uSkeletonSize, cooled) * (1.0 + hot * uProbeSize)
       * uProjScale / depth;
     float q = want / max(0.5, uPixelCap);
     float px = want / pow(1.0 + q * q * q, 0.33333334);
@@ -788,6 +838,17 @@ export class StructuredPaint {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
+    /*
+     * What `aScale` reads as for a geometry that does not carry it — every dot of the lattice.
+     *
+     * three.js binds a program attribute the geometry is missing to a constant from this map
+     * (`WebGLBindingStates`), so one `vertexAttrib1fv` stands in for the 400 KB of ones the
+     * lattice would otherwise have to store and upload. The cast is the type's fault, not the
+     * idea's: `ShaderMaterial.defaultAttributeValues` is declared as a closed record of the three
+     * built-in names, and a shader with its own attributes is exactly what a `ShaderMaterial` is
+     * for.
+     */
+    (this.dotMaterial.defaultAttributeValues as unknown as Record<string, number[]>).aScale = [1];
 
     this.edgeMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -817,6 +878,33 @@ export class StructuredPaint {
 
   get object(): THREE.Object3D {
     return this.root;
+  }
+
+  /**
+   * The dot layer's material, shared with anything else that draws matter-layer dots.
+   *
+   * Handed out rather than copied, because everything the material carries — the age ramp, the
+   * §3.6 draw window, the refresh ease, the dot size and every dev-panel slider that moves them
+   * — is *policy*, and a second material would be a second answer to all of it that nothing
+   * keeps in step. `paint/prints.ts` hangs a second `Points` off this exact instance, so a
+   * resting print cools on the same curve as the wall behind it by construction rather than by
+   * agreement. The one thing a print supplies for itself is `aScale`, which the lattice does not
+   * carry at all (see `DOT_VERTEX`).
+   */
+  get dotLayerMaterial(): THREE.ShaderMaterial {
+    return this.dotMaterial;
+  }
+
+  /**
+   * The wave slot the last handled event took, or −1 before anything has been handled.
+   *
+   * A dot's `aWave` names the front that unlocked it, and the shader will only draw the ring
+   * over a dot whose stamp genuinely adds up against that slot's origin and time. A print
+   * unlocked by the same event has to name the same slot or its first appearance is a flat pop
+   * in the middle of a room that is visibly rippling.
+   */
+  get lastWaveSlot(): number {
+    return this.slotCursor === 0 ? -1 : (this.slotCursor - 1) % WAVE_SLOTS;
   }
 
   get active(): boolean {
@@ -1138,8 +1226,8 @@ export class StructuredPaint {
 
     this.dotPos = new Float32Array(pos);
     this.dotSeed = new Float32Array(seeds);
-    this.dotBirth = new Float32Array(dots).fill(NEVER);
-    this.dotPrior = new Float32Array(dots).fill(NEVER);
+    this.dotBirth = new Float32Array(dots).fill(NEVER_HEARD);
+    this.dotPrior = new Float32Array(dots).fill(NEVER_HEARD);
     this.dotWave = new Float32Array(dots);
     this.dotAccent = new Float32Array(dots);
     this.dotRefresh = unbounded(dots);
@@ -1150,8 +1238,8 @@ export class StructuredPaint {
     this.edgeBox = new Int32Array(ebox);
     this.edgeNa = new Uint8Array(ena);
     this.edgeNb = new Uint8Array(enb);
-    this.edgeBirth = new Float32Array(verts).fill(NEVER);
-    this.edgePrior = new Float32Array(verts).fill(NEVER);
+    this.edgeBirth = new Float32Array(verts).fill(NEVER_HEARD);
+    this.edgePrior = new Float32Array(verts).fill(NEVER_HEARD);
     this.edgeAccent = new Float32Array(verts);
     this.edgeRefresh = unbounded(verts);
     this.edgeT = new Float32Array(verts);
@@ -1250,12 +1338,12 @@ export class StructuredPaint {
   clear(): void {
     this.job = null;
     if (!this.built) return;
-    this.dotBirth.fill(NEVER);
-    this.dotPrior.fill(NEVER);
+    this.dotBirth.fill(NEVER_HEARD);
+    this.dotPrior.fill(NEVER_HEARD);
     this.dotWave.fill(0);
     this.dotRefresh.set(unbounded(this.dotRefresh.length / 2));
-    this.edgeBirth.fill(NEVER);
-    this.edgePrior.fill(NEVER);
+    this.edgeBirth.fill(NEVER_HEARD);
+    this.edgePrior.fill(NEVER_HEARD);
     this.edgeRefresh.set(unbounded(this.edgeRefresh.length / 2));
     this.waveMeta.fill(0);
     this.stats.unlockedDots = 0;
@@ -1672,9 +1760,10 @@ export class StructuredPaint {
   }
 
   /**
-   * The age an item is displaying this instant, under the exact curve its shader runs.
+   * The age an item is displaying this instant — the module function above, at this class's own
+   * refresh ease.
    *
-   * It exists because an item bounded by a floor and a feather sits *between* its two stamps,
+   * It is called because an item bounded by a floor and a feather sits *between* its two stamps,
    * so the only stamp that can be written back without moving the picture is the one that
    * reproduces what is on screen now.
    */
@@ -1685,12 +1774,7 @@ export class StructuredPaint {
     feather: number,
     now: number,
   ): number {
-    const ageNew = now - birth;
-    if (prior <= -1e8) return ageNew;
-    const ageOld = now - prior;
-    const target = Math.min(ageOld, Math.max(ageNew, floor));
-    const s = smoothstep(0, Math.max(0.001, this.refreshSeconds), ageNew) * feather;
-    return ageOld + (target - ageOld) * s;
+    return displayedAge(birth, prior, floor, feather, now, this.refreshSeconds);
   }
 
   /**

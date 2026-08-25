@@ -34,6 +34,7 @@ import {
   defaultStructuredTunables,
   type StructuredTunables,
 } from './structured';
+import { RestingPrints } from './prints';
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -302,6 +303,18 @@ export class PaintSystem {
   readonly wave: WaveTunables;
   /** The reveal itself: exact geometry, unlocked by sound. */
   readonly structured: StructuredPaint;
+  /**
+   * The matter layer for things the lattice cannot hold: objects that came to rest somewhere.
+   *
+   * It lives *here*, beside the lattice and behind the same hearing gate, rather than inside
+   * `structured.ts`, because the lattice is built once off the collider list and never edited —
+   * a can moves, and retracting lattice points is exactly what that structure is not for. What a
+   * print does share is everything about how paint *looks*: it draws with the lattice's own dot
+   * `ShaderMaterial` instance, so the age ramp, the §3.6 window and every dev-panel slider that
+   * moves either of them reach a cairn without one line of duplication. The seam is one extra
+   * `handle` call below, on the same event, inside the same gate.
+   */
+  readonly prints: RestingPrints;
 
   private readonly eventPositions = new Float32Array(EVENT_CAPACITY * 3);
   private readonly eventColors = new Float32Array(EVENT_CAPACITY * 3);
@@ -356,6 +369,7 @@ export class PaintSystem {
       options.structured ?? defaultStructuredTunables(),
       options.latticeSeed,
     );
+    this.prints = RestingPrints.forLattice(this.structured);
 
     this.eventGeometry.setAttribute('position', new THREE.BufferAttribute(this.eventPositions, 3));
     this.eventGeometry.setAttribute('aColor', new THREE.BufferAttribute(this.eventColors, 3));
@@ -391,6 +405,7 @@ export class PaintSystem {
     this.dust.setLook(this.wave.dustGain, this.wave.dustSize, this.wave.dustShell);
 
     this.root.add(this.eventPoints, this.tracer.object, this.dust.object, this.structured.object);
+    this.root.add(this.prints.object);
     this.structured.setActive(true);
     this.applyTunables();
   }
@@ -409,6 +424,7 @@ export class PaintSystem {
       this.wave.refreshSeconds,
       this.wave.featherStart,
     );
+    this.prints.applyLook(this.wave.refreshSeconds, this.wave.featherStart);
   }
 
   /**
@@ -470,6 +486,7 @@ export class PaintSystem {
     this.lastRefreshFloor = 0;
     this.diagTime = Number.NaN;
     this.structured.clear();
+    this.prints.clear();
     this.flushEvents();
   }
 
@@ -501,6 +518,9 @@ export class PaintSystem {
       // found it. The refresh floor is a property of the sound, not of the reveal, so it is
       // handed over rather than re-derived.
       this.structured.handle(event, this.time, this.lastRefreshFloor);
+      // A print is matter and takes the matter layer's answer to the same event, on the same
+      // wave slot the lattice just used — one sound, one front, both surfaces it reached.
+      this.prints.handle(event, this.time, this.lastRefreshFloor, this.structured.lastWaveSlot);
     }
     this.diagTime = Number.NaN;
   };
@@ -611,6 +631,7 @@ export class PaintSystem {
     this.tracer.dispose();
     this.dust.dispose();
     this.structured.dispose();
+    this.prints.dispose();
     this.root.clear();
   }
 }

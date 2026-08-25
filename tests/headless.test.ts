@@ -73,17 +73,25 @@ describe('walking, headless', () => {
    * (§3.1) against this tick's listener. All three are read from inside a bus subscriber, which
    * is the one place in the process that can see the middle of a tick. Move any of the three
    * below `player.update` and this goes red.
+   *
+   * The run throws a can as well as walking and pinging, because the hand emits from a different
+   * place in the tick than the legs do (`throwables.update` runs above `player.update`) and an
+   * emitter that ran before the clock was advanced would stamp its impact into the past — a
+   * wavefront arriving before the sound was made. The class list is asserted at the bottom so
+   * that this cannot go quietly vacuous if the throw ever stops reaching the bus.
    */
   it('has the clock, the ears and the reveal all current before anything emits', () => {
     const game = createHeadlessGame();
     /** Per emitted event: how stale each of the three was when the event went out. */
     const stale: Array<{ ears: number; stamp: number; reveal: number }> = [];
+    const classes = new Set<string>();
     let startX = 0;
     let startY = 0;
     let startZ = 0;
 
     game.sim.bus.subscribe((e) => {
       const l = game.sim.paint.listenerPosition;
+      classes.add(e.class);
       stale.push({
         // The ears are at this tick's body, not last tick's.
         ears: Math.hypot(l.x - startX, l.y - (startY + E_PING_HEIGHT), l.z - startZ),
@@ -101,6 +109,8 @@ describe('walking, headless', () => {
       startY = p.y;
       startZ = p.z;
       if (tick === 120 || tick === 300) game.input.tapKey('KeyQ');
+      if (tick === 30) game.input.hold('throw');
+      if (tick === 90) game.input.release('throw');
       game.step();
     }
 
@@ -110,6 +120,11 @@ describe('walking, headless', () => {
       expect(d.stamp).toBe(0);
       expect(d.reveal).toBe(0);
     }
+    // Every emitter in the game went through the checks above, not just the legs.
+    expect(classes.has('walk-step')).toBe(true);
+    expect(classes.has('q-ping')).toBe(true);
+    expect(classes.has('throw-windup')).toBe(true);
+    expect(classes.has('prop-impact') || classes.has('prop-knock')).toBe(true);
     game.sim.dispose();
   });
 

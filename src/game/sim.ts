@@ -58,6 +58,8 @@ import { Halo } from '../paint/halo';
 import { defaultAgeRamp } from '../paint/ageRamp';
 import { defaultStructuredTunables } from '../paint/structured';
 import { PROBE_REGIONS, SPAWN, SPAWN_YAW_DEG, buildRoom, type Room } from '../world/room';
+import { CAN_MAT, CAN_RADIUS } from '../world/cans';
+import { CAN_EMITTER_BASE, Throwables, type ThrowSound } from './throwables';
 
 /** Shared ping cooldown, seconds (§3.5). */
 const PING_COOLDOWN = 0.75;
@@ -109,6 +111,22 @@ export const E_PING_HEIGHT = 1.5;
  * not the floor: the strike rings up through the chassis and radiates from about knee height.
  */
 const STEP_HEIGHT = 0.65;
+/**
+ * How far off the struck face a prop's contact sound radiates from, metres.
+ *
+ * The same problem `STEP_HEIGHT` solves, and it is not cosmetic. `ballistics.ts` reports a
+ * contact at the point on the face, and a point source lying exactly *on* a plane meets that
+ * plane at 90° everywhere: measured in this room, a `prop-impact` emitted at y = 0 on the floor
+ * unlocks **0 dots out of 33 880 rays**, and the same impact one millimetre up unlocks 39 362.
+ * A thrown can that painted nothing is the whole verb quietly not working.
+ *
+ * `CAN_RADIUS` rather than an epsilon, because it is the honest distance rather than a nudge
+ * away from a numerical cliff: physics treats a can as a point (`world/cans.ts`), perception
+ * treats it as a 6 cm object, and when that object touches a face its centre is one radius off
+ * it. Along the contact normal, not up — unlike a footfall, a can strikes walls and ceilings,
+ * and the sound leaves the side of the wall the can is on.
+ */
+const PROP_STANDOFF = CAN_RADIUS;
 
 /**
  * Which sound class a gait tier makes — the one place the two vocabularies meet.
@@ -172,6 +190,14 @@ export class GameSim {
    */
   readonly halo = new Halo();
 
+  /**
+   * The hand (§M2): the rack, the charge, every can in the world and every noise one makes.
+   *
+   * It emits nothing itself — see `emitThrowSound` below, which is the only place a can's noise
+   * becomes a `SoundEvent`, exactly as `onPlayerEvent` is the only place a footfall does.
+   */
+  readonly throwables: Throwables;
+
   private readonly unsubscribeBus: () => void;
   private readonly unsubscribeHalo: () => void;
   private readonly unsubscribePlayer: () => void;
@@ -217,6 +243,19 @@ export class GameSim {
       structured: defaultStructuredTunables(),
       latticeSeed: streamSeed(this.seed, STREAM_LATTICE),
       dustSeed: streamSeed(this.seed, STREAM_DUST),
+    });
+    this.throwables = new Throwables({
+      world: this.world,
+      thrower: this.player,
+      movement: this.movement,
+      prints: this.paint.prints,
+      /*
+       * No authored cans yet. `world/room.ts` is where a stack gets placed and this is the one
+       * line that would hand it over (`boot: this.room.cans`); until then the pool is exactly a
+       * rack's worth and every can in the world is one the player threw. Wiring the authored
+       * stack is a room job, not a hand job: nothing in `throwables.ts` knows what a stack is
+       * beyond "cans that were asleep before you touched the one underneath".
+       */
     });
     this.unsubscribeBus = this.bus.subscribe(this.paint.handle);
     this.unsubscribeHalo = this.bus.subscribe(this.onOwnNoise);
@@ -281,6 +320,68 @@ export class GameSim {
       mat: event.mat,
     });
   };
+
+  /**
+   * One noise the hand made, priced and put on the bus (§3.3's three throw rows).
+   *
+   * The whole of M2's emit policy, in one function, next to the footstep's. Three decisions live
+   * here and nowhere else:
+   *
+   *  - **The wind-up is the player.** `source: 'player'` and the local emitter id, because it is
+   *    the rig's own arm — as much "you" as a footstep — so §3.8's Halo flares for it, faintly
+   *    (2.5 m). Both stages emit the same event; they are 0.9 s apart and the first coincides
+   *    with the keypress, so which is which is never in doubt.
+   *  - **A can is not the player.** `source: 'prop'` and an emitter id well clear of the local
+   *    one (`CAN_EMITTER_BASE`), because `onOwnNoise` decides the Halo on emitter alone: a can
+   *    emitting as the player would make the ring claim *you* were audible at 25 m the moment
+   *    your can landed across the room.
+   *  - **Off the face it struck.** Both contact classes are stood off along the contact normal
+   *    by `PROP_STANDOFF`; see that constant for the measurement that makes it load-bearing.
+   *  - **Both materials, every time.** `prop-impact` and `prop-knock` are composed classes
+   *    (§3.9): the can's own voice is `CAN_MAT` and the struck surface came from the box the
+   *    physics resolved against, never from a re-probe. The bus takes the geometric mean and
+   *    scales both radii — a can on steel is a different sound *and* a different reach than the
+   *    same can on dust, which is what makes the landing point say where it landed.
+   */
+  private emitThrowSound(s: ThrowSound): void {
+    if (s.kind === 'windup') {
+      this.bus.emit({
+        class: 'throw-windup',
+        source: 'player',
+        emitter: PLAYER_EMITTER_ID,
+        x: s.x,
+        y: s.y,
+        z: s.z,
+      });
+      return;
+    }
+    if (s.kind === 'impact') {
+      this.bus.emit({
+        class: 'prop-impact',
+        source: 'prop',
+        emitter: CAN_EMITTER_BASE + s.can,
+        x: s.x + s.nx * PROP_STANDOFF,
+        y: s.y + s.ny * PROP_STANDOFF,
+        z: s.z + s.nz * PROP_STANDOFF,
+        // §3.3's 8-12 m band, read off the approach speed. The bus scales it by the composed
+        // material voice afterwards, so this is the pre-material radius exactly as a landing's is.
+        paintRadius: SoundBus.impactRadius(s.speed),
+        mat: s.mat,
+        objMat: CAN_MAT,
+      });
+      return;
+    }
+    this.bus.emit({
+      class: 'prop-knock',
+      source: 'prop',
+      emitter: CAN_EMITTER_BASE + s.can,
+      x: s.x + s.nx * PROP_STANDOFF,
+      y: s.y + s.ny * PROP_STANDOFF,
+      z: s.z + s.nz * PROP_STANDOFF,
+      mat: s.mat,
+      objMat: CAN_MAT,
+    });
+  }
 
   /** Emits a ping and starts the shared cooldown. Public so the dev panel can push the button. */
   firePing(kind: 'q-ping' | 'e-ping'): void {
@@ -371,7 +472,11 @@ export class GameSim {
     this.syncListener();
     this.paint.advance(this.paintTime);
 
-    if (input.wasKeyPressed('KeyR')) this.player.respawn();
+    if (input.wasKeyPressed('KeyR')) {
+      this.player.respawn();
+      // The body and the props it left lying around are one situation, and R restarts it.
+      this.throwables.reset();
+    }
     if (input.wasKeyPressed('KeyT')) {
       this.timeScaleIndex = (this.timeScaleIndex + 1) % TIME_SCALES.length;
     }
@@ -382,6 +487,18 @@ export class GameSim {
       if (input.wasKeyPressed('KeyQ')) this.firePing('q-ping');
       else if (input.wasKeyPressed('KeyE')) this.firePing('e-ping');
     }
+
+    /*
+     * The hand runs before the body, on the pose the tick started with — the same rule the pings
+     * follow, so a throw goes where the player was looking when they let go.
+     *
+     * The drain is the seam: `update` fills a queue and emits nothing, and this loop is the only
+     * thing that turns a can's contact into a sound. Between them sits the one ordering the
+     * throwables file cares about — a settled can's print is laid inside `update`, before the
+     * knock announcing it reaches the bus, so the cairn is inside its own event's paint.
+     */
+    this.throwables.update(dt, input);
+    for (const s of this.throwables.sounds) this.emitThrowSound(s);
 
     this.player.update(dt, input);
     this.halo.advance(this.audibleRadius(), dt);
@@ -452,6 +569,21 @@ export class GameSim {
       lastEventSpeed: last?.waveSpeed ?? 0,
       lastEventRadius: last?.paintRadius ?? 0,
       pingCooldown: this.pingCooldownSeconds,
+      // --- the hand (§M2). `chargeT` is seconds of wind-up, not a fraction: the charge curve is
+      // authored in seconds and a fraction would hide the cap. `canPoses` is what lets the
+      // browser suite project a cairn onto the screen and check it is drawn where the can is.
+      carriedCans: this.throwables.carried,
+      chargeT: this.throwables.charge,
+      chargeFraction: this.throwables.chargeFraction,
+      charging: this.throwables.charging,
+      throwSpeed: this.throwables.pendingSpeed,
+      cansThrown: this.throwables.thrown,
+      cansRefused: this.throwables.refused,
+      worldCans: this.throwables.inWorld,
+      canPoses: this.throwables.cansSnapshot(),
+      canPrints: this.paint.prints.placed,
+      canPrintsKnown: this.paint.prints.known,
+      canPrintDots: this.paint.prints.knownDots,
       eConeDeg: this.sound.classes['e-ping'].coneAngleDeg,
       eRange: this.sound.classes['e-ping'].paintRadius,
       hearingRange: this.paint.perception.hearingRange,

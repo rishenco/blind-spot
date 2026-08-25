@@ -12,9 +12,31 @@
 export type LookMode = 'pointerlock' | 'drag';
 
 /** Logical actions, decoupled from physical keys. */
-export type Action = 'forward' | 'back' | 'left' | 'right' | 'jump' | 'sprint' | 'crouch';
+export type Action =
+  | 'forward'
+  | 'back'
+  | 'left'
+  | 'right'
+  | 'jump'
+  | 'sprint'
+  | 'crouch'
+  /**
+   * The hand: hold to wind the arm, release to throw (`game/throwables.ts`).
+   *
+   * A key and deliberately not a mouse button. Button 0 is the drag-look fallback above, which
+   * every headless tool and the whole screenshot suite steers with — a throw bound there either
+   * fights look or adds a second mouse path to every driver. Riding `Action` instead means
+   * `ScriptedInput` drives the verb for free through the same generic `hold`/`release` a player
+   * uses, so nothing anywhere needs a setter to make the rig throw.
+   */
+  | 'throw';
 
-const KEY_BINDINGS: Record<string, Action> = {
+/**
+ * Physical key → logical action. Exported so the binding itself can be asserted: `Input` only
+ * exists with a `window` and a `document`, so this table is otherwise unreachable from the suite,
+ * and a verb whose key silently moved is a verb the HUD lies about (`game/game.ts`'s hint line).
+ */
+export const KEY_BINDINGS: Record<string, Action> = {
   KeyW: 'forward',
   ArrowUp: 'forward',
   KeyS: 'back',
@@ -29,6 +51,7 @@ const KEY_BINDINGS: Record<string, Action> = {
   KeyC: 'crouch',
   ControlLeft: 'crouch',
   ControlRight: 'crouch',
+  KeyF: 'throw',
 };
 
 export class Input {
