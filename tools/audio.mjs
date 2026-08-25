@@ -30,6 +30,8 @@ import {
   highRms,
   highFraction,
   drawPanel,
+  spectrogram,
+  FFT_N,
   W,
   PANEL_H,
   WAVE_H,
@@ -110,23 +112,61 @@ now.forEach((r, i) => {
 
 const win = (s, from, to) => [Math.floor(from * s.rate), Math.floor(to * s.rate)];
 
-// 1. The clicks exist at all — the thing the player never heard once.
+// 1. The chatter — the thing the player never heard once, and then still could not tell was
+//    alive. The scene puts three-call phrases at 3, 10, 20, 30 and 45 m; every range is
+//    measured and printed, so "at what distance does the pack stop reading" is a table and not
+//    a memory.
 {
   const { a, b, r } = scenes.get('clicks');
+  const RANGES = [3, 10, 20, 30, 45];
+  const at = RANGES.map((m, i) => {
+    const t0 = 0.15 + i * 0.9;
+    const w = win(a, t0 - 0.05, t0 + 0.8);
+    return { m, peak: peakOf(a.mono, ...w), rms: rmsOf(a.mono, ...w) };
+  });
+  console.log(
+    `[audio] chatter by range: ${at.map((x) => `${x.m} m ${db(x.peak).toFixed(1)}`).join('  ')} dBFS peak`,
+  );
   const near = win(a, 0.1, 0.85);
-  const nowPeak = peakOf(a.mono, ...near);
+  const nowPeak = at[0].peak;
   const oldPeak = peakOf(b.mono, ...near);
-  check('a spider click at 3 m is audible', db(nowPeak) > -26, `${db(nowPeak).toFixed(1)} dBFS (was ${db(oldPeak).toFixed(1)})`);
+  check('the pack at 3 m is unmistakable', db(nowPeak) > -20,
+    `${db(nowPeak).toFixed(1)} dBFS (was ${db(oldPeak).toFixed(1)} before any of this)`);
   const hiNow = highFraction(a.mono, a.rate, near[0], near[1] - 1, 2000);
   const hiOld = highFraction(b.mono, b.rate, near[0], near[1] - 1, 2000);
-  check('the click sits above everything else in the game', hiNow > 0.5,
+  check('and it sits above everything else in the game', hiNow > 0.5,
     `${(hiNow * 100).toFixed(0)}% of its energy is over 2 kHz (was ${(hiOld * 100).toFixed(0)}%)`);
-  const mid = win(a, 1.9, 2.65);
-  check('at 14 m it is quieter but still there', db(peakOf(a.mono, ...mid)) > -52,
-    `${db(peakOf(a.mono, ...mid)).toFixed(1)} dBFS, against ${db(nowPeak).toFixed(1)} at 3 m`);
-  const far = win(a, 2.85, 4.35);
-  check('past its loudness radius it is gone', db(peakOf(a.mono, ...far)) < -70,
-    `${db(peakOf(a.mono, ...far)).toFixed(1)} dBFS, ${r.culled} events culled by range`);
+  // The whole point of this pass: the hall has to sound inhabited from across it, not only
+  // when something is already on top of you.
+  check('at 20 m it still reads', db(at[2].peak) > -34,
+    `${db(at[2].peak).toFixed(1)} dBFS, ${(db(nowPeak) - db(at[2].peak)).toFixed(1)} dB under the 3 m phrase`);
+  check('at 30 m it is thin but there', db(at[3].peak) > -40,
+    `${db(at[3].peak).toFixed(1)} dBFS`);
+  check('past its reach it is gone', db(at[4].peak) < -70,
+    `${db(at[4].peak).toFixed(1)} dBFS at 45 m, ${r.culled} events culled by range`);
+  // "Живое, а не аппаратура": a tick generator holds one pitch, a throat does not. Measured as
+  // the spectral centroid of a single call's first half against its second — a static tick moves
+  // it by a percent or two, a glide moves it by a lot.
+  const centroid = (from, to) => {
+    const [i0, i1] = win(a, from, to);
+    const cols = spectrogram(a.mono.subarray(i0, i1), Math.max(1, Math.floor((i1 - i0) / 6)));
+    let num = 0;
+    let den = 0;
+    for (const col of cols) {
+      for (let k = 1; k < FFT_N / 2; k++) {
+        const f = (k * a.rate) / FFT_N;
+        if (f < 800 || f > 12000) continue;
+        num += f * col[k];
+        den += col[k];
+      }
+    }
+    return den > 0 ? num / den : 0;
+  };
+  const c1 = centroid(0.152, 0.19);
+  const c2 = centroid(0.19, 0.235);
+  const move = Math.abs(c2 - c1) / Math.max(1, Math.min(c1, c2));
+  check('and every call is a glide, not a tick', move > 0.08,
+    `one call's centre of gravity travels ${(c1 / 1000).toFixed(2)} → ${(c2 / 1000).toFixed(2)} kHz, ${(move * 100).toFixed(0)}%`);
 }
 
 // 2. The shot is an event, not a knock.
@@ -135,8 +175,11 @@ const win = (s, from, to) => [Math.floor(from * s.rate), Math.floor(to * s.rate)
   const clicks = scenes.get('clicks');
   const shotPeak = peakOf(shot.a.mono);
   const clickPeak = peakOf(clicks.a.mono, ...win(clicks.a, 0.1, 0.85));
-  check('the shot towers over the pack', db(shotPeak) - db(clickPeak) > 18,
-    `${(db(shotPeak) - db(clickPeak)).toFixed(1)} dB above a 3 m click`);
+  // This gap used to be 22 dB, and the pack was inaudible. Spending some of the rifle's headroom
+  // on the animals was the whole point of the pass; the shot still has to be the biggest thing in
+  // the game by a wide margin, and 10 dB of peak plus its body and its ducking is that margin.
+  check('the shot towers over the pack', db(shotPeak) - db(clickPeak) > 10,
+    `${(db(shotPeak) - db(clickPeak)).toFixed(1)} dB above a 3 m phrase, peak to peak`);
   check('the shot does not clip', shotPeak < 0.999, `peak ${db(shotPeak).toFixed(2)} dBFS`);
   // A real muzzle blast is low-heavy, so the absolute share of high frequency is never large.
   // What matters is that there is a crack there at all, which is precisely what the old
@@ -164,10 +207,13 @@ const win = (s, from, to) => [Math.floor(from * s.rate), Math.floor(to * s.rate)
   const openHi = highRms(n.mono, n.rate, hurt[0], hurt[1] - 1, 2000);
   check('the clicks that land while you are deaf are pushed down', db(openHi) - db(duckedHi) > 5,
     `${(db(openHi) - db(duckedHi)).toFixed(1)} dB below the same scene without ducking`);
-  const hiDucked = highFraction(d.mono, d.rate, hurt[0], hurt[1] - 1, 2000);
-  const hiOpen = highFraction(n.mono, n.rate, hurt[0], hurt[1] - 1, 2000);
-  check('and goes muffled, not just quiet', hiDucked < hiOpen * 0.7,
-    `${(hiDucked * 100).toFixed(1)}% over 2 kHz against ${(hiOpen * 100).toFixed(1)}% open`);
+  // Muffled means the top drops *further* than the whole does — a share-of-energy test says
+  // nothing when the source is all treble to begin with, which the chatter now is.
+  const dropAll = db(rmsOf(n.mono, ...hurt)) - db(rmsOf(d.mono, ...hurt));
+  const dropTop = db(highRms(n.mono, n.rate, hurt[0], hurt[1] - 1, 4000)) -
+    db(highRms(d.mono, d.rate, hurt[0], hurt[1] - 1, 4000));
+  check('and goes muffled, not just quiet', dropTop > dropAll + 1.5,
+    `over 4 kHz it drops ${dropTop.toFixed(1)} dB against ${dropAll.toFixed(1)} dB overall`);
   const lateDucked = db(rmsOf(d.mono, ...later));
   const lateOpen = db(rmsOf(n.mono, ...later));
   check('and comes back', Math.abs(lateOpen - lateDucked) < 2.5,

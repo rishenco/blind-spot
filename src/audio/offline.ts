@@ -16,7 +16,7 @@
  * the rifle and the spiders were not quiet but *wrong*, and that no volume knob would have
  * reached them.
  */
-import type { SoundEvent, SoundSource } from '../events/bus';
+import type { SoundEvent, SoundSource, SpiderKind } from '../events/bus';
 import { MATERIALS, type MaterialName } from '../props/shapes';
 import { refDistanceFor } from './audio';
 import { buildTimbre, hash01, loudnessGain, makeNoiseBuffer, timbreFor } from './voices';
@@ -30,6 +30,7 @@ export interface SceneEvent {
   z: number;
   loudness: number;
   material?: string;
+  kind?: SpiderKind;
 }
 
 export interface Scene {
@@ -46,19 +47,25 @@ const STEP_FLOOR = 1.6;
 const STEP_METAL = 3.6;
 
 /**
- * A pack talking somewhere off to your right, at four ranges. The last one is deliberately past
- * the click's own 12 m loudness, so the scene also proves the cull.
+ * A pack talking somewhere off to your right, at five ranges. The last one is deliberately past
+ * even the chatter's widened reach, so the scene still proves the cull.
+ *
+ * The ranges were 3/8/14/22 while the chatter died at 14; they now run out to 45, because the
+ * complaint being answered is that the hall did not sound inhabited from across it.
  *
  * All scene coordinates are relative to the ear, which stands at eye height — so y = -1.4 is the
  * floor and y = -0.3 is a shelf lip.
  */
 function clickTrain(): SceneEvent[] {
   const out: SceneEvent[] = [];
-  const ranges = [3, 8, 14, 22];
+  const ranges = [3, 10, 20, 30, 45];
   ranges.forEach((r, i) => {
     const t0 = 0.15 + i * 0.9;
     for (let k = 0; k < 3; k++) {
-      out.push({ t: t0 + k * 0.22, source: 'spider', x: r * 0.7, y: -1.3, z: -r * 0.71, loudness: CLICK });
+      out.push({
+        t: t0 + k * 0.22, source: 'spider', kind: 'chatter',
+        x: r * 0.7, y: -1.3, z: -r * 0.71, loudness: CLICK,
+      });
     }
   });
   return out;
@@ -86,8 +93,8 @@ export const SCENES: readonly Scene[] = [
   },
   {
     name: 'clicks',
-    what: 'chatter at 3, 8, 14 and 22 m - the last set is past its 12 m loudness and is culled',
-    seconds: 4.4,
+    what: 'chatter at 3, 10, 20, 30 and 45 m - the last set is past even its widened reach',
+    seconds: 5.3,
     events: clickTrain(),
   },
   {
@@ -97,12 +104,12 @@ export const SCENES: readonly Scene[] = [
     events: [
       // Both at the same range, so the difference you hear is the material and nothing else. A
       // spider's footfall carries 1.6 m on concrete and 3.6 m on steel: this is close work.
-      { t: 0.15, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_FLOOR },
-      { t: 0.55, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_FLOOR },
-      { t: 0.95, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_FLOOR },
-      { t: 1.6, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_METAL, material: 'steel' },
-      { t: 2.0, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_METAL, material: 'steel' },
-      { t: 2.4, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_METAL, material: 'steel' },
+      { t: 0.15, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_FLOOR, kind: 'step' },
+      { t: 0.55, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_FLOOR, kind: 'step' },
+      { t: 0.95, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_FLOOR, kind: 'step' },
+      { t: 1.6, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_METAL, material: 'steel', kind: 'step' },
+      { t: 2.0, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_METAL, material: 'steel', kind: 'step' },
+      { t: 2.4, source: 'spider', x: 0.8, y: -1.2, z: -1.0, loudness: STEP_METAL, material: 'steel', kind: 'step' },
       { t: 2.9, source: 'player-step', x: 0, y: -1.5, z: 0, loudness: 9 },
     ],
   },
@@ -130,6 +137,7 @@ export const SCENES: readonly Scene[] = [
         y: -1.3,
         z: -4.2,
         loudness: CLICK,
+        kind: 'chatter',
       })),
       { t: 1.0, source: 'gunshot', x: 0.1, y: -0.1, z: -0.45, loudness: 90 },
     ],
@@ -140,19 +148,19 @@ export const SCENES: readonly Scene[] = [
     seconds: 5.0,
     events: [
       { t: 0.2, source: 'player-step', x: 0, y: -1.5, z: 0, loudness: 9 },
-      { t: 0.55, source: 'spider', x: 5, y: -1.3, z: -6, loudness: CLICK },
+      { t: 0.55, source: 'spider', x: 5, y: -1.3, z: -6, loudness: CLICK, kind: 'chatter' },
       { t: 0.8, source: 'player-step', x: 0, y: -1.5, z: 0, loudness: 9 },
       { t: 1.1, source: 'prop-impact', x: -3, y: -1.4, z: -4, loudness: 12, material: 'tin' },
-      { t: 1.35, source: 'spider', x: -4, y: -1.3, z: -5, loudness: CLICK },
-      { t: 1.6, source: 'spider', x: 1.4, y: -0.4, z: -1.1, loudness: STEP_METAL, material: 'steel' },
-      { t: 1.9, source: 'spider', x: 3, y: -1.3, z: -3.4, loudness: CLICK },
-      { t: 2.2, source: 'spider', x: -2, y: -1.3, z: -2.6, loudness: CLICK },
-      { t: 2.5, source: 'spider', x: 1.2, y: -1.1, z: -1.4, loudness: 24 },
+      { t: 1.35, source: 'spider', x: -4, y: -1.3, z: -5, loudness: CLICK, kind: 'chatter' },
+      { t: 1.6, source: 'spider', x: 1.4, y: -0.4, z: -1.1, loudness: STEP_METAL, material: 'steel', kind: 'step' },
+      { t: 1.9, source: 'spider', x: 3, y: -1.3, z: -3.4, loudness: CLICK, kind: 'chatter' },
+      { t: 2.2, source: 'spider', x: -2, y: -1.3, z: -2.6, loudness: CLICK, kind: 'chatter' },
+      { t: 2.5, source: 'spider', x: 1.2, y: -1.1, z: -1.4, loudness: 24, kind: 'bite' },
       { t: 2.9, source: 'gunshot', x: 0.1, y: -0.1, z: -0.45, loudness: 90 },
       { t: 2.94, source: 'bullet-hit', x: 1.4, y: -1.1, z: -2.2, loudness: 15 },
-      { t: 3.4, source: 'spider', x: -5, y: -1.3, z: -4, loudness: CLICK },
+      { t: 3.4, source: 'spider', x: -5, y: -1.3, z: -4, loudness: CLICK, kind: 'chatter' },
       { t: 3.9, source: 'prop-impact', x: 4, y: -1.4, z: -5, loudness: 16, material: 'glass' },
-      { t: 4.3, source: 'spider', x: -1.5, y: -1.3, z: -2, loudness: CLICK },
+      { t: 4.3, source: 'spider', x: -1.5, y: -1.3, z: -2, loudness: CLICK, kind: 'chatter' },
     ],
   },
 ];
@@ -299,24 +307,26 @@ export async function renderScene(scene: Scene, opts: RenderOptions = {}): Promi
       z: ear.z + se.z,
       loudness: se.loudness,
       material: se.material,
+      kind: se.kind,
       time: se.t,
       seq: i * 7 + 1,
     };
     const dist = Math.max(0.25, Math.hypot(ev.x - ear.x, ev.y - ear.y, ev.z - ear.z));
-    if (dist > ev.loudness * 1.2) {
+    const t0 = se.t;
+    const timbre = timbreFor(ev);
+    const reach = legacy ? 1 : timbre.reach ?? 1;
+    if (dist > ev.loudness * 1.2 * reach) {
       culled++;
       return;
     }
-    const t0 = se.t;
-    const timbre = timbreFor(ev);
     const blast = !legacy && timbre.blast === true;
 
     const panner = ctx.createPanner();
     panner.panningModel = 'HRTF';
     panner.distanceModel = 'inverse';
-    panner.refDistance = legacy ? 1.2 : refDistanceFor(ev.loudness);
+    panner.refDistance = legacy ? 1.2 : refDistanceFor(ev.loudness) * reach;
     panner.rolloffFactor = 1;
-    panner.maxDistance = legacy ? 200 : Math.max(4, ev.loudness * 1.25);
+    panner.maxDistance = legacy ? 200 : Math.max(4, ev.loudness * 1.25 * reach);
     if (panner.positionX !== undefined) {
       panner.positionX.value = ev.x;
       panner.positionY.value = ev.y;

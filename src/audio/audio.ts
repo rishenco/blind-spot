@@ -288,14 +288,16 @@ export class AudioStage {
     const dy = event.y - this.ly;
     const dz = event.z - this.lz;
     const dist = Math.max(0.25, Math.hypot(dx, dy, dz));
+    const timbre = timbreFor(event);
     // Loudness is "metres at which this can be noticed" (bus contract), so past that range there
-    // is nothing to hear and no reason to spend a voice.
-    if (dist > event.loudness * 1.2) {
+    // is nothing to hear and no reason to spend a voice. `reach` widens it for the one source
+    // that is supposed to carry across the hall — see Timbre.reach.
+    const reach = timbre.reach ?? 1;
+    if (dist > event.loudness * 1.2 * reach) {
       this.stats.outOfRange++;
       return;
     }
-    const rank = event.loudness / dist;
-    const timbre = timbreFor(event);
+    const rank = (event.loudness * reach) / dist;
 
     const voice = timbre.blast === true ? this.blast : this.take(rank);
     if (voice === null) {
@@ -304,7 +306,7 @@ export class AudioStage {
     }
 
     const t0 = ctx.currentTime + 0.005;
-    this.place(voice, event, t0);
+    this.place(voice, event, t0, timbre.reach ?? 1);
     voice.gain.gain.cancelScheduledValues(t0);
     voice.gain.gain.setValueAtTime(1, t0);
 
@@ -320,10 +322,10 @@ export class AudioStage {
     this.stats.last = timbre.name;
   }
 
-  private place(voice: Voice, event: SoundEvent, t0: number): void {
+  private place(voice: Voice, event: SoundEvent, t0: number, reach: number): void {
     const p = voice.panner;
-    p.refDistance = refDistanceFor(event.loudness);
-    p.maxDistance = Math.max(4, event.loudness * 1.25);
+    p.refDistance = refDistanceFor(event.loudness) * reach;
+    p.maxDistance = Math.max(4, event.loudness * 1.25 * reach);
     if (p.positionX !== undefined) {
       p.positionX.setValueAtTime(event.x, t0);
       p.positionY.setValueAtTime(event.y, t0);

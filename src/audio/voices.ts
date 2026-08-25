@@ -64,6 +64,15 @@ export interface Timbre {
    * the absolute level.
    */
   readonly ref: number;
+  /**
+   * How far this source carries, as a multiple of its own loudness radius. 1 for almost
+   * everything: the radius at which a noise "can be noticed" is also the radius at which the
+   * mixer lets it fade out. The chatter is the exception the concept asks for — it is the pack's
+   * one giveaway and the player has to be able to tell the hall is inhabited from across it, so
+   * it both rolls off more gently and is still faintly there past the radius the spiders' own
+   * hearing and the marker layer use. Nothing else on the bus is allowed this.
+   */
+  readonly reach?: number;
   /** Total lifetime, seconds. The voice is held this long. */
   readonly dur: number;
   readonly layers: readonly Layer[];
@@ -121,32 +130,79 @@ function gunshot(seq: number): Timbre {
 }
 
 /**
- * The birds. Two to four ticks, each a few milliseconds of steep band-passed noise plus a tuned
- * partial, spaced 30–70 ms apart and rising slightly through the phrase.
+ * The birds. «Переговариваются птичьими щелчками» — read literally.
  *
- * The frequency band is chosen to sit where nothing else in the game lives: the rifle's body is
- * under a kilohertz, footsteps are under 300 Hz, prop rings top out around 1.6 kHz. A click at
- * 3–6 kHz cannot be masked by any of them, which is what lets a quiet pack be heard *through* a
- * noisy hall — «главный способ их обнаружить».
+ * The first version of this was a row of 7 ms band-passed noise ticks at a fixed pitch, and the
+ * verdict on it was exactly right: it sounded like *equipment*, a Geiger counter in the dark,
+ * not like an animal. What separates a bird from a tick generator is not level, it is:
+ *
+ *   - a *glide*. Every element sweeps in pitch over its 15-35 ms, up or down, alternating
+ *     through the phrase. A static pitch reads as a device; a moving one reads as a throat.
+ *   - an inharmonic partial riding above the fundamental (x2.02, not x2), which is what makes
+ *     a whistle sound bodied rather than synthesised.
+ *   - breath. A little band-passed noise tracking the glide, so the element has air in it.
+ *   - phrasing. The elements accelerate through the phrase and their level rises and falls in
+ *     an arc, so it is a *call* with a shape, not a metronome.
+ *   - a voice per phrase: the base pitch is seeded, so two spiders talking are two spiders and
+ *     not one sound played twice.
+ *
+ * The band, 2.2-4.4 kHz, still sits where nothing else in the game lives (the rifle's body is
+ * under a kilohertz, footsteps under 300 Hz, prop rings top out near 1.6 kHz), so the pack can
+ * still be heard *through* a noisy hall — «главный способ их обнаружить».
  */
-function click(seq: number): Timbre {
-  const ticks = 2 + Math.floor(hash01(seq, 3) * 3);
-  const base = lerp(3100, 5200, hash01(seq, 5));
+function chatter(seq: number): Timbre {
+  const n = 3 + Math.floor(hash01(seq, 3) * 5);
+  const base = lerp(2200, 4400, hash01(seq, 5));
+  // Which way the first element sweeps; the rest alternate around it.
+  const rising = hash01(seq, 11) > 0.45;
   const layers: Layer[] = [];
   let t = 0;
-  for (let i = 0; i < ticks; i++) {
-    const f = base * (1 + i * 0.06 * (hash01(seq, 7 + i) - 0.2));
-    const g = i === 0 ? 1 : 0.62 + 0.3 * hash01(seq, 13 + i);
-    layers.push({ kind: 'noise', delay: t, gain: g, attack: 0.0003, decay: 0.0075, freq: f, q: 11, filter: 'bandpass' });
-    layers.push({ kind: 'tone', delay: t, gain: g * 0.5, attack: 0.0003, decay: 0.005, freq: f, freqEnd: f * 0.7, wave: 'triangle' });
-    t += lerp(0.03, 0.07, hash01(seq, 23 + i));
+  for (let i = 0; i < n; i++) {
+    const v = hash01(seq, 7 + i * 3);
+    const w = hash01(seq, 8 + i * 3);
+    // The arc: quiet at the edges of the phrase, loudest a third of the way in.
+    const arc = 0.55 + 0.45 * Math.sin(Math.PI * Math.min(1, (i + 0.6) / n));
+    const g = arc * lerp(0.8, 1, w);
+    const f0 = base * lerp(0.9, 1.14, v) * (1 + i * 0.035);
+    const up = i % 2 === 0 ? rising : !rising;
+    const span = lerp(1.25, 1.85, w);
+    const f1 = up ? f0 * span : f0 / span;
+    const dur = lerp(0.014, 0.032, v);
+    // The mandible: the hard front edge of the call, gone in four milliseconds.
+    layers.push({ kind: 'noise', delay: t, gain: g * 0.55, attack: 0.0003, decay: 0.004, freq: f0 * 1.5, q: 5, filter: 'bandpass' });
+    // The call itself, gliding.
+    layers.push({ kind: 'tone', delay: t + 0.001, gain: g, attack: 0.0015, decay: dur, freq: f0, freqEnd: f1, wave: 'triangle' });
+    // An inharmonic partial: what makes it a throat and not an oscillator.
+    layers.push({ kind: 'tone', delay: t + 0.001, gain: g * 0.3, attack: 0.002, decay: dur * 0.8, freq: f0 * 2.02, freqEnd: f1 * 2.02, wave: 'sine' });
+    // Breath, tracking the glide.
+    layers.push({ kind: 'noise', delay: t + 0.001, gain: g * 0.22, attack: 0.002, decay: dur * 0.9, freq: f0, freqEnd: f1, q: 6, filter: 'bandpass' });
+    // The phrase accelerates: the last gaps are half the first ones.
+    const pace = lerp(0.085, 0.04, n === 1 ? 0 : i / (n - 1));
+    t += pace * lerp(0.8, 1.3, hash01(seq, 23 + i));
   }
-  return { name: 'spider-click', gain: 0.62, ref: 12, dur: t + 0.08, layers };
+  return { name: 'spider-chatter', gain: 0.45, ref: 12, reach: 2.6, dur: t + 0.14, layers };
 }
 
-/** The bite. The loudest thing a spider ever does, and the one that gives the pack away. */
-function screech(seq: number): Timbre {
+/**
+ * The bite, and — a longer, lower, collapsing version of it — dying. The loudest thing a spider
+ * ever does either way, and the one that gives the pack away.
+ */
+function screech(seq: number, dying: boolean): Timbre {
   const v = hash01(seq, 31);
+  if (dying) {
+    return {
+      name: 'spider-death',
+      gain: 0.9,
+      ref: 24,
+      dur: 0.8,
+      layers: [
+        { kind: 'noise', delay: 0, gain: 1, attack: 0.003, decay: 0.34, freq: lerp(2200, 2900, v), freqEnd: 420, q: 2.5, filter: 'bandpass' },
+        { kind: 'tone', delay: 0, gain: 0.55, attack: 0.003, decay: 0.3, freq: lerp(1300, 1700, v), freqEnd: 190, wave: 'sawtooth' },
+        // The body giving up: a dry clatter of legs under the cry.
+        { kind: 'noise', delay: 0.12, gain: 0.4, attack: 0.004, decay: 0.16, freq: 1100, freqEnd: 300, q: 1.1, filter: 'bandpass' },
+      ],
+    };
+  }
   return {
     name: 'spider-screech',
     gain: 0.85,
@@ -271,11 +327,11 @@ export function loudnessGain(loudness: number, ref: number): number {
 /**
  * The one place an event becomes a sound.
  *
- * A note on spiders: the bus carries `source: 'spider'` for the click, the footfall and the
- * bite alike, and nothing else to tell them apart. Footfalls are separable by their loudness
- * being under 4 m (and by carrying 'steel' when the spider is up on shelving); the bite is the
- * only spider event above 18 m. A `kind` field on the bus would be cleaner — see the report —
- * but `src/spiders/**` belongs to another agent this milestone, so the split lives here.
+ * A note on spiders: one `source: 'spider'` covers four quite different noises, so the event
+ * carries `kind` ('chatter' | 'step' | 'bite' | 'death') to say which. The swarm lands that field
+ * in its own commit, so until then — and for any emitter that forgets — the old loudness guess is
+ * kept as a fallback. It is only a fallback: it was already wrong the moment the chatter got
+ * louder, which is exactly why the field exists.
  */
 export function timbreFor(event: SoundEvent): Timbre {
   const mat = event.material as MaterialName | undefined;
@@ -292,9 +348,22 @@ export function timbreFor(event: SoundEvent): Timbre {
     case 'player-land':
       return playerLand(event.seq);
     case 'spider':
-      if (event.loudness >= 18) return screech(event.seq);
-      if (event.loudness <= 5) return spiderStep(event.seq, known === 'steel');
-      return click(event.seq);
+      switch (event.kind) {
+        case 'chatter':
+          return chatter(event.seq);
+        case 'step':
+          return spiderStep(event.seq, known === 'steel');
+        case 'bite':
+          return screech(event.seq, false);
+        case 'death':
+          return screech(event.seq, true);
+        default:
+          // No `kind` yet: guess the way we used to, and keep the guess narrow. Only a footfall
+          // is quiet and only the bite is very loud; everything between is talk.
+          if (event.loudness >= 18) return screech(event.seq, false);
+          if (event.loudness <= 5) return spiderStep(event.seq, known === 'steel');
+          return chatter(event.seq);
+      }
     default:
       return playerStep(event.seq);
   }

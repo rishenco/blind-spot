@@ -24,6 +24,15 @@ export type SoundSource =
   | 'bullet-hit'
   | 'spider';
 
+/**
+ * What a spider noise *is*, when the emitter is a spider.
+ *
+ * Added because the audio side was telling clicks from bites by their loudness, which stops
+ * working the moment the pack's chatter is tuned — and it is about to be. Only the swarm sets
+ * it; every consumer must still work when it is absent, like `material`.
+ */
+export type SpiderSoundKind = 'chatter' | 'step' | 'bite' | 'death';
+
 export interface SoundEvent {
   readonly source: SoundSource;
   /** Origin — the place the noise was made. */
@@ -49,7 +58,17 @@ export interface SoundEvent {
    * is why it is optional rather than a required field with a meaningless default.
    */
   readonly material?: string;
+  /**
+   * For `source: 'spider'` only: which of the animal's noises this is. The swarm makes four
+   * quite different sounds and they used to be told apart downstream by loudness alone, which
+   * was a guess that broke the moment the chatter was made louder. Optional, and every consumer
+   * must still work without it — the swarm and the mixer land in separate commits.
+   */
+  readonly kind?: SpiderSoundKind;
 }
+
+/** The four noises a spider makes. Nothing else on the bus uses this. */
+export type SpiderKind = 'chatter' | 'step' | 'bite' | 'death';
 
 export interface SoundEmitSpec {
   source: SoundSource;
@@ -58,6 +77,7 @@ export interface SoundEmitSpec {
   z: number;
   loudness: number;
   material?: string;
+  kind?: SpiderSoundKind;
 }
 
 export type SoundListener = (event: SoundEvent) => void;
@@ -110,6 +130,7 @@ export class SoundBus {
       z: spec.z,
       loudness: Math.max(0, spec.loudness),
       material: spec.material,
+      kind: spec.kind,
       time: this.now,
       seq: this.seq++,
     };

@@ -1442,7 +1442,7 @@ for (const r of audioScenes) {
     note:
       r.name === 'shot'
         ? 'the rifle, rendered offline through the mixer the player hears — spectrogram on top (60 Hz at the bottom, 16 kHz at the top), waveform underneath, one tick per second. A crack across the whole band, then the blast, then the hall answering for half a second. Listen to the WAV next to it'
-        : 'the pack talking at 3, 8, 14 and 22 m — four sets of three clicks, high and narrow, fading with range. The last set is missing on purpose: it is past the click\'s own 12 m loudness, so it is culled and there is nothing to hear. This is the frame that would have caught the dead click',
+        : 'the pack talking at 3, 10, 20, 30 and 45 m — five phrases of three calls each, fading with range. Each call is a glide, which is why the spectrogram is full of little chevrons rather than vertical ticks: that is the difference between an animal and a Geiger counter. The last set is missing on purpose — it is past the chatter\'s reach, culled, nothing to hear',
     lit: 0,
     mean: 0,
   });
@@ -1454,11 +1454,11 @@ for (const r of audioScenes) {
   const near = [Math.floor(0.1 * clicks.rate), Math.floor(0.85 * clicks.rate)];
   const clickPeak = peakOf(clicks.mono, near[0], near[1]);
   const hi = highFraction(clicks.mono, clicks.rate, near[0], near[1] - 1, 2000);
-  check('a spider click at 3 m can be heard', db(clickPeak) > -26,
+  check('the pack at 3 m can be heard', db(clickPeak) > -22,
     `${db(clickPeak).toFixed(1)} dBFS, ${(hi * 100).toFixed(0)}% of it over 2 kHz`);
-  check('and it is a click, not a thud', hi > 0.3, `${(hi * 100).toFixed(0)}% over 2 kHz`);
+  check('and it is an animal, not a thud', hi > 0.3, `${(hi * 100).toFixed(0)}% over 2 kHz`);
   check('the shot towers over it without clipping',
-    db(shotv.peak) > db(clickPeak) + 18 && shotv.peak < 1,
+    db(shotv.peak) > db(clickPeak) + 10 && shotv.peak < 1,
     `shot ${db(shotv.peak).toFixed(1)} dBFS vs click ${db(clickPeak).toFixed(1)} dBFS`);
   notes.push(
     `M4b ear: two of the seven audio scenes are rendered in this run (frames 50) — the rifle and the pack's ` +
