@@ -39,6 +39,25 @@
  * runs on a staggered slice — each spider re-decides at `decisionHz`, spread across ticks by
  * index, so no frame ever pays for the whole pack at once. Integration and the contact test are
  * a handful of flops each and run every tick.
+ *
+ * M4f — three fixes after the first playtest, each independent and each with its own keyframe:
+ *
+ * 5. **A gunshot is a call, not a threat.** The muzzle blast pulls belief towards it like any
+ *    loud noise, but the loudness-based fright test now excludes it outright — see `hear`. What
+ *    personally frightens a spider is the bullet's real path, tested every shot in `shoot`
+ *    against every spider's actual body: inside `hitRadius` it is a hit, out to `nearMissRadius`
+ *    it is a graze that only spooks (`nearMiss`).
+ *
+ * 6. **Walking is close to silent; running is not.** `hear` hard-caps how far a `player-step`
+ *    event can be heard at all when its loudness says "walk" (`stepQuietLoudness` /
+ *    `stepQuietReach`) — a sprint is left at its ordinary loudness-times-`hearing` reach. The
+ *    spread between the two is deliberately large, not a tuning nudge.
+ *
+ * 7. **The pack is 2-3 companies, not one mob.** `spawn` splits it into `groups` territorial
+ *    clusters; `click`'s rumour propagation refuses to cross into another spider's `groupId`
+ *    (scaled by `crossGroupChatter`, 0 by default). Real bus events are still heard by everyone
+ *    — only hearsay is partitioned, which is what lets one company rally while another, out of
+ *    earshot of the chatter, never finds out.
  */
 import * as THREE from 'three';
 
@@ -116,6 +135,19 @@ export interface SpiderTunables {
    * exactly as far as the debug rings drawn in M2 say it does — the same number, one scale.
    */
   hearing: number;
+  /**
+   * M4f: «если ходить а не бегать пауки не должны находить особо тебя, только если они и так
+   * близко». A footstep at or below this loudness (`player-step` only — a landing thump is its
+   * own event and is left alone) counts as a *walk*, and a walk is not allowed to reach further
+   * than `stepQuietReach` no matter what `hearing` says — the ordinary loudness-times-hearing
+   * reach still applies above this line, which is what lets a sprint (16 m of loudness) carry
+   * across most of a room while a walk (9 m) carries almost nothing. The split lives here rather
+   * than in the loudness numbers themselves (owned by `main.ts`, not this file) because "how far
+   * a given loudness travels" is exactly what `hear` already owns.
+   */
+  stepQuietLoudness: number;
+  /** Metres a walking footstep can be heard at, full stop — see `stepQuietLoudness`. */
+  stepQuietReach: number;
   /** Seconds for belief confidence to fall to 1/e with nothing new heard. */
   beliefTau: number;
   /**
@@ -172,6 +204,32 @@ export interface SpiderTunables {
   scareSeconds: number;
   /** Courage burnt by one scare. */
   scareCost: number;
+  /**
+   * M4f: «пауки пугаются любого выстрела, а должны только когда почти или попадаешь». The
+   * muzzle blast itself no longer runs the generic loudness/distance fear test at all (see
+   * `hear`) — a gunshot is a *call*, not a threat, and only draws belief. What still frightens a
+   * spider personally is the bullet's actual path: `Swarm.shoot` already tests the shot segment
+   * against a hit sphere, and a *miss* is the same geometry with a bigger radius. This is that
+   * radius, in metres of perpendicular distance from the segment. Inside `hitRadius` it is a
+   * hit and does damage; between that and here it is a miss close enough to spook.
+   */
+  nearMissRadius: number;
+
+  // --- groups ---------------------------------------------------------------
+  /**
+   * M4f: «раздели их на 2-3 группы, а то сейчас как один большой моб себя ведут». Spawn splits
+   * the pack into this many territorial companies (nearest-cluster-centre, decided once at
+   * spawn) and `click` only lets a rumour cross into a spider's own company — see
+   * `crossGroupChatter`. Real events (footsteps, impacts, gunshots, bites, deaths) are heard by
+   * everybody regardless of group; only hearsay is partitioned. This is not a faction system —
+   * groups do not know about each other at all, they simply never talk.
+   */
+  groups: number;
+  /**
+   * 0..1 multiplier on a rumour's quality when it would cross from one group into another. 0 —
+   * the human's «либо никак» — means groups never learn anything from each other's chatter.
+   */
+  crossGroupChatter: number;
 
   // --- courage ------------------------------------------------------------
   /** Courage per second at full pack support and full confidence. */
@@ -289,6 +347,12 @@ export function defaultSpiderTunables(): SpiderTunables {
     accel: 14,
 
     hearing: 1,
+    // Walk is 9 m of loudness in main.ts, sprint is 16 — on their own that is a 1.8x spread,
+    // which the playtest correctly called "not on 20%". Capping a walk's reach at 2.5 m (inside
+    // FEEL_RANGE plus a stride) while leaving a sprint's 16 m untouched makes it a ~6.4x spread:
+    // only spiders already close hear you walk, and running lights up most of a room.
+    stepQuietLoudness: 10,
+    stepQuietReach: 2.5,
     beliefTau: 9,
     approachPatience: 5,
     weightPlayer: 1,
@@ -305,6 +369,12 @@ export function defaultSpiderTunables(): SpiderTunables {
     scarePressure: 4.5,
     scareSeconds: 1.5,
     scareCost: 0.45,
+    // hitRadius is 0.34 m; a bullet passing within a metre of a spider it did not touch is still
+    // a very close call.
+    nearMissRadius: 1.1,
+
+    groups: 3,
+    crossGroupChatter: 0,
 
     courageGain: 0.45,
     courageDecay: 0.05,
@@ -370,6 +440,8 @@ export interface Belief {
 /** What the overlay prints and what the keyframe scenarios assert against. */
 export interface SpiderSnapshot {
   id: number;
+  /** Which company it belongs to — see `SpiderTunables.groups`. */
+  groupId: number;
   x: number;
   y: number;
   z: number;
@@ -399,6 +471,13 @@ export interface SwarmStats {
   mode: SpiderState;
   meanCourage: number;
   ready: number;
+  /**
+   * M4f debug tool: how many living spiders each company has, index = groupId. Only real way to
+   * see the split from the outside without walking the raw list — the point of grouping is that
+   * it does not show up as a single pack-wide number, so the pack-wide numbers need this next to
+   * them or the feature is unverifiable from the panel.
+   */
+  byGroup: number[];
   /** Clicks per second across the whole pack, sampled over the last second. */
   chatter: number;
   clicks: number;
@@ -436,6 +515,8 @@ export interface Smashable {
 
 interface Spider {
   id: number;
+  /** Which company it belongs to — see `SpiderTunables.groups`. Set once, at spawn. */
+  groupId: number;
   hp: number;
   pos: THREE.Vector3;
   vel: THREE.Vector3;
@@ -522,6 +603,7 @@ export class Swarm {
     mode: 'idle',
     meanCourage: 0,
     ready: 0,
+    byGroup: [],
     chatter: 0,
     clicks: 0,
     steps: 0,
@@ -589,6 +671,15 @@ export class Swarm {
   spawn(n = this.tunables.count, awayFrom?: THREE.Vector3): void {
     this.spiders.length = 0;
     const shun = awayFrom ?? new THREE.Vector3(-30, 0, -20);
+    // M4f grouping: pick `groups` cluster centres, deterministically, and hand each spawned
+    // spider to whichever centre it landed nearest. This is the "by spawn / by territory" split
+    // the brief left up to us — cheap, and it naturally gives each company its own corner of the
+    // hall instead of the whole pack starting as one interleaved blob.
+    const groupCount = Math.max(1, Math.round(this.tunables.groups));
+    const centres: { x: number; z: number }[] = [];
+    for (let g = 0; g < groupCount; g++) {
+      centres.push({ x: range(this.rng, -28, 28), z: range(this.rng, -19, 19) });
+    }
     let placed = 0;
     let attempts = 0;
     while (placed < n && attempts < n * 60) {
@@ -597,7 +688,16 @@ export class Swarm {
       const z = range(this.rng, -21, 21);
       if (Math.hypot(x - shun.x, z - shun.z) < 14) continue;
       if (!this.free(x, 0.05, z)) continue;
-      this.spiders.push(this.make(placed, x, z));
+      let groupId = 0;
+      let best = Infinity;
+      for (let g = 0; g < centres.length; g++) {
+        const d = Math.hypot(x - centres[g]!.x, z - centres[g]!.z);
+        if (d < best) {
+          best = d;
+          groupId = g;
+        }
+      }
+      this.spiders.push(this.make(placed, x, z, groupId));
       placed++;
     }
     this.stats.count = this.spiders.length;
@@ -628,10 +728,11 @@ export class Swarm {
     return false;
   }
 
-  private make(id: number, x: number, z: number): Spider {
+  private make(id: number, x: number, z: number, groupId = 0): Spider {
     const angle = (id / Math.max(1, this.tunables.count)) * Math.PI * 2;
     return {
       id,
+      groupId,
       hp: this.tunables.hp,
       pos: new THREE.Vector3(x, 0.02, z),
       vel: new THREE.Vector3(),
@@ -684,9 +785,22 @@ export class Swarm {
    */
   private hear(event: SoundEvent): void {
     const t = this.tunables;
-    const reach = event.loudness * t.hearing;
+    let reach = event.loudness * t.hearing;
+    // M4f: a walked footstep must not carry like a run. `main.ts` already emits a much quieter
+    // event for a walk than for a sprint (9 m of loudness against 16), but on their own those
+    // numbers are only a 1.8x spread — this is where the spread becomes the "не на 20%" the
+    // brief asked for: a walk is hard-capped to `stepQuietReach` regardless of `hearing`, and a
+    // sprint is left exactly as loud as its loudness says.
+    if (event.source === 'player-step' && event.loudness <= t.stepQuietLoudness) {
+      reach = Math.min(reach, t.stepQuietReach);
+    }
     if (reach <= 0) return;
-    const loudEnough = event.loudness >= t.scareLoudness;
+    // M4f: «пауки пугаются любого выстрела, а должны только когда почти или попадаешь». The
+    // muzzle blast (`gunshot`) is a call, not a threat — it still updates belief below like any
+    // other loud, distant noise, it just never runs the fright test. What actually frightens a
+    // spider about a shot is the bullet's own path, tested against every spider individually in
+    // `shoot`/`nearMiss` with the real geometry, not the loudness of the bang.
+    const loudEnough = event.loudness >= t.scareLoudness && event.source !== 'gunshot';
 
     for (const s of this.spiders) {
       if (!s.alive) continue;
@@ -718,15 +832,17 @@ export class Swarm {
       s.heard = `${event.source} ${event.loudness.toFixed(0)}m @${d.toFixed(0)}m`;
       s.heardAt = this.time;
 
-      // Fright is loudness *at the ear*, not loudness at the source. A gunshot across the hall
-      // is the best news a blind hunter ever gets; a gunshot at your feet is a reason to run.
+      // Fright is loudness *at the ear*, not loudness at the source — for whatever is still
+      // eligible here. `gunshot` itself opted out above (M4f): the bang no longer scares by
+      // loudness at any range, only the bullet's real path does (`shoot`/`nearMiss`). What is
+      // left on this test is everything else honestly loud at close range: a barrel going over,
+      // a bullet actually striking something (`bullet-hit`) nearby, a dying spider's screech.
       const pressure = event.loudness / Math.max(1, d);
       if (loudEnough && pressure >= t.scarePressure) {
         const bite = t.scareCost * Math.min(1, pressure / (t.scarePressure * 2));
-        // The concept, verbatim: a shot or a falling barrel *scatters* them as well as
-        // attracting them. The belief is updated above — they know where the bang was — and
-        // then they get off that spot as fast as they can, which is why shooting *at close
-        // range* is a trade and not a solution. From across the hall it is a free address.
+        // The concept, verbatim: a loud event *scatters* them as well as attracting them. The
+        // belief is updated above — they know where the noise was — and then they get off that
+        // spot as fast as they can.
         s.courage = Math.max(0, s.courage - bite);
         s.scaredUntil = Math.max(
           s.scaredUntil,
@@ -1369,13 +1485,25 @@ export class Swarm {
     // The click's *meaning*, which the bus deliberately does not carry: whoever hears it learns
     // what the speaker thinks, weakly. This is why a pack converges on one belief without any
     // shared blackboard, and why one spider blundering into you brings the others round.
+    //
+    // M4f: "round" now stops at the edge of its own company. «Группы не должны знать всё, что
+    // знают другие» — a rumour crossing into another `groupId` is scaled by `crossGroupChatter`
+    // (0 by default: never), so two companies on opposite sides of the hall genuinely do not
+    // hear about each other. Real events on the bus are untouched by this — only hearsay is
+    // partitioned, which is the whole difference between "these are two packs" and "half the pack
+    // went deaf".
     if (s.belief.confidence < 0.15) return;
     const reach = t.clickLoudness * t.hearing;
     for (const o of this.spiders) {
       if (o === s || !o.alive) continue;
+      let crossGroup = 1;
+      if (o.groupId !== s.groupId) {
+        if (t.crossGroupChatter <= 0) continue;
+        crossGroup = t.crossGroupChatter;
+      }
       const d = Math.hypot(o.pos.x - s.pos.x, o.pos.z - s.pos.z);
       if (d > reach) continue;
-      const quality = Math.max(0.1, 1 - d / reach) * t.weightChatter * s.belief.confidence;
+      const quality = Math.max(0.1, 1 - d / reach) * t.weightChatter * s.belief.confidence * crossGroup;
       this.updateBelief(o, s.belief.x, s.belief.z, quality, true);
       o.heard = `chatter #${s.id}`;
       o.heardAt = this.time;
@@ -1424,6 +1552,12 @@ export class Swarm {
    *
    * Returns the id of the spider hit, or -1. The nearest one along the segment wins, so a
    * bullet cannot kill two spiders standing in a line — it stops in the first.
+   *
+   * M4f: this is also the only place a gunshot personally frightens anybody now. Every alive
+   * spider is tested against the same segment; inside `hitRadius` it is the hit above, between
+   * that and `nearMissRadius` it is a close flyby and gets `nearMiss` instead — «пугать должно
+   * только то, что случилось лично с этим пауком: попадание, и пролёт пули близко». A miss can
+   * spook more than one spider in a line; a hit can only ever be the first one.
    */
   shoot(
     ox: number,
@@ -1434,18 +1568,20 @@ export class Swarm {
     ez: number,
     damage = this.tunables.bulletDamage,
   ): number {
+    const t = this.tunables;
     const dx = ex - ox;
     const dy = ey - oy;
     const dz = ez - oz;
     const len2 = dx * dx + dy * dy + dz * dz;
     if (len2 <= 1e-6) return -1;
-    const r = this.tunables.hitRadius;
+    const r = t.hitRadius;
+    const missR = t.nearMissRadius;
     let best: Spider | null = null;
     let bestT = Infinity;
     for (const s of this.spiders) {
       if (!s.alive) continue;
       const cx = s.pos.x - ox;
-      const cy = s.pos.y + this.tunables.height * 0.5 - oy;
+      const cy = s.pos.y + t.height * 0.5 - oy;
       const cz = s.pos.z - oz;
       // Closest approach of the segment to the body centre, clamped to the segment.
       let u = (cx * dx + cy * dy + cz * dz) / len2;
@@ -1453,15 +1589,41 @@ export class Swarm {
       const px = cx - dx * u;
       const py = cy - dy * u;
       const pz = cz - dz * u;
-      if (px * px + py * py + pz * pz > r * r) continue;
-      if (u < bestT) {
-        bestT = u;
-        best = s;
+      const d2 = px * px + py * py + pz * pz;
+      if (d2 <= r * r) {
+        if (u < bestT) {
+          bestT = u;
+          best = s;
+        }
+        continue;
+      }
+      if (missR > r && d2 <= missR * missR) {
+        this.nearMiss(s, ox + dx * u, oz + dz * u, Math.sqrt(d2));
       }
     }
     if (best === null) return -1;
     this.damage(best, damage);
     return best.id;
+  }
+
+  /**
+   * «Промах рядом» — a bullet that passed close enough to feel without touching. Uses the same
+   * scare/flee machinery as a loud noise (`hear`'s pressure branch), just entered directly with
+   * real geometry instead of loudness-over-distance: `dist` is already the perpendicular metres
+   * from the shot to this spider, at the closest point on its actual flight. 1 right at the edge
+   * of the hit sphere, fading to 0 at `nearMissRadius` — a graze is terrifying, a shot that went
+   * a metre wide is merely a bad afternoon.
+   */
+  private nearMiss(s: Spider, x: number, z: number, dist: number): void {
+    const t = this.tunables;
+    const span = Math.max(1e-3, t.nearMissRadius - t.hitRadius);
+    const scale = clamp01(1 - (dist - t.hitRadius) / span);
+    if (scale <= 0) return;
+    s.courage = Math.max(0, s.courage - t.scareCost * scale);
+    s.scaredUntil = Math.max(s.scaredUntil, this.time + t.scareSeconds * scale);
+    s.scareX = x;
+    s.scareZ = z;
+    this.enter(s, 'flee');
   }
 
   /**
@@ -1563,6 +1725,7 @@ export class Swarm {
 
   private summarise(): void {
     const by = emptyStateCounts();
+    const byGroup: number[] = new Array(Math.max(1, Math.round(this.tunables.groups))).fill(0);
     let courage = 0;
     let alive = 0;
     let mode: SpiderState = 'idle';
@@ -1572,6 +1735,7 @@ export class Swarm {
       alive++;
       by[s.state]++;
       courage += s.courage;
+      byGroup[s.groupId] = (byGroup[s.groupId] ?? 0) + 1;
     }
     for (const st of SPIDER_STATES) {
       if (by[st] > modeN) {
@@ -1582,6 +1746,7 @@ export class Swarm {
     const cut = this.time - 1;
     while (this.clickWindow.length > 0 && this.clickWindow[0]! < cut) this.clickWindow.shift();
     this.stats.byState = by;
+    this.stats.byGroup = byGroup;
     this.stats.count = alive;
     this.stats.mode = mode;
     this.stats.meanCourage = alive === 0 ? 0 : courage / alive;
@@ -1600,6 +1765,7 @@ export class Swarm {
   list(): SpiderSnapshot[] {
     return this.spiders.map((s) => ({
       id: s.id,
+      groupId: s.groupId,
       x: s.pos.x,
       y: s.pos.y,
       z: s.pos.z,

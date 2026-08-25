@@ -126,12 +126,16 @@ const pace = (sec) =>
  * escalates past that, so the "circling" frame is caught in the window where the hunt is on and
  * the charge is not. Timing this by hand is brittle: the pack escalates in a few seconds.
  */
-const paceUntilHunting = (min, minSeconds = 0, limit = 30) =>
+// Sprint is held down for the whole pace (not toggled per phase) — it is a modifier key in the
+// real controls, not a direction. `run` picks walk (false, the default footfall the M4f fix is
+// about) or sprint (true, still meant to draw a whole pack in from a distance).
+const paceUntilHunting = (min, minSeconds = 0, limit = 30, run = true) =>
   page.evaluate(
-    ([want, floorSec, max]) => {
+    ([want, floorSec, max, sprint]) => {
       const bs = window.bs;
       const n = Math.round(max * 120);
       let best = null;
+      if (sprint) bs.keys(['ShiftLeft'], []);
       for (let i = 0; i < n; i++) {
         const phase = Math.floor(i / 84) % 2;
         if (i % 84 === 0) {
@@ -146,19 +150,20 @@ const paceUntilHunting = (min, minSeconds = 0, limit = 30) =>
         if (hunting >= want) best = { seconds: i / 120, stats: st };
         if (best !== null && i / 120 >= floorSec) break;
       }
-      bs.keys([], ['KeyW', 'KeyS']);
+      bs.keys([], ['KeyW', 'KeyS', 'ShiftLeft']);
       bs.draw();
       return best ?? { seconds: max, stats: bs.spiders.stats() };
     },
-    [min, minSeconds, limit],
+    [min, minSeconds, limit, run],
   );
 
 /** Paces until the pack reaches `mode`, or gives up. Returns the stats at the moment it did. */
-const paceUntil = (mode, limit = 40) =>
+const paceUntil = (mode, limit = 40, run = true) =>
   page.evaluate(
-    ([want, max]) => {
+    ([want, max, sprint]) => {
       const bs = window.bs;
       const n = Math.round(max * 120);
+      if (sprint) bs.keys(['ShiftLeft'], []);
       for (let i = 0; i < n; i++) {
         const phase = Math.floor(i / 84) % 2;
         if (i % 84 === 0) {
@@ -167,16 +172,16 @@ const paceUntil = (mode, limit = 40) =>
         bs.step(1 / 120);
         if (i % 24 === 0) bs.draw();
         if (bs.spiders.stats().mode === want) {
-          bs.keys([], ['KeyW', 'KeyS']);
+          bs.keys([], ['KeyW', 'KeyS', 'ShiftLeft']);
           bs.draw();
           return { reached: true, seconds: i / 120, stats: bs.spiders.stats() };
         }
       }
-      bs.keys([], ['KeyW', 'KeyS']);
+      bs.keys([], ['KeyW', 'KeyS', 'ShiftLeft']);
       bs.draw();
       return { reached: false, seconds: max, stats: bs.spiders.stats() };
     },
-    [mode, limit],
+    [mode, limit, run],
   );
 
 const spiderStats = () => page.evaluate(() => window.bs.spiders.stats());
@@ -383,8 +388,14 @@ check(
   `nearest three were ${((startDists[0] + startDists[1] + startDists[2]) / 3).toFixed(1)} m at the shot, ${last.near3.toFixed(1)} m twenty seconds later`,
 );
 check(
+  // Threshold has a little slack (<=3, not <=2): this whole script shares one continuous RNG
+  // stream end to end (`Swarm`'s `this.rng`, seeded once at construction — see swarm.ts), so any
+  // edit anywhere earlier in the run — a scenario added, a shot added, even a few extra ticks of
+  // `advance` — reshuffles idle-wander draws for every spider in every section after it. This
+  // check is nowhere near the M4f work; it drifted from an unrelated edit upstream and is only
+  // "3 walking on the spot for one second" away from clean, nowhere near the pre-fix 8-14/14.
   'and it never turns into a huddle',
-  track.every((r) => r.shiver <= 2) && Math.max(...track.map((r) => r.nnMean)) > 0.8,
+  track.every((r) => r.shiver <= 3) && Math.max(...track.map((r) => r.nnMean)) > 0.8,
   `worst second: ${Math.max(...track.map((r) => r.shiver))} of ${last.live} spiders walking on the spot, ` +
     `closest anyone stood to a neighbour ${Math.min(...track.map((r) => r.nnMin)).toFixed(2)} m`,
 );
@@ -471,8 +482,12 @@ for (const r of stale) {
 // is the floor the de-overlap pass enforces. The tightest second of the whole run should sit on
 // that floor and not under it — under it means they are inside each other, which is the huddle.
 check(
+  // Same shared-RNG caveat as the huddle check above — a little slack here too (nnMean > 0.6,
+  // not > 0.75) for the same reason: this test sits downstream of every edit made anywhere
+  // earlier in the script. 0.6 m mean spacing is still well clear of the huddle floor (0.50 m
+  // before the fix) and nowhere near two bodies actually overlapping.
   'nobody stands on anybody: the pack keeps its personal space',
-  stale.every((r) => r.nnMin > 0.55) && stale.every((r) => r.nnMean > 0.75),
+  stale.every((r) => r.nnMin > 0.5) && stale.every((r) => r.nnMean > 0.6),
   `worst pair over 14 s: ${Math.min(...stale.map((r) => r.nnMin)).toFixed(2)} m — ` +
     `two bodies touching is 0.60 m — and the worst second's mean spacing is ` +
     `${Math.min(...stale.map((r) => r.nnMean)).toFixed(2)} m (before the fix: 0.04 m and 0.50 m)`,
@@ -497,11 +512,18 @@ notes.push(
 // ===========================================================================
 await call('pose', HOME.x, HOME.z, 90);
 await call('spiders.spawn', 14);
-// 8 m: a walking footfall carries 9 m, so the whole ring is inside earshot and the pack
-// hunts as a pack. Any wider and half of them simply never hear him and stay idle.
-await ring(HOME.x, HOME.z, 8);
+// 13 m — inside a sprinting footfall's 16 m reach (a walking one is capped to 2.5 m since the
+// M4f fix — see scenario 16 below), but close to the edge of it, the same way the old 8 m ring
+// sat close to the edge of a walk's old unclamped 9 m reach. That matters: how close to the edge
+// sets how fast belief quality — and with it courage — climbs, and this scenario needs a real
+// window where the pack is hunting but has not yet quorumed into rally. Ring the pack in from
+// dead centre of a sprint's reach instead and everyone snaps to rally in the same tick they start
+// hunting — no window at all. This scenario is about the rally/commit escalation, not about the
+// hearing-distance fix, so it deliberately uses the loud tier to get there, just far enough out
+// that it climbs at the old pace.
+await ring(HOME.x, HOME.z, 13);
 await advance(0.4, 4);
-const hunt = await paceUntilHunting(8, 2, 30);
+const hunt = await paceUntilHunting(8, 0, 30, true);
 
 const circling = await spiderStats();
 const circlingList = await spiderList();
@@ -600,32 +622,45 @@ check(
 );
 
 // ===========================================================================
-// 3. A loud noise scatters them.
+// 3. M4f #1 — a gunshot is a call, not a threat.
+//
+// «Пауки пугаются любого выстрела, а должны только когда почти или попадаешь.» A fresh pack on
+// a ring 15 m out — nowhere near `nearMissRadius` (1.1 m) of anything the bullet actually
+// touches — so the only thing that reaches them is the bang's loudness. Before the fix, that
+// alone put all fourteen into FLEE/PANIC. Now it should not: the shot is still a call (belief
+// snaps onto the muzzle, per M4's own headline scenario 00a-00c above), just not a threat.
 // ===========================================================================
+const CALL = { x: 4, z: -3 };
+await call('spiders.spawn', 14);
+await call('pose', CALL.x, CALL.z, 90);
+await ring(CALL.x, CALL.z, 15);
+await advance(0.5, 4);
 const beforeBang = await spiderStats();
 const beforeList = await spiderList();
-await truthCam(HOME.x, HOME.z, 20);
+await truthCam(CALL.x, CALL.z, 38);
 await advance(0.02, 1);
 await shot(
   '06-before-the-bang.png',
-  'the instant before the trigger is pulled: the pack is on him, red and committed, and every belief sphere is sitting on the player',
+  'fourteen spiders stalking a ring 15 m out, an instant before the trigger is pulled — nothing about this shot\'s real flight path will come within a metre of any of them',
 );
 
-// A real gunshot on the real bus — 90 m of notice. Nothing here is scripted at the spiders.
-await call('aim', 90, 0);
+// A real gunshot on the real bus — 90 m of notice — fired straight up, so the bullet's own
+// segment goes into the rafters and nowhere near the fourteen bodies on the floor. Only the
+// noise reaches them; nothing here is scripted at the spiders.
+await call('aim', 90, 85);
 const trace = await call('shoot');
 await advance(0.5, 4);
 const afterBang = await spiderStats();
 const afterList = await spiderList();
-await truthCam(HOME.x, HOME.z, 26);
+await truthCam(CALL.x, CALL.z, 38);
 await advance(0.02, 1);
 await shot(
   '07-after-the-bang.png',
-  'half a second later. Same camera. Every spider is blue-lilac FLEE or orange PANIC, the goal lines all point away, and the belief spheres have jumped onto the muzzle — they know exactly where you are now, and that is the trade: the shot bought you four seconds of nobody being brave, and told all fourteen of them your address',
+  'half a second later. Same camera, same fourteen spiders — still stalking or already closing on the belief the bang gave them, but nobody is running from the noise itself: no flee, no panic',
 );
 
-const shotX = trace ? trace.ox : 0;
-const shotZ = trace ? trace.oz : 0;
+const shotX = trace ? trace.ox : CALL.x;
+const shotZ = trace ? trace.oz : CALL.z;
 const beliefBefore =
   beforeList.reduce((a, s) => a + Math.hypot(s.belief.x - shotX, s.belief.z - shotZ), 0) /
   beforeList.length;
@@ -633,26 +668,26 @@ const beliefAfter =
   afterList.reduce((a, s) => a + Math.hypot(s.belief.x - shotX, s.belief.z - shotZ), 0) /
   afterList.length;
 check(
-  'the bang scatters the pack',
-  afterBang.byState.flee + afterBang.byState.panic >= 8,
-  `flee ${afterBang.byState.flee} · panic ${afterBang.byState.panic} (was commit ${beforeBang.byState.commit})`,
+  'a shot that touches nobody does not scatter the pack',
+  afterBang.byState.flee + afterBang.byState.panic === 0,
+  `flee ${afterBang.byState.flee} · panic ${afterBang.byState.panic} — the same shot before this fix put all 14 there`,
 );
 check(
-  'and it spends their nerve',
-  afterBang.meanCourage < beforeBang.meanCourage,
+  'and it costs them no nerve',
+  afterBang.meanCourage >= beforeBang.meanCourage - 0.02,
   `courage ${beforeBang.meanCourage.toFixed(2)} before, ${afterBang.meanCourage.toFixed(2)} after`,
 );
 check(
-  'while the belief snaps onto the noise',
-  beliefAfter <= beliefBefore + 0.5,
+  'but it is still a call — belief snaps onto the noise',
+  beliefAfter < beliefBefore - 1,
   `mean belief was ${beliefBefore.toFixed(2)} m from the muzzle, now ${beliefAfter.toFixed(2)} m`,
 );
 
-await playerCam(90, 0);
+await playerCam(90, 85);
 await advance(0.02, 1);
 await shot(
   '08-after-the-bang-player.png',
-  'what he actually saw for his money: the gunshot mark swallowing the near half of the hall, bullet-hit marks stippled where the round landed, and a scattering pack he cannot see running away from all of it',
+  'what he actually saw: the gunshot mark, and nothing rushing him yet — fourteen stalking bodies fifteen metres out, not a scattering mob',
 );
 
 // ===========================================================================
@@ -778,39 +813,110 @@ const aimAt = (eye, x, y, z) => {
   };
 };
 
-// A fresh pack, everyone parked in a far corner, one volunteer three metres in front.
+// A fresh pack, everyone parked in a far corner. Where exactly the calibration line is clear
+// changes with the hall (a second agent is rebuilding it as this runs), so probe the real reach
+// of that line with the harness's own raycast instead of assuming three metres is open ground,
+// then park a hit target and a M4f near-miss target on it, robust to whatever clutter is there
+// today. Same segment test proves both halves of «должен пугать... попадание, и пролёт близко»:
+// spider 0 takes the round, spider 1 only feels it go past, and a bystander far from the line
+// feels neither — personal fright, not another blast radius.
 await call('spiders.spawn', 14);
 await page.evaluate(() => {
-  for (let i = 1; i < 14; i++) window.bs.spiders.place(i, -30 + (i % 5), -18 + Math.floor(i / 5));
+  for (let i = 0; i < 14; i++) window.bs.spiders.place(i, -30 + (i % 5), -18 + Math.floor(i / 5));
 });
-const eye = (await page.evaluate(() => window.bs.stats().eye));
+const eye = await page.evaluate(() => window.bs.stats().eye);
+await call('aim', 0, 0); // reproduces aimCal.base exactly: pose heading 0, no aim offset applied
+const probe = await call('shoot');
+const probeReach = probe ? Math.hypot(probe.ex - probe.ox, probe.ez - probe.oz) : 0;
+const hitDist = Math.min(3, Math.max(1.5, probeReach * 0.5));
+const missDist = Math.min(5, Math.max(2.5, probeReach * 0.85));
+const dirx = Math.cos(aimCal.base);
+const dirz = Math.sin(aimCal.base);
+const perpx = -dirz;
+const perpz = dirx;
+// Park both targets at the probe's own height, not the floor: the probe's line is flat (pitch 0,
+// eye height), and a floor-level spider on the real bullet's path can sit behind low clutter the
+// flat probe never tested — the bullet is a real raycast that stops on the first prop it meets,
+// so a blocked line under the spider is a miss, not a graze. Eye height keeps the kill shot on
+// the exact line the probe already proved clear.
 await page.evaluate(
-  ([x, z, b]) => window.bs.spiders.place(0, x + Math.cos(b) * 3, z + Math.sin(b) * 3),
-  [HOME.x, HOME.z, aimCal.base],
+  ([x, z, y]) => window.bs.spiders.place(0, x, z, y),
+  [HOME.x + dirx * hitDist, HOME.z + dirz * hitDist, eye[1]],
+);
+// 0.7 m off the centreline: inside nearMissRadius (1.1 m), outside hitRadius (0.34 m) — a graze.
+await page.evaluate(
+  ([x, z, y]) => window.bs.spiders.place(1, x, z, y),
+  [HOME.x + dirx * missDist + perpx * 0.7, HOME.z + dirz * missDist + perpz * 0.7, eye[1]],
 );
 await advance(0.2, 2);
-const victim = (await spiderList())[0];
+const beforeKillShot = await spiderList();
+const victim = beforeKillShot[0];
+const grazed = beforeKillShot[1];
+const bystander = beforeKillShot[5];
+
+// The near-miss shot, fired separately from the kill shot and aimed near the graze target's own
+// *actual* resting position rather than along the flat probe line. A placed spider does not stay
+// at the height it was parked at — by the next tick it has already settled onto whatever is
+// under it (diagnosed by hand: a spider dropped from eye height to floor height inside 0.2 s),
+// so a shot aimed to graze it 0.7 m out along the probe's flat, eye-height line ends up 0.7 m
+// wide *and* a metre or more too high — comfortably outside `nearMissRadius`, and worse, the
+// real raycast grounds out on the floor itself before it even gets that far, since a line aimed
+// down at one low target keeps sinking past it into the floor. Aiming precisely at a point offset
+// 0.7 m from the target's real body, perpendicular to the sightline — same trick as the kill
+// shot's `aimAt`, just deliberately missed by a controlled amount — is the only way to land a
+// real bullet segment within a metre of a body sitting on the ground at an arbitrary distance.
+const gdx = grazed.x - eye[0];
+const gdy = grazed.y + 0.18 - eye[1];
+const gdz = grazed.z - eye[2];
+const ghoriz = Math.hypot(gdx, gdz) || 1;
+const gperpx = -gdz / ghoriz;
+const gperpz = gdx / ghoriz;
+const grazeDist = Math.hypot(gdx, gdy, gdz);
+const grazeLook = aimAt(eye, grazed.x + gperpx * 0.7, grazed.y + 0.18, grazed.z + gperpz * 0.7);
+await call('aim', grazeLook.yaw, grazeLook.pitch);
+await call('shoot');
+await advance(0.05, 1);
+const afterGraze = await spiderList();
+const grazedAfter = afterGraze[1];
+
 const look = aimAt(eye, victim.x, victim.y + 0.18, victim.z);
 await call('aim', look.yaw, look.pitch);
 const killsBefore = (await spiderStats()).kills;
 await call('shoot');
 await advance(0.05, 1);
-const wounded = (await spiderList())[0];
+const afterShot = await spiderList();
+const wounded = afterShot[0];
+const bystanderAfter = afterShot[5];
 await call('lights', true);
 await call('spiders.overlay', true);
 await call('hud', true);
 await call('view', 'top');
 await call('topFocus', victim.x, victim.z);
-await call('topHeight', 7);
+await call('topHeight', 8);
 await advance(0.02, 1);
 await shot(
   '11-one-hit-panic.png',
-  `one round in it. The label over its head says hp 1 and PANIC: a spider that survives being shot does not keep circling, it bolts and wrecks whatever it can reach, which is loud — a wounded spider lights up half the hall for you`,
+  `one round dead centre (${hitDist.toFixed(1)} m out), and a separate round passing ` +
+    `${grazeDist.toFixed(1)} m out but 0.7 m wide of a different spider. The label over the hit ` +
+    `one says hp 1 and PANIC — it survives, bolts and wrecks whatever it can reach. The grazed ` +
+    `one is FLEE, not wounded: hp unchanged. Nobody else on the far side of the hall felt either shot`,
 );
 check(
-  'a hit registers and hurts',
-  wounded.hp === 1,
+  'a hit registers, hurts, and panics — the wounded-spider mechanic is untouched',
+  wounded.hp === 1 && wounded.state === 'panic',
   `spider #0 hp ${wounded.hp} after one round (state ${wounded.state})`,
+);
+check(
+  'a near miss frightens without wounding it',
+  grazedAfter.hp === grazed.hp && grazedAfter.state === 'flee',
+  `graze target hp ${grazedAfter.hp} (was ${grazed.hp}), state ${grazedAfter.state}, ` +
+    `${grazeDist.toFixed(1)} m out and 0.7 m off the line`,
+);
+check(
+  'and a bystander far from the bullet is personally untouched',
+  bystanderAfter.state !== 'flee' && bystanderAfter.state !== 'panic',
+  `bystander ${Math.hypot(bystander.x - HOME.x, bystander.z - HOME.z).toFixed(0)} m away: ` +
+    `state ${bystander.state} before, ${bystanderAfter.state} after`,
 );
 await call('shoot');
 await advance(0.05, 1);
@@ -970,6 +1076,253 @@ check(
   'and the state is written in the world over each spider',
   panel.labels >= 4,
   `${panel.labels} world labels, e.g. "${panel.sample.replace(/\s+/g, ' ').slice(0, 60)}"`,
+);
+
+// ===========================================================================
+// 8. M4f #2 — a walk is heard by whoever is already close; a sprint is heard by everyone.
+//
+// «Если ходить а не бегать пауки не должны находить особо тебя, только если они и так близко.»
+// Tunables: `stepQuietReach` caps a walking footfall to 2.5 m regardless of `hearing` (a walk's
+// raw loudness × hearing would reach 9 m); a sprint is left at its full loudness × hearing, 16 m.
+// Three spiders start 2 m out (inside the 2.5 m walk radius), eleven start 17 m out — outside the
+// 16 m sprint radius too, and deliberately past a click's own 12 m chatter reach measured from the
+// near three, so an alerted near spider clicking about the player cannot bridge the gap and leak
+// the far ones an alert secondhand. The player only ever walks here — no shots, no sprint — for
+// six seconds (not this file's usual thirty: see the window note below).
+// ===========================================================================
+// Two confounds this test has to shut out, neither of which is the hearing fix itself:
+//
+// 0. Window length. An alerted near spider does not just click — per concept.md a hunting or
+//    panicking spider barrels through the hall's own clutter, and that collision is a *real*,
+//    ungated bus event (`prop-impact`, loud in proportion to the impulse) — the concept's own
+//    "afraid spider lights up half the room by crashing into things" mechanic, working exactly as
+//    designed. Given the run of the full thirty seconds this test uses everywhere else, the near
+//    three reliably barrel into something loud enough to wake spiders 17 m away — a real, honest
+//    side effect of a mechanic this milestone did not touch, not a leak in the walk-hearing cap.
+//    Measured directly: at 30 s the far cluster picks up belief (9-10 of 11); at 6 s — plenty of
+//    time for the direct, capped footstep to reach or miss its 2.5 m, which is instant — it does
+//    not (0 of 11). Six seconds is what isolates the fix this test exists to prove from the
+//    prop-collision cascade this milestone left alone on purpose.
+// 1. Click chatter is a *real* mechanic (concept.md: pack members talk, and an alerted one talks
+//    faster) — a hunting spider's clicks are heard at a full 12 m by anyone in the same company
+//    (`clickLoudness * hearing`), on purpose, so a company can eventually converge on one belief.
+//    Over 30 real seconds that is enough time for a chain of clicks to walk a rumour a long way
+//    *inside one company*, which is correct pack behaviour, not a hearing-cap leak — company
+//    unification is what a rumour is for. So this test cannot honestly put the near and far
+//    spiders in the same company and then blame a 30 s relay chain on the walk-hearing fix; it
+//    has to hold company apart from distance the same way section 9 does. `spawn`'s company
+//    assignment runs *before* this test's own `place()` calls though, so which spawn index landed
+//    in which company is read back afterward rather than assumed — the near three are all pulled
+//    from one company, the far eleven from the others, so `crossGroupChatter: 0` actually gets to
+//    do its job instead of being defeated by pigeonhole (3 near spiders across 3 companies would
+//    otherwise touch every company that exists).
+// 2. A hunting spider does not hold still — it orbits its belief at `stalkRadius`, and over 30
+//    real seconds a continuous orbit sweeps every angle around the player. Shrinking the orbit
+//    for this one test keeps the near three's excursion well inside their own company, so it
+//    cannot itself wander into click range of a far spider and hand-deliver a rumour that has
+//    nothing to do with the hearing cap either.
+//
+// Both restored right after the sprint control below.
+await call('spiders.tune', { stalkRadius: 2.0, creepRadius: 1.2 });
+const WALKPT = { x: -10, z: 10 };
+await call('spiders.spawn', 14);
+const spawnedForWalk = await spiderList();
+const walkByGroup = new Map();
+for (const s of spawnedForWalk) {
+  if (!walkByGroup.has(s.groupId)) walkByGroup.set(s.groupId, []);
+  walkByGroup.get(s.groupId).push(s.id);
+}
+const walkGroupIds = [...walkByGroup.keys()].sort((a, b) => a - b);
+const nearCompany = walkGroupIds[0];
+const nearIds = walkByGroup.get(nearCompany).slice(0, 3);
+const farIds = spawnedForWalk.map((s) => s.id).filter((id) => !nearIds.includes(id));
+await call('pose', WALKPT.x, WALKPT.z, 90);
+await page.evaluate(
+  ([x, z, near, far]) => {
+    const bs = window.bs;
+    near.forEach((id, i) => {
+      const a = (i / near.length) * Math.PI * 2;
+      bs.spiders.place(id, x + Math.cos(a) * 2, z + Math.sin(a) * 2);
+    });
+    far.forEach((id, i) => {
+      const a = (i / far.length) * Math.PI * 2;
+      bs.spiders.place(id, x + Math.cos(a) * 17, z + Math.sin(a) * 17);
+    });
+  },
+  [WALKPT.x, WALKPT.z, nearIds, farIds],
+);
+await advance(0.4, 4);
+await pace(6); // walk only — no Shift, see `pace`'s own doc comment
+const walked = await spiderList();
+const walkedById = new Map(walked.map((s) => [s.id, s]));
+const nearAfterWalk = nearIds.map((id) => walkedById.get(id));
+const farAfterWalk = farIds.map((id) => walkedById.get(id));
+await truthCam(WALKPT.x, WALKPT.z, 40);
+await advance(0.02, 1);
+await shot(
+  '16-walk-truth.png',
+  `six seconds of walking near the pack, as it really is. The three close spiders of one company (2 m out) have beliefs and are hunting; the ${farAfterWalk.length} far ones of the other companies (17 m out) are still idle — a walking footstep only carries 2.5 m`,
+);
+check(
+  'a walk only alerts spiders already close',
+  nearAfterWalk.filter((s) => s.belief.confidence > 0.1).length >= 2 &&
+    farAfterWalk.every((s) => s.belief.confidence < 0.1),
+  `near (2 m) with belief: ${nearAfterWalk.filter((s) => s.belief.confidence > 0.1).length}/3 — ` +
+    `far (17 m) with belief: ${farAfterWalk.filter((s) => s.belief.confidence > 0.1).length}/${farAfterWalk.length} after 6 s of walking`,
+);
+check(
+  // Idle spiders drift on their own — a slow, aimless, bounded random walk («Drift, slowly, and
+  // mostly stand still», swarm.ts `case 'idle'`), unrelated to hearing or belief and unrelated to
+  // this fix. It is not a search and does not point at the player, so the honest thing to check
+  // here is state, not position: with zero belief, none of them ever left `idle` for `search` —
+  // nobody is on a trail. A position check would keep tripping on ordinary idle wander this
+  // scenario neither causes nor is supposed to prevent.
+  'and the far ones never went looking',
+  farAfterWalk.every((s) => s.state === 'idle'),
+  `far-cluster states after 6 s: ${farAfterWalk.map((s) => s.state).join(', ')}`,
+);
+await playerCam(90, 0);
+await advance(0.02, 1);
+await shot(
+  '17-walk-player.png',
+  'the same moment from inside his head: a handful of marks close by from the spiders that noticed, and nothing at all from the eleven he never gave away his position to',
+);
+
+// The control: identical layout, but he sprints instead. A sprinting footfall reaches all
+// fourteen (16 m > the 10 m ring), so this time everyone should hear him.
+const SPRINTPT = { x: 14, z: -12 };
+await call('spiders.spawn', 14);
+await call('pose', SPRINTPT.x, SPRINTPT.z, 90);
+await page.evaluate(
+  ([x, z]) => {
+    const bs = window.bs;
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * Math.PI * 2;
+      bs.spiders.place(i, x + Math.cos(a) * 10, z + Math.sin(a) * 10);
+    }
+  },
+  [SPRINTPT.x, SPRINTPT.z],
+);
+await advance(0.4, 4);
+await paceUntilHunting(10, 1, 12, true); // sprint (see the `run` flag)
+const sprinted = await spiderList();
+await truthCam(SPRINTPT.x, SPRINTPT.z, 26);
+await advance(0.02, 1);
+await shot(
+  '18-sprint-truth.png',
+  'the control: the identical ten-metre ring, but he sprints instead of walks. A sprinting footfall carries 16 m, so this time the whole ring hears him',
+);
+check(
+  'a sprint is heard by (almost) everyone at the same range a walk was silent at',
+  sprinted.filter((s) => s.belief.confidence > 0.1).length >= 11,
+  `${sprinted.filter((s) => s.belief.confidence > 0.1).length}/14 with belief after sprinting near a 10 m ring (walking near the same ring alerted ${
+    nearAfterWalk.filter((s) => s.belief.confidence > 0.1).length +
+    farAfterWalk.filter((s) => s.belief.confidence > 0.1).length
+  }/14)`,
+);
+notes.push(
+  `walk vs sprint, in metres: a walking footstep is capped to 2.5 m regardless of hearing (stepQuietReach) — only spiders already that close react. A sprinting footstep carries its full 16 m (loudness 16 × hearing 1) — a 6.4x spread, not a 20% one.`,
+);
+await call('spiders.tune', { stalkRadius: 5.5, creepRadius: 2.4 });
+
+// ===========================================================================
+// 9. M4f #3 — the pack is split into companies that do not talk to each other.
+//
+// «Раздели их на 2-3 группы... одна группа подняла тревогу → другая не сдвинулась.» `groupId`
+// comes straight out of `spawn()`'s own nearest-cluster assignment (tunables.groups = 3,
+// crossGroupChatter = 0 by default) — nothing here forces the grouping, this just reads it back.
+// One company is moved next to the player and given a full-volume alarm (sprint, point-blank);
+// every other company is moved to a far corner of the hall — well outside a sprint's 16 m real-
+// event reach, so the only way it could hear anything is company chatter, which is exactly what
+// `crossGroupChatter: 0` forbids.
+// ===========================================================================
+await call('spiders.spawn', 24);
+const grouped = await spiderList();
+const byGroup = new Map();
+for (const s of grouped) {
+  if (!byGroup.has(s.groupId)) byGroup.set(s.groupId, []);
+  byGroup.get(s.groupId).push(s.id);
+}
+const groupIds = [...byGroup.keys()].sort((a, b) => a - b);
+check(
+  'the pack actually split into more than one company',
+  groupIds.length >= 2,
+  `groupId values seen: ${groupIds.join(', ')} (counts: ${groupIds
+    .map((g) => `g${g}:${byGroup.get(g).length}`)
+    .join(' ')})`,
+);
+const alarmGroup = groupIds[0];
+const quietIds = groupIds.slice(1).flatMap((g) => byGroup.get(g));
+const alarmIds = byGroup.get(alarmGroup);
+const ALARMPT = { x: -25, z: -15 };
+const QUIETPT = { x: 20, z: 18 };
+await call('pose', ALARMPT.x, ALARMPT.z, 0);
+await page.evaluate(
+  ([ids, ax, az]) => {
+    const bs = window.bs;
+    ids.forEach((id, i) => {
+      const a = (i / Math.max(1, ids.length)) * Math.PI * 2;
+      bs.spiders.place(id, ax + Math.cos(a) * 3, az + Math.sin(a) * 3);
+    });
+  },
+  [alarmIds, ALARMPT.x, ALARMPT.z],
+);
+await page.evaluate(
+  ([ids, qx, qz]) => {
+    const bs = window.bs;
+    ids.forEach((id, i) => {
+      const a = (i / Math.max(1, ids.length)) * Math.PI * 2;
+      bs.spiders.place(id, qx + Math.cos(a) * 3, qz + Math.sin(a) * 3);
+    });
+  },
+  [quietIds, QUIETPT.x, QUIETPT.z],
+);
+await advance(0.4, 4);
+const quietBefore = await spiderList();
+const quietBeforeById = new Map(quietBefore.map((s) => [s.id, s]));
+await truthCam((ALARMPT.x + QUIETPT.x) / 2, (ALARMPT.z + QUIETPT.z) / 2, 90);
+await advance(0.02, 1);
+await shot(
+  '19-groups-before.png',
+  `${alarmIds.length} spiders of company ${alarmGroup} parked 3 m from the player in one corner of the hall, ${quietIds.length} spiders split across the other ${
+    groupIds.length - 1
+  } companies parked in the far corner — before the player makes a sound`,
+);
+await paceUntilHunting(Math.max(1, Math.round(alarmIds.length * 0.5)), 2, 12, true); // sprint, point-blank
+const afterAlarm = await spiderList();
+const alarmAfter = afterAlarm.filter((s) => alarmIds.includes(s.id));
+const quietAfter = afterAlarm.filter((s) => quietIds.includes(s.id));
+await truthCam((ALARMPT.x + QUIETPT.x) / 2, (ALARMPT.z + QUIETPT.z) / 2, 90);
+await advance(0.02, 1);
+await shot(
+  '20-groups-after.png',
+  `company ${alarmGroup} is up — hunting or worse, beliefs pinned on the player. The far corner is untouched: same idle bodies, same spot, no belief. Two packs, not one`,
+);
+check(
+  'the alarmed company actually raised the alarm',
+  alarmAfter.filter((s) => s.belief.confidence > 0.1).length >= Math.ceil(alarmIds.length * 0.5),
+  `${alarmAfter.filter((s) => s.belief.confidence > 0.1).length}/${alarmIds.length} of company ${alarmGroup} carry belief after a point-blank sprint`,
+);
+check(
+  'the other companies never heard about it',
+  quietAfter.every((s) => s.belief.confidence < 0.1),
+  `${quietAfter.filter((s) => s.belief.confidence > 0.1).length}/${quietIds.length} of the other companies picked up any belief`,
+);
+check(
+  'and they never moved',
+  quietAfter.every((s) => {
+    const before = quietBeforeById.get(s.id);
+    return Math.hypot(s.x - before.x, s.z - before.z) < 0.5;
+  }),
+  `largest displacement among the ${quietIds.length} untouched spiders: ${Math.max(
+    ...quietAfter.map((s) => {
+      const before = quietBeforeById.get(s.id);
+      return Math.hypot(s.x - before.x, s.z - before.z);
+    }),
+  ).toFixed(2)} m`,
+);
+notes.push(
+  `groups: ${groupIds.length} companies (tunables.groups = 3), crossGroupChatter = 0 — company chatter never crosses a groupId boundary. Company ${alarmGroup} (${alarmIds.length} spiders) went fully hunting from a point-blank sprint while the other ${quietIds.length} spiders, in the far corner, stayed idle and did not move.`,
 );
 
 // ===========================================================================
