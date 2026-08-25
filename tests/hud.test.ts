@@ -1,7 +1,7 @@
 /**
  * The rack row — the four-pip readout, and the three moments it is allowed to exist.
  *
- * Two doors, the same split `tests/throwables.test.ts` uses. Everything about the *rule* — when
+ * Two doors, the same split `tests/spheres.test.ts` uses. Everything about the *rule* — when
  * the row is up, how many pips are lit, where on screen it lands — is asserted against the pure
  * functions in `ui/hud.ts`, because that is where the rule lives and because the node suite has
  * no DOM to build a `Hud` in. Everything about the *game* is driven through `createHeadlessGame`
@@ -35,7 +35,7 @@ import {
   type RackSample,
 } from '../src/ui/hud';
 import { createHeadlessGame, type HeadlessGame } from '../src/game/headless';
-import { CAN_RACK_CAP } from '../src/world/cans';
+import { SPHERE_COUNT } from '../src/game/spheres';
 
 /** The browser loop's fixed step, so a "second" here is the number of frames it is in play. */
 const FRAME = 1 / 120;
@@ -98,8 +98,8 @@ describe('where the row lands on screen', () => {
     // The measurement itself, pinned so the report's number and the code's stay the same number.
     const b = rackPipBounds();
     expect([b.left, b.right, b.top, b.bottom]).toEqual([-9, 9, 4.5, 7.5]);
-    const pips = CAN_RACK_CAP * RACK_PIP_PX;
-    expect(b.right - b.left).toBe(pips + (CAN_RACK_CAP - 1) * RACK_PIP_GAP_PX);
+    const pips = SPHERE_COUNT * RACK_PIP_PX;
+    expect(b.right - b.left).toBe(pips + (SPHERE_COUNT - 1) * RACK_PIP_GAP_PX);
     expect(b.bottom - b.top).toBe(RACK_PIP_PX);
     expect((b.top + b.bottom) / 2).toBe(RACK_PIP_DROP_PX);
     expect(b.left).toBe(-b.right);
@@ -118,22 +118,22 @@ describe('where the row lands on screen', () => {
 
   it('keeps an empty slot visible, so the row reads "n of four"', () => {
     // Drop this to zero and the row's *width* becomes the encoding — a length to compare instead
-    // of a group to perceive, which is the counting `CAN_RACK_CAP` was chosen four to avoid.
+    // of a group to perceive, which is the counting `SPHERE_COUNT` was chosen four to avoid.
     expect(RACK_PIP_EMPTY_ALPHA).toBeGreaterThan(0);
     expect(RACK_PIP_EMPTY_ALPHA).toBeLessThan(1);
   });
 });
 
 describe('how many pips are lit', () => {
-  it('is one pip per can, all the way up the rack', () => {
-    for (let n = 0; n <= CAN_RACK_CAP; n++) expect(rackFilledPips(n)).toBe(n);
+  it('is one pip per sphere, all the way up the rack', () => {
+    for (let n = 0; n <= SPHERE_COUNT; n++) expect(rackFilledPips(n)).toBe(n);
   });
 
   it('never grows past the four slots the row has', () => {
     // A fifth pip would not be more information — it would turn a perceived row into a counted
-    // one, which is the whole of `CAN_RACK_CAP`'s argument.
-    expect(rackFilledPips(CAN_RACK_CAP + 1)).toBe(CAN_RACK_CAP);
-    expect(rackFilledPips(99)).toBe(CAN_RACK_CAP);
+    // one, which is the whole of `SPHERE_COUNT`'s argument.
+    expect(rackFilledPips(SPHERE_COUNT + 1)).toBe(SPHERE_COUNT);
+    expect(rackFilledPips(99)).toBe(SPHERE_COUNT);
   });
 
   it('reads a spent rack as an empty row rather than an absent one', () => {
@@ -144,9 +144,9 @@ describe('how many pips are lit', () => {
 
   it('fills the slots from the left, and exactly that many of them', () => {
     // The slot mapping, which is the only line of the DOM write that carries a number.
-    for (let filled = 0; filled <= CAN_RACK_CAP; filled++) {
+    for (let filled = 0; filled <= SPHERE_COUNT; filled++) {
       let lit = 0;
-      for (let i = 0; i < CAN_RACK_CAP; i++) {
+      for (let i = 0; i < SPHERE_COUNT; i++) {
         if (rackPipLit(i, filled)) {
           lit++;
           expect(i).toBeLessThan(filled);
@@ -201,20 +201,20 @@ describe('the 1.6 s window', () => {
 
 describe('the three triggers', () => {
   it('states the rack once at spawn, since nothing else ever will', () => {
-    const first = advanceRackReadout(RACK_READOUT_DARK, sample(CAN_RACK_CAP), FRAME);
+    const first = advanceRackReadout(RACK_READOUT_DARK, sample(SPHERE_COUNT), FRAME);
     expect(first.alpha).toBe(1);
-    expect(first.filled).toBe(CAN_RACK_CAP);
+    expect(first.filled).toBe(SPHERE_COUNT);
   });
 
   it('lights on a count that changed, and is gone inside the window', () => {
-    const full = settled(sample(CAN_RACK_CAP));
-    const spent = advanceRackReadout(full, sample(CAN_RACK_CAP - 1), FRAME);
+    const full = settled(sample(SPHERE_COUNT));
+    const spent = advanceRackReadout(full, sample(SPHERE_COUNT - 1), FRAME);
     expect(spent.alpha).toBe(1);
-    expect(spent.filled).toBe(CAN_RACK_CAP - 1);
-    expect(hold(spent, sample(CAN_RACK_CAP - 1), PAST_WINDOW).alpha).toBe(0);
+    expect(spent.filled).toBe(SPHERE_COUNT - 1);
+    expect(hold(spent, sample(SPHERE_COUNT - 1), PAST_WINDOW).alpha).toBe(0);
   });
 
-  it('lights on a can coming back as readily as on one going out', () => {
+  it('lights on a sphere coming back as readily as on one going out', () => {
     const spent = settled(sample(2));
     expect(advanceRackReadout(spent, sample(3), FRAME).alpha).toBe(1);
   });
@@ -290,7 +290,7 @@ function rackDriver(game: HeadlessGame): {
     const ticks = Math.round(seconds / game.stepSeconds);
     for (let i = 0; i < ticks; i++) {
       game.step(1);
-      readout = advanceRackReadout(readout, game.sim.throwables, game.stepSeconds);
+      readout = advanceRackReadout(readout, game.sim.spheres, game.stepSeconds);
       frames.push(readout);
     }
   };
@@ -301,7 +301,7 @@ function rackDriver(game: HeadlessGame): {
   };
 }
 
-/** Aims at the floor, so every can thrown below lands at the rig's feet and stays inert there. */
+/** Aims at the floor, so every sphere thrown below goes off at the rig's feet and is gone. */
 function aimDown(game: HeadlessGame, d: { run(seconds: number): void }): void {
   game.input.look(0, 900);
   d.run(0.1);
@@ -319,19 +319,19 @@ describe('against the hand it reports on', () => {
     d.run(PAST_WINDOW);
     // Still winding, long past the window, and the count has not moved — this is the trigger the
     // change alone could not have supplied.
-    expect(game.sim.throwables.charging).toBe(true);
-    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP);
+    expect(game.sim.spheres.charging).toBe(true);
+    expect(game.sim.spheres.carried).toBe(SPHERE_COUNT);
     expect(d.now().alpha).toBe(1);
-    expect(d.now().filled).toBe(CAN_RACK_CAP);
+    expect(d.now().filled).toBe(SPHERE_COUNT);
 
     game.input.release('throw');
     d.run(0.1);
-    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP - 1);
+    expect(game.sim.spheres.carried).toBe(SPHERE_COUNT - 1);
     expect(d.now().alpha).toBe(1);
-    expect(d.now().filled).toBe(CAN_RACK_CAP - 1);
+    expect(d.now().filled).toBe(SPHERE_COUNT - 1);
 
     d.run(PAST_WINDOW);
-    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP - 1);
+    expect(game.sim.spheres.carried).toBe(SPHERE_COUNT - 1);
     expect(d.now().alpha).toBe(0);
   });
 
@@ -339,20 +339,20 @@ describe('against the hand it reports on', () => {
     const game = createHeadlessGame();
     const d = rackDriver(game);
     aimDown(game, d);
-    for (let i = 0; i < CAN_RACK_CAP; i++) {
+    for (let i = 0; i < SPHERE_COUNT; i++) {
       game.input.hold('throw');
       d.run(0.1);
       game.input.release('throw');
       d.run(1.2);
     }
-    expect(game.sim.throwables.carried).toBe(0);
+    expect(game.sim.spheres.carried).toBe(0);
     d.run(PAST_WINDOW);
     expect(d.now().alpha).toBe(0);
 
-    const before = game.sim.throwables.refused;
+    const before = game.sim.spheres.refused;
     game.input.press('throw');
     d.run(game.stepSeconds);
-    expect(game.sim.throwables.refused).toBe(before + 1);
+    expect(game.sim.spheres.refused).toBe(before + 1);
     expect(d.now().alpha).toBe(1);
     expect(d.now().filled).toBe(0);
   });
@@ -367,7 +367,7 @@ describe('against the hand it reports on', () => {
     d.run(1);
     // Sprinting is the loudest the rig gets and the Halo ring is wide open; the rack row is not
     // a loudness readout and has nothing to add to it.
-    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP);
+    expect(game.sim.spheres.carried).toBe(SPHERE_COUNT);
     expect(d.every(2.5).every((f) => f.alpha === 0)).toBe(true);
   });
 
@@ -379,13 +379,13 @@ describe('against the hand it reports on', () => {
     d.run(0.1);
     game.input.release('throw');
     d.run(PAST_WINDOW);
-    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP - 1);
+    expect(game.sim.spheres.carried).toBe(SPHERE_COUNT - 1);
     expect(d.now().alpha).toBe(0);
 
     game.input.tapKey('KeyR');
     d.run(0.05);
-    expect(game.sim.throwables.carried).toBe(CAN_RACK_CAP);
+    expect(game.sim.spheres.carried).toBe(SPHERE_COUNT);
     expect(d.now().alpha).toBe(1);
-    expect(d.now().filled).toBe(CAN_RACK_CAP);
+    expect(d.now().filled).toBe(SPHERE_COUNT);
   });
 });

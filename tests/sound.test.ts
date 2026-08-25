@@ -9,9 +9,6 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import {
-  IMPACT_FULL_SPEED,
-  IMPACT_MAX_RADIUS,
-  IMPACT_MIN_SPEED,
   LANDING_FULL_IMPACT,
   LANDING_MAX_RADIUS,
   LANDING_MIN_IMPACT,
@@ -55,9 +52,12 @@ describe('the class table', () => {
   it('holds exactly the classes implemented so far, in §3.3 order', () => {
     expect(Object.keys(SOUND_CLASSES)).toEqual([
       'crouch-step', 'walk-step', 'sprint-step', 'landing', 'q-ping', 'e-ping',
-      // M2's throwable: §3.3's reserved prop row, the settle under it, and the rig's own arm —
-      // which §3.3 has no row for, because a wind-up is a mechanism rather than a contact.
-      'prop-impact', 'prop-knock', 'throw-windup',
+      // M2's throwable: the rig's own arm — which §3.3 has no row for, because a wind-up is a
+      // mechanism rather than a contact — and the boom the sphere ends in. The two prop rows
+      // between them are §3.3's reserved contact rows, kept with no emitter: core-loop §2's
+      // artifact clang and the M4 spider both want them, and a class with no emitter costs a
+      // table row while a class deleted and re-added costs the halo calibration below.
+      'prop-impact', 'prop-knock', 'throw-windup', 'sphere-boom',
     ]);
   });
 
@@ -74,10 +74,10 @@ describe('the class table', () => {
       'prop-impact': { paintRadius: 8, hearingRadius: 25, coneAngleDeg: 360, intensity: 1.0, wave: 'step' },
       'prop-knock': { paintRadius: 1.5, hearingRadius: 4, coneAngleDeg: 360, intensity: 0.7, wave: 'step' },
       'throw-windup': { paintRadius: 0.5, hearingRadius: 2.5, coneAngleDeg: 360, intensity: 0.6, wave: 'step' },
+      'sphere-boom': { paintRadius: 12, hearingRadius: 32, coneAngleDeg: 360, intensity: 1.0, wave: 'ping' },
     });
     expect(WAVE_SPEEDS).toEqual({ step: 25, ping: 25, beam: 45 });
     expect([LANDING_MIN_IMPACT, LANDING_FULL_IMPACT, LANDING_MAX_RADIUS]).toEqual([5, 14, 14]);
-    expect([IMPACT_MIN_SPEED, IMPACT_FULL_SPEED, IMPACT_MAX_RADIUS]).toEqual([2.5, 16, 12]);
   });
 });
 
@@ -130,71 +130,6 @@ describe('SoundBus.landingRadius', () => {
       expect(r).toBeGreaterThanOrEqual(base);
       expect(r).toBeLessThanOrEqual(LANDING_MAX_RADIUS);
     }
-  });
-});
-
-describe('SoundBus.impactRadius', () => {
-  const base = SOUND_CLASSES['prop-impact'].paintRadius; // 8
-
-  /**
-   * The same shape as the landing's band, and deliberately the same code (`speedFraction`).
-   *
-   * A thrown thing and a falling body are the same event seen twice — a contact whose loudness
-   * is how fast it arrived — so a second hand-written clamp here would be a second place for
-   * the NaN trapdoor below to be reopened. What differs is only the band: an impact starts
-   * ringing at a much lower speed than a landing does, because a can does not have to be
-   * dropped four metres to be worth hearing.
-   */
-  it('is flat at the base below and at IMPACT_MIN_SPEED', () => {
-    // Under this the contact is a set-down, and the emitter never reaches the bus at all — the
-    // quiet "place it, do not throw it" verb, priced at nothing.
-    expect(SoundBus.impactRadius(-5)).toBe(base);
-    expect(SoundBus.impactRadius(0)).toBe(base);
-    expect(SoundBus.impactRadius(2.4999)).toBe(base);
-    expect(SoundBus.impactRadius(IMPACT_MIN_SPEED)).toBe(base);
-  });
-
-  it('starts rising immediately above IMPACT_MIN_SPEED', () => {
-    expect(SoundBus.impactRadius(IMPACT_MIN_SPEED + 1e-4)).toBeCloseTo(8.00002962962963, 12);
-  });
-
-  it('interpolates linearly across the 8-12 m band', () => {
-    expect(SoundBus.impactRadius(9.25)).toBe(10); // halfway
-    expect(SoundBus.impactRadius(5.875)).toBe(9); // a quarter
-    expect(SoundBus.impactRadius(12.625)).toBe(11); // three quarters
-  });
-
-  it('clamps at IMPACT_MAX_RADIUS from IMPACT_FULL_SPEED upward', () => {
-    expect(SoundBus.impactRadius(IMPACT_FULL_SPEED)).toBe(IMPACT_MAX_RADIUS);
-    expect(SoundBus.impactRadius(100)).toBe(IMPACT_MAX_RADIUS);
-    expect(SoundBus.impactRadius(Infinity)).toBe(IMPACT_MAX_RADIUS);
-  });
-
-  it('never leaves the 8-12 m band, whatever it is handed', () => {
-    // Including NaN, for the landing's reason exactly: a NaN radius paints nothing while the
-    // sound is still heard, which is a law-2 lie the type system cannot see.
-    const nasty = [
-      NaN, Infinity, -Infinity, 0, -0, 2.5, 16, 1e308, -1e308, 1e-308,
-      Number.MIN_VALUE, Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER,
-    ];
-    for (const v of nasty) {
-      const r = SoundBus.impactRadius(v);
-      expect(Number.isFinite(r), `impactRadius(${v}) = ${r}`).toBe(true);
-      expect(r).toBeGreaterThanOrEqual(base);
-      expect(r).toBeLessThanOrEqual(IMPACT_MAX_RADIUS);
-    }
-    expect(SoundBus.impactRadius(NaN)).toBe(base);
-  });
-
-  it('leaves the landing band exactly where it was', () => {
-    // The two bands now share a clamp, and this is the assertion that the sharing changed
-    // nothing: a landing's radius is a number the whole audio suite is levelled against, so a
-    // refactor that moved it by one ulp would be a silent retune of every drop in the game.
-    expect(SoundBus.landingRadius(9.5)).toBe(11);
-    expect(SoundBus.landingRadius(LANDING_MIN_IMPACT + 1e-4)).toBe(8.000066666666667);
-    expect(SoundBus.landingRadius(NaN)).toBe(SOUND_CLASSES.landing.paintRadius);
-    // Different bands, and neither reads the other's constants.
-    expect(SoundBus.impactRadius(9.5)).not.toBe(SoundBus.landingRadius(9.5));
   });
 });
 

@@ -34,7 +34,6 @@ import {
   defaultStructuredTunables,
   type StructuredTunables,
 } from './structured';
-import { RestingPrints } from './prints';
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -176,17 +175,22 @@ function floorAgeFor(cls: SoundClass, wave: WaveTunables, ramp: AgeRamp): number
 /**
  * Event-layer palette (§3.2): self is amber, and the pings are the same self, brighter.
  *
- * The two `prop-*` rows are §3.2's pale yellow, which is the right *colour* arriving by the
- * wrong road — this table is keyed on the class and §3.2's palette is keyed on the source, and
- * the two only agree because no player-made class is a prop and no prop-made class is a rig's.
- * That coincidence ends the moment anything else can knock a can, and `eventTint`
- * (`soundEvents.ts`) is the function that already answers the question properly and that nothing
- * calls. Wiring it is a separate job with its own screenshots; what is here is the honest
- * minimum, so a thrown can does not render as the player's own footstep.
+ * The `prop-*` rows and `sphere-boom` are §3.2's pale yellow, which is the right *colour*
+ * arriving by the wrong road — this table is keyed on the class and §3.2's palette is keyed on
+ * the source, and the two only agree because no player-made class is a prop and no prop-made
+ * class is a rig's. That coincidence ends the moment anything else can set a prop off, and
+ * `eventTint` (`soundEvents.ts`) is the function that already answers the question properly and
+ * that nothing calls. Wiring it is a separate job with its own screenshots; what is here is the
+ * honest minimum, so a sphere going off does not render as the player's own footstep.
+ *
+ * `sphere-boom` is the brightest of that family and deliberately the brightest marker in the
+ * table: it is the loudest single thing the player can put anywhere, and the marker is the only
+ * part of it drawn at a place rather than across the geometry it reached.
  *
  * `throw-windup` stays in the amber family and at the bottom of it, because it *is* the rig: the
  * arm winding up is the player making a noise, exactly as a crouch-step is, and it is the
- * quietest thing either of them does.
+ * quietest thing either of them does. In practice it is never drawn — its origin is the rig's own
+ * hand, which `handle` refuses markers inside — and it keeps a row because the table is total.
  */
 const EVENT_COLORS: Record<SoundClass, number> = {
   'crouch-step': 0xd98a2b,
@@ -198,6 +202,7 @@ const EVENT_COLORS: Record<SoundClass, number> = {
   'prop-impact': 0xf2df9a,
   'prop-knock': 0xd9c47e,
   'throw-windup': 0xd98a2b,
+  'sphere-boom': 0xfff2c0,
 };
 
 /** How many event-layer markers can be alive at once. */
@@ -303,19 +308,6 @@ export class PaintSystem {
   readonly wave: WaveTunables;
   /** The reveal itself: exact geometry, unlocked by sound. */
   readonly structured: StructuredPaint;
-  /**
-   * The matter layer for things the lattice cannot hold: objects that came to rest somewhere.
-   *
-   * It lives *here*, beside the lattice and behind the same hearing gate, rather than inside
-   * `structured.ts`, because the lattice is built once off the collider list and never edited —
-   * a can moves, and retracting lattice points is exactly what that structure is not for. What a
-   * print does share is everything about how paint *looks*: it draws with the lattice's own dot
-   * `ShaderMaterial` instance, so the age ramp, the §3.6 window and every dev-panel slider that
-   * moves either of them reach a cairn without one line of duplication. The seam is one extra
-   * `handle` call below, on the same event, inside the same gate.
-   */
-  readonly prints: RestingPrints;
-
   private readonly eventPositions = new Float32Array(EVENT_CAPACITY * 3);
   private readonly eventColors = new Float32Array(EVENT_CAPACITY * 3);
   private readonly eventBirths = new Float32Array(EVENT_CAPACITY);
@@ -333,6 +325,12 @@ export class PaintSystem {
 
   private time = 0;
   private readonly listener = new THREE.Vector3();
+  /**
+   * The rig's own shell: feet at `y`, `radius` across, `height` tall. Zero until something says
+   * otherwise, which is what makes the guard below inert for a `PaintSystem` nobody has told
+   * about a body (a unit test, a tool staging events by hand).
+   */
+  private readonly body = { x: 0, y: 0, z: 0, radius: 0, height: 0 };
   private readonly viewportSize = new THREE.Vector2();
   private readonly scratchColor = new THREE.Color();
   private projScale = 500;
@@ -369,7 +367,6 @@ export class PaintSystem {
       options.structured ?? defaultStructuredTunables(),
       options.latticeSeed,
     );
-    this.prints = RestingPrints.forLattice(this.structured);
 
     this.eventGeometry.setAttribute('position', new THREE.BufferAttribute(this.eventPositions, 3));
     this.eventGeometry.setAttribute('aColor', new THREE.BufferAttribute(this.eventColors, 3));
@@ -405,7 +402,6 @@ export class PaintSystem {
     this.dust.setLook(this.wave.dustGain, this.wave.dustSize, this.wave.dustShell);
 
     this.root.add(this.eventPoints, this.tracer.object, this.dust.object, this.structured.object);
-    this.root.add(this.prints.object);
     this.structured.setActive(true);
     this.applyTunables();
   }
@@ -424,7 +420,6 @@ export class PaintSystem {
       this.wave.refreshSeconds,
       this.wave.featherStart,
     );
-    this.prints.applyLook(this.wave.refreshSeconds, this.wave.featherStart);
   }
 
   /**
@@ -465,6 +460,22 @@ export class PaintSystem {
   }
 
   /**
+   * Where the rig's own shell is: feet at (x, feetY, z), `radius` across, `height` tall.
+   *
+   * Separate from `setListener` because they are different things measured from different
+   * places — the ear is a point at eye height, the shell is a cylinder standing on the floor —
+   * and the one rule that reads this (`insideOwnBody`) is a rule about the *volume*. Set to a
+   * zero radius, or never set at all, and that rule is inert.
+   */
+  setBody(x: number, feetY: number, z: number, radius: number, height: number): void {
+    this.body.x = x;
+    this.body.y = feetY;
+    this.body.z = z;
+    this.body.radius = radius;
+    this.body.height = height;
+  }
+
+  /**
    * Recomputes the world-units-to-pixels factor for `gl_PointSize`. Depends on the vertical
    * FOV and the drawing buffer height, so it is refreshed every frame rather than cached.
    */
@@ -486,7 +497,6 @@ export class PaintSystem {
     this.lastRefreshFloor = 0;
     this.diagTime = Number.NaN;
     this.structured.clear();
-    this.prints.clear();
     this.flushEvents();
   }
 
@@ -510,7 +520,23 @@ export class PaintSystem {
       )
     ) {
       this.lastRefreshFloor = floorAgeFor(event.class, this.wave, this.ramp);
-      this.addEventMarker(event);
+      /*
+       * §3.2's event layer marks *where something happened*, and a place inside your own chassis
+       * is not one. The marker is a world-sized sprite, so an origin a few centimetres from the
+       * eye covers the screen: the wind-up, emitted at the rig's own hand, drew an amber wash
+       * across the middle of the frame every time the arm went back — a readout nobody asked for,
+       * in the one place §14 keeps clear, reporting a position the player already occupies.
+       *
+       * The guard is the volume and not the class, so it protects every emitter that will ever
+       * put a sound on the rig: the arm today, a chip active, a revive, an artifact clanging
+       * against the rack. The consequence, stated because it is the whole of the change: *no*
+       * noise the body makes at the body draws a marker any more — footfalls, landings and both
+       * pings all originate inside the shell. None of them were ever visible (a sprite at zero
+       * depth is clipped, not drawn), so what this removes is the near-miss cases where the
+       * camera's bob put one just far enough away to bloom. The paint and the sound are
+       * untouched: the room still lights, the world still hears it, and the Halo still flares.
+       */
+      if (!this.insideOwnBody(event)) this.addEventMarker(event);
       this.addWave(event);
       if (event.class === 'e-ping') this.fireTracer(event);
       // Everything above this line belongs to the *sound* — the marker, the travelling front,
@@ -518,9 +544,6 @@ export class PaintSystem {
       // found it. The refresh floor is a property of the sound, not of the reveal, so it is
       // handed over rather than re-derived.
       this.structured.handle(event, this.time, this.lastRefreshFloor);
-      // A print is matter and takes the matter layer's answer to the same event, on the same
-      // wave slot the lattice just used — one sound, one front, both surfaces it reached.
-      this.prints.handle(event, this.time, this.lastRefreshFloor, this.structured.lastWaveSlot);
     }
     this.diagTime = Number.NaN;
   };
@@ -528,6 +551,18 @@ export class PaintSystem {
   /** The floor the newest heard event's refresh carried, seconds. */
   get refreshFloor(): number {
     return this.lastRefreshFloor;
+  }
+
+  /**
+   * How many event-layer markers have been drawn this run — monotonic, and never reset.
+   *
+   * Published for the same reason `refreshFloor` is: the guard in `handle` is a *policy* (a
+   * sound made inside your own shell is heard and paints, and is not marked), and a policy
+   * nothing can read is a policy nothing can hold. The ring buffer clamps the draw range, not
+   * this count, so a test can ask "did that event draw a marker" without owning a renderer.
+   */
+  get eventMarkers(): number {
+    return this.eventIndex;
   }
 
   /** Fronts still expanding, newest last. Read by the dust field and by the diagnostics. */
@@ -581,6 +616,17 @@ export class PaintSystem {
     );
   }
 
+  /** Is this event's origin inside the rig's own shell? See the guard in `handle`. */
+  private insideOwnBody(event: SoundEvent): boolean {
+    const b = this.body;
+    if (!(b.radius > 0)) return false;
+    const dy = event.y - b.y;
+    if (dy < 0 || dy > b.height) return false;
+    const dx = event.x - b.x;
+    const dz = event.z - b.z;
+    return dx * dx + dz * dz <= b.radius * b.radius;
+  }
+
   private addEventMarker(event: SoundEvent): void {
     const slot = this.eventIndex % EVENT_CAPACITY;
     const i3 = slot * 3;
@@ -631,7 +677,6 @@ export class PaintSystem {
     this.tracer.dispose();
     this.dust.dispose();
     this.structured.dispose();
-    this.prints.dispose();
     this.root.clear();
   }
 }

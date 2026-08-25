@@ -168,11 +168,11 @@ describe('how loud, at a distance', () => {
         checked++;
       }
     }
-    // Nine classes over four materials, less the single cell that never reaches the near field
-    // (the next test names it). It read 23 while the table held six classes: this is the
-    // *cardinality of the sweep*, pinned so that a class silently dropping out of the loop is a
-    // failure rather than a quieter test, and it moves exactly when the class table does.
-    expect(checked).toBe(35);
+    // Ten classes over four materials, less the single cell that never reaches the near field
+    // (the next test names it). It read 23 while the table held six classes and 35 at nine: this
+    // is the *cardinality of the sweep*, pinned so that a class silently dropping out of the
+    // loop is a failure rather than a quieter test, and it moves when the class table does.
+    expect(checked).toBe(39);
   });
 
   it('except for the one sound that never carries as far as your own feet', () => {

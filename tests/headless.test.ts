@@ -5,7 +5,7 @@
  * hand. This file proves the assembled thing does: `createHeadlessGame` builds the same `GameSim`
  * the browser builds, and `ScriptedInput` drives it through the same `GameInputSource` the
  * keyboard implements — no setters, no mocks, no swapped-out paint system. Everything after M0
- * (dogs, throwables, audio) gets tested through this door.
+ * (spheres, spiders, audio) gets tested through this door.
  *
  * Two things here are not about the simulation being right, but about it being *testable*:
  *  - the DOM guard, which fails loudly the day something inside the sim reaches for `document`;
@@ -74,9 +74,9 @@ describe('walking, headless', () => {
    * is the one place in the process that can see the middle of a tick. Move any of the three
    * below `player.update` and this goes red.
    *
-   * The run throws a can as well as walking and pinging, because the hand emits from a different
-   * place in the tick than the legs do (`throwables.update` runs above `player.update`) and an
-   * emitter that ran before the clock was advanced would stamp its impact into the past — a
+   * The run throws a sphere as well as walking and pinging, because the hand emits from a
+   * different place in the tick than the legs do (`spheres.update` runs above `player.update`)
+   * and an emitter that ran before the clock was advanced would stamp its boom into the past — a
    * wavefront arriving before the sound was made. The class list is asserted at the bottom so
    * that this cannot go quietly vacuous if the throw ever stops reaching the bus.
    */
@@ -124,7 +124,7 @@ describe('walking, headless', () => {
     expect(classes.has('walk-step')).toBe(true);
     expect(classes.has('q-ping')).toBe(true);
     expect(classes.has('throw-windup')).toBe(true);
-    expect(classes.has('prop-impact') || classes.has('prop-knock')).toBe(true);
+    expect(classes.has('sphere-boom')).toBe(true);
     game.sim.dispose();
   });
 
@@ -359,8 +359,7 @@ describe('how much the bus is asked to carry', () => {
   /**
    * A characterization number, not a budget — the bus gates nothing, and it must not: a dropped
    * event is a sound that painted nothing, which design law 2 forbids outright. What this pins
-   * is the *shape* of today's traffic, so that when M2's twenty throwables or M4's spiders
-   * arrive, the difference between "more emitters" and "an emitter that fires every tick instead
+   * is the *shape* of today's traffic, so that when M4's spiders arrive, the difference between "more emitters" and "an emitter that fires every tick instead
    * of every contact" is a number in a diff rather than a frame-rate mystery.
    */
   it('pins the scripted run\'s worst tick', () => {

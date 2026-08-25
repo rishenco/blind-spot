@@ -32,8 +32,6 @@ import {
 import {
   COMPOSED_CLASSES,
   CONTACT_CLASSES,
-  IMPACT_FULL_SPEED,
-  IMPACT_MIN_SPEED,
   LANDING_FULL_IMPACT,
   PLAYER_EMITTER_ID,
   SOUND_CLASSES,
@@ -103,6 +101,10 @@ describe('which classes have a material at all', () => {
       'prop-impact': true,
       'prop-knock': true,
       'throw-windup': false,
+      // A sphere's boom is a detonation, not a contact: the energy is the sphere's own, so the
+      // surface it went off against gets no say in how loud it was. Scaled, the same explosion
+      // would carry 19.2 m over dust and 48 m over steel.
+      'sphere-boom': false,
     });
   });
 
@@ -120,6 +122,7 @@ describe('which classes have a material at all', () => {
       'prop-impact': true,
       'prop-knock': true,
       'throw-windup': false,
+      'sphere-boom': false,
     });
     for (const cls of Object.keys(SOUND_CLASSES) as SoundClass[]) {
       if (isComposedClass(cls)) expect(isContactClass(cls), cls).toBe(true);
@@ -346,10 +349,11 @@ describe('a composed contact is priced by both bodies (§3.9 generalized)', () =
     }
   });
 
-  it('scales a speed-scaled paint radius too, by the same pair', () => {
-    // §3.9's "every radius the event carries": the impact computed its own paint radius from how
-    // fast the thing was going before the bus saw it, and the two bodies still price it.
-    const radius = SoundBus.impactRadius(IMPACT_FULL_SPEED);
+  it('scales a paint radius the event brought with it, by the same pair', () => {
+    // §3.9's "every radius the event carries": an emitter that computed its own paint radius
+    // before the bus saw it — a landing reading its impact speed, and whatever prices core-loop
+    // §2's artifact clang — is still scaled by both bodies, not just by the class default.
+    const radius = 12;
     const e = hit(MAT_METAL, MAT_DUST, { paintRadius: radius });
     expect(e.paintRadius).toBe(radius * gm(MAT_METAL, MAT_DUST));
     // Hearing stays the class's, scaled by the same pair — speed moves paint, not ear level.
@@ -408,14 +412,6 @@ describe('a composed contact is priced by both bodies (§3.9 generalized)', () =
     // And a class with only one body ignores the argument it was never given a meaning for.
     expect(materialVoiceFor('walk-step', MAT_METAL)).toBe(materialLoudness(MAT_METAL));
     expect(materialVoiceFor('q-ping', null)).toBe(1);
-  });
-
-  it('is silent below the speed that makes a contact a sound at all', () => {
-    // The set-down verb, free: the emitter gates on this and never reaches the bus, so placing a
-    // can is the quiet way to move it. Pinned here because the band's floor is what makes that
-    // verb exist rather than a comment in an emitter that does not exist yet.
-    expect(SoundBus.impactRadius(IMPACT_MIN_SPEED)).toBe(impact.paintRadius);
-    expect(IMPACT_MIN_SPEED).toBeLessThan(IMPACT_FULL_SPEED);
   });
 });
 

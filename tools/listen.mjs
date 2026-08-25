@@ -85,6 +85,7 @@ const { PLAYER_EMITTER_ID, SoundBus } = await load('/src/paint/soundEvents.ts');
 const { MATERIAL_NAMES } = await load('/src/paint/materials.ts');
 const { canOccupy } = await load('/src/core/collision.ts');
 const { humPitch } = await load('/src/paint/halo.ts');
+const { SPHERE_RADIUS } = await load('/src/game/spheres.ts');
 
 // ---------------------------------------------------------------------------
 //  writing a wav
@@ -258,7 +259,12 @@ function surfaceFor(world, body, mat) {
     if (!fits(world, body, cx, b.maxY + 0.05, cz)) continue;
     const run = Math.max(w, d);
     if (best === null || run > best.run) {
-      best = { run, top: b.maxY, cx, cz, alongX: w >= d, mat };
+      // The box itself rides along, because a scene that stages a throw *onto* this surface has
+      // to be able to prove afterwards that the thing came down on it. Two of the room's
+      // materials share a height — the dust apron is the same continuous slab as the concrete
+      // floor (§3.9) — so "landed at the right altitude" does not distinguish them and a
+      // footprint is the only answer that does.
+      best = { run, top: b.maxY, cx, cz, alongX: w >= d, mat, box: b };
     }
   }
   return best;
@@ -341,6 +347,12 @@ async function renderScene(scene, withHum) {
       cls: event.class,
       mat: event.mat === null ? null : MATERIAL_NAMES[event.mat],
       carries: event.hearingRadius,
+      // Where it happened. A scene that stages one sound per surface has to be able to say which
+      // surface each one came off, and for the classes that carry no material — the sphere's own
+      // boom is the whole of that list (§3.3) — the position is the only thing that can say it.
+      x: event.x,
+      y: event.y,
+      z: event.z,
       // How far the ear was from it. Not printed — the timeline is for a listener and a column
       // of metres is noise there — but half of `gainFor` is this number, so a scene that wants
       // to argue about level between two events has to be able to show they were equally far.
@@ -621,65 +633,59 @@ function buildScenes(world, body) {
   });
 
   /*
-   * §3.3's three throwable rows, in the order one throw produces them.
+   * §3.3's throwable rows, in the order one throw produces them.
    *
    * They are a scene of their own rather than another segment of 03 because every sound above
    * this line is a sound the body makes *at* the body — the ear is always within a metre of the
-   * source, and distance is a thing the file asserts rather than a thing you hear. A can is the
-   * first sound in the game that happens somewhere the player is not, and the only way to judge
-   * whether that reads is to hear one arm, one flight and one landing as a single continuous
+   * source, and distance is a thing the file asserts rather than a thing you hear. A sphere is
+   * the first sound in the game that happens somewhere the player is not, and the only way to
+   * judge whether that reads is to hear one arm, one flight and one boom as a single continuous
    * event with the metres audible in it.
    *
    * Everything here is the shipped path: `ScriptedInput` holds and releases the throw action on
-   * the real `GameSim`, `game/throwables.ts` charges the arm and integrates the ballistics, and
-   * `game/sim.ts` turns its contact records into bus events. Nothing in this file emits a can.
+   * the real `GameSim`, `game/spheres.ts` charges the arm and integrates the ballistics, and
+   * `game/sim.ts` turns its contact records into bus events. Nothing in this file emits a sphere.
    */
   scenes.push({
     file: '05-throw.wav',
-    title: 'the arm: a tap, the walk back for it, and a charge held to the click',
-    seconds: 9,
+    title: 'the arm: a tap, a charge held to the click, and the silence after each',
+    seconds: 8,
     listenFor: [
-      'One whole turn of the verb, in the order a player performs it. First a tap: the arm starts',
-      'with a dry tick at your own shoulder that carries 2.5 m and no further, and a can goes down',
-      'the lane. Two impacts as it lands and skips — and then nothing, because a `prop-knock`',
-      'carries 4.9 m on concrete and the can came to rest seven metres away. That silence is the',
-      'verb working. A throw puts a sound where you are not, and the tail of it is not addressed',
-      'to you; if you want to know where it stopped, you go and find out.',
-      'Then the price, which §3.3 says is threefold and two thirds of it are audible here. Four',
-      'walk-steps to fetch it — each one individually louder than anything the can said — and',
-      'one knock as it comes off the floor. Same class and material as the settle you did not',
-      'hear a moment ago; the only difference is that this one happened at your feet. Retrieval is',
-      'not free and it does not pretend to be.',
-      'Last, the charged throw, and the thing to count rather than listen to. Two ticks 0.9 s',
-      'apart: the arm starting, and full tension. They are the same sound — one class, one',
-      'voice, no second timbre for "ready" — so the *gap* is the meter and the second tick',
-      'is the readout. There is no charge bar in this game, and anything within 2.5 m heard you',
-      'wind it. Then a long flight and three impacts inside four tenths of a second: concrete,',
-      'the tank’s steel flank, concrete again. Carry over distance puts all three inside a',
-      'decibel of each other, so if you can tell which one was steel you are hearing §3.9’s',
-      'composed voice and not a volume change. 06 is that same comparison, controlled.',
+      'One whole turn of the verb, twice, in the order a player performs it. First a tap: the arm',
+      'starts with a dry tick at your own shoulder that carries 2.5 m and no further, and a sphere',
+      'goes down the lane. One boom where it arrives — and then nothing.',
+      'That nothing is the scene. A sphere is gone the instant it touches anything: there is no',
+      'bounce, no skitter, no settle a second later, no tail addressed to the thrower. Two full',
+      'seconds of room follow the first boom and they are empty, and if you ever hear a second',
+      'sound out of one throw then something has survived its own contact.',
+      'Then the charged throw, and the thing to count rather than listen to. Two ticks 0.9 s',
+      'apart: the arm starting, and full tension. They are the same sound — one class, one voice,',
+      'no second timbre for "ready" — so the *gap* is the meter and the second tick is the',
+      'readout. There is no charge bar in this game, and anything within 2.5 m heard you wind it.',
+      'Then a long flight, silent all the way, and one boom much further out than the first.',
+      'The two booms are the same voice at two distances and nothing else: the boom is the',
+      "sphere's own detonation, not the floor's (§3.3), so what changes between them is carry",
+      'over distance and your sense of where the room is. 06 is that claim, controlled.',
     ],
     cues: [
-      // A tap, level, straight down the spawn lane. `CAN_THROW_MIN` and no charge at all: the
-      // throw a player makes without thinking about it, and therefore the one that has to be
-      // legible with nothing held down to read.
+      // A tap, level, straight down the spawn lane. `SPHERE_THROW_MIN` and no charge worth the
+      // name: the throw a player makes without thinking about it, and therefore the one that has
+      // to be legible with nothing held down to read.
       [0.4, hold('throw')],
       [0.45, release('throw')],
-      // Walking starts a full half-second after the can has stopped, so the fetch never overlaps
-      // the flight. The two halves of the price have to be separable or the scene argues that a
-      // throw is loud, which is the one thing `world/cans.ts` says it must not be.
-      [2.4, hold('forward')],
-      [4.7, release('forward')],
-      // Held 1.3 s, comfortably past `CAN_CHARGE_SECONDS`. Not "long enough to charge" — long
+      // Nothing at all until 3.4 s. The empty stretch is load-bearing: it is the only way a file
+      // can argue that a thrown thing made *one* sound, and it has to be long enough that a
+      // listener stops expecting a second one.
+      [3.4, hold('throw')],
+      // Held 1.3 s, comfortably past `SPHERE_CHARGE_SECONDS`. Not "long enough to charge" — long
       // enough that the click lands well inside the hold, so a listener can hear that the arm
       // went quiet again afterwards, and that holding longer buys nothing but noise already made.
-      [5.6, hold('throw')],
-      [6.9, release('throw')],
+      [4.7, release('throw')],
     ],
     after: ({ sim, log }) => {
       const winds = log.filter((e) => e.cls === 'throw-windup').map((e) => e.t);
-      const knocks = log.filter((e) => e.cls === 'prop-knock');
-      const near = knocks.filter((e) => e.audible).length;
+      const booms = log.filter((e) => e.cls === 'sphere-boom');
+      const after = booms.length === 0 ? [] : log.filter((e) => e.t > booms[0].t && e.t < 3.3);
       return [
         /*
          * The check that matters most in this scene, and the reason it is written down rather
@@ -688,14 +694,11 @@ function buildScenes(world, body) {
          * clip and still is not silence. Only the rack knows whether the arm ever moved.
          */
         {
-          label: 'two cans left the rack and one of them came back',
-          ok:
-            sim.throwables.thrown === 2 &&
-            sim.throwables.carried === 3 &&
-            sim.throwables.refused === 0,
+          label: 'two spheres left the rack and neither came back',
+          ok: sim.spheres.thrown === 2 && sim.spheres.carried === 2 && sim.spheres.refused === 0,
           detail:
-            `thrown ${sim.throwables.thrown}, rack ${sim.throwables.carried}, ` +
-            `refused ${sim.throwables.refused}`,
+            `thrown ${sim.spheres.thrown}, rack ${sim.spheres.carried}, ` +
+            `refused ${sim.spheres.refused}, ${sim.spheres.inWorld} still in the air`,
         },
         {
           label: 'the arm wound twice and reached full tension once',
@@ -705,26 +708,41 @@ function buildScenes(world, body) {
             (winds.length === 3 ? ` — ${(winds[2] - winds[1]).toFixed(2)} s of held charge` : ''),
         },
         {
-          // Both sides of one hearing gate, from one class, in one file. If the settle across
-          // the room ever becomes audible the scene still renders and still sounds fine — and
-          // the argument the annotation makes about §3.3's 4 m row quietly stops being true.
-          label: 'a knock sounded at the feet and the settle across the room did not',
-          ok: near > 0 && near < knocks.length,
-          detail: `${near} of ${knocks.length} knocks inside a prop-knock's carry`,
+          // One throw, one sound, and the sound is the sphere's own: `sphere-boom` is not a
+          // contact class, so it names no material and nothing scales it (§3.3, §3.9). A boom
+          // that arrived carrying a material would be the surface speaking through it.
+          label: 'each throw made exactly one boom, and the boom belongs to no surface',
+          ok: booms.length === 2 && booms.every((b) => b.audible && b.mat === null),
+          detail:
+            booms.map((b) => `${b.t.toFixed(2)}s at ${b.d.toFixed(2)} m`).join(', ') ||
+            'no booms',
+        },
+        {
+          // The negative half, asked of the bus rather than of the ear. Nothing survives its own
+          // contact, so between the first boom and the second wind-up the world has nothing to
+          // say — no second impact, no settle, no knock. A tail here is a sphere that lived.
+          label: 'and nothing at all followed it',
+          ok: booms.length === 2 && after.length === 0,
+          detail:
+            after.length === 0
+              ? `${(3.3 - (booms[0]?.t ?? 0)).toFixed(2)} s of empty room after the first boom`
+              : `${after.length} event(s) after it: ${after.map((e) => e.cls).join(', ')}`,
         },
       ];
     },
   });
 
   /*
-   * §3.9's composed voice, made judgeable — the claim that an impact is *two* materials, the
-   * arriving body as the attack and the struck surface as the resonance, at a level that is the
-   * mean of the two in dB.
+   * The boom against every floor the room owns — a scene written to come out the same four times.
    *
-   * Nothing in normal play can test that claim, because a thrown can lands once, on whatever
-   * happened to be there, with no second landing to hold it against. So this scene is the
-   * comparison and nothing else: one can (always metal, always ×1.5, always the same attack) at
-   * every floor the room owns, thrown the same way each time.
+   * §3.3 gives `sphere-boom` a fixed 12 m of paint and 32 m of carry and no material column, and
+   * §3.9's multipliers scale contact sounds only. A sphere is not a can: it does not strike a
+   * surface so much as stop existing against one, and the noise it makes is its own. So the
+   * surface underneath a boom has no vote, and this file is how that is checked by ear.
+   *
+   * It is deliberately a negative result. 03 and the old throw-materials scene were written so
+   * that a listener could tell four surfaces apart; this one is written so that they cannot, and
+   * the moment anyone can, something has handed the boom a material it must not have.
    *
    * The body is set down 5 cm onto each surface where 03 drops it 1.6 m. 03 wants that landing —
    * a landing is the loudest thing a *surface* says and the fastest way to learn its voice. Here
@@ -733,71 +751,93 @@ function buildScenes(world, body) {
    */
   const lobs = materials.map((m, i) => ({ ...m, at: 0.4 + i * 3.2 }));
   scenes.push({
-    file: '06-throw-materials.wav',
-    title: `the same can onto ${lobs.map((m) => m.name).join(' → ')}`,
+    file: '06-boom-materials.wav',
+    title: `the same boom over ${lobs.map((m) => m.name).join(' → ')}`,
     seconds: (lobs[lobs.length - 1]?.at ?? 0) + 2.6,
     note:
       missing.length > 0
         ? `no surface in this room to throw at for: ${missing.join(', ')}`
         : null,
     listenFor: [
-      'The same can, thrown identically, onto each floor the room has. The body stands on the',
-      'surface and lobs it two metres along that same surface, so the ear is the same distance',
-      'from all four landings — `gainFor` is carry over distance, and with the distance held',
-      'equal the carry figures in the timeline *are* the level, exactly and nothing else.',
-      'Level is therefore the easy half, and it is not the half that matters. What has to survive',
-      'is identity. The strike is the same bright metal tick every time, because the can never',
-      'changes; what answers it differs every time. Steel rings for about a third of a second,',
-      'stone knocks and stops, dust takes the tick and gives nothing back. If the four segments',
-      'differ mainly in how loud they are, the composed voice has collapsed into a volume knob and',
-      'a thrown can has lost the only thing it can do — tell you where it landed.',
-      'Each segment ends with two soft knocks: the same can settling, same pair of materials, far',
-      'less energy behind them. That is what the tail of a throw sounds like when it happens near',
-      'enough to hear — which in 05, at seven metres, it did not.',
+      'The same sphere, thrown identically, onto each floor the room has. The body stands on the',
+      'surface and lobs it a metre along that same surface, so the ear is the same distance from',
+      'all four booms — `gainFor` is carry over distance, and with the distance held equal the',
+      'carry figures in the timeline *are* the level, exactly and nothing else.',
+      'What you are listening for is that nothing changes. Four booms over four different floors,',
+      'and steel, stone, concrete and dust get no say in any of them: the boom is the sphere',
+      "going off, not the floor being struck, and §3.3 gives it no material column to read.",
+      'If you can tell which segment is the steel one, a contact voice has leaked into a',
+      'non-contact class and §3.9 is now scaling something it was never meant to touch.',
+      'Note also what each segment does *not* end with. There is no settle, no second tick, no',
+      'tail — four sounds in the whole file, one per throw, and long quiet stretches between them.',
     ],
     cues: lobs.flatMap((m) => [
       [m.at, (s) => s.placeOn(m.surface, 0.05)],
       /*
-       * 60° down. Steep enough that the can is on the ground inside a second and never leaves
-       * the surface its segment staged — a can that skips off the bench onto the floor is a
-       * segment arguing about two materials at once. Shallow enough that it lands two metres out,
-       * well outside `CAN_REACH`: a can that comes down at your own feet is one the rig lifts or
-       * boots on the next tick, and then the sound is about the body again.
+       * 60° down. Steep enough that the sphere is on the ground inside a second and never leaves
+       * the surface its segment staged — a sphere that clears the bench and goes off on the floor
+       * is a segment arguing about two surfaces at once. The tap that follows carries it about a
+       * metre, which is far enough out that the boom is a place in the room rather than a noise
+       * at the ear, and short enough to stay on the smallest surface the room offers.
        */
       [m.at + 0.25, (s) => s.turn(0, -60)],
       [m.at + 0.45, hold('throw')],
       [m.at + 0.55, release('throw')],
     ]),
     after: ({ log }) => {
-      const firsts = [];
-      let prev = null;
-      for (const e of log) {
-        if (e.cls !== 'prop-impact') continue;
-        if (e.mat !== prev) firsts.push(e);
-        prev = e.mat;
-      }
-      const struck = firsts.map((e) => e.mat);
-      const want = lobs.map((m) => m.name);
-      const spread =
-        firsts.length === 0
-          ? Infinity
-          : Math.max(...firsts.map((e) => e.d)) - Math.min(...firsts.map((e) => e.d));
+      const booms = log.filter((e) => e.cls === 'sphere-boom');
+      /** Did this boom happen over the footprint of the surface its segment staged? */
+      const over = (b, surface) => {
+        const box = surface.box;
+        return (
+          b.x >= box.minX - 0.05 &&
+          b.x <= box.maxX + 0.05 &&
+          b.z >= box.minZ - 0.05 &&
+          b.z <= box.maxZ + 0.05 &&
+          Math.abs(b.y - (box.maxY + SPHERE_RADIUS)) < 0.05
+        );
+      };
+      const placed =
+        booms.length === lobs.length && booms.every((b, i) => over(b, lobs[i].surface));
+      const reach = booms.map((b) => b.d);
+      const dSpread = booms.length === 0 ? Infinity : Math.max(...reach) - Math.min(...reach);
+      const carries = [...new Set(booms.map((b) => b.carries.toFixed(3)))];
       return [
         {
-          label: 'each can landed on the surface its segment staged',
-          ok: struck.length === want.length && struck.every((m, i) => m === want[i]),
-          detail: `staged ${want.join(' → ')}, struck ${struck.join(' → ') || 'nothing'}`,
+          label: 'each sphere went off over the surface its segment staged',
+          ok: placed,
+          detail:
+            booms.length === 0
+              ? `staged ${lobs.map((m) => m.name).join(' → ')}, nothing went off`
+              : booms
+                  .map((b, i) => `${lobs[i]?.name ?? '?'} at y=${b.y.toFixed(2)}`)
+                  .join(', '),
         },
         {
           /*
-           * The comparison is fair only if the ear was equally far from every landing. Level is
-           * carry over distance, so a segment that flew a hand's breadth further would be quieter
-           * for a reason that has nothing to do with its material — and the file would then be
-           * making the opposite of the argument it was written to make, inaudibly.
+           * The comparison is fair only if the ear was equally far from every boom. Level is
+           * carry over distance, so a segment that flew a hand's breadth further would be
+           * quieter for a reason that has nothing to do with the floor — and the file would then
+           * be making the opposite of the argument it was written to make, inaudibly.
            */
           label: 'every segment threw the same throw',
-          ok: spread < 0.01,
-          detail: firsts.map((e) => `${e.mat} at ${e.d.toFixed(3)} m`).join(', ') || 'no impacts',
+          ok: dSpread < 0.01,
+          detail: booms.map((b) => `${b.d.toFixed(3)} m`).join(', ') || 'no booms',
+        },
+        {
+          /*
+           * And the point of the scene, in one line. Same class, same carry, no material, equal
+           * distance: four identical inputs to `voiceFor`, so four identical sounds. The day a
+           * material reaches this event, this is the guard that says so rather than the ear.
+           */
+          label: 'and the four booms are one sound, four times',
+          ok:
+            booms.length === lobs.length &&
+            carries.length === 1 &&
+            booms.every((b) => b.mat === null),
+          detail:
+            `${booms.length} boom(s), carrying ${carries.join(' / ')} m, ` +
+            `material ${[...new Set(booms.map((b) => String(b.mat)))].join('/')}`,
         },
       ];
     },

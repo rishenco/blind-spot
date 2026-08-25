@@ -125,9 +125,9 @@ export function defaultStructuredTunables(): StructuredTunables {
 /**
  * Birth stamp meaning "nothing was ever known here".
  *
- * Exported because the lattice is no longer the only thing stamped with it: `paint/prints.ts`
- * lays a handful of dots that are not on any surface and rides the same shader, the same ramp
- * and the same sentinel. One number, so "never heard" cannot mean two things in one draw call.
+ * Exported because the lattice need not be the only thing stamped with it: anything that hangs
+ * its own dots off `dotLayerMaterial` rides the same shader, the same ramp and the same
+ * sentinel. One number, so "never heard" cannot mean two things in one draw call.
  */
 export const NEVER_HEARD = -1e9;
 /** How many recent events can still be rippling at once. */
@@ -181,7 +181,7 @@ export function smoothstep(edge0: number, edge1: number, x: number): number {
  * The age an item is displaying this instant, under the exact curve the dot shader runs.
  *
  * A free function rather than a method because it is the *policy*, not this class's copy of it.
- * `paint/prints.ts` stamps its dots into the same shader with the same dual stamp, and a second
+ * Anything else that stamps dots into this shader does it with the same dual stamp, and a second
  * hand-written mirror of these four lines is a second answer to "how old does that look" — free
  * to drift from the one on screen, and drifting silently. There is one curve; anything that
  * writes a stamp asks it here.
@@ -320,9 +320,10 @@ const DOT_VERTEX = /* glsl */ `
    *
    * The lattice is a hundred thousand dots that are all the same size, so a per-dot float for it
    * would be 400 KB saying "1" — which is why the geometry omits the attribute and the
-   * material's defaultAttributeValues answers 1 for every vertex that lacks it. The consumer is
-   * paint/prints.ts: a resting print is a cairn whose centre dot is larger than its ring, and
-   * form is the only encoding a print is allowed (§3.2 forbids geometry taking a source's hue).
+   * material's defaultAttributeValues answers 1 for every vertex that lacks it. It has no
+   * consumer today — the resting-print layer that wanted it went with the can it printed — and it
+   * is kept because form is the only encoding a second dot layer is ever allowed (§3.2 forbids
+   * geometry taking a source's hue), so it is the knob the next one has to reach for.
    *
    * The zero fallback below is not defensive noise. If the default-attribute path ever stopped
    * firing, an absent attribute reads as 0 and *every dot in the game* would collapse to nothing
@@ -886,10 +887,9 @@ export class StructuredPaint {
    * Handed out rather than copied, because everything the material carries — the age ramp, the
    * §3.6 draw window, the refresh ease, the dot size and every dev-panel slider that moves them
    * — is *policy*, and a second material would be a second answer to all of it that nothing
-   * keeps in step. `paint/prints.ts` hangs a second `Points` off this exact instance, so a
-   * resting print cools on the same curve as the wall behind it by construction rather than by
-   * agreement. The one thing a print supplies for itself is `aScale`, which the lattice does not
-   * carry at all (see `DOT_VERTEX`).
+   * keeps in step. A second `Points` hung off this exact instance cools on the same curve as the
+   * wall behind it by construction rather than by agreement. The one thing such a layer supplies
+   * for itself is `aScale`, which the lattice does not carry at all (see `DOT_VERTEX`).
    */
   get dotLayerMaterial(): THREE.ShaderMaterial {
     return this.dotMaterial;

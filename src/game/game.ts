@@ -21,8 +21,8 @@ import { BloomChain, defaultBloomTunables, isSoftwareRenderer } from '../paint/p
 import { REVEAL_BACKGROUND } from '../world/room';
 import { PLAYER_EMITTER_ID } from '../paint/soundEvents';
 import type { ListenerState } from '../audio/director';
-import { CAN_CHARGE_SECONDS } from '../world/cans';
 import { GameSim, Q_PING_HEIGHT } from './sim';
+import { SPHERE_CHARGE_SECONDS, SPHERE_COUNT } from './spheres';
 
 /**
  * The one line of text on screen, and the whole of the game's discoverability.
@@ -41,7 +41,7 @@ export const HELP: HelpRow[] = [
   { keys: 'Space', action: 'jump — landings paint hard · at a ledge, climb' },
   { keys: 'Q', action: 'spatial ping — 360°, 12 m, the room read' },
   { keys: 'E', action: 'directed ping — 110°, 22 m, the look-around' },
-  { keys: 'F', action: 'throw a can — hold to charge · walk into one to pick it up' },
+  { keys: 'F', action: 'throw a sphere — hold to charge · one boom where it lands' },
   { keys: 'L', action: 'reveal — lights on, for comparison only' },
   { keys: 'B', action: 'bloom on / off' },
   { keys: 'T', action: 'paint clock speed — x1, x0.1 (watch a wave), x10, x60' },
@@ -107,9 +107,9 @@ export class Game {
    * lil-gui's `listen()` polls an object, so the readout needs one to poll; these are refreshed
    * once per frame from the sim and are never read back. Two disabled rows rather than a HUD-only
    * reading because the rack is the one piece of state the throw verb has that the world does not
-   * show you — a can you are carrying makes no sound and paints nothing.
+   * show you — a sphere you are carrying makes no sound and paints nothing.
    */
-  private readonly handReadout = { cans: 0, charge: 0 };
+  private readonly handReadout = { spheres: 0, charge: 0 };
 
   constructor(ctx: GameCtx) {
     this.ctx = ctx;
@@ -172,9 +172,21 @@ export class Game {
     g.add({ toggle: () => this.setReveal(!this.revealOn) }, 'toggle').name('Reveal lights (L)');
     g.add({ view: () => this.sim.player.toggleView() }, 'view').name('Toggle view (V)');
     const hand = this.handReadout;
-    hand.cans = this.sim.throwables.carried;
-    g.add(hand, 'cans', 0, 8, 1).name('cans in rack (F throws)').listen().disable();
-    g.add(hand, 'charge', 0, CAN_CHARGE_SECONDS, 0.01).name('wind-up (s)').listen().disable();
+    hand.spheres = this.sim.spheres.carried;
+    const rack = g.add(hand, 'spheres', 0, SPHERE_COUNT, 1).name('spheres in rack (F throws)');
+    rack.listen().disable();
+    g.add(hand, 'charge', 0, SPHERE_CHARGE_SECONDS, 0.01).name('wind-up (s)').listen().disable();
+    /*
+     * The rack's refill rate, live — the one number of the throw verb that is genuinely open.
+     *
+     * A slider rather than a constant to edit because the two ends of it are both *uses*: 0 is an
+     * instant refill, which is how you tune anything else about the sphere without the wait
+     * getting in the way, and a large value is the off switch for a session that wants to know
+     * what four spheres and no more feels like. `Spheres.rechargeSeconds` is public and mutable
+     * for exactly this, and `advanceRecharge` reads it every tick, so a drag takes effect on the
+     * next one rather than at the next throw.
+     */
+    g.add(this.sim.spheres, 'rechargeSeconds', 0, 60, 0.5).name('sphere recharge (s)');
 
     /*
      * The reveal's own numbers.
@@ -323,14 +335,14 @@ export class Game {
      * on an empty rack lives for one tick; at 10 Hz the refusal would flash on some presses and
      * not others, which is a readout that teaches the player nothing except not to trust it.
      *
-     * `Throwables` is handed over whole rather than copied into a literal: it already reads as a
+     * `Spheres` is handed over whole rather than copied into a literal: it already reads as a
      * `RackSample` structurally, so this is one call and no allocation on a path that runs 120
      * times a second.
      */
-    this.ctx.hud.setRack(this.sim.throwables, dt);
+    this.ctx.hud.setRack(this.sim.spheres, dt);
 
-    this.handReadout.cans = this.sim.throwables.carried;
-    this.handReadout.charge = this.sim.throwables.charge;
+    this.handReadout.spheres = this.sim.spheres.carried;
+    this.handReadout.charge = this.sim.spheres.charge;
 
     this.hudTimer -= dt;
     if (this.hudTimer <= 0) {
@@ -345,7 +357,7 @@ export class Game {
     const diag = this.sim.paint.diagnostics();
     const st = this.sim.paint.structured.getStats();
     const cooldown = this.sim.pingCooldownSeconds;
-    const hand = this.sim.throwables;
+    const hand = this.sim.spheres;
     const handState = hand.charging
       ? `winding ${hand.charge.toFixed(2)} s → ${hand.pendingSpeed.toFixed(1)} m/s`
       : hand.inWorld > 0
@@ -372,7 +384,7 @@ export class Game {
           : 'settled',
       ],
       ['ping', cooldown > 0 ? `cooling ${cooldown.toFixed(2)} s` : 'ready  Q · E'],
-      ['hand', `${hand.carried} cans · ${handState}`],
+      ['hand', `${hand.carried} spheres · ${handState}`],
       ['clock', `${this.sim.clock.toFixed(1)} s ×${this.sim.timeScale}`],
       ['speed', `${s.speed.toFixed(2)} m/s · ${s.stance}${s.grounded ? '' : ' · air'}`],
       ['view', `${this.bloomOn ? 'bloom' : 'raw'}${this.revealOn ? ' · REVEAL' : ''}`],

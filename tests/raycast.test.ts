@@ -3,10 +3,10 @@
  *
  * Two jobs here, and they pull in opposite directions:
  *
- *  1. **Pin the new surface.** `raycastWorld` exists for M2 throwables (a bounce needs the
- *     normal, and a can off metal needs the *box*) and M4 spiders (surface-attach needs the
- *     normal), neither of which is written yet. So the tests have to state the contract those
- *     will be built on rather than describe today's only caller — especially the degenerate
+ *  1. **Pin the new surface.** `raycastWorld` exists for M2's thrown spheres (the boom leaves
+ *     along the normal, and the sweep has to hand back the *box* it struck) and M4 spiders
+ *     (surface-attach needs the normal). So the tests have to state the contract those are
+ *     built on rather than describe one caller — especially the degenerate
  *     answers, which are where a physics consumer actually lives: origin on a face, origin
  *     inside a box, ray along a face, `maxDist` landing exactly on the surface.
  *  2. **Prove the consolidation moved nothing.** `raySlabEnter` replaced two hand-written

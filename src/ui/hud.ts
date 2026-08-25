@@ -11,7 +11,7 @@
  * DOM, so a rule inside a method of this class is a rule nothing can test.
  */
 
-import { CAN_RACK_CAP } from '../world/cans';
+import { SPHERE_COUNT } from '../game/spheres';
 
 /**
  * The Halo ring's geometry, px — the two numbers `.bs-halo` is drawn from.
@@ -77,7 +77,7 @@ export const RACK_PIP_DROP_PX = 6;
  *
  * Not zero, because the readout's claim is "two of four" and not "two": a row that dropped its
  * empty slots would be a row whose *width* encoded the count, which is a length to compare
- * rather than a group to perceive, and comparing lengths is the counting `CAN_RACK_CAP` was
+ * rather than a group to perceive, and comparing lengths is the counting `SPHERE_COUNT` was
  * chosen to avoid. Four pips always, two of them lit.
  *
  * 0.22 is §3.6's memory-skeleton alpha floor, borrowed on purpose rather than tuned afresh: an
@@ -142,9 +142,9 @@ const STYLE = `
   margin: ${-HALO_RING_PX / 2}px 0 0 ${-HALO_RING_PX / 2}px;
   border-radius: 50%; border: ${HALO_RING_BORDER_PX}px solid var(--bs-accent);
 }
-/* The rack — how many cans are left, drawn the way world/cans.ts says the number is meant to be
-   read: "humans subitize up to four: a four-pip readout is *perceived*, not counted". So four
-   dots in a row and never a numeral, because a numeral is the thing that costs a glance.
+/* The rack — how many spheres are left, drawn the way game/spheres.ts says the number is meant
+   to be read: "humans subitize up to four: a four-pip readout is *perceived*, not counted". So
+   four dots in a row and never a numeral, because a numeral is the thing that costs a glance.
    Cyan, by the ring's argument directly above: this is chrome reporting a state the player owns,
    not a §3.2 event, and the amber that layer reserves for a self-event would claim at the centre
    of the screen that a noise had just happened where the rig is standing.
@@ -249,14 +249,15 @@ export const HALO_ALPHA_EPSILON = 0.0005;
  * How long one showing of the rack row lasts, seconds — from the trigger to fully dark.
  *
  * The row is not permanent, and that is §14's "no minimap, no compass, no objective markers"
- * applied to the one piece of state the world genuinely cannot show you: a can in the rack makes
- * no sound and paints nothing, so it is invisible by the rules the rest of the game plays by.
+ * applied to the one piece of state the world genuinely cannot show you: a sphere in the rack
+ * makes no sound and paints nothing, so it is invisible by the rules the rest of the game plays
+ * by.
  * The answer is not to draw it forever — a glyph that is always lit stops being read within a
  * minute and is then just a bright spot in the middle of a black screen, competing with §3.8's
  * ring for the one place on screen the player is already looking. The answer is to draw it when
  * the number is *in question*, which is what the three triggers in `advanceRackReadout` are.
  *
- * 1.6 s is roughly two beats of a wind-up (`CAN_CHARGE_SECONDS` is 0.9) — long enough that a
+ * 1.6 s is roughly two beats of a wind-up (`SPHERE_CHARGE_SECONDS` is 0.9) — long enough that a
  * glance a moment late still catches it, short enough that a throw and the row that reported it
  * are the same event in the player's head rather than two.
  */
@@ -278,11 +279,11 @@ export const RACK_PIP_FADE_SEC = 0.4;
 
 /** What the hand looks like to the readout — the three numbers, and nothing else about it. */
 export interface RackSample {
-  /** Cans in the rack. */
+  /** Spheres in the rack. */
   readonly carried: number;
   /** True for every frame the arm is winding. */
   readonly charging: boolean;
-  /** Monotonic count of F-presses that found an empty rack (`Throwables.refused`). */
+  /** Monotonic count of F-presses that found an empty rack (`Spheres.refused`). */
   readonly refused: number;
 }
 
@@ -294,7 +295,7 @@ export interface RackReadout {
   readonly carried: number;
   /** The refusal count the previous frame sampled. */
   readonly refused: number;
-  /** Lit pips, 0–`CAN_RACK_CAP`. */
+  /** Lit pips, 0–`SPHERE_COUNT`. */
   readonly filled: number;
   /** The row's opacity; exactly 0 when the row is not drawn at all. */
   readonly alpha: number;
@@ -303,7 +304,7 @@ export interface RackReadout {
 /**
  * The readout before anything has happened: dark, and remembering a rack it has never seen.
  *
- * `carried: 0` rather than `CAN_RACK_CAP` is deliberate. A run opens with a full rack, so the
+ * `carried: 0` rather than `SPHERE_COUNT` is deliberate. A run opens with a full rack, so the
  * first sample is a change and the row states the count once at spawn — which is the one moment
  * a player has not yet been told what they are carrying, and a readout that fired only on
  * *change* would never tell them.
@@ -319,7 +320,7 @@ export const RACK_READOUT_DARK: RackReadout = {
 /**
  * Lit pips for a rack count: clamped to the four slots the row has.
  *
- * The clamp is not defensive tidying, it is the row refusing to grow. `CAN_RACK_CAP` is four
+ * The clamp is not defensive tidying, it is the row refusing to grow. `SPHERE_COUNT` is four
  * because four is the ceiling of subitizing, so a fifth pip would not be more information — it
  * would convert the whole readout from something perceived into something counted, and the count
  * is what the row exists to avoid. A rack that somehow held five reads as four here and the bug
@@ -327,11 +328,11 @@ export const RACK_READOUT_DARK: RackReadout = {
  */
 export function rackFilledPips(carried: number): number {
   if (!(carried > 0)) return 0;
-  return carried < CAN_RACK_CAP ? Math.floor(carried) : CAN_RACK_CAP;
+  return carried < SPHERE_COUNT ? Math.floor(carried) : SPHERE_COUNT;
 }
 
 /**
- * Is the pip in slot `index` lit, given `filled` cans? Slots fill from the left.
+ * Is the pip in slot `index` lit, given `filled` spheres? Slots fill from the left.
  *
  * A line this small is a function because it is the *only* logic in `setRack`'s DOM write, and
  * the DOM write is the half of this file the node suite cannot reach. Left inline it would be
@@ -366,8 +367,8 @@ export function rackRowAlpha(since: number): number {
  *
  * ## The three triggers
  *
- * **The count changed.** A throw spent one, a can came back. The row reports what the number
- * became, at the moment it became it.
+ * **The count changed.** A throw spent one, the reactor finished rebuilding one. The row reports
+ * what the number became, at the moment it became it.
  *
  * **The arm is winding.** `charging` is a level, not an edge, so it re-arms the window every
  * frame and the row is up for the whole wind-up however long it is held. This is not covered by
@@ -375,7 +376,7 @@ export function rackRowAlpha(since: number): number {
  * moment the count decides whether to commit — the arm is back, is this the last one? — is the
  * one moment the row is dark.
  *
- * **A refusal.** F pressed on an empty rack. `Throwables.advanceCharge` deliberately makes no
+ * **A refusal.** F pressed on an empty rack. `Spheres.advanceCharge` deliberately makes no
  * sound for this and gives the argument in full: the world may not carry a noise that paints
  * nothing, and §3.8's Halo hum is the sole carve-out because it "has no position and no emitter,
  * and nothing in the world can hear it". This row is in exactly that category and nowhere near
@@ -428,13 +429,13 @@ export interface PixelBounds {
  * clearances that matter — the hole the screenshot suite depends on, and the ring the row sits
  * inside — without a browser and without a golden to re-bless.
  *
- * The row is `CAN_RACK_CAP` pips wide with a gap between each pair, centred horizontally on the
+ * The row is `SPHERE_COUNT` pips wide with a gap between each pair, centred horizontally on the
  * screen and dropped `RACK_PIP_DROP_PX` below it. No shadow and no glow, deliberately: `.bs-halo`
  * has none either, and a box-shadow would paint outside these bounds — which is to say it would
  * put pixels in the hole this function exists to keep clear of.
  */
 export function rackPipBounds(): PixelBounds {
-  const width = CAN_RACK_CAP * RACK_PIP_PX + (CAN_RACK_CAP - 1) * RACK_PIP_GAP_PX;
+  const width = SPHERE_COUNT * RACK_PIP_PX + (SPHERE_COUNT - 1) * RACK_PIP_GAP_PX;
   return {
     left: -width / 2,
     right: width / 2,
@@ -504,11 +505,11 @@ export class Hud {
     this.haloEl.className = 'bs-halo';
     this.setHalo(0);
 
-    // Four pips, built once and never rebuilt — `CAN_RACK_CAP` is the rack's size and the row's,
+    // Four pips, built once and never rebuilt — `SPHERE_COUNT` is the rack's size and the row's,
     // and the row is the same four dots all run whether they are lit or not.
     this.rackEl = document.createElement('div');
     this.rackEl.className = 'bs-rack bs-hidden';
-    for (let i = 0; i < CAN_RACK_CAP; i++) {
+    for (let i = 0; i < SPHERE_COUNT; i++) {
       const pip = document.createElement('div');
       pip.className = 'bs-rack-pip';
       this.pipEls.push(pip);

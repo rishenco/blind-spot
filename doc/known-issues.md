@@ -54,10 +54,11 @@ wrong everywhere, not just where it tunnels, and no amount of sweeping fixes it.
 **Owner: M4, and it no longer blocks M2.** M2 does not fix this and does not need it fixed:
 thrown bodies never enter `moveBody`. They run on their own swept integrator — landing during
 M2 as `src/core/ballistics.ts` — built on `raycastWorld`, whose contract was authored for exactly
-this — inclusive `maxDist` "for a thrown object stepped by `speed * dt`", the `t = 0`
-separate-don't-reflect rule, and a reflectable normal from inside a box. A can needs none of
-`moveBody`'s stance machinery (step-up, mantle slack, ground snap, coyote edges) and gets
-bounce for free by not asking for slide.
+this — inclusive `maxDist` "for a thrown object stepped by `speed * dt`", `t = 0` meaning
+contact rather than impact, and a usable normal from inside a box. A sphere needs none of
+`moveBody`'s stance machinery (step-up, mantle slack, ground snap, coyote edges), and it never
+has to survive slide semantics either, because it does not survive its first contact at all:
+one sweep, one boom, gone.
 
 What still owns the bug is the next fast mover that genuinely *is* a `moveBody` body: M4's
 spider, which pounces. The M4 fix is a swept horizontal pass, and it should land with a test
@@ -68,12 +69,13 @@ built from the corrected law above rather than the old one — a suite written a
 safe because the thinnest collider is Y m thick" must be recomputed against `Y/2 + r`, and any
 such claim about *unswept* motion is a smell in the first place.
 
-### Three of the four materials do not sound different, and a thrown can hides the fourth
+### Three of the four materials do not sound different
 
 `src/audio/voices.ts` (`MATERIAL_VOICES`) and `src/paint/soundEvents.ts` (`materialVoiceFor`).
-Measured by `tools/listen.mjs` §06, which lobs the *same* can two metres along each of the four
-floors the test room has, with the first impact of every segment 1.645 m from the ear to three
-decimals — so the distance term is held fixed and what is left is the material.
+Measured by `tools/listen.mjs` §06 as it stood while the throwable was still a can: it lobbed the
+*same* can two metres along each of the four floors the test room has, with the first impact of
+every segment 1.645 m from the ear to three decimals — so the distance term was held fixed and
+what was left was the material.
 
 Metal is unmistakable. Concrete, stone and dust are not distinguishable from each other.
 
@@ -88,28 +90,40 @@ rather than the centroid is the hardness axis, and it is right — but concrete'
 0.04–0.09 s and dust has one mode at 0.05 s, so on that axis those two are the same material and
 stone is only just not.
 
-**Level cannot rescue it, and the throw is why.** §3.9's normalization made the multiplier the
-sole level difference, so metal-to-dust is 20·log10(1.5/0.6) = 7.96 dB — except that
-`materialVoiceFor` composes a struck pair as the geometric mean of the two multipliers, which is
-the *arithmetic* mean in dB, so a fixed metal can halves every surface difference it lands on:
-3.98 dB across the whole table. Single-strike spread already reaches 3.70 dB (`audioSpec.ts`
-documents why: the loudness law is a power mean over 192 strikes precisely because one strike is
-not a measurement). The design gap and the noise floor are the same size.
+**The scene that took that measurement is gone. The voices it measured are not.** The can was
+replaced by the sphere, and §06 is now `06-boom-materials`, which asserts the opposite thing: a
+sphere's boom is the sphere's own voice, it names no material, and it comes out identical over
+all four floors. Nothing in the game composes two materials any more — `materialVoiceFor` and
+the two-part voice still ship and are still pinned by `tests/audio/composedVoice.test.ts`, but
+`prop-impact` and `prop-knock` have no emitter, so every material sound the game currently makes
+is a single-body contact: a footfall, or a landing. The table above stands as a record and the
+tool can no longer reproduce it.
 
-The consequence is specific and it lands on M2's own verb: **the can you throw to learn what is
-over there is the worst probe of what is over there the game could have handed you.** It drags
-the timbre toward metal and halves the level difference, in exchange for being loud. Plain
-landings on the same four floors separate better (metal +29.4 dB, stone +7.6, dust −0.3 against
-concrete at 100–150 ms) — so the composition is what flattens stone, and the table itself is what
-leaves concrete and dust identical.
+**What that retires, and what it does not.** It retires the half of this entry that blamed the
+throwable. The old argument was that a fixed metal can halves every surface difference it lands
+on, because `materialVoiceFor` composes a struck pair as the geometric mean of the two
+multipliers, which is the *arithmetic* mean in dB: §3.9's 20·log10(1.5/0.6) = 7.96 dB of
+metal-to-dust arrived as 3.98, against a single-strike spread that already reaches 3.70
+(`audioSpec.ts` documents why: the loudness law is a power mean over 192 strikes precisely
+because one strike is not a measurement). That halving is now latent rather than live, and the
+verb it used to indict no longer exists — a sphere cannot drag the timbre toward metal, because
+it brings no timbre at all.
 
-Not fixed here, because there are three candidate fixes and they are not interchangeable:
-weighting the composition toward the surface (physically right — the object gives the transient,
-the larger body gives the resonance); spreading the three dull voices apart in *tail*, which is
-free because the invariant in `tests/audio/materialVoices.test.ts` pins attack level and
-explicitly leaves timbre and decay alone; or widening dust's multiplier, which §3.9 already names
-as the honest knob and which moves paint radius and enemy hearing with it. Picking among them is
-a design call, not a repair.
+What survives is the table, on the single-body path that is now the only path. Plain landings on
+the same four floors separate better than the composed ones did — metal +29.4 dB, stone +7.6,
+dust −0.3 against concrete at 100–150 ms — which says the composition was what flattened stone,
+and the table itself is what leaves **concrete and dust the same sound**. That is the half that
+matters, because the apron fork is a concrete lane against a dust lane and the whole point of it
+is knowing which one you are on.
+
+Not fixed here, because there are two candidate fixes and they are not interchangeable:
+spreading the three dull voices apart in *tail*, which is free because the invariant in
+`tests/audio/materialVoices.test.ts` pins attack level and explicitly leaves timbre and decay
+alone; or widening dust's multiplier, which §3.9 already names as the honest knob and which moves
+paint radius and enemy hearing with it. (A third — weighting the composition toward the surface,
+physically right because the object gives the transient and the larger body gives the resonance —
+is now a fix to a path with no emitter, and belongs with whatever emitter revives it.) Picking
+among them is a design call, not a repair.
 
 Nothing is broken today: dust is plainly distinguishable *visually* (one walk-step hands back
 2184 floor dots on concrete against 673 on dust), which is what the test room's apron fork is
@@ -120,7 +134,8 @@ surface" — which today is true only of metal.
 **Owner: M3.** The gym is the first level where material is a route choice rather than a
 probe, and the tower's completion gradient (core-loop §1) is the first place a player is asked to
 read a floor by ear. Whichever fix is chosen should land with the level that makes it matter, and
-with the listening scene above as its before/after.
+with a listening scene of its own as its before/after — §03's four segments are the surviving
+measurement, and the one to re-run.
 
 ### The ears do not crouch, and the beam leaves from above a crouched head
 

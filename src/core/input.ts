@@ -21,7 +21,7 @@ export type Action =
   | 'sprint'
   | 'crouch'
   /**
-   * The hand: hold to wind the arm, release to throw (`game/throwables.ts`).
+   * The hand: hold to wind the arm, release to throw (`game/spheres.ts`).
    *
    * A key and deliberately not a mouse button. Button 0 is the drag-look fallback above, which
    * every headless tool and the whole screenshot suite steers with — a throw bound there either

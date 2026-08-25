@@ -203,6 +203,16 @@ const CLASS_VOICES: Readonly<Record<SoundClass, ClassVoice>> = Object.freeze({
    * along with the emitter that first plays it. Nothing emits this class today.
    */
   'throw-windup': Object.freeze({ voice: 'ping' as const, bright: 1.0, toneHz: 300, durationSec: 0.5 }),
+  /*
+   * The boom is a `'ping'` for the same structural reason and with the same honesty: `VoiceKind`
+   * has two builders, the check below refuses a non-contact class the contact one, and a
+   * detonation strikes no surface whose modes it could ring (`CONTACT_CLASSES` argues that at
+   * length). So this is the placeholder, not the shipped sound — a sonar pulse pitched low and
+   * run long is a recognisable *stand-in* for a boom and nothing more. The real voice is the
+   * audio owner's commit: it wants a body, a transient with no tone in it, and a tail that is
+   * the room rather than the source.
+   */
+  'sphere-boom': Object.freeze({ voice: 'ping' as const, bright: 1.5, toneHz: 90, durationSec: 1.2 }),
 });
 
 /**

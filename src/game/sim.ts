@@ -57,16 +57,13 @@ import {
 import { Halo } from '../paint/halo';
 import { defaultAgeRamp } from '../paint/ageRamp';
 import { defaultStructuredTunables } from '../paint/structured';
+import { PROBE_REGIONS, SPAWN, SPAWN_YAW_DEG, buildRoom, type Room } from '../world/room';
 import {
-  CAN_STACK,
-  PROBE_REGIONS,
-  SPAWN,
-  SPAWN_YAW_DEG,
-  buildRoom,
-  type Room,
-} from '../world/room';
-import { CAN_MAT, CAN_RADIUS } from '../world/cans';
-import { CAN_EMITTER_BASE, Throwables, type ThrowSound } from './throwables';
+  SPHERE_EMITTER_BASE,
+  SPHERE_RADIUS,
+  Spheres,
+  type SphereSound,
+} from './spheres';
 
 /** Shared ping cooldown, seconds (§3.5). */
 const PING_COOLDOWN = 0.75;
@@ -119,21 +116,21 @@ export const E_PING_HEIGHT = 1.5;
  */
 const STEP_HEIGHT = 0.65;
 /**
- * How far off the struck face a prop's contact sound radiates from, metres.
+ * How far off the struck face a sphere's boom radiates from, metres.
  *
  * The same problem `STEP_HEIGHT` solves, and it is not cosmetic. `ballistics.ts` reports a
  * contact at the point on the face, and a point source lying exactly *on* a plane meets that
- * plane at 90° everywhere: measured in this room, a `prop-impact` emitted at y = 0 on the floor
- * unlocks **0 dots out of 33 880 rays**, and the same impact one millimetre up unlocks 39 362.
- * A thrown can that painted nothing is the whole verb quietly not working.
+ * plane at 90° everywhere: measured in this room, a prop sound emitted at y = 0 on the floor
+ * unlocks **0 dots out of 33 880 rays**, and the same sound one millimetre up unlocks 39 362.
+ * A sphere that painted nothing is the whole verb quietly not working.
  *
- * `CAN_RADIUS` rather than an epsilon, because it is the honest distance rather than a nudge
- * away from a numerical cliff: physics treats a can as a point (`world/cans.ts`), perception
- * treats it as a 6 cm object, and when that object touches a face its centre is one radius off
- * it. Along the contact normal, not up — unlike a footfall, a can strikes walls and ceilings,
- * and the sound leaves the side of the wall the can is on.
+ * `SPHERE_RADIUS` rather than an epsilon, because it is the honest distance rather than a nudge
+ * away from a numerical cliff: physics treats a sphere as a point (`core/ballistics.ts`),
+ * perception treats it as a 6 cm object, and when that object touches a face its centre is one
+ * radius off it. Along the contact normal, not up — unlike a footfall, a sphere goes off against
+ * walls and ceilings, and the sound leaves the side of the wall the sphere is on.
  */
-const PROP_STANDOFF = CAN_RADIUS;
+const BOOM_STANDOFF = SPHERE_RADIUS;
 
 /**
  * Which sound class a gait tier makes — the one place the two vocabularies meet.
@@ -198,12 +195,12 @@ export class GameSim {
   readonly halo = new Halo();
 
   /**
-   * The hand (§M2): the rack, the charge, every can in the world and every noise one makes.
+   * The hand (§M2): the rack, the charge, every sphere in the air and every noise one makes.
    *
-   * It emits nothing itself — see `emitThrowSound` below, which is the only place a can's noise
-   * becomes a `SoundEvent`, exactly as `onPlayerEvent` is the only place a footfall does.
+   * It emits nothing itself — see `emitSphereSound` below, which is the only place a sphere's
+   * noise becomes a `SoundEvent`, exactly as `onPlayerEvent` is the only place a footfall does.
    */
-  readonly throwables: Throwables;
+  readonly spheres: Spheres;
 
   private readonly unsubscribeBus: () => void;
   private readonly unsubscribeHalo: () => void;
@@ -251,22 +248,16 @@ export class GameSim {
       latticeSeed: streamSeed(this.seed, STREAM_LATTICE),
       dustSeed: streamSeed(this.seed, STREAM_DUST),
     });
-    this.throwables = new Throwables({
+    /*
+     * The hand takes no world data at all: a sphere is equipment the rig owns, not a prop the
+     * level authored, so there is nothing for the room to place and nothing for a reset to
+     * restore. That is the difference between the sphere and the can it replaced, in one
+     * constructor.
+     */
+    this.spheres = new Spheres({
       world: this.world,
       thrower: this.player,
       movement: this.movement,
-      prints: this.paint.prints,
-      /*
-       * The room's authored stack (§8), handed across as a flat list of poses and nothing else
-       * — no structure, no parent, no "stack" object, and deliberately no count (the room
-       * derives how many cans fit under `CAN_REACH`; anything here that named a number would go
-       * stale the moment the reach moved). Nothing in `throwables.ts` knows what a stack *is*: a
-       * column is a fact about a handful of coordinates, and the moment one is disturbed the room
-       * simply contains the same cans in worse places. That is what makes a knocked-over stack
-       * cost nothing to represent, and it is why the room authors poses rather than handing the
-       * sim a thing to maintain.
-       */
-      boot: CAN_STACK,
     });
     this.unsubscribeBus = this.bus.subscribe(this.paint.handle);
     this.unsubscribeHalo = this.bus.subscribe(this.onOwnNoise);
@@ -333,28 +324,27 @@ export class GameSim {
   };
 
   /**
-   * One noise the hand made, priced and put on the bus (§3.3's three throw rows).
+   * One noise the hand made, priced and put on the bus (§3.3's two throwable rows).
    *
-   * The whole of M2's emit policy, in one function, next to the footstep's. Three decisions live
+   * The whole of M2's emit policy, in one function, next to the footstep's. Four decisions live
    * here and nowhere else:
    *
    *  - **The wind-up is the player.** `source: 'player'` and the local emitter id, because it is
    *    the rig's own arm — as much "you" as a footstep — so §3.8's Halo flares for it, faintly
    *    (2.5 m). Both stages emit the same event; they are 0.9 s apart and the first coincides
    *    with the keypress, so which is which is never in doubt.
-   *  - **A can is not the player.** `source: 'prop'` and an emitter id well clear of the local
-   *    one (`CAN_EMITTER_BASE`), because `onOwnNoise` decides the Halo on emitter alone: a can
-   *    emitting as the player would make the ring claim *you* were audible at 25 m the moment
-   *    your can landed across the room.
-   *  - **Off the face it struck.** Both contact classes are stood off along the contact normal
-   *    by `PROP_STANDOFF`; see that constant for the measurement that makes it load-bearing.
-   *  - **Both materials, every time.** `prop-impact` and `prop-knock` are composed classes
-   *    (§3.9): the can's own voice is `CAN_MAT` and the struck surface came from the box the
-   *    physics resolved against, never from a re-probe. The bus takes the geometric mean and
-   *    scales both radii — a can on steel is a different sound *and* a different reach than the
-   *    same can on dust, which is what makes the landing point say where it landed.
+   *  - **A sphere is not the player.** `source: 'prop'` and an emitter id well clear of the local
+   *    one (`SPHERE_EMITTER_BASE`), because `onOwnNoise` decides the Halo on emitter alone: a
+   *    sphere emitting as the player would make the ring claim *you* were audible at 32 m the
+   *    moment your sphere went off across the room.
+   *  - **Off the face it struck.** The boom is stood off along the contact normal by
+   *    `BOOM_STANDOFF`; see that constant for the measurement that makes it load-bearing.
+   *  - **No material, ever.** The boom is the sphere's own voice, not the surface's, so it names
+   *    no material and the bus scales neither of its radii (`CONTACT_CLASSES` gives the argument
+   *    in full). Naming one here would throw, which is the point: the refusal is structural
+   *    rather than a convention this function is trusted to keep.
    */
-  private emitThrowSound(s: ThrowSound): void {
+  private emitSphereSound(s: SphereSound): void {
     if (s.kind === 'windup') {
       this.bus.emit({
         class: 'throw-windup',
@@ -366,31 +356,13 @@ export class GameSim {
       });
       return;
     }
-    if (s.kind === 'impact') {
-      this.bus.emit({
-        class: 'prop-impact',
-        source: 'prop',
-        emitter: CAN_EMITTER_BASE + s.can,
-        x: s.x + s.nx * PROP_STANDOFF,
-        y: s.y + s.ny * PROP_STANDOFF,
-        z: s.z + s.nz * PROP_STANDOFF,
-        // §3.3's 8-12 m band, read off the approach speed. The bus scales it by the composed
-        // material voice afterwards, so this is the pre-material radius exactly as a landing's is.
-        paintRadius: SoundBus.impactRadius(s.speed),
-        mat: s.mat,
-        objMat: CAN_MAT,
-      });
-      return;
-    }
     this.bus.emit({
-      class: 'prop-knock',
+      class: 'sphere-boom',
       source: 'prop',
-      emitter: CAN_EMITTER_BASE + s.can,
-      x: s.x + s.nx * PROP_STANDOFF,
-      y: s.y + s.ny * PROP_STANDOFF,
-      z: s.z + s.nz * PROP_STANDOFF,
-      mat: s.mat,
-      objMat: CAN_MAT,
+      emitter: SPHERE_EMITTER_BASE + s.sphere,
+      x: s.x + s.nx * BOOM_STANDOFF,
+      y: s.y + s.ny * BOOM_STANDOFF,
+      z: s.z + s.nz * BOOM_STANDOFF,
     });
   }
 
@@ -445,9 +417,21 @@ export class GameSim {
     return this.bus.carryRadius(stepClassOf(tier), this.player.groundMaterial);
   }
 
+  /**
+   * The ears, and the shell they are mounted in, moved to where the body is.
+   *
+   * Two calls because they answer two questions: the listener is a point at eye height and gates
+   * what is heard, the shell is a cylinder standing on the floor and gates what the event layer
+   * is allowed to draw a marker inside (`PaintSystem.insideOwnBody`). Both are set here, on the
+   * same line of the tick, because a shell that lagged the ears by a frame would suppress markers
+   * around where the rig *was*.
+   */
   private syncListener(): void {
     const p = this.player.position;
     this.paint.setListener(p.x, p.y + E_PING_HEIGHT, p.z);
+    const m = this.movement;
+    const height = this.player.state.stance === 'crouch' ? m.crouchHeight : m.standHeight;
+    this.paint.setBody(p.x, p.y, p.z, m.radius, height);
   }
 
   // ---- the tick ------------------------------------------------------------
@@ -485,8 +469,8 @@ export class GameSim {
 
     if (input.wasKeyPressed('KeyR')) {
       this.player.respawn();
-      // The body and the props it left lying around are one situation, and R restarts it.
-      this.throwables.reset();
+      // The body and whatever it has in the air are one situation, and R restarts it.
+      this.spheres.reset();
     }
     if (input.wasKeyPressed('KeyT')) {
       this.timeScaleIndex = (this.timeScaleIndex + 1) % TIME_SCALES.length;
@@ -504,12 +488,10 @@ export class GameSim {
      * follow, so a throw goes where the player was looking when they let go.
      *
      * The drain is the seam: `update` fills a queue and emits nothing, and this loop is the only
-     * thing that turns a can's contact into a sound. Between them sits the one ordering the
-     * throwables file cares about — a settled can's print is laid inside `update`, before the
-     * knock announcing it reaches the bus, so the cairn is inside its own event's paint.
+     * thing that turns a sphere's contact into a sound.
      */
-    this.throwables.update(dt, input);
-    for (const s of this.throwables.sounds) this.emitThrowSound(s);
+    this.spheres.update(dt, input);
+    for (const s of this.spheres.sounds) this.emitSphereSound(s);
 
     this.player.update(dt, input);
     this.halo.advance(this.audibleRadius(), dt);
@@ -571,7 +553,7 @@ export class GameSim {
       soundEvents: this.bus.emitted,
       // Emission rate, as observability rather than as a limit — the bus never drops anything,
       // so a flood is an emitter bug and these are what make it loud. One player emits at most a
-      // couple a tick; M2's throwables and M4's spiders are the ones worth watching.
+      // couple a tick; M2's spheres and M4's spiders are the ones worth watching.
       soundEmittedThisTick: this.bus.emittedThisTick,
       soundMaxEmittedPerTick: this.bus.maxEmittedPerTick,
       lastEvent: last?.class ?? null,
@@ -579,22 +561,28 @@ export class GameSim {
       lastEventTime: last?.time ?? -1,
       lastEventSpeed: last?.waveSpeed ?? 0,
       lastEventRadius: last?.paintRadius ?? 0,
+      // Where it happened. Published because a sound is the only thing in this game that decides
+      // *where* the light lands, and the browser suite has to aim a measurement window at that
+      // place to photograph it — a boom eight metres out and a boom at your boots unlock the
+      // same dot count and are the entire difference the throw verb sells (`tools/shoot.mjs`).
+      lastEventX: last?.x ?? 0,
+      lastEventY: last?.y ?? 0,
+      lastEventZ: last?.z ?? 0,
       pingCooldown: this.pingCooldownSeconds,
       // --- the hand (§M2). `chargeT` is seconds of wind-up, not a fraction: the charge curve is
-      // authored in seconds and a fraction would hide the cap. `canPoses` is what lets the
-      // browser suite project a cairn onto the screen and check it is drawn where the can is.
-      carriedCans: this.throwables.carried,
-      chargeT: this.throwables.charge,
-      chargeFraction: this.throwables.chargeFraction,
-      charging: this.throwables.charging,
-      throwSpeed: this.throwables.pendingSpeed,
-      cansThrown: this.throwables.thrown,
-      cansRefused: this.throwables.refused,
-      worldCans: this.throwables.inWorld,
-      canPoses: this.throwables.cansSnapshot(),
-      canPrints: this.paint.prints.placed,
-      canPrintsKnown: this.paint.prints.known,
-      canPrintDots: this.paint.prints.knownDots,
+      // authored in seconds and a fraction would hide the cap. `spherePoses` is what lets the
+      // browser suite project a sphere onto the screen and check the light lands where it does.
+      carriedSpheres: this.spheres.carried,
+      chargeT: this.spheres.charge,
+      chargeFraction: this.spheres.chargeFraction,
+      charging: this.spheres.charging,
+      throwSpeed: this.spheres.pendingSpeed,
+      spheresThrown: this.spheres.thrown,
+      spheresRefused: this.spheres.refused,
+      worldSpheres: this.spheres.inWorld,
+      spherePoses: this.spheres.spheresSnapshot(),
+      sphereRecharge: this.spheres.rechargeSeconds,
+      sphereRebuild: this.spheres.rebuildFraction,
       eConeDeg: this.sound.classes['e-ping'].coneAngleDeg,
       eRange: this.sound.classes['e-ping'].paintRadius,
       hearingRange: this.paint.perception.hearingRange,

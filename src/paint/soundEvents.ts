@@ -44,10 +44,16 @@ import { MAT_CONCRETE, materialLoudness } from './materials';
  * additional rows in the same table of §3.3 and need no new machinery — a class name, a profile
  * entry, an emitter.
  *
- * The three `prop-*`/`throw-*` rows are M2's throwable, and two of them are the first classes in
- * the game made by *two* bodies rather than by one body and the floor — see `COMPOSED_CLASSES`.
- * `throw-windup` is the odd one out and deliberately so: it is the rig's own arm, striking
- * nothing, and it is here because §1 has no second path for a noise the world can hear.
+ * `sphere-boom` and `throw-windup` are M2's throwable: the arm winding, and the sphere going off
+ * against whatever it reaches. Neither strikes a surface in the sense §3.9 means — the wind-up
+ * strikes nothing at all, and a detonation is loud because of what it *is* — so neither is a
+ * contact class, and both are here because §1 has no second path for a noise the world can hear.
+ *
+ * The two `prop-*` rows have no emitter today. They are kept because they are the game's only
+ * *composed* classes — the pair of materials §3.9 prices as a geometric mean — and the things
+ * that will emit them are already named: core-loop §2's artifact set down on a floor, and M4's
+ * spider putting a foot on one. Deleting a priced row to re-derive it later is how a table
+ * becomes two tables.
  */
 export type SoundClass =
   | 'crouch-step'
@@ -58,7 +64,8 @@ export type SoundClass =
   | 'e-ping'
   | 'prop-impact'
   | 'prop-knock'
-  | 'throw-windup';
+  | 'throw-windup'
+  | 'sphere-boom';
 
 /**
  * Who made a noise — the *kind* of thing, never a viewer's relationship to it.
@@ -110,7 +117,7 @@ export type EventTint = 'self' | 'teammate' | 'spider' | 'prop';
  * **Nothing in `src/` calls this yet, and that is the finding rather than the plumbing.** §3.2's
  * event layer is what needs it, and `paintSystem.ts`'s `EVENT_COLORS` is a `Record<SoundClass,
  * number>` — an amber ramp with no source axis at all, which is honest today because every
- * shipped emitter is the local player. It stops being honest at M2: a thrown can is
+ * shipped emitter is the local player. It stops being honest at M2: a sphere's boom is
  * `source: 'prop'`, §3.2 says pale yellow, and it would render self-amber. The audio director
  * used to call this and store the answer on `VoiceSpec`, where nothing read it — a paint concept
  * parked in the mixer, which looked like wiring and was not.
@@ -181,20 +188,24 @@ export interface SoundClassProfile {
  * beam) is unchanged. The docs get updated when the design settles; until then this comment is
  * the record that the difference is a choice and not a drift.
  *
- * **The three throw rows.** `prop-impact` lands §3.3's reserved "prop knock" band — 8-12 m of
- * paint by impact speed (`SoundBus.impactRadius`), heard at 25 — because that is the row the doc
- * already priced for a can hitting a floor, and the "thrown-object impact" row underneath it
- * says only "by material", which is what the composed voice and `materialVoiceFor` now answer.
- * `prop-knock` is the settle: the same two bodies meeting far more gently, 1.5 m of paint and
- * 4 m of carry, which is a sound you have to be standing next to the can to learn anything from.
- * `throw-windup` is the rig's arm winding up — 0.5 m and 2.5 m, the quietest thing in the table
- * — and the reason it is *in* the table is §1: a mechanism the world can hear has to paint, so
- * the wind-up's tell and the wind-up's noise are one event or they are a lie.
+ * **The throwable's two rows.** `sphere-boom` is the sphere going off — 12 m of paint and 32 m
+ * of carry, a `ping` front because a detonation arrives fast and all at once rather than
+ * travelling as a knock does. It paints exactly what a Q-ping paints and is heard nearly twice
+ * as far, which is the whole shape of the verb: a question asked from somewhere you are not,
+ * that answers a room-sized patch of geometry to you and announces itself to everything within
+ * half the floor. `throw-windup` is the rig's arm winding up — 0.5 m and 2.5 m, the quietest
+ * thing in the table — and the reason it is *in* the table is §1: a mechanism the world can hear
+ * has to paint, so the wind-up's tell and the wind-up's noise are one event or they are a lie.
  *
- * Every one of the three stays under the Halo's ceiling by construction: the loudest is
- * `prop-impact` at 25 x 1.5 = 37.5 m against the landing's 42 (`HALO_MAX_RADIUS_M`), so §3.8's
- * dial does not stretch and no hum calibration moves. A prop class that out-carried the landing
- * would silently re-scale the player's own loudness readout — see `paint/halo.ts`.
+ * Both stay under the Halo's ceiling by construction, and the boom does it *without* being
+ * scaled: it is not a contact class, so its 32 m is 32 m on any floor, against the landing's
+ * 28 x 1.5 = 42 (`HALO_MAX_RADIUS_M`). §3.8's dial does not stretch and no hum calibration moves.
+ * A class that out-carried the landing would silently re-scale the player's own loudness
+ * readout — see `paint/halo.ts`, and `tests/spheres.test.ts`, which pins exactly this.
+ *
+ * The two `prop-*` rows are emitterless (see the class union). Their numbers are the ones a can
+ * was priced at and they are left alone: an unemitted row is a promise about a future emitter,
+ * and re-tuning it now would be tuning against nothing.
  *
  * **Frozen, and both tables are.** They are the *defaults* every simulation copies from, not
  * live state: a dev-panel slider bound straight into this object used to tune every `SoundBus`
@@ -213,14 +224,15 @@ export const SOUND_CLASSES: Readonly<Record<SoundClass, Readonly<SoundClassProfi
     'prop-impact': Object.freeze({ paintRadius: 8, hearingRadius: 25, coneAngleDeg: 360, intensity: 1.0, wave: 'step' as const }),
     'prop-knock': Object.freeze({ paintRadius: 1.5, hearingRadius: 4, coneAngleDeg: 360, intensity: 0.7, wave: 'step' as const }),
     'throw-windup': Object.freeze({ paintRadius: 0.5, hearingRadius: 2.5, coneAngleDeg: 360, intensity: 0.6, wave: 'step' as const }),
+    'sphere-boom': Object.freeze({ paintRadius: 12, hearingRadius: 32, coneAngleDeg: 360, intensity: 1.0, wave: 'ping' as const }),
   });
 
 /**
  * Which classes are made by something striking a surface — §3.9's "all contact-made classes".
  *
  * This is the structural statement that **a ping is not a contact sound**. A footfall, a
- * landing, a thrown can's impact and (at M4) a spider's foot all happen *because* a body met a
- * surface, so the surface has a say in how loud they are. A ping is a rig emitting into the air
+ * landing, an artifact set down on a floor and (at M4) a spider's foot all happen *because* a
+ * body met a surface, so the surface has a say in how loud they are. A ping is a rig emitting into the air
  * from wherever the rig happens to be: nothing is struck, no material is involved, and scaling
  * it by whatever the player is standing on would mean a Q-ping fired from a steel walkway
  * reaches 18 m while the same Q-ping fired one step later on concrete reaches 12 — a deliberate
@@ -244,6 +256,24 @@ export const CONTACT_CLASSES: Readonly<Record<SoundClass, boolean>> = Object.fre
   // floor gets a say in how loud it is, for the same reason a ping's price does not move under
   // the player's feet.
   'throw-windup': false,
+  /*
+   * **A detonation is not a contact sound**, and this is the row where that is decided.
+   *
+   * A sphere does touch a surface — that is what sets it off — so the tempting answer is `true`.
+   * It is wrong, and the reason is §3.9's own definition: a contact class is scaled by the struck
+   * material because the *surface* is what is speaking. A footfall on steel is loud because steel
+   * is loud. A sphere going off on dust is loud because the sphere went off; the dust contributes
+   * nothing to it and muffles nothing of it. Scaled by material the same throw would carry 19.2 m
+   * on dust and 48 on the steel walkway — a 2.5× swing in the one property the player is using
+   * the sphere to control, decided by a surface they threw at precisely because they could not
+   * see it.
+   *
+   * `false` therefore does two things at once: it makes the boom one constant, learnable
+   * loudness, and it keeps `HALO_MAX_RADIUS_M` where it is (32 raw, under the landing's 42).
+   * The struck surface is still the *paint's* origin and still the thing the geometry is drawn
+   * from — it just does not get a vote on the volume.
+   */
+  'sphere-boom': false,
 });
 
 /** True when this class is made by a body meeting a surface, and therefore has a material. */
@@ -253,11 +283,11 @@ export function isContactClass(cls: SoundClass): boolean {
 
 /**
  * Which contact classes are made by **two bodies whose materials are both known** — §3.9 asked
- * of a thrown can rather than of a boot.
+ * of a dropped object rather than of a boot.
  *
  * Every contact has two sides. What makes these classes different is that the game knows *both*:
  * a footfall is "the rig" hitting a floor and the rig has no material in the table, so the
- * surface is the whole of the answer. A thrown can hitting a floor is a metal can and a floor,
+ * surface is the whole of the answer. A steel artifact set down on a dusty slab is two materials,
  * and both are facts the emitter is holding at the moment it emits. Those are the classes whose
  * loudness is the geometric mean of the two voices (see `materialVoiceFor`) and whose sound is
  * built from two rows of `MATERIAL_VOICES` (see `audio/voices.ts`'s `contactVoice`).
@@ -278,6 +308,9 @@ export const COMPOSED_CLASSES: Readonly<Record<SoundClass, boolean>> = Object.fr
   'prop-impact': true,
   'prop-knock': true,
   'throw-windup': false,
+  // Not a contact at all (see `CONTACT_CLASSES`), so there is no pair to compose. The module-load
+  // check below is what makes that consistency a compile-and-boot fact rather than a convention.
+  'sphere-boom': false,
 });
 
 /** True when this class is a contact between two bodies the game has a material for. */
@@ -307,9 +340,9 @@ for (const cls of Object.keys(COMPOSED_CLASSES) as SoundClass[]) {
  * function, read by the emitter and by the readout, is what stops the ring from claiming an
  * audible radius the bus does not give.
  *
- * **Two bodies compose as the geometric mean, `√(m_object · m_surface)`.** A thrown can is the
- * first sound in the game where §3.9 has two materials to price and not one, and the mean is the
- * only rule of the four considered that keeps every property the law already relies on:
+ * **Two bodies compose as the geometric mean, `√(m_object · m_surface)`.** A composed class is
+ * the case where §3.9 has two materials to price and not one, and the mean is the only rule of
+ * the four considered that keeps every property the law already relies on:
  *
  *  - **It reduces to `m` on the diagonal.** `√(m·m) = m` — exactly, in IEEE, for all four
  *    shipped multipliers — so a metal can dropped on a metal floor is scaled by the same 1.5 a
@@ -444,20 +477,6 @@ export const LANDING_FULL_IMPACT = 14;
 /** Top of the landing paint band, metres (§3.3). */
 export const LANDING_MAX_RADIUS = 14;
 
-/**
- * Slowest contact a thrown thing can make and still be a sound, m/s.
- *
- * Under it there is no `prop-impact`, and that silence is a verb rather than an omission: a can
- * *placed* on a ledge at walking speed makes no impact, so "put it down quietly" is a thing the
- * player can do without any new machinery, key or state. It is deliberately well above the
- * speeds a settling body bounces at, which is what stops a can rolling to rest from emitting a
- * dozen impacts — the quiet end of a settle is `prop-knock`'s job.
- */
-export const IMPACT_MIN_SPEED = 2.5;
-/** Impact speed that earns the top of the 8-12 m band, m/s — a charged throw's first contact. */
-export const IMPACT_FULL_SPEED = 16;
-/** Top of the thrown-impact paint band, metres (§3.3's reserved prop-knock row). */
-export const IMPACT_MAX_RADIUS = 12;
 
 export interface SoundEvent {
   readonly class: SoundClass;
@@ -570,7 +589,7 @@ export interface SoundEmitSpec {
    */
   mat?: number;
   /**
-   * What struck it, for a composed class — the thrown can's own material.
+   * What struck it, for a composed class — the arriving body's own material.
    *
    * Required on a composed class and refused on every other, both by `assertMaterials`. Required
    * because a default would be a guess with a price: concrete's 1.0 would quietly charge a steel
@@ -658,7 +677,7 @@ export class SoundBus {
    * this climbs: a dropped event is a sound with no paint, which is the one thing design law 2
    * forbids the system to produce. A flood is a bug in whatever is emitting, and the only useful
    * thing the bus can do about it is make the number impossible to miss. Today one player emits
-   * at most a handful a tick; M2 adds twenty throwables and M4 adds spiders, and the day one of
+   * at most a handful a tick; M2 adds a rack of spheres and M4 adds spiders, and the day one of
    * them emits per-tick instead of per-contact this is what says so.
    */
   get emittedThisTick(): number {
@@ -729,7 +748,7 @@ export class SoundBus {
      * the class table: a landing has already computed its own 8-14 m from impact speed and a
      * chip-modified ping will arrive with its own override, and both of those still have to be
      * scaled by what they struck. Keeping the law at the single choke point every noise passes
-     * through is what stops each new emitter — M2's throwables, M4's spider — from having to
+     * through is what stops each new emitter — M2's spheres, M4's spider — from having to
      * remember it. The consequence is real and intended: a hard landing on steel is
      * 14 x 1.5 = 21 m of paint, louder than a Q-ping, so a steel floor is a genuinely dangerous
      * thing to drop onto.
@@ -739,9 +758,10 @@ export class SoundBus {
      * carry further would be a surface that is loud to the player and quiet to the spider —
      * law 2, and the exact asymmetry `canHear` exists to prevent.
      *
-     * A composed class (a thrown can) is priced by *both* bodies, `√(L(objMat)·L(mat))`, and it
-     * is priced **here** rather than by the emitter for the same reason everything else is: the
-     * choke point is what stops M2's throwables and M4's spider from each remembering the law.
+     * A composed class (one known body striking another) is priced by *both*,
+     * `√(L(objMat)·L(mat))`, and it is priced **here** rather than by the emitter for the same
+     * reason everything else is: the choke point is what stops each new emitter, and M4's spider,
+     * from having to remember the law.
      * An emitter that arrived with a pre-multiplied radius would be invisible to the guards
      * above and would then be scaled by the surface a second time.
      */
@@ -911,38 +931,18 @@ export class SoundBus {
     return base + (LANDING_MAX_RADIUS - base) * t;
   }
 
-  /**
-   * Thrown-impact paint radius from contact speed — the 8-12 m band of §3.3's prop row.
-   *
-   * The landing's shape, deliberately: same clamp, same NaN answer, and the same division of
-   * labour between the two radii. Speed moves the *paint* and the class keeps its 25 m of carry,
-   * so a tap and a charged throw differ in how much room they hand back and in how far they
-   * travel — not in how loudly they arrive at an ear. That mirrors soft and hard landings, which
-   * already work this way, and it is the conservative half of the choice: turning §3.3's
-   * right-hand column into a band for one class is a bigger claim than a paint band, and it can
-   * be made later by scaling the hearing override with the same fraction if playtests ask.
-   *
-   * The caller is expected to have gated on `IMPACT_MIN_SPEED` already — under it there is no
-   * event at all, which is the quiet set-down. This function does not gate, because a radius
-   * function that could answer "no sound" would be a second way to emit nothing.
-   */
-  static impactRadius(impactSpeed: number): number {
-    const base = SOUND_CLASSES['prop-impact'].paintRadius;
-    const t = speedFraction(impactSpeed, IMPACT_MIN_SPEED, IMPACT_FULL_SPEED);
-    return base + (IMPACT_MAX_RADIUS - base) * t;
-  }
-
   dispose(): void {
     this.listeners.clear();
   }
 }
 
 /**
- * Where a contact speed sits in a class's speed band, 0 to 1 — the clamp both bands share.
+ * Where a contact speed sits in a class's speed band, 0 to 1 — the clamp every band shares.
  *
- * One function because the trapdoor below is one trapdoor, and a second band written out by
- * hand is a second chance to reopen it. Landings and thrown impacts are the same event read
- * twice — a contact priced by how fast it arrived — and bands added later will be too.
+ * One function because the trapdoor below is one trapdoor, and a second band written out by hand
+ * is a second chance to reopen it. The landing is the only band today — the thrown can's 8-12 m
+ * impact band went with the can, because a detonation has one voice and is not priced by how fast
+ * it arrived — and the bands M4 adds for the spider will come back through here.
  */
 function speedFraction(speed: number, min: number, full: number): number {
   const t = (speed - min) / (full - min);
