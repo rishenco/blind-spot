@@ -30,13 +30,28 @@
  *   - **a swim**: a slow low-frequency warp, plus a squeeze that throbs at the same few hertz
  *     the ring in your ears wobbles at. The frame breathes. It is the layer you feel rather than
  *     see, and it is what makes the picture read as a *head* rather than as a camera.
- *   - **double vision**: the frame is sampled twice, at two strengths of the same warp, and the
- *     two are mixed with weights that sum to one. A point smears into two points that do not
- *     agree — the most direct way to say "your eyes are not working" without adding a photon.
  *   - **tearing**: sparse horizontal bands slip sideways for a few frames at a time. This is the
- *     "сыпется" part; on a point cloud it reads as the picture coming apart in strips.
+ *     "сыпется" part; on a point cloud it reads as the picture coming apart in strips. This is the
+ *     layer the human kept — «мне нравится эффект лагов» — and the only one that got *stronger*.
  *   - **the dark closing in**: grain that punches holes in the dimmer points, and a vignette that
- *     eats the periphery. Tunnel vision, and the only channel it can act on is subtraction.
+ *     eats the periphery. Tunnel vision, and the only channel it can act on is subtraction. Both
+ *     are now a hint rather than a wall; see the note on the defaults.
+ *   - **double vision** (`ghost`, off by default): the frame sampled twice, at two strengths of the
+ *     same warp, mixed with weights that sum to one. Kept as code and as a slider, but zeroed —
+ *     it is the layer the verdict below threw out.
+ *
+ * ## What the first version got wrong
+ *
+ * «контузия слишком жесткая, ничего не видно совсем. мне нравится эффект лагов, но второй это
+ * слишком.» The *second image* — double vision — was doing the blinding. On a point cloud with no
+ * fill, splitting every line into two half-brightness copies does not read as "my eyes are off",
+ * it reads as "the lidar failed": each line loses half its contrast against a black background
+ * where contrast is the *only* thing carrying the geometry. The vignette and the grain finished
+ * the job, one crushing the periphery and the other eating the dimmer points that were already at
+ * the edge of visible. So `ghost` is zero, the vignette and the grain drop to roughly a quarter and
+ * a third of what they were, and the swim is halved; the tearing — the part he liked — goes up.
+ * The rule this settled on: **a concussed player must still be able to play**. Anything that
+ * removes geometry rather than disturbing it is the wrong kind of cost.
  *
  * ## Determinism and cost
  *
@@ -74,18 +89,23 @@ export interface ConcussionTunables {
   ghost: number;
 }
 
+/**
+ * Tuned against the verdict quoted in the header: the hall has to stay readable *through* the
+ * effect. Everything subtractive is a hint; the tearing carries the feeling.
+ */
 export function defaultConcussionTunables(): ConcussionTunables {
   return {
     enabled: true,
     seconds: 5.5,
     strength: 1,
-    wobble: 0.026,
-    tear: 0.045,
-    tearRows: 0.16,
-    grain: 0.5,
-    vignette: 0.55,
+    wobble: 0.012,
+    tear: 0.05,
+    tearRows: 0.22,
+    grain: 0.16,
+    vignette: 0.12,
     pulse: 2.6,
-    ghost: 0.34,
+    // Off by default. This was the layer the human threw out — see the note above the defaults.
+    ghost: 0,
   };
 }
 

@@ -3,21 +3,25 @@
  *
  *   node tools/concussion.mjs [dist/index.html] [out/concussion]
  *
- * The other half of "контузия от выстрела" is a picture, and a picture of a black screen is
- * exactly the thing `doc/proto/process.md` says cannot be debugged by eye — so this generator
- * exists to make the claim measurable rather than admired.
+ * Four frames and a page of numbers, per `doc/proto/process.md` §«Скриншоты — это пруф, но пруф
+ * дешёвый»: the PNGs exist to be *looked at*, and nothing here is measured by decoding one. Every
+ * number below is read off the canvas inside the page — two draws of the same simulation tick, one
+ * with the pass off and one with it on, compared in a single JS task.
  *
- * The claim being proved has two parts, and the second one is a law from `doc/proto/concept.md`:
+ * The claim has two parts, and the second is a law from `doc/proto/concept.md`:
  *
- *   1. the frame is *unwell* right after the shot — it swims, tears and doubles — and it is
- *      still unwell seconds later, then recovers on its own;
+ *   1. the frame is *unwell* right after the shot — it swims and tears — and it is still unwell
+ *      seconds later, then recovers on its own;
  *   2. it never lights the world. Law 1 says nothing renders for convenience: the effect may only
- *      move, dim and resample pixels the renderer had already earned. So every concussed frame is
- *      shot as an A/B pair against the identical simulation tick with the pass switched off, and
- *      the pair is compared photometrically. If a frame ever gets *brighter*, or shows more lit
- *      pixels than its twin, this generator fails.
+ *      move, dim and resample pixels the renderer had already earned. So every measured moment is
+ *      an A/B against the identical tick with the pass off, and if a frame ever gets *brighter*,
+ *      or contains a pixel brighter than its twin's brightest, this generator fails.
  *
- * The muzzle flash is a real light and it would ruin that comparison, so no frame here is taken
+ * The four frames are the *before/after of the softening*: the human's verdict on the first cut
+ * was «контузия слишком жесткая, ничего не видно совсем» — so frame 3 re-renders the very same
+ * tick as frame 2 with the old, blinding tunables, and the pair is the whole argument.
+ *
+ * The muzzle flash is a real light and it would ruin the comparison, so no frame here is taken
  * while it is alive (it lives three frames); the first concussed frame is 0.12 s after the round.
  *
  * Conventions are the house ones: fixed seed, fixed 120 Hz step, no wall clock, audio device
@@ -28,7 +32,6 @@ import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { decodePng, meanLuminance as meanRect, litFraction as litRect } from './png.mjs';
 
 const htmlPath = resolve(process.argv[2] ?? 'dist/index.html');
 const outDir = resolve(process.argv[3] ?? 'out/concussion');
@@ -39,39 +42,8 @@ if (!existsSync(htmlPath)) {
 await mkdir(outDir, { recursive: true });
 for (const f of await readdir(outDir)) if (f.endsWith('.png')) await unlink(join(outDir, f));
 
-const whole = (img) => ({ x: 0, y: 0, w: img.width, h: img.height });
-const mean = (img) => meanRect(img, whole(img)).mean;
-const lit = (img) => litRect(img, whole(img)).fraction;
-/** The brightest pixel in the frame — "did anything new appear", as opposed to "did it spread". */
-function peak(img) {
-  const n = img.width * img.height;
-  let best = 0;
-  for (let i = 0; i < n; i++) {
-    const j = i * img.channels;
-    const l = (img.data[j] * 299 + img.data[j + 1] * 587 + img.data[j + 2] * 114) / 1000;
-    if (l > best) best = l;
-  }
-  return best;
-}
-
-/**
- * How far two frames of the same tick are from each other, 0..1: the mean absolute luminance
- * difference over the frame, normalised. This is the number that says "the picture moved" — a
- * pass-through scores ~0 and a frame that is swimming scores a lot more, without any assumption
- * about *which* pixels moved.
- */
-function difference(a, b) {
-  const n = a.width * a.height;
-  let acc = 0;
-  for (let i = 0; i < n; i++) {
-    const ia = i * a.channels;
-    const ib = i * b.channels;
-    const la = (a.data[ia] * 299 + a.data[ia + 1] * 587 + a.data[ia + 2] * 114) / 1000;
-    const lb = (b.data[ib] * 299 + b.data[ib + 1] * 587 + b.data[ib + 2] * 114) / 1000;
-    acc += Math.abs(la - lb);
-  }
-  return acc / n / 255;
-}
+/** The tunables the human threw out, kept only so frame 3 can show what they looked like. */
+const OLD = { wobble: 0.026, tear: 0.045, tearRows: 0.16, grain: 0.5, vignette: 0.55, ghost: 0.34 };
 
 const failures = [];
 const errors = [];
@@ -112,40 +84,72 @@ const advance = (sec) =>
     [sec],
   );
 const redraw = () => page.evaluate(() => window.bs.draw());
-const state = () => page.evaluate(() => window.bs.concussion.state());
-
-async function shot(name) {
-  const buf = await page.screenshot({ path: join(outDir, name), timeout: 180000 });
-  return decodePng(buf);
-}
+const shot = (name) => page.screenshot({ path: join(outDir, name), timeout: 180000 });
 
 /**
- * One moment, twice: the pass off and the pass on, with nothing in between but the switch and
- * a redraw of the same simulation tick. Everything this file claims is a statement about the
- * gap between those two frames.
+ * One moment, measured twice inside the page: the pass off and the pass on, with nothing between
+ * the two draws but the switch. Reading the drawing buffer in the same task as the draw is what
+ * makes this possible without `preserveDrawingBuffer` — the buffer is cleared only afterwards.
+ *
+ * Returns the mean and peak luminance of both halves and the mean absolute difference between
+ * them, normalised to 0..1. A pass-through scores ~0; a swimming frame scores a lot more, with no
+ * assumption about *which* pixels moved.
  */
-async function pair(tag) {
-  await call('concussion.tune', { enabled: false });
-  // Redraw after *each* switch. Without it the "off" screenshot is simply the last frame the
-  // simulation happened to draw — which was drawn with the pass on — and the pair comes out
-  // pixel-identical, which is how this file first "proved" that the effect does nothing.
-  await redraw();
-  const off = await shot(`${tag}-off.png`);
-  await call('concussion.tune', { enabled: true });
-  await redraw();
-  const on = await shot(`${tag}-on.png`);
-  const st = await state();
-  const d = difference(off, on);
+async function moment(tag) {
+  const m = await page.evaluate(() => {
+    // The page has more than one canvas (the HUD keeps a 2D one); the drawing buffer we want is
+    // the one that answers to a WebGL context.
+    const all = [...document.querySelectorAll('canvas')];
+    let cvs = null;
+    let gl = null;
+    for (const c of all) {
+      const g = c.getContext('webgl2') ?? c.getContext('webgl');
+      if (g !== null) { cvs = c; gl = g; break; }
+    }
+    if (gl === null) throw new Error(`no WebGL canvas among ${all.length}`);
+    // Straight off the drawing buffer. A 2D `drawImage` of this canvas comes back nearly black —
+    // the scene is drawn with an alpha of zero over a transparent page — so the honest reading is
+    // `readPixels` on the live context, in the same task as the draw, before the compositor
+    // clears the buffer.
+    const w = cvs.width;
+    const h = cvs.height;
+    const px = new Uint8Array(w * h * 4);
+    const grab = () => {
+      window.bs.draw();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      const n = w * h;
+      const lum = new Float32Array(n);
+      let sum = 0;
+      let top = 0;
+      for (let i = 0; i < n; i++) {
+        const j = i * 4;
+        const l = (px[j] * 299 + px[j + 1] * 587 + px[j + 2] * 114) / 1000;
+        lum[i] = l;
+        sum += l;
+        if (l > top) top = l;
+      }
+      return { lum, n, mean: sum / n, peak: top };
+    };
+    window.bs.concussion.tune({ enabled: false });
+    const off = grab();
+    window.bs.concussion.tune({ enabled: true });
+    const on = grab();
+    let acc = 0;
+    for (let i = 0; i < off.n; i++) acc += Math.abs(on.lum[i] - off.lum[i]);
+    return {
+      d: acc / off.n / 255,
+      meanOn: on.mean, meanOff: off.mean,
+      peakOn: on.peak, peakOff: off.peak,
+      amount: window.bs.concussion.state().amount,
+    };
+  });
   console.log(
-    `[fx] ${tag.padEnd(16)} amount ${st.amount.toFixed(3)}  diff ${(d * 100).toFixed(2)}%  ` +
-      `mean ${mean(on).toFixed(2)} vs ${mean(off).toFixed(2)}  lit ${(lit(on) * 100).toFixed(2)}% vs ${(lit(off) * 100).toFixed(2)}%`,
+    `[fx] ${tag.padEnd(16)} amount ${m.amount.toFixed(3)}  moved ${(m.d * 100).toFixed(2)}%  ` +
+      `mean ${m.meanOn.toFixed(2)} on / ${m.meanOff.toFixed(2)} off  ` +
+      `peak ${m.peakOn.toFixed(0)} / ${m.peakOff.toFixed(0)}`,
   );
-  return {
-    tag, off, on, d, amount: st.amount,
-    meanOn: mean(on), meanOff: mean(off),
-    litOn: lit(on), litOff: lit(off),
-    peakOn: peak(on), peakOff: peak(off),
-  };
+  return { tag, ...m };
 }
 
 const url = `${pathToFileURL(htmlPath).href}?harness=1&seed=20260825`;
@@ -171,30 +175,50 @@ await advance(0.9);
 await call('aim', 90, 0);
 await redraw();
 
-const frames = [];
-// 0 — the control. Nothing has gone off; the pass must be a literal pass-through here, or every
-// frame in the game is paying for an effect that is not happening.
-frames.push(await pair('0-before'));
+// The control. Nothing has gone off; the pass must be a literal pass-through here, or every frame
+// in the game is paying for an effect that is not happening. Measured, not photographed.
+const before = await moment('0-before');
 
-// The round itself. Frames are taken from 0.12 s on, after the flash has died, so the light in
-// the picture is never the muzzle's.
+// The round itself, from 0.12 s on — after the flash has died, so the light in the picture is
+// never the muzzle's.
 await call('shoot');
 await advance(0.12);
-frames.push(await pair('1-just-fired'));
-await advance(0.88);
-frames.push(await pair('2-one-second'));
-await advance(2.0);
-frames.push(await pair('3-three-seconds'));
-await advance(2.6);
-frames.push(await pair('4-six-seconds'));
-await advance(4.0);
-frames.push(await pair('5-recovered'));
+const fired = await moment('1-just-fired');
+// Frame 1: the reference. The same tick with the pass switched off — what the hall actually is.
+await call('concussion.tune', { enabled: false });
+await redraw();
+await shot('1-just-fired-off.png');
+// Frame 2: the concussion as it now ships.
+await call('concussion.tune', { enabled: true });
+await redraw();
+await shot('2-just-fired-on.png');
+// Frame 3: the same tick again, with the tunables the human called blinding. Frames 2 and 3 are
+// the before/after of this change, and the reason the hall is readable in one and gone in the other.
+// `tune({})` is a no-op patch that returns the current tunables — the ones to restore after.
+const now = await call('concussion.tune', {});
+await call('concussion.tune', OLD);
+const old = await moment('1-just-fired (old)');
+await redraw();
+await shot('3-just-fired-old-tuning.png');
+await call('concussion.tune', now);
 
-const [before, fired, oneSec, threeSec, sixSec, done] = frames;
+await advance(0.88);
+const oneSec = await moment('2-one-second');
+await advance(2.0);
+const threeSec = await moment('3-three-seconds');
+// Frame 4: seconds later. Still unwell, and still a hall.
+await redraw();
+await shot('4-three-seconds-on.png');
+await advance(2.6);
+const sixSec = await moment('4-six-seconds');
+await advance(4.0);
+const done = await moment('5-recovered');
+
+const frames = [before, fired, old, oneSec, threeSec, sixSec, done];
 
 check('before the shot the pass is not in the picture at all', before.d < 0.002 && before.amount < 0.001,
   `${(before.d * 100).toFixed(3)}% of a frame, amount ${before.amount.toFixed(4)}`);
-check('the round leaves the frame visibly unwell', fired.d > 0.012 && fired.amount > 0.6,
+check('the round leaves the frame visibly unwell', fired.d > 0.004 && fired.amount > 0.6,
   `${(fired.d * 100).toFixed(2)}% of the frame moved, amount ${fired.amount.toFixed(2)}`);
 // The complaint being answered was that the old effect was over in about a second.
 check('and it is still unwell seconds later', threeSec.d > fired.d * 0.25 && threeSec.amount > 0.25,
@@ -204,25 +228,26 @@ check('it fades rather than switching off', sixSec.amount < threeSec.amount && s
 check('and the frame comes back on its own', done.d < 0.002 && done.amount < 0.02,
   `${(done.d * 100).toFixed(3)}% of a frame at +9.6 s, amount ${done.amount.toFixed(4)}`);
 
-// The law. Not an aspiration — a numeric gate on every concussed frame in this run.
+// The point of this revision, as a number rather than as an impression: how much of the hall's
+// light the effect eats at its worst. The old tuning took a quarter of it away *and* split every
+// remaining line into two half-brightness copies; the gate says the shipped one may not take more
+// than a tenth, and what it does take is grain speckle rather than contrast on the geometry.
+{
+  const kept = fired.meanOn / fired.meanOff;
+  const keptOld = old.meanOn / old.meanOff;
+  check('the hall stays visible through it', kept > 0.9,
+    `${(kept * 100).toFixed(1)}% of the hall's light survives the pass, against ` +
+      `${(keptOld * 100).toFixed(1)}% under the old tuning — ${((1 - keptOld) / Math.max(1e-6, 1 - kept)).toFixed(1)}x less taken away`);
+}
+
+// The law. Not an aspiration — a numeric gate on every measured moment in this run.
 {
   const worstMean = Math.max(...frames.map((f) => f.meanOn - f.meanOff));
   const worstPeak = Math.max(...frames.map((f) => f.peakOn - f.peakOff));
   check('concept law 1: it never lights the hall', worstMean <= 0.01,
-    `total light on screen never rises; the worst case is ${worstMean.toFixed(3)} of 255, ` +
-      `and at its deepest the frame is ${(frames[1].meanOff - frames[1].meanOn).toFixed(2)} darker than its twin`);
-  // Not a lit-pixel count, deliberately. Every operation here is multiplicative or a resample, so
-  // a point smears across a few more texels while its energy goes *down* — the count goes up and
-  // means nothing. What the law actually forbids is new light, which is total energy (above) and
-  // whether anything got brighter than the renderer had made it (here).
+    `total light on screen never rises; the worst case is ${worstMean.toFixed(3)} of 255`);
   check('and nothing in it gets brighter than the renderer drew it', worstPeak <= 1.5,
     `the brightest pixel moves by at most ${worstPeak.toFixed(1)} of 255`);
-  const spread = Math.max(...frames.map((f) => f.litOn - f.litOff));
-  console.log(
-    `[fx] note: lit-pixel count moves by up to ${(spread * 100).toFixed(2)} points — that is the ` +
-      `double vision and the resample smearing points the renderer already drew, at lower energy, ` +
-      `not new information.`,
-  );
 }
 
 check('no page errors', errors.length === 0, errors.join('; '));
@@ -257,9 +282,13 @@ await writeFile(
   join(outDir, 'README.txt'),
   [
     'M6c — the concussion, as pictures. seed 20260825, 120 Hz fixed step.',
-    'Each moment is a pair: -off.png is the pass switched off, -on.png is the same',
-    'simulation tick with it on. Nothing else differs between the two.',
     '',
+    '1-just-fired-off      the hall as it is, 0.12 s after the round, pass switched off.',
+    '2-just-fired-on       the same tick with the concussion as it ships.',
+    '3-just-fired-old-tuning  the same tick again with the first, blinding tuning.',
+    '4-three-seconds-on    +3.1 s: still unwell, still a hall.',
+    '',
+    'Numbers are printed by the generator, not measured from these PNGs.',
     ...frames.map(
       (f) =>
         `${f.tag}: amount ${f.amount.toFixed(3)}, ${(f.d * 100).toFixed(2)}% of the frame moved, ` +
@@ -268,7 +297,7 @@ await writeFile(
   ].join('\n'),
 );
 
-console.log(`[fx] ${frames.length * 2} frames → ${outDir}`);
+console.log(`[fx] 4 frames → ${outDir}`);
 await browser.close();
 if (failures.length > 0) {
   console.error(`[fx] ${failures.length} check(s) failed`);
