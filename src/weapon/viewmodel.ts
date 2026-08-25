@@ -34,6 +34,22 @@
  *
  * The `L` debug view lights it with a flat key so the shape can be inspected; that is the same
  * switch that already lights the hall and is not part of the game.
+ *
+ * **The second channel draws it in the second channel's own language.** The hand does not light
+ * the gun and never did — but the first attempt let the *mesh* carry the tactile term, and a
+ * shaded solid is what the world's props look like under the debug lights, so the rifle read as
+ * one more grey object lying in the hall instead of as something the player is feeling. The
+ * tactile layer everywhere else in this game draws two things and only two: a stipple of hard
+ * grey points on the surfaces the hand reached, and grey contour pieces along their edges. So
+ * that is what the rifle is now — its own lattice of points and its own contour, in `TOUCH_GREY`,
+ * at the same handful of pixels per point the hall's felt dots use. Same channel, same switch,
+ * same alphabet.
+ *
+ * The two channels never draw at once by accident and never blend: with a flash in flight the
+ * solid is drawn (there is real light on it), and with only the hand on it, only the stipple and
+ * the contour are. What the stipple *does* borrow from the solid is depth: the mesh is drawn
+ * colour-less into the depth buffer first, so the far side of the receiver does not show through
+ * the near side. You cannot feel through your own rifle.
  */
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -63,7 +79,8 @@ export interface ViewModelTunables {
    * How brightly the *tactile* channel draws the gun, as a fraction of the touch layer's own
    * near-hand alpha. This is the second and only other thing allowed to make the rifle visible,
    * and it is not a lamp: it is the same channel that already draws the crate you are leaning
-   * on, asking the same question about the nearest object there is.
+   * on, asking the same question about the nearest object there is — and, since the human looked
+   * at it, drawing the answer the same way too: grey stipple and grey contour, never a lit body.
    *
    * Unlike everything else the hand draws, the gun is drawn *whole* rather than by radius —
    * the human's call, and the right one: the reach test exists because you only know the piece
@@ -72,7 +89,7 @@ export interface ViewModelTunables {
    * целиком.
    */
   feel: number;
-  /** How much of the felt gun is edge rather than surface. Higher = more contour, less body. */
+  /** Brightness of the contour relative to the stipple. Higher = more edge, less surface. */
   feelEdge: number;
   /**
    * How much of a *ball* the flash is treated as. A muzzle flash is a fistful of burning
@@ -124,8 +141,8 @@ export function defaultViewModelTunables(): ViewModelTunables {
     gain: 0.0018,
     exposure: 1.15,
     rim: 0.25,
-    feel: 2.2,
-    feelEdge: 1.6,
+    feel: 1.0,
+    feelEdge: 1.4,
     wrap: 0.55,
     kickBack: 0.55,
     kickPitch: 0.8,
@@ -159,9 +176,6 @@ uniform float uExposure;
 uniform float uRim;
 uniform float uWrap;
 uniform float uDebug;
-uniform float uFeel;
-uniform float uFeelEdge;
-uniform vec3 uFeelColor;
 varying vec3 vWorld;
 varying vec3 vNormal2;
 void main() {
@@ -182,19 +196,135 @@ void main() {
   float rim = pow(1.0 - max(dot(n, toEye), 0.0), 3.0) * uRim;
   vec3 c = vec3(uAlbedo) * uLightColor * atten * (ndl + rim);
   c = vec3(1.0) - exp(-c * uExposure);
-  /*
-   * The tactile channel. Not light: it adds nothing to the scene, throws nothing, and reaches
-   * exactly as far as the gun's own surface. It is drawn the touch layer's grey, mostly as
-   * contour — a hard edge term plus a thin wash of body, which is the same "серый тактильный
-   * контур" the hall gets, on the one object the player is holding. It is switched by the same
-   * switch as the rest of the hand: touch off, gun gone.
-   */
-  float edge = pow(1.0 - max(dot(n, toEye), 0.0), uFeelEdge);
-  c += uFeelColor * uFeel * (0.22 + 0.78 * edge);
   // Debug lights only (the L key). Never on in the game.
   c += uDebug * uAlbedo * (0.30 + 0.70 * max(dot(n, toEye), 0.0));
   gl_FragColor = vec4(c, 1.0);
 }`;
+
+/*
+ * The tactile pair. These two shaders are the whole point of the rework: what the hand draws is
+ * points and lines in one flat grey, with no lighting model anywhere in them. There is no light
+ * position here, no falloff, no exposure — a felt thing is not a lit thing, and if any of that
+ * crept in the channel would be a lamp again.
+ *
+ * Two details are borrowed deliberately from `structured.ts`, because "the same language" has to
+ * mean the same numbers and not a similar mood:
+ *
+ *  - a felt point is a *hard small stipple* of a few drawing-buffer pixels, not the lidar's
+ *    energy-conserving blob that swells with proximity. The hall's felt dots clamp to 5-9 px; the
+ *    gun sits at a fixed 30 cm from the eye and never moves, so its dots need no distance maths
+ *    at all — they are simply drawn at that size.
+ *  - the facing term. A point whose surface has turned away from the eye is dropped, and one at a
+ *    grazing angle is dimmer, exactly as the hall's lattice does it. This is what keeps the far
+ *    side of the receiver from stippling through the near side even before the depth pass.
+ */
+const FEEL_VERT = `
+uniform vec3 uEye;
+uniform vec3 uColor;
+uniform float uBright;
+uniform float uPixels;
+varying vec3 vColor;
+void main() {
+  vec4 world = modelMatrix * vec4(position, 1.0);
+  vec3 n = normalize(mat3(modelMatrix) * normal);
+  float facing = dot(n, normalize(uEye - world.xyz));
+  if (facing < 0.02) {
+    // Off the clip volume entirely: a point has no second end to leave a streak behind.
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    gl_PointSize = 0.0;
+    return;
+  }
+  vColor = uColor * uBright * (0.45 + 0.55 * facing);
+  gl_PointSize = uPixels;
+  gl_Position = projectionMatrix * viewMatrix * world;
+}`;
+
+const FEEL_FRAG = `
+varying vec3 vColor;
+void main() {
+  float r = length(gl_PointCoord - 0.5) * 2.0;
+  // Harder-edged than a lidar dot: a felt point is a fingertip, not a return. Same 0.6 of the
+  // hall's dot softness that its own touch branch uses.
+  float shape = 1.0 - smoothstep(0.79, 1.0, r);
+  if (shape <= 0.002) discard;
+  gl_FragColor = vec4(vColor, shape);
+}`;
+
+const EDGE_VERT = `
+void main() {
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const EDGE_FRAG = `
+uniform vec3 uColor;
+uniform float uBright;
+void main() {
+  gl_FragColor = vec4(uColor * uBright, 1.0);
+}`;
+
+/** Stipple pitch on the gun's own surface, metres before the viewmodel scale. */
+const FEEL_PITCH = 0.02;
+/** How far a felt point sits proud of the surface it belongs to, metres. */
+const FEEL_LIFT = 0.0022;
+/** Diameter of one felt point, drawing-buffer pixels — inside the hall's own 5-9 band. */
+const FEEL_PIXELS = 6;
+
+/** Deterministic and seeded: `Math.random()` in a viewmodel would break every keyframe run. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * The gun's own lattice. The hall snaps its dots to a world grid so that coplanar faces line up;
+ * that trick is not available here (the gun moves with the eye, and a grid in its local frame
+ * would swim as it kicks), so the points are laid down per triangle at a fixed area density with
+ * a fractional carry, which gives the same even, unpatterned covering. Built once.
+ */
+function buildStipple(source: THREE.BufferGeometry): THREE.BufferGeometry {
+  const pos = source.getAttribute('position');
+  const nor = source.getAttribute('normal');
+  const index = source.getIndex();
+  const count = index !== null ? index.count : pos.count;
+  const rnd = mulberry32(0x1f1e33);
+  const P: number[] = [];
+  const N: number[] = [];
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const na = new THREE.Vector3(), nb = new THREE.Vector3(), nc = new THREE.Vector3();
+  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), cross = new THREE.Vector3();
+  const p = new THREE.Vector3(), n = new THREE.Vector3();
+  const per = FEEL_PITCH * FEEL_PITCH;
+  let carry = 0;
+  for (let t = 0; t + 2 < count; t += 3) {
+    const i0 = index !== null ? index.getX(t) : t;
+    const i1 = index !== null ? index.getX(t + 1) : t + 1;
+    const i2 = index !== null ? index.getX(t + 2) : t + 2;
+    a.fromBufferAttribute(pos, i0); b.fromBufferAttribute(pos, i1); c.fromBufferAttribute(pos, i2);
+    na.fromBufferAttribute(nor, i0); nb.fromBufferAttribute(nor, i1); nc.fromBufferAttribute(nor, i2);
+    e1.subVectors(b, a); e2.subVectors(c, a);
+    carry += 0.5 * cross.crossVectors(e1, e2).length() / per;
+    while (carry >= 1) {
+      carry -= 1;
+      let u = rnd(), v = rnd();
+      if (u + v > 1) { u = 1 - u; v = 1 - v; }
+      n.set(0, 0, 0)
+        .addScaledVector(na, 1 - u - v).addScaledVector(nb, u).addScaledVector(nc, v)
+        .normalize();
+      p.copy(a).addScaledVector(e1, u).addScaledVector(e2, v).addScaledVector(n, FEEL_LIFT);
+      P.push(p.x, p.y, p.z);
+      N.push(n.x, n.y, n.z);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
+  return g;
+}
 
 /** One part of the silhouette. All coordinates local: +Z runs back towards the shoulder. */
 function box(w: number, h: number, d: number, x: number, y: number, z: number, pitch = 0): THREE.BufferGeometry {
@@ -241,8 +371,16 @@ export class RifleViewModel implements TouchSink {
   readonly tunables: ViewModelTunables;
   /** Add this to the *camera*: the gun is held in view space, like every viewmodel ever. */
   readonly object = new THREE.Group();
+  /** Everything the gun is made of, in one frame: the hold and the kick are applied here once. */
+  private readonly body = new THREE.Group();
   private readonly mesh: THREE.Mesh;
   private readonly material: THREE.ShaderMaterial;
+  /** The tactile pair, and the depth-only copy that stops them showing through the gun. */
+  private readonly stipple: THREE.Points;
+  private readonly contour: THREE.LineSegments;
+  private readonly occluder: THREE.Mesh;
+  private readonly stippleMaterial: THREE.ShaderMaterial;
+  private readonly contourMaterial: THREE.ShaderMaterial;
   private readonly rest = new THREE.Vector3();
   private lastEnergy = 0;
   /** Set by the touch layer: is the tactile channel on at all, and how bright is it up close. */
@@ -264,15 +402,13 @@ export class RifleViewModel implements TouchSink {
         uRim: { value: tunables.rim },
         uWrap: { value: tunables.wrap },
         uDebug: { value: 0 },
-        uFeel: { value: 0 },
-        uFeelEdge: { value: tunables.feelEdge },
-        uFeelColor: { value: new THREE.Color(TOUCH_GREY) },
       },
       transparent: false,
       depthWrite: true,
       side: THREE.DoubleSide,
     });
-    this.mesh = new THREE.Mesh(buildGeometry(), this.material);
+    const geometry = buildGeometry();
+    this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.castShadow = false;
     this.mesh.receiveShadow = false;
     // It is 30 cm from the eye and always in front of it; culling it is a test that can only
@@ -281,7 +417,56 @@ export class RifleViewModel implements TouchSink {
     // The stock is canted to the shoulder while the muzzle stays on the sight line, so the
     // barrel is not a stripe down the middle of the screen and the flash is where the shot is.
 
-    this.object.add(this.mesh);
+    const grey = new THREE.Color(TOUCH_GREY);
+    this.stippleMaterial = new THREE.ShaderMaterial({
+      vertexShader: FEEL_VERT,
+      fragmentShader: FEEL_FRAG,
+      uniforms: {
+        uEye: { value: new THREE.Vector3() },
+        uColor: { value: grey.clone() },
+        uBright: { value: 0 },
+        uPixels: { value: FEEL_PIXELS },
+      },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.contourMaterial = new THREE.ShaderMaterial({
+      vertexShader: EDGE_VERT,
+      fragmentShader: EDGE_FRAG,
+      uniforms: {
+        uColor: { value: grey.clone() },
+        uBright: { value: 0 },
+      },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    this.stipple = new THREE.Points(buildStipple(geometry), this.stippleMaterial);
+    this.stipple.frustumCulled = false;
+    // 25 degrees: every crease of a box and the rim of every cylinder, and nothing along the
+    // flats. This is the same idea as the hall's contour pieces — where a surface turns, the hand
+    // knows it — reused instead of hand-listing thirty edges.
+    this.contour = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 25), this.contourMaterial);
+    this.contour.frustumCulled = false;
+    /*
+     * Depth only, no colour. Without it the stipple on the far side of the receiver shows through
+     * the near side and the gun turns into a cloud with no front or back. The facing test in the
+     * shader gets most of the way there, but the contour has no normal to test and would still
+     * draw its hidden edges. Polygon offset pushes this copy a hair further from the eye so the
+     * points and lines sitting exactly on the surface are not fighting it for the same depth.
+     */
+    this.occluder = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+      colorWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 2,
+    }));
+    this.occluder.frustumCulled = false;
+    this.occluder.renderOrder = -1;
+
+    this.body.add(this.mesh, this.occluder, this.stipple, this.contour);
+    this.object.add(this.body);
     this.object.visible = false;
     this.applyLook();
   }
@@ -293,12 +478,11 @@ export class RifleViewModel implements TouchSink {
     this.material.uniforms.uExposure!.value = t.exposure;
     this.material.uniforms.uRim!.value = t.rim;
     this.material.uniforms.uWrap!.value = t.wrap;
-    this.material.uniforms.uFeelEdge!.value = t.feelEdge;
     // x stays at zero on purpose: the muzzle has to sit exactly where the flash is born, so
     // the gun is swung to the shoulder by rotating it about that point, not by sliding it.
     this.rest.set(t.side, -t.drop, -t.ahead);
-    this.mesh.rotation.set(t.tilt, t.cant, t.roll);
-    this.mesh.scale.setScalar(t.scale);
+    this.body.rotation.set(t.tilt, t.cant, t.roll);
+    this.body.scale.setScalar(t.scale);
   }
 
   get lit(): boolean {
@@ -358,21 +542,44 @@ export class RifleViewModel implements TouchSink {
     const energy = Math.max(0, intensity) * t.gain;
     this.lastEnergy = energy;
     const feel = inView ? this.felt : 0;
-    const on = inView && t.visible && (energy > 1e-4 || debugLit || feel > 1e-3);
+    const solid = energy > 1e-4 || debugLit;
+    const on = inView && t.visible && (solid || feel > 1e-3);
     this.object.visible = on;
     if (!on) return;
+    /*
+     * One object, two channels, never mixed. Light on it: the solid, shaded by the flash. Only
+     * the hand on it: the stipple and the contour, and the solid reduced to a depth mask. The
+     * hand never adds a single lumen to the shaded pass, which is why the tactile channel here
+     * cannot become the "gun lamp" law 1 forbids.
+     */
+    this.mesh.visible = solid;
+    const felt = !solid && feel > 1e-3;
+    this.occluder.visible = felt;
+    this.stipple.visible = felt;
+    this.contour.visible = felt;
     const u = this.material.uniforms;
-    u.uFeel!.value = feel;
     u.uEnergy!.value = energy;
     u.uDebug!.value = debugLit ? 0.75 : 0;
     (u.uLightPos!.value as THREE.Vector3).set(lightX, lightY, lightZ);
     (u.uEye!.value as THREE.Vector3).set(eyeX, eyeY, eyeZ);
-    this.mesh.position.set(this.rest.x, this.rest.y, this.rest.z + punchBack * t.kickBack);
-    this.mesh.rotation.x = t.tilt + punchPitch * t.kickPitch;
+    if (felt) {
+      this.stippleMaterial.uniforms.uBright!.value = feel;
+      // A line covers many more pixels than a point does, so the contour is scaled down before
+      // the ratio slider ever sees it — the same reasoning as the hall's own uTouchEdge.
+      this.contourMaterial.uniforms.uBright!.value = feel * t.feelEdge * 0.34;
+      (this.stippleMaterial.uniforms.uEye!.value as THREE.Vector3).set(eyeX, eyeY, eyeZ);
+    }
+    this.body.position.set(this.rest.x, this.rest.y, this.rest.z + punchBack * t.kickBack);
+    this.body.rotation.x = t.tilt + punchPitch * t.kickPitch;
   }
 
   dispose(): void {
     this.mesh.geometry.dispose();
+    this.stipple.geometry.dispose();
+    this.contour.geometry.dispose();
+    (this.occluder.material as THREE.Material).dispose();
+    this.stippleMaterial.dispose();
+    this.contourMaterial.dispose();
     this.material.dispose();
   }
 }

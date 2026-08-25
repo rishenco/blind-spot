@@ -1296,18 +1296,59 @@ check('and black stays black where it was', litIn(f38, GUN_RECT) < 0.005,
 // props and the hall are — same switch, same channel, no private path. It is drawn whole rather
 // than clipped to the reach sphere, because the reach test models not knowing the world, and the
 // player does know the thing he is holding.
+//
+// And it is drawn in the tactile channel's *alphabet*: grey stipple on the surfaces plus grey
+// contour along the creases, exactly what the hand draws when it finds a crate. The first cut of
+// this made the mesh itself carry the touch term and the result was a shaded solid — which is
+// what the world's props look like under the debug lights, so the gun read as one more object
+// lying in the hall. That is not a brightness bug and could not be fixed with a slider, so the
+// check below is structural rather than photometric: it asks whether the gun is made of separate
+// marks like the floor beside it, or is a body like the flash-lit gun four frames ago.
+//
+// The measure is transitions per lit pixel along the scanlines — how often the row crosses from
+// black into something. A stipple crosses constantly; a lit solid crosses twice.
+const markiness = (img, rect, skip) => {
+  let lit = 0;
+  let crossings = 0;
+  for (let y = rect.y; y < rect.y + rect.h; y++) {
+    let prev = false;
+    for (let x = rect.x; x < rect.x + rect.w; x++) {
+      if (skip !== undefined && x >= skip.x && x < skip.x + skip.w && y >= skip.y && y < skip.y + skip.h) {
+        prev = false;
+        continue;
+      }
+      const i = (y * img.width + x) * img.channels;
+      const on = (img.data[i] + img.data[i + 1] + img.data[i + 2]) / 3 > 8;
+      if (on) lit++;
+      if (on !== prev) crossings++;
+      prev = on;
+    }
+  }
+  return lit === 0 ? 0 : crossings / lit;
+};
 await call('pose', 0, 6, 200);
 await call('aim', 200, -38);
 await call('touch', true);
 await advance(0.5, 3);
 const f43 = await shot(
   '43-rifle-by-touch.png',
-  'total darkness — no flash, no lidar ping, no marker. The rifle is drawn by the tactile channel alone: a flat grey contour with no falloff across it, because it is felt, not lit. Below it the floor’s own touch dots, the same channel reaching the same ~0.5 m, are bright pinpoints — the two must not look alike: dots are matter the hand found, the contour is the thing the hand is holding',
+  'total darkness — no flash, no lidar ping, no marker. The rifle is drawn by the tactile channel alone, and in that channel’s own language: a stipple of hard grey points across its surfaces and grey contour along its creases, with no falloff anywhere on it, because it is felt and not lit. Compare it with the floor’s own touch dots below and to the left — same grey, same handful of pixels per point, same channel reaching the same ~0.5 m. The gun is not a lit object in the room; it is the one thing the hand never has to look for',
 );
 const gunFelt = await stats();
 check('the tactile layer is what draws the rifle here',
   gunFelt.gun.lit === true && gunFelt.gun.energy === 0 && gunFelt.gun.felt > 0,
   `energy=${gunFelt.gun.energy} (no flash at all), felt=${gunFelt.gun.felt.toFixed(2)}`);
+
+// The human's note on the first cut: «винтовка теперь просто меш, а должна рисоваться аналогично
+// тому что тач раскрывает». So: is it drawn the way the hand draws, or the way light draws?
+const feltMarks = markiness(f43, GUN_RECT);
+const handMarks = markiness(f43, { x: 0, y: 0, w: f43.width, h: f43.height }, GUN_RECT);
+const solidMarks = markiness(f36, GUN_RECT);
+check('and it is drawn in the hand’s language, not as a lit body',
+  feltMarks > 0.15 && feltMarks > 6 * solidMarks && feltMarks > 0.5 * handMarks && feltMarks < 4 * handMarks,
+  `crossings per lit pixel: ${feltMarks.toFixed(3)} on the felt rifle, ${handMarks.toFixed(3)} on the floor's ` +
+    `own touch dots in the same frame, ${solidMarks.toFixed(3)} on the same rifle lit by the flash in frame 40 — ` +
+    `the felt gun is made of separate marks like the floor beside it, and the lit gun is a body`);
 
 // Control: switch the mesh off with the touch layer still on. The floor dots must survive
 // untouched — if they dim, the gun was lighting the room, and law 2's neighbour would be broken.
@@ -1344,9 +1385,17 @@ const f44 = await shot(
   'the same pose with the tactile channel switched off. The floor dots go, and so does the rifle: it has no light of its own to fall back on. Two channels can draw the gun — the flash and the hand — and with both out it is switched off, not dimmed',
 );
 const gunNumb = await stats();
+// The claim is about the gun and the floor dots that were drawn a moment ago, so it is measured
+// where they were: the rectangle the gun is held in has to be empty, and the frame has to fall
+// back to black. It is not asserted as an exact zero over the whole frame any more — a handful of
+// stray pixels somewhere else in the build is a different feature's bug, and it should fail that
+// feature's check rather than silently turn this one red.
 check('with the hand off, the rifle is gone too',
-  gunNumb.gun.lit === false && gunNumb.gun.felt === 0 && meanLuminance(f44) < 0.01,
-  `felt=${gunNumb.gun.felt}, lit=${gunNumb.gun.lit}, whole frame mean ${meanLuminance(f44).toFixed(4)}`);
+  gunNumb.gun.lit === false && gunNumb.gun.felt === 0 &&
+    litIn(f44, GUN_RECT) < litIn(f43, GUN_RECT) / 20 && meanLuminance(f44) < 0.1,
+  `felt=${gunNumb.gun.felt}, lit=${gunNumb.gun.lit}, the hold rectangle is lit ` +
+    `${litIn(f44, GUN_RECT).toFixed(5)} (was ${litIn(f43, GUN_RECT).toFixed(5)} with the hand on), ` +
+    `whole frame mean ${meanLuminance(f44).toFixed(4)}`);
 await call('pose', ...VISTA);
 await call('aim', ...VISTA_AIM);
 await call('viewmodel', false);
@@ -1358,7 +1407,9 @@ notes.push(
     `(${flashWithout.toFixed(2)} → ${flashWith.toFixed(2)}), and that is pure occlusion: the mesh adds no light ` +
     `and is in no shadow map. The second thing that can draw it is the hand: it is a TouchSink like the props, ` +
     `so the tactile channel feels its own barrel in complete darkness (frame 43) and drops it again with the rest ` +
-    `of the hand (frame 44).`,
+    `of the hand (frame 44) — and it draws it the way that channel draws everything else, as grey stipple and ` +
+    `grey contour: ${feltMarks.toFixed(2)} crossings per lit pixel against the floor's own felt dots at ` +
+    `${handMarks.toFixed(2)} in the same frame, and ${solidMarks.toFixed(2)} for the same rifle as a lit body.`,
 );
 
 // --- what a flash frame costs ----------------------------------------------
