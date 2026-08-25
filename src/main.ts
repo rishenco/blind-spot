@@ -551,6 +551,29 @@ class App {
     }
     const gui = new GUI({ title: 'lidar / perf' });
     this.gui = gui;
+    /*
+     * lil-gui calls stopPropagation() on keydown/keyup inside every one of its controllers, so
+     * once a slider has focus the window never sees WASD again — and, worse, never sees the
+     * *keyup* either, so a key held while you reach for the GUI stays down for ever. Catch those
+     * events on the way in (capture phase, before lil-gui's own bubble handler) and re-issue them
+     * on the window, unless the focus really is in a field being typed into.
+     */
+    const isTyping = (el: HTMLElement | null): boolean => {
+      if (el === null) return false;
+      if (el.isContentEditable || el.tagName === 'TEXTAREA') return true;
+      if (el.tagName !== 'INPUT') return false;
+      const type = (el as HTMLInputElement).type;
+      return type === 'text' || type === 'number' || type === 'search';
+    };
+    const relay = (e: Event): void => {
+      const el = e.target as HTMLElement | null;
+      if (isTyping(el)) return;
+      // A checkbox or a dropdown has no business holding the keyboard once it has been used.
+      el?.blur?.();
+      window.dispatchEvent(new KeyboardEvent(e.type, e as KeyboardEvent));
+    };
+    gui.domElement.addEventListener('keydown', relay, true);
+    gui.domElement.addEventListener('keyup', relay, true);
     const t = this.paint.tunables;
     const lidar = this.lidar.tunables;
 
