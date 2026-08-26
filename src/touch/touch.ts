@@ -54,7 +54,7 @@ export interface TouchTunables {
 
 export function defaultTouchTunables(): TouchTunables {
   return {
-    range: 0.55,
+    range: 0.9,
     drop: 1.75,
     nearAlpha: 1,
     memoryAlpha: 0.22,
@@ -159,10 +159,12 @@ export class TouchLayer {
     this.lastZ = z;
     this.dirty = false;
 
-    // The write has to cover the reach plus the drift allowance, or a point would be felt a
-    // re-query late and pop in behind the hand.
-    let fresh = this.paint.revealTouch(x, foot, z, span, t.range + t.rebuildStep);
-    for (const sink of this.extra) fresh += sink.revealTouch(x, foot, z, span, t.range + t.rebuildStep);
+    // `range` is the physical boundary, not a rendering hint. This used to include
+    // `rebuildStep`, which made a nominal 0.55 m hand actually stamp geometry out to 0.63 m and
+    // would turn the requested 0.9 m reach into almost a metre. Rebuild cadence may delay the
+    // first stamp by a few centimetres while moving; it must never let the hand reach farther.
+    let fresh = this.paint.revealTouch(x, foot, z, span, t.range);
+    for (const sink of this.extra) fresh += sink.revealTouch(x, foot, z, span, t.range);
     const s = this.paint.getStats();
     this.stats = {
       near: fresh,
