@@ -209,6 +209,16 @@ export interface SpiderTunables {
   /** A fresh strong lead holds priority over weak repeats such as a floor-radio ping. */
   strongLeadSeconds: number;
 
+  // --- quiet exploration -------------------------------------------------
+  /** Metres around a deliberately reached search goal that count as examined, not merely crossed. */
+  searchInspectRadius: number;
+  /** How long an empty area stays unattractive to new quiet-search goals. */
+  emptySeconds: number;
+  /** Bound on short-lived empty zones retained by the pack. */
+  emptySlots: number;
+  /** Candidate cells scored per decision; bounded so search remains cheap. */
+  searchCandidates: number;
+
   // --- fear ---------------------------------------------------------------
   /** Loudness, in metres of notice, below which a noise can never be frightening however close. */
   scareLoudness: number;
@@ -290,16 +300,6 @@ export interface SpiderTunables {
   lungeRange: number;
   /** Confidence needed for that solo lunge. */
   lungeConfidence: number;
-
-  // --- searching ----------------------------------------------------------
-  /**
-   * Seconds a spider keeps combing the area around a spent lead before it gives up and idles.
-   * "Стою N секунд и они пришли" needs this: the player who makes one noise and then freezes
-   * gives them nothing more to home in on, so the last stretch has to be a search.
-   */
-  searchSeconds: number;
-  /** Metres the verification search widens to around the last belief (starts at 8 m). */
-  searchRadius: number;
 
   // --- flesh --------------------------------------------------------------
   /** Hit points. One rifle round does `bulletDamage`; «пара выстрелов» is the human's brief. */
@@ -418,7 +418,7 @@ export function defaultSpiderTunables(): SpiderTunables {
     // the nose plus a hop) while leaving a sprint's 16 m untouched makes it a ~6.4x spread:
     // only spiders already close hear you walk, and running lights up most of a room.
     stepQuietLoudness: 10,
-    stepQuietReach: 2.5,
+    stepQuietReach: 5,
     beliefTau: 9,
     approachPatience: 5,
     weightPlayer: 1,
@@ -429,6 +429,11 @@ export function defaultSpiderTunables(): SpiderTunables {
     checkedSeconds: 18,
     checkedOverrideLoudness: 20,
     strongLeadSeconds: 3,
+
+    searchInspectRadius: 2.1,
+    emptySeconds: 18,
+    emptySlots: 12,
+    searchCandidates: 48,
 
     // A gunshot is 90 m of notice and a barrel going over caps at 34; a sprint is 16. So this
     // line puts "the world fell over" and "he fired" on the frightening side and leaves ordinary
@@ -459,9 +464,6 @@ export function defaultSpiderTunables(): SpiderTunables {
     waveCourageKeep: 0.6,
     lungeRange: 3.2,
     lungeConfidence: 0.45,
-
-    searchSeconds: 45,
-    searchRadius: 14,
 
     hp: 2,
     bulletDamage: 1,
@@ -564,6 +566,16 @@ export interface CheckedZoneSnapshot {
   remaining: number;
   /** Points inside this radius are considered the same source. */
   radius: number;
+}
+
+export interface SearchCoverageSnapshot {
+  /** Covered / walkable cells in the current debug search region. */
+  covered: number;
+  walkable: number;
+  fraction: number;
+  version: number;
+  /** Cells are only emitted on the debug path, for the P overlay's historical coverage wash. */
+  cells: ReadonlyArray<{ x: number; z: number }>;
 }
 
 /**
@@ -715,8 +727,10 @@ interface Spider {
    * the point is to forget an exhausted lead, not to build a map.
    */
   checked: { x: number; z: number; at: number; seconds: number }[];
-  /** Sweep angle of the search pattern, radians. */
-  sweep: number;
+  /** Quiet-search target selected from the shared reachable-cell ledger. */
+  searchX: number;
+  searchZ: number;
+  searchAt: number;
   /** Simulation time it died, or Infinity. A corpse is furniture: it stops moving and stays. */
   deadAt: number;
 }
@@ -740,6 +754,15 @@ const HOP_REACH = [1, 0.66, 0.38];
 
 /** Points along the parabola the clearance test samples. Cheap, and enough to keep walls solid. */
 const ARC_SAMPLES = [0.25, 0.5, 0.75];
+
+interface SearchCell {
+  x: number;
+  z: number;
+  covered: boolean;
+  claimedBy: number;
+  claimUntil: number;
+  emptyUntil: number;
+}
 
 export class Swarm {
   readonly tunables: SpiderTunables;
@@ -784,6 +807,12 @@ export class Swarm {
   private clickWindow: number[] = [];
 
   private readonly scratchBoxes: Aabb[] = [];
+  /** A compact, static floor ledger. It is AI navigation telemetry, never player-visible state. */
+  private searchCells: SearchCell[] = [];
+  private searchBounds = { minX: -30, maxX: 30, minZ: -20, maxZ: 20 };
+  private searchCoverageVersion = 0;
+  /** Short-lived inspected-area markers, separate from sound-source conclusions so exploration cannot evict radio memory. */
+  private readonly searchEmptyZones: { x: number; z: number; until: number }[] = [];
 
   constructor(
     private readonly world: StaticWorld,
@@ -800,6 +829,7 @@ export class Swarm {
       height: tunables.height,
       stepHeight: tunables.stepHeight,
     };
+    this.rebuildSearchCells();
     // The third bus consumer, and it knows nothing about the other two. A spider hears exactly
     // what the marker layer draws and what the synth voices — no private channel, no cheat.
     this.unsubscribe = bus.subscribe((event) => this.hear(event));
@@ -1042,7 +1072,9 @@ export class Swarm {
       rng: makeRng((this.seed ^ 0x51de_1000) + id * 0x9e37_79b1),
       ledAt: -99,
       checked: [],
-      sweep: angle,
+      searchX: x,
+      searchZ: z,
+      searchAt: -Infinity,
       deadAt: Infinity,
     };
   }
@@ -1371,7 +1403,6 @@ export class Swarm {
     s.belief.confidence = 0;
     s.belief.pinnedFor = 0;
     s.ledAt = this.time;
-    s.sweep += 1.3;
     this.enter(s, 'search');
   }
 
@@ -1392,7 +1423,6 @@ export class Swarm {
       o.belief.confidence = 0;
       o.belief.pinnedFor = 0;
       o.ledAt = this.time;
-      o.sweep += 0.7 + o.id * 0.41;
       this.enter(o, 'search');
       o.heard = `#${s.id}: empty source, pack searching`;
       o.heardAt = this.time;
@@ -1412,7 +1442,7 @@ export class Swarm {
       }
     }
     s.checked.push({ x, z, at: this.time, seconds });
-    if (s.checked.length > 3) s.checked.shift();
+    if (s.checked.length > Math.max(1, Math.round(t.emptySlots))) s.checked.shift();
   }
 
   /**
@@ -1461,11 +1491,9 @@ export class Swarm {
       // just been shot at still runs, however close the player is.
       this.enter(s, 'commit');
     } else if (b.confidence < 0.1) {
-      // Out of belief, but not necessarily out of the hunt: a spider that had a lead recently
-      // combs the place it lost it instead of standing in the dark. This is the last stretch of
-      // "выдал себя, стою — и они пришли": one noise gets them into the room, the search walks
-      // them onto him, and the nose closes it.
-      this.enter(s, this.time - s.ledAt < t.searchSeconds ? 'search' : 'idle');
+      // No lead is not idleness. Quiet spiders deliberately partition reachable floor and check
+      // it; only a fresh sound or the two-metre nose is allowed to interrupt that work.
+      this.enter(s, 'search');
     } else if (b.inspect) {
       // Weak evidence is not a player position to encircle forever. First verify it; only then
       // is there a reason to spread through the surrounding room.
@@ -1523,20 +1551,17 @@ export class Swarm {
         break;
       }
       case 'search': {
-        // A widening sweep about the point the trail went cold. Slow — it is feeling its way,
-        // and a spider that ran the search would be a spider the player can hear coming.
+        // Shared, reachable exploration — not an orbit around the last thing that made noise.
+        // A target is reserved for a short time, then only a calm arrival marks its local area
+        // covered and empty. Crossing a cell in flight counts for nothing.
         speed = t.speedCreep;
-        const age = this.time - b.at;
-        // A checked point itself is empty. The company starts outside its immediate clutter and
-        // combs a broad 8–14 m annulus, so its search reads as a spread, not as a new huddle.
-        const r = Math.min(t.searchRadius, 8 + age * 0.25);
-        // The sweep point walks at the spider's own pace, not at a fixed angular rate. With a
-        // fixed rate the target ran round the circle faster than the spider could follow at any
-        // useful radius, so fourteen searchers all spiralled into the middle and combed the one
-        // spot they already knew was empty — the pack looked like a huddle.
-        s.sweep += (speed / Math.max(1.2, r)) * dt * s.orbitDir;
-        gx = b.x + Math.cos(s.sweep) * r;
-        gz = b.z + Math.sin(s.sweep) * r;
+        const toGoal = Math.hypot(s.pos.x - s.searchX, s.pos.z - s.searchZ);
+        if (s.searchAt < 0 || this.time - s.searchAt > 12 || (toGoal < 0.85 && s.hopPhase === 'rest')) {
+          if (s.searchAt >= 0 && toGoal < 0.85 && s.hopPhase === 'rest') this.inspectSearchGoal(s);
+          this.chooseSearchGoal(s);
+        }
+        gx = s.searchX;
+        gz = s.searchZ;
         break;
       }
       case 'stalk':
@@ -1640,6 +1665,110 @@ export class Swarm {
       this.scratchBoxes,
     );
     return canOccupy(boxes, x, feetY, z, t.radius, t.height);
+  }
+
+  /**
+   * One-metre floor ledger for quiet search. We only admit cells whose floor position can hold a
+   * spider; shelves are still reachable by the gait, but do not make this coarse coverage metric
+   * lie about walkable ground. Rebuilt only for a harness region, never in the hot loop.
+   */
+  private rebuildSearchCells(): void {
+    const b = this.searchBounds;
+    const cells: SearchCell[] = [];
+    for (let z = Math.ceil(b.minZ) + 0.5; z < b.maxZ; z += 1) {
+      for (let x = Math.ceil(b.minX) + 0.5; x < b.maxX; x += 1) {
+        if (!this.free(x, 0.05, z)) continue;
+        cells.push({ x, z, covered: false, claimedBy: -1, claimUntil: -Infinity, emptyUntil: -Infinity });
+      }
+    }
+    this.searchCells = cells;
+    this.searchEmptyZones.length = 0;
+    this.searchCoverageVersion++;
+  }
+
+  /** Harness-only bounded region: lets the numeric check measure the real clutter deterministically. */
+  setSearchRegion(minX: number, maxX: number, minZ: number, maxZ: number): SearchCoverageSnapshot {
+    this.searchBounds = {
+      minX: clamp(Math.min(minX, maxX), -31, 31),
+      maxX: clamp(Math.max(minX, maxX), -31, 31),
+      minZ: clamp(Math.min(minZ, maxZ), -21, 21),
+      maxZ: clamp(Math.max(minZ, maxZ), -21, 21),
+    };
+    this.rebuildSearchCells();
+    for (const s of this.spiders) s.searchAt = -Infinity;
+    return this.searchCoverage();
+  }
+
+  searchCoverage(): SearchCoverageSnapshot {
+    let covered = 0;
+    const cells: { x: number; z: number }[] = [];
+    for (const c of this.searchCells) {
+      if (!c.covered) continue;
+      covered++;
+      cells.push({ x: c.x, z: c.z });
+    }
+    const walkable = this.searchCells.length;
+    return { covered, walkable, fraction: walkable === 0 ? 0 : covered / walkable, version: this.searchCoverageVersion, cells };
+  }
+
+  /** Selects an unclaimed, unexamined cell without a map-wide scan every decision. */
+  private chooseSearchGoal(s: Spider): void {
+    const t = this.tunables;
+    if (this.searchCells.length === 0) return;
+    let best: SearchCell | null = null;
+    let bestScore = Infinity;
+    const tries = Math.max(8, Math.round(t.searchCandidates));
+    for (let i = 0; i < tries; i++) {
+      const c = this.searchCells[Math.floor(s.rng() * this.searchCells.length)]!;
+      const claimed = c.claimUntil > this.time && c.claimedBy !== s.id;
+      const empty = c.emptyUntil > this.time || this.isChecked(s, c.x, c.z);
+      const d = Math.hypot(c.x - s.pos.x, c.z - s.pos.z);
+      // Covered cells stay legal only once the fresh frontier is exhausted; this avoids a hard
+      // deadlock late in a small region while strongly preferring new territory at the start.
+      const score = d * 0.16 + (c.covered ? 80 : 0) + (claimed ? 120 : 0) + (empty ? 160 : 0);
+      if (score < bestScore) {
+        best = c;
+        bestScore = score;
+      }
+    }
+    if (best === null) return;
+    best.claimedBy = s.id;
+    best.claimUntil = this.time + 10;
+    s.searchX = best.x;
+    s.searchZ = best.z;
+    s.searchAt = this.time;
+  }
+
+  /** A calm stop at an assigned goal is an actual inspection, so it earns coverage and empty memory. */
+  private inspectSearchGoal(s: Spider): void {
+    const t = this.tunables;
+    const r2 = t.searchInspectRadius * t.searchInspectRadius;
+    let changed = false;
+    for (const c of this.searchCells) {
+      const dx = c.x - s.pos.x;
+      const dz = c.z - s.pos.z;
+      if (dx * dx + dz * dz > r2) continue;
+      c.emptyUntil = Math.max(c.emptyUntil, this.time + t.emptySeconds);
+      if (!c.covered) {
+        c.covered = true;
+        changed = true;
+      }
+    }
+    if (changed) this.searchCoverageVersion++;
+    this.recordSearchEmpty(s.searchX, s.searchZ);
+  }
+
+  private recordSearchEmpty(x: number, z: number): void {
+    const t = this.tunables;
+    for (const e of this.searchEmptyZones) {
+      if (Math.hypot(e.x - x, e.z - z) >= t.searchInspectRadius) continue;
+      e.x = x;
+      e.z = z;
+      e.until = this.time + t.emptySeconds;
+      return;
+    }
+    this.searchEmptyZones.push({ x, z, until: this.time + t.emptySeconds });
+    if (this.searchEmptyZones.length > Math.max(1, Math.round(t.emptySlots))) this.searchEmptyZones.shift();
   }
 
   /**
@@ -2268,6 +2397,15 @@ export class Swarm {
         if (previous === undefined || remaining > previous.remaining) {
           zones.set(key, { groupId: null, x: c.x, z: c.z, remaining, radius: this.tunables.pinnedRadius });
         }
+      }
+    }
+    for (const e of this.searchEmptyZones) {
+      const remaining = e.until - this.time;
+      if (remaining <= 0) continue;
+      const key = `${e.x.toFixed(2)}:${e.z.toFixed(2)}`;
+      const previous = zones.get(key);
+      if (previous === undefined || remaining > previous.remaining) {
+        zones.set(key, { groupId: null, x: e.x, z: e.z, remaining, radius: this.tunables.searchInspectRadius });
       }
     }
     return [...zones.values()].sort((a, b) => b.remaining - a.remaining);

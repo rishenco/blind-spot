@@ -25,7 +25,7 @@
  */
 import * as THREE from 'three';
 
-import { STATE_COLORS, type CheckedZoneSnapshot, type SpiderSnapshot, type SwarmStats, type Swarm } from './swarm';
+import { STATE_COLORS, type CheckedZoneSnapshot, type SearchCoverageSnapshot, type SpiderSnapshot, type SwarmStats, type Swarm } from './swarm';
 
 /**
  * The panel used to sit top-right at up to 46vw with one long row per spider, i.e. it covered
@@ -64,6 +64,7 @@ const PANEL_STYLE = `
 const SEGMENTS = 5;
 const ZONE_SEGMENTS = 24;
 const ZONE_CAPACITY = 12;
+const COVERAGE_CAPACITY = 4096;
 
 const ONE = new THREE.Vector3(1, 1, 1);
 
@@ -93,6 +94,8 @@ export class SpiderOverlay {
   private readonly zoneLines: THREE.LineSegments;
   private readonly zonePos: Float32Array;
   private readonly zoneCol: Float32Array;
+  private readonly coverage: THREE.InstancedMesh;
+  private coverageVersion = -1;
 
   private readonly body: THREE.InstancedMesh;
   private readonly head: THREE.InstancedMesh;
@@ -179,6 +182,15 @@ export class SpiderOverlay {
     this.zoneLines.frustumCulled = false;
     this.zoneLines.renderOrder = 902;
     this.object.add(this.zoneLines);
+    this.coverage = new THREE.InstancedMesh(
+      new THREE.PlaneGeometry(0.9, 0.9),
+      new THREE.MeshBasicMaterial({ color: 0x4fb0c6, transparent: true, opacity: 0.16, depthTest: false, depthWrite: false, side: THREE.DoubleSide }),
+      COVERAGE_CAPACITY,
+    );
+    this.coverage.frustumCulled = false;
+    this.coverage.renderOrder = 899;
+    this.coverage.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.object.add(this.coverage);
     this.object.visible = false;
 
     // The truth body. Flat Lambert, exactly like the props: the concept has no materials, and a
@@ -249,9 +261,11 @@ export class SpiderOverlay {
     if (this.bodies.visible) this.drawBodies(list);
     if (this.object.visible) {
       const zones = swarm.checkedZones();
+      const coverage = swarm.searchCoverage();
       this.drawGizmos(list);
       this.drawZones(zones);
-      this.writePanel(list, swarm.getStats());
+      this.drawCoverage(coverage);
+      this.writePanel(list, swarm.getStats(), coverage);
       this.writeLabels(list, camera);
       this.writeZones(zones, camera);
     }
@@ -461,12 +475,27 @@ export class SpiderOverlay {
     (this.zoneLines.geometry.getAttribute('color') as THREE.BufferAttribute).needsUpdate = true;
   }
 
+  /** Historical quiet-search coverage: teal floor wash, recomputed only when a real inspection lands. */
+  private drawCoverage(coverage: SearchCoverageSnapshot): void {
+    if (coverage.version === this.coverageVersion) return;
+    let n = 0;
+    for (const c of coverage.cells) {
+      if (n >= COVERAGE_CAPACITY) break;
+      this.m.makeRotationX(-Math.PI / 2);
+      this.m.setPosition(c.x, 0.035, c.z);
+      this.coverage.setMatrixAt(n++, this.m);
+    }
+    this.coverage.count = n;
+    this.coverage.instanceMatrix.needsUpdate = true;
+    this.coverageVersion = coverage.version;
+  }
+
   /**
    * The corner card. Summary first, then only the spiders close enough to be about to matter —
    * the rest are a count. The header names the key, because the previous version did not and the
    * human had to go looking for it.
    */
-  private writePanel(list: SpiderSnapshot[], stats: SwarmStats): void {
+  private writePanel(list: SpiderSnapshot[], stats: SwarmStats, coverage: SearchCoverageSnapshot): void {
     const counts = Object.entries(stats.byState)
       .filter(([, v]) => v > 0)
       .map(([k, v]) => `${k} ${v}`)
@@ -480,7 +509,8 @@ export class SpiderOverlay {
       `courage ${stats.meanCourage.toFixed(2)} · ready ${stats.ready} · groups ${groups}\n` +
       `chatter ${stats.chatter.toFixed(1)}/s · ${stats.strikes} bites · ` +
       `air ${stats.airborne}/${stats.count} · ${stats.hops} hops · ` +
-      `ai ${stats.updateMs.toFixed(2)} ms`;
+      `ai ${stats.updateMs.toFixed(2)} ms\n` +
+      `SEARCH COVERAGE ${coverage.covered}/${coverage.walkable} ${(coverage.fraction * 100).toFixed(0)}% · teal = inspected history · amber = live empty`;
 
     const alive = list.filter((s) => s.alive);
     // Nearest to their own belief first: those are the ones about to do something.
@@ -504,7 +534,7 @@ export class SpiderOverlay {
   }
 
   dispose(): void {
-    for (const mesh of [this.markers, this.beliefs, this.body, this.head, this.legsA, this.legsB]) {
+    for (const mesh of [this.markers, this.beliefs, this.coverage, this.body, this.head, this.legsA, this.legsB]) {
       mesh.geometry.dispose();
       mesh.dispose();
     }

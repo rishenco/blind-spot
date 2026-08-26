@@ -1850,6 +1850,10 @@ class App {
         list: () => this.spiders?.list() ?? [],
         /** Company-level empty-source conclusions, for the P overlay and text regressions. */
         zones: () => this.spiders?.checkedZones() ?? [],
+        coverage: () => this.spiders?.searchCoverage() ?? null,
+        /** Harness/debug only: constrain the quiet-search ledger to a real, cluttered test area. */
+        searchRegion: (minX: number, maxX: number, minZ: number, maxZ: number) =>
+          this.spiders?.setSearchRegion(minX, maxX, minZ, maxZ) ?? null,
         stats: () => this.spiders?.getStats() ?? null,
         mode: () => this.spiders?.mode ?? 'off',
         spawn: (n?: number) => {
