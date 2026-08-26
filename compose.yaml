@@ -1,0 +1,6 @@
+services:
+  game:
+    build: .
+    container_name: blindspot
+    ports:
+      - "8080:80"
