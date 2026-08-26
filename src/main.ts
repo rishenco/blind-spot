@@ -16,7 +16,7 @@ import { Loop } from './core/loop';
 import { AudioStage, defaultAudioTunables } from './audio/audio';
 import { renderAll as renderAudioScenes, phraseShapes } from './audio/offline';
 import { Concussion, defaultConcussionTunables } from './fx/concussion';
-import { SoundBus } from './events/bus';
+import { SoundBus, type SoundSource } from './events/bus';
 import { Hud, type HelpRow } from './debug/hud';
 import { Lidar, defaultLidarTunables } from './lidar/lidar';
 import { StructuredPaint, defaultStructuredTunables } from './lidar/structured';
@@ -52,6 +52,8 @@ import { SpiderOverlay } from './spiders/overlay';
 import { PlayerVitals, defaultVitalsTunables } from './hud/vitals';
 import { Radio, defaultRadioTunables } from './radio/radio';
 import { NoiseCompass, defaultCompassTunables } from './hud/compass';
+import { FinaleOverlay } from './finale/overlay';
+import { VictoryTableau } from './finale/tableau';
 import {
   PlayerHudLayer,
   defaultHudLayerTunables,
@@ -89,7 +91,6 @@ const HELP: HelpRow[] = [
   { keys: 'P', action: 'debug: spider overlay — state, goal, belief, above each spider' },
   { keys: 'I', action: 'debug: damage feedback (wedge, flinch, dark edge) on/off' },
   { keys: 'Z', action: 'debug: take a bite — from the nearest spider, else from behind' },
-  { keys: 'Backspace', action: 'respawn (debug) · after death or the gate: restart, same seed' },
   { keys: 'Enter', action: 'after death or the gate: restart with a new seed' },
   { keys: 'H', action: 'this help' },
 ];
@@ -223,11 +224,15 @@ class App {
   private readonly radio = new Radio(defaultRadioTunables(), this.hall.plan.gate);
   /** The round (M7 "Раунд целиком"): a beginning, a wave timer, and exactly one of two endings. */
   private roundState: 'playing' | 'won' | 'dead' = 'playing';
+  /** Scene time at which input/HUD gave way to the ending. */
+  private roundEndedAt = -1;
   /** A wave replaces losses up to the original pack, never escalates the encounter. */
   private readonly wave = { intervalS: 60, step: 6 };
   private lastWave: ReinforcementResult = { requested: 0, added: 0, alive: 0, cap: 14, attempts: 0 };
   private nextWaveAt = 60;
   private readonly playerHud = new PlayerHudLayer(defaultHudLayerTunables());
+  private readonly finale = new FinaleOverlay();
+  private readonly victoryTableau = new VictoryTableau();
   /** Rebuilt per frame from the live blips. Never grows past the compass's own capacity. */
   private readonly notches: CompassNotch[] = [];
   private readonly scratchProject = new THREE.Vector3();
@@ -398,6 +403,7 @@ class App {
       }
     });
     this.scene.add(this.propReveal.object);
+    this.scene.add(this.victoryTableau.object);
     // The rifle gets the prop world as its hitscan target and a seed stream of its own, so how
     // much you shoot cannot perturb the layout RNG and break every other keyframe.
     this.rifle = new Rifle(this.bus, this.props, this.seed, defaultRifleTunables());
@@ -440,7 +446,7 @@ class App {
 
     this.hotkeys();
     this.playerBefore.copy(this.player.position);
-    this.player.update(dt, this.input);
+    if (this.roundState === 'playing') this.player.update(dt, this.input);
     this.lidar.update(dt);
 
     if (this.pendingFire) {
@@ -484,17 +490,19 @@ class App {
       }
 
       if (!this.vitals.alive) {
-        this.roundState = 'dead';
+        this.finishRound('dead');
       } else if (this.radio.carried) {
         if (crossedGate(this.hall.plan.gate, this.playerBefore, this.player.position, this.player.bodyRadius)) {
-          this.roundState = 'won';
+          this.finishRound('won');
         }
       }
     }
     if (this.roundState === 'dead') {
-      // Reused, not reinvented: the same pass the gunshot already drives, pinned above 1 every
-      // tick so `advance()`'s exponential decay never gets a chance to run before the next pin.
-      this.concussion.setLevel(1.6, this.time);
+      // Death escalates rather than snapping. The camera keeps filming the active hall while the
+      // picture tears farther apart and the mix drains away.
+      const age = Math.max(0, this.time - this.roundEndedAt);
+      this.concussion.setLevel(Math.min(1.6, age / 2.4 * 1.6), this.time);
+      this.audio.setSceneFade(Math.max(0.015, 1 - age / 3.5));
     }
 
     /*
@@ -559,12 +567,6 @@ class App {
         this.carry?.dropInPlace();
         this.vitals.reset();
         this.compass.clear();
-      } else {
-        // M7: dead or through the gate — same seed, so the hall you just learned is the hall
-        // you get to try again on. A fresh App instance is the honest way to reset the wasm
-        // world, the pack and the clutter together; a full reload is the least code that can do
-        // it without three subsystems drifting out of sync with each other.
-        this.restartRound(this.seed);
       }
     }
     if (i.wasKeyPressed('Enter') && this.roundState !== 'playing') {
@@ -591,6 +593,21 @@ class App {
     const url = new URL(location.href);
     url.searchParams.set('seed', String(seed));
     location.href = url.toString();
+  }
+
+  /** The single end-state transition: freeze player input, hide the ordinary instrument/debug
+   * layers, and hand presentation to the dedicated finale overlay. */
+  private finishRound(state: 'won' | 'dead'): void {
+    if (this.roundState !== 'playing') return;
+    this.roundState = state;
+    this.roundEndedAt = this.time;
+    this.hudVisible(false);
+    this.playerHud.setVisible(false);
+    this.victoryTableau.show(state === 'won');
+    this.audio.setSceneFade(state === 'won' ? 0 : 1);
+    this.radio.setSceneFade(state === 'won' ? 0 : 1);
+    this.finale.show(state, this.time);
+    if (state === 'won') this.audio.playVictoryMelody();
   }
 
   /**
@@ -837,7 +854,7 @@ class App {
      * floating in the hall, which is the very thing this must not become.
      */
     {
-      const first = this.view === 'player';
+      const first = this.view === 'player' && this.roundState === 'playing';
       const gunPunch = this.rifle?.viewPunch;
       const lp = this.flash.light.position;
       const cp = this.camera.position;
@@ -858,6 +875,7 @@ class App {
     this.renderer.shadowMap.needsUpdate = this.flash.takeShadowUpdate();
 
     if (this.spiders !== null) this.spiderOverlay.sync(this.spiders, camera);
+    this.victoryTableau.update(camera, renderTime);
 
     const renderStart = performance.now();
     // Through the concussion pass, which is a plain pass-through unless a round has just gone off.
@@ -937,7 +955,6 @@ class App {
       reloadProgress: r.reloadProgress,
       scanCharge: l.progress,
       scanReady: l.ready,
-      held: (this.carry?.holding ?? -1) >= 0,
     };
   }
 
@@ -1726,6 +1743,7 @@ class App {
             powered: this.radio.powered,
             indicator: this.radio.indicator(this.time),
             clarity: this.radio.lastComputedClarity,
+            audioFade: this.radio.audioFade,
             position: pos.toArray(),
             distanceToGate: Math.hypot(pos.x - this.hall.plan.gate.x, pos.z - this.hall.plan.gate.z),
           };
@@ -1759,9 +1777,27 @@ class App {
         /** Force a result, for scenarios that need to photograph the ending without playing
          *  the whole round to reach it. */
         force: (state: 'playing' | 'won' | 'dead') => {
-          this.roundState = state;
+          if (state === 'playing') {
+            this.roundState = 'playing';
+            this.roundEndedAt = -1;
+            this.hudVisible(true);
+            this.playerHud.setVisible(true);
+            this.finale.hide();
+            this.victoryTableau.show(false);
+            this.audio.setSceneFade(1);
+            this.radio.setSceneFade(1);
+          } else {
+            this.finishRound(state);
+          }
           return this.roundState;
         },
+        finale: () => ({
+          state: this.finale.state(),
+          endedAt: this.roundEndedAt,
+          elapsed: this.roundEndedAt < 0 ? 0 : Math.max(0, this.time - this.roundEndedAt),
+          concussion: this.concussion.amount(this.time),
+          tableau: this.victoryTableau.object.visible,
+        }),
         /** The URL a restart would navigate to — read, never navigated, so a keyframe run can
          *  check the seed logic without actually leaving the page mid-scenario. */
         restartUrl: (sameSeed: boolean) => {
@@ -1812,6 +1848,8 @@ class App {
       /** The pack, for the M4 scenarios: look at it, move it, hurt it, switch the overlay. */
       spiders: {
         list: () => this.spiders?.list() ?? [],
+        /** Company-level empty-source conclusions, for the P overlay and text regressions. */
+        zones: () => this.spiders?.checkedZones() ?? [],
         stats: () => this.spiders?.getStats() ?? null,
         mode: () => this.spiders?.mode ?? 'off',
         spawn: (n?: number) => {
@@ -1822,6 +1860,14 @@ class App {
         place: (i: number, x: number, z: number, y?: number) =>
           this.spiders?.place(i, x, z, y) ?? false,
         hurt: (i: number) => this.spiders?.hurt(i) ?? false,
+        /**
+         * Deterministic AI probe: emits through the one real SoundBus, never a private brain
+         * hook. Used by `check:spider-attention` to prove radio repetition and fresh evidence.
+         */
+        noise: (source: SoundSource, x: number, z: number, loudness: number) => {
+          this.bus.emit({ source, x, y: 0.2, z, loudness });
+          return this.bus.lastEvent?.seq ?? -1;
+        },
         overlay: (on: boolean) => {
           this.spiderOverlay.setVisible(on);
           return this.spiderOverlay.visible;
@@ -1951,7 +1997,8 @@ class App {
         radio: {
           carried: this.radio.carried,
           powered: this.radio.powered,
-          clarity: this.radio.lastComputedClarity,
+            clarity: this.radio.lastComputedClarity,
+            audioFade: this.radio.audioFade,
         },
         round: this.roundState,
         frameMs: this.perf,

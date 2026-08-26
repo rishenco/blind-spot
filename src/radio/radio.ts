@@ -98,6 +98,9 @@ export class Radio {
   private noiseGainNode: GainNode | null = null;
   private melodyOsc: OscillatorNode | null = null;
   private melodyGainNode: GainNode | null = null;
+  /** Final-round mute, independent of the radio's own signal clarity. */
+  private synthMaster: GainNode | null = null;
+  private sceneFade = 1;
   /** The continuous radio is spatial too; it must never bypass the listener as a UI sound. */
   private synthPanner: PannerNode | null = null;
 
@@ -170,6 +173,14 @@ export class Radio {
   get lastComputedClarity(): number {
     return this.lastClarity;
   }
+
+  /** The ending owns the mix: victory must not leave radio hiss or its old melody underneath. */
+  setSceneFade(fade: number): void {
+    this.sceneFade = Math.max(0, Math.min(1, fade));
+    if (this.synthMaster !== null) this.synthMaster.gain.value = this.sceneFade;
+  }
+
+  get audioFade(): number { return this.sceneFade; }
 
   /**
    * The floor unit's continuous-sound falloff, exposed for the text-only radio check.
@@ -259,13 +270,16 @@ export class Radio {
     const melodyGain = ctx.createGain();
     melodyGain.gain.value = 0;
     melodyOsc.connect(melodyGain).connect(panner);
-    panner.connect(ctx.destination);
+    const master = ctx.createGain();
+    master.gain.value = this.sceneFade;
+    panner.connect(master).connect(ctx.destination);
     melodyOsc.start();
 
     this.noiseGainNode = noiseGain;
     this.melodyOsc = melodyOsc;
     this.melodyGainNode = melodyGain;
     this.synthPanner = panner;
+    this.synthMaster = master;
   }
 
   /** The same render camera drives the radio's private AudioContext listener. */
@@ -341,5 +355,6 @@ export class Radio {
     if (this.ctx) void this.ctx.close().catch(() => undefined);
     this.ctx = null;
     this.synthPanner = null;
+    this.synthMaster = null;
   }
 }

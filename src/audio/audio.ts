@@ -80,6 +80,8 @@ export interface AudioStats {
   outOfRange: number;
   /** Name of the last timbre played — the quickest way to see the table is being reached. */
   last: string;
+  /** Round-end attenuation after the player's own volume preference. */
+  sceneFade: number;
 }
 
 /**
@@ -97,6 +99,10 @@ export class AudioStage {
   private ctx: AudioContext | null = null;
   /** Post-everything: volume, then the limiter, then out. */
   private master: GainNode | null = null;
+  /** Victory melody bypasses the round-end world mute. */
+  private music: GainNode | null = null;
+  /** Round-end fade, separate from the player's persistent volume preference. */
+  private sceneFade = 1;
   /** Everything except the blast passes through here, and the blast closes it. */
   private duck: GainNode | null = null;
   private muffle: BiquadFilterNode | null = null;
@@ -106,7 +112,7 @@ export class AudioStage {
   private blast: Voice | null = null;
   private cursor = 0;
   private readonly stats: AudioStats = {
-    state: 'off', active: 0, played: 0, dropped: 0, outOfRange: 0, last: '-',
+    state: 'off', active: 0, played: 0, dropped: 0, outOfRange: 0, last: '-', sceneFade: 1,
   };
   /**
    * Set false by the keyframe harness before it sends any input. A headless run has no device,
@@ -164,6 +170,10 @@ export class AudioStage {
     master.gain.value = this.tunables.volume;
     master.connect(limiter);
     this.master = master;
+    const music = ctx.createGain();
+    music.gain.value = 1;
+    music.connect(limiter);
+    this.music = music;
 
     const muffle = ctx.createBiquadFilter();
     muffle.type = 'lowpass';
@@ -206,7 +216,32 @@ export class AudioStage {
 
   setVolume(v: number): void {
     this.tunables.volume = v;
-    if (this.master !== null) this.master.gain.value = v;
+    if (this.master !== null) this.master.gain.value = v * this.sceneFade;
+  }
+
+  /** Fade the whole world after a death without overwriting the user's volume setting. */
+  setSceneFade(fade: number): void {
+    this.sceneFade = Math.max(0, Math.min(1, fade));
+    this.stats.sceneFade = this.sceneFade;
+    if (this.master !== null) this.master.gain.value = this.tunables.volume * this.sceneFade;
+  }
+
+  /** A tiny one-shot victory arpeggio; inert until a browser gesture has opened the device. */
+  playVictoryMelody(): void {
+    const ctx = this.ctx;
+    const music = this.music;
+    if (ctx === null || music === null || ctx.state !== 'running') return;
+    const now = ctx.currentTime + 0.03;
+    for (const [i, hz] of [523.25, 659.25, 783.99, 1046.5].entries()) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const at = now + i * 0.13;
+      osc.type = 'triangle'; osc.frequency.setValueAtTime(hz, at);
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.055, at + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.28);
+      osc.connect(gain); gain.connect(music); osc.start(at); osc.stop(at + 0.3);
+    }
   }
 
   /** The ear. Called once per frame from the camera. */
@@ -376,6 +411,7 @@ export class AudioStage {
     this.voices = [];
     this.blast = null;
     this.master = null;
+    this.music = null;
     this.duck = null;
     this.muffle = null;
     this.stats.state = 'off';

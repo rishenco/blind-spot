@@ -25,7 +25,7 @@
  */
 import * as THREE from 'three';
 
-import { STATE_COLORS, type SpiderSnapshot, type SwarmStats, type Swarm } from './swarm';
+import { STATE_COLORS, type CheckedZoneSnapshot, type SpiderSnapshot, type SwarmStats, type Swarm } from './swarm';
 
 /**
  * The panel used to sit top-right at up to 46vw with one long row per spider, i.e. it covered
@@ -57,10 +57,13 @@ const PANEL_STYLE = `
 }
 .bs-sp-label b { font-weight: 600; letter-spacing: 0.06em; }
 .bs-sp-label i { font-style: normal; color: #9fb2c0; }
+.bs-sp-zone { color: #ffe08a; border-left-color: #ffd166; }
 `;
 
 /** Segments per spider in the line buffer: stand stick, to-goal, to-belief, belief cross (2). */
 const SEGMENTS = 5;
+const ZONE_SEGMENTS = 24;
+const ZONE_CAPACITY = 12;
 
 const ONE = new THREE.Vector3(1, 1, 1);
 
@@ -87,6 +90,9 @@ export class SpiderOverlay {
   private readonly lines: THREE.LineSegments;
   private readonly linePos: Float32Array;
   private readonly lineCol: Float32Array;
+  private readonly zoneLines: THREE.LineSegments;
+  private readonly zonePos: Float32Array;
+  private readonly zoneCol: Float32Array;
 
   private readonly body: THREE.InstancedMesh;
   private readonly head: THREE.InstancedMesh;
@@ -95,6 +101,7 @@ export class SpiderOverlay {
 
   private readonly labelBox: HTMLDivElement;
   private readonly labels: HTMLDivElement[] = [];
+  private readonly zoneLabels: HTMLDivElement[] = [];
   private readonly root: HTMLDivElement;
   private readonly headEl: HTMLDivElement;
   private readonly listEl: HTMLDivElement;
@@ -160,6 +167,18 @@ export class SpiderOverlay {
     this.lines.frustumCulled = false;
     this.lines.renderOrder = 901;
     this.object.add(this.lines);
+
+    this.zonePos = new Float32Array(ZONE_CAPACITY * ZONE_SEGMENTS * 6);
+    this.zoneCol = new Float32Array(ZONE_CAPACITY * ZONE_SEGMENTS * 6);
+    const zoneGeo = new THREE.BufferGeometry();
+    zoneGeo.setAttribute('position', new THREE.BufferAttribute(this.zonePos, 3).setUsage(THREE.DynamicDrawUsage));
+    zoneGeo.setAttribute('color', new THREE.BufferAttribute(this.zoneCol, 3).setUsage(THREE.DynamicDrawUsage));
+    this.zoneLines = new THREE.LineSegments(zoneGeo, new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false,
+    }));
+    this.zoneLines.frustumCulled = false;
+    this.zoneLines.renderOrder = 902;
+    this.object.add(this.zoneLines);
     this.object.visible = false;
 
     // The truth body. Flat Lambert, exactly like the props: the concept has no materials, and a
@@ -212,7 +231,7 @@ export class SpiderOverlay {
     this.object.visible = on;
     this.root.style.display = on ? '' : 'none';
     this.labelBox.style.display = on ? '' : 'none';
-    if (!on) for (const el of this.labels) el.style.display = 'none';
+    if (!on) for (const el of [...this.labels, ...this.zoneLabels]) el.style.display = 'none';
   }
 
   /** The lit bodies follow the hall's lights and the muzzle flash, not the overlay key. */
@@ -229,9 +248,12 @@ export class SpiderOverlay {
     const list = swarm.list();
     if (this.bodies.visible) this.drawBodies(list);
     if (this.object.visible) {
+      const zones = swarm.checkedZones();
       this.drawGizmos(list);
+      this.drawZones(zones);
       this.writePanel(list, swarm.getStats());
       this.writeLabels(list, camera);
+      this.writeZones(zones, camera);
     }
   }
 
@@ -275,7 +297,8 @@ export class SpiderOverlay {
         `${s.phase === 'air' ? '↗air' : '·still'} ${s.phaseFor.toFixed(2)}s\n` +
         `<i>go</i> ${heading} ${Math.hypot(dx, dz).toFixed(1)}m  <i>c</i>${s.courage.toFixed(2)}` +
         `${s.hp < 2 ? `  <i>hp</i>${s.hp}` : ''}\n` +
-        `<i>bel</i> ${s.toBelief.toFixed(1)}m p${s.belief.confidence.toFixed(2)}` +
+        `<i>bel</i> ${s.toBelief.toFixed(1)}m p${s.belief.confidence.toFixed(2)} ${s.belief.source ?? '-'}` +
+        `${s.ignoreFor > 0 ? ` · ignore ${s.ignoreFor.toFixed(0)}s` : ''}` +
         `  <i>heard</i> ${s.heard} ${s.heardAgo < 99 ? `${s.heardAgo.toFixed(1)}s` : '-'}`;
       if (el.dataset.text !== text) {
         el.innerHTML = text.replace(/\n/g, '<br>');
@@ -299,6 +322,33 @@ export class SpiderOverlay {
       this.labels[i] = el;
     }
     return el;
+  }
+
+  private writeZones(zones: CheckedZoneSnapshot[], camera?: THREE.Camera): void {
+    if (camera === undefined) {
+      for (const el of this.zoneLabels) el.style.display = 'none';
+      return;
+    }
+    const w = this.labelBox.clientWidth || 1;
+    const h = this.labelBox.clientHeight || 1;
+    let n = 0;
+    for (const z of zones.slice(0, ZONE_CAPACITY)) {
+      this.v.set(z.x, 0.55, z.z).project(camera);
+      if (this.v.z > 1 || this.v.x < -1.1 || this.v.x > 1.1 || this.v.y < -1.1 || this.v.y > 1.1) continue;
+      let el = this.zoneLabels[n];
+      if (el === undefined) {
+        el = document.createElement('div');
+        el.className = 'bs-sp-label bs-sp-zone';
+        this.labelBox.append(el);
+        this.zoneLabels[n] = el;
+      }
+      el.textContent = `IGNORE PACK · ${z.remaining.toFixed(0)}s`;
+      el.style.left = `${((this.v.x + 1) / 2) * w}px`;
+      el.style.top = `${((1 - this.v.y) / 2) * h}px`;
+      el.style.display = '';
+      n++;
+    }
+    for (let i = n; i < this.zoneLabels.length; i++) this.zoneLabels[i]!.style.display = 'none';
   }
 
   private drawBodies(list: SpiderSnapshot[]): void {
@@ -387,6 +437,30 @@ export class SpiderOverlay {
     (this.lines.geometry.getAttribute('color') as THREE.BufferAttribute).needsUpdate = true;
   }
 
+  /** Amber rings are a shared pack conclusion, not another per-spider belief marker. */
+  private drawZones(zones: CheckedZoneSnapshot[]): void {
+    let seg = 0;
+    for (const z of zones.slice(0, ZONE_CAPACITY)) {
+      for (let i = 0; i < ZONE_SEGMENTS; i++) {
+        const a = (i / ZONE_SEGMENTS) * Math.PI * 2;
+        const b = ((i + 1) / ZONE_SEGMENTS) * Math.PI * 2;
+        const o = seg * 6;
+        this.zonePos[o] = z.x + Math.cos(a) * z.radius;
+        this.zonePos[o + 1] = 0.08;
+        this.zonePos[o + 2] = z.z + Math.sin(a) * z.radius;
+        this.zonePos[o + 3] = z.x + Math.cos(b) * z.radius;
+        this.zonePos[o + 4] = 0.08;
+        this.zonePos[o + 5] = z.z + Math.sin(b) * z.radius;
+        this.zoneCol[o] = 1; this.zoneCol[o + 1] = 0.72; this.zoneCol[o + 2] = 0.2;
+        this.zoneCol[o + 3] = 1; this.zoneCol[o + 4] = 0.72; this.zoneCol[o + 5] = 0.2;
+        seg++;
+      }
+    }
+    this.zoneLines.geometry.setDrawRange(0, seg * 2);
+    (this.zoneLines.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    (this.zoneLines.geometry.getAttribute('color') as THREE.BufferAttribute).needsUpdate = true;
+  }
+
   /**
    * The corner card. Summary first, then only the spiders close enough to be about to matter —
    * the rest are a count. The header names the key, because the previous version did not and the
@@ -436,6 +510,8 @@ export class SpiderOverlay {
     }
     this.lines.geometry.dispose();
     (this.lines.material as THREE.Material).dispose();
+    this.zoneLines.geometry.dispose();
+    (this.zoneLines.material as THREE.Material).dispose();
     this.root.remove();
     this.labelBox.remove();
     this.styleEl.remove();

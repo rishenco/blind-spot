@@ -63,7 +63,7 @@ import * as THREE from 'three';
 
 import { StaticWorld, canOccupy, highestTopUnder, type Aabb, type BodyShape } from '../core/collision';
 import { makeRng, range, type Rng } from '../core/rng';
-import type { SoundBus, SoundEvent } from '../events/bus';
+import type { SoundBus, SoundEvent, SoundSource } from '../events/bus';
 
 /**
  * What a spider is doing, in the order the hunt normally walks through them.
@@ -75,6 +75,7 @@ import type { SoundBus, SoundEvent } from '../events/bus';
  */
 export type SpiderState =
   | 'idle'
+  | 'investigate'
   | 'search'
   | 'stalk'
   | 'creep'
@@ -86,6 +87,7 @@ export type SpiderState =
 
 export const SPIDER_STATES: readonly SpiderState[] = [
   'idle',
+  'investigate',
   'search',
   'stalk',
   'creep',
@@ -99,6 +101,7 @@ export const SPIDER_STATES: readonly SpiderState[] = [
 /** Debug-overlay colour per state. Kept here so the panel and the gizmos cannot disagree. */
 export const STATE_COLORS: Record<SpiderState, number> = {
   idle: 0x5a6b76,
+  investigate: 0xb9b86f,
   search: 0x9aa7ae,
   stalk: 0x4fb0c6,
   creep: 0x6fd3a0,
@@ -201,6 +204,10 @@ export interface SpiderTunables {
    * immediately — new evidence beats an old conclusion.
    */
   checkedSeconds: number;
+  /** A prop impact this loud is fresh enough to disprove an old empty-site conclusion. */
+  checkedOverrideLoudness: number;
+  /** A fresh strong lead holds priority over weak repeats such as a floor-radio ping. */
+  strongLeadSeconds: number;
 
   // --- fear ---------------------------------------------------------------
   /** Loudness, in metres of notice, below which a noise can never be frightening however close. */
@@ -291,7 +298,7 @@ export interface SpiderTunables {
    * gives them nothing more to home in on, so the last stretch has to be a search.
    */
   searchSeconds: number;
-  /** Metres the search sweep widens to around the last belief. */
+  /** Metres the verification search widens to around the last belief (starts at 8 m). */
   searchRadius: number;
 
   // --- flesh --------------------------------------------------------------
@@ -419,7 +426,9 @@ export function defaultSpiderTunables(): SpiderTunables {
     weightChatter: 0.5,
     pinnedRadius: 2.5,
     rumourCap: 0.55,
-    checkedSeconds: 10,
+    checkedSeconds: 18,
+    checkedOverrideLoudness: 20,
+    strongLeadSeconds: 3,
 
     // A gunshot is 90 m of notice and a barrel going over caps at 34; a sprint is 16. So this
     // line puts "the world fell over" and "he fired" on the frightening side and leaves ordinary
@@ -452,7 +461,7 @@ export function defaultSpiderTunables(): SpiderTunables {
     lungeConfidence: 0.45,
 
     searchSeconds: 45,
-    searchRadius: 6,
+    searchRadius: 14,
 
     hp: 2,
     bulletDamage: 1,
@@ -507,6 +516,10 @@ export interface Belief {
   at: number;
   /** Seconds the belief has stayed in essentially the same place — "he has not moved". */
   pinnedFor: number;
+  /** The physical source that installed this lead; weak leads are checked, not orbited. */
+  source: SoundSource | null;
+  /** Weak evidence has to be approached and verified before it turns into a long hunt. */
+  inspect: boolean;
 }
 
 /** What the overlay prints and what the keyframe scenarios assert against. */
@@ -538,6 +551,19 @@ export interface SpiderSnapshot {
   phaseFor: number;
   alive: boolean;
   hp: number;
+  /** Seconds until this spider is willing to revisit its most recent checked site. */
+  ignoreFor: number;
+}
+
+/** Pack-wide conclusion that a weak source was checked and found empty. Debug only. */
+export interface CheckedZoneSnapshot {
+  groupId: null;
+  x: number;
+  z: number;
+  /** Remaining seconds before weak evidence at this point may be investigated again. */
+  remaining: number;
+  /** Points inside this radius are considered the same source. */
+  radius: number;
 }
 
 /**
@@ -688,7 +714,7 @@ interface Spider {
    * пустую и ушёл, и на этот же самый старый звук больше не возвращается.» A short ring, because
    * the point is to forget an exhausted lead, not to build a map.
    */
-  checked: { x: number; z: number; at: number }[];
+  checked: { x: number; z: number; at: number; seconds: number }[];
   /** Sweep angle of the search pattern, radians. */
   sweep: number;
   /** Simulation time it died, or Infinity. A corpse is furniture: it stops moving and stays. */
@@ -984,7 +1010,7 @@ export class Swarm {
       state: 'idle',
       stateAt: this.time,
       courage: range(this.rng, 0.05, 0.2),
-      belief: { x, z, confidence: 0, at: -99, pinnedFor: 0 },
+      belief: { x, z, confidence: 0, at: -99, pinnedFor: 0, source: null, inspect: false },
       orbit: angle,
       orbitDir: this.rng() < 0.5 ? -1 : 1,
       goal: new THREE.Vector3(x, 0, z),
@@ -1053,7 +1079,11 @@ export class Swarm {
     // other loud, distant noise, it just never runs the fright test. What actually frightens a
     // spider about a shot is the bullet's own path, tested against every spider individually in
     // `shoot`/`nearMiss` with the real geometry, not the loudness of the bang.
-    const loudEnough = event.loudness >= t.scareLoudness && event.source !== 'gunshot';
+    // A radio is deliberately audible, not frightening: treating its 24 m search cue as a
+    // collapse made every listener flee on every ping, so nobody ever reached the transmitter
+    // to learn that it was empty. The source remains weak evidence below; this only excludes it
+    // from the unrelated fear channel, like a gunshot muzzle blast already is.
+    const loudEnough = event.loudness >= t.scareLoudness && event.source !== 'gunshot' && event.source !== 'radio';
 
     for (const s of this.spiders) {
       if (!s.alive) continue;
@@ -1089,16 +1119,27 @@ export class Swarm {
        * A noise the *player* made is different: he was not there, and now something over there
        * is his. That clears the mark outright — new evidence beats an old conclusion.
        */
-      if (event.source === 'prop-impact') {
-        if (this.isChecked(s, event.x, event.z, true)) {
-          s.heard = `${event.source} (checked, ignored)`;
-          s.heardAt = this.time;
-          continue;
-        }
-      } else {
-        this.clearChecked(s, event.x, event.z);
+      const weakEvidence = event.source === 'radio' ||
+        (event.source === 'prop-impact' && event.loudness < t.checkedOverrideLoudness);
+      if (weakEvidence && !s.belief.inspect && s.belief.confidence > 0.1 && this.time - s.belief.at < t.strongLeadSeconds) {
+        // A floor transmitter cannot reclaim attention one tick after a shot or a collapse.
+        // This is a priority rule, not a radio exception: all weak evidence yields to a fresh
+        // strong lead for the same short window.
+        s.heard = `${event.source} (weak, stronger lead)`;
+        s.heardAt = this.time;
+        continue;
       }
-      this.updateBelief(s, event.x, event.z, quality * weight);
+      if (weakEvidence && this.isChecked(s, event.x, event.z)) {
+        // A checked quiet source is not new evidence. This deliberately has no radio-specific
+        // branch: the radio follows the same memory law as a weak rattling pile.
+        s.heard = `${event.source} (checked, ignored)`;
+        s.heardAt = this.time;
+        continue;
+      }
+      // A shot, a player noise, or a genuinely loud collapse is fresh evidence. It overturns
+      // a checked conclusion at this spot; no emitter gets a special exemption.
+      if (!weakEvidence) this.clearChecked(s, event.x, event.z);
+      this.updateBelief(s, event.x, event.z, quality * weight, false, event.source, weakEvidence);
       s.heard = `${event.source} ${event.loudness.toFixed(0)}m @${d.toFixed(0)}m`;
       s.heardAt = this.time;
 
@@ -1138,12 +1179,20 @@ export class Swarm {
    * capped and can be refused outright, and that is not a detail: without the cap the pack is a
    * feedback loop that manufactures certainty out of nothing (see `rumourCap`).
    */
-  private updateBelief(s: Spider, x: number, z: number, quality: number, rumour = false): void {
+  private updateBelief(
+    s: Spider,
+    x: number,
+    z: number,
+    quality: number,
+    rumour = false,
+    source: SoundSource | null = null,
+    inspect = false,
+  ): void {
     const t = this.tunables;
     const b = s.belief;
     if (rumour) {
       // "I have just been there. There is nothing there. Stop telling me about it."
-      if (this.isChecked(s, x, z, false)) return;
+      if (this.isChecked(s, x, z)) return;
       if (b.confidence >= t.rumourCap) return;
       quality = Math.min(quality, t.rumourCap - b.confidence * 0.5);
       if (quality <= 0) return;
@@ -1162,6 +1211,12 @@ export class Swarm {
     }
     if (rumour) b.confidence = Math.min(b.confidence, t.rumourCap);
     b.at = this.time;
+    // A weak rumour carries the source of the original clue. It may not turn a direct gunshot
+    // into a radio inspection merely because the messenger itself is a spider.
+    if (!rumour || b.source === null || quality >= b.confidence) {
+      b.source = source;
+      b.inspect = inspect;
+    }
     if (moved > t.pinnedRadius) b.pinnedFor = 0;
   }
 
@@ -1320,32 +1375,55 @@ export class Swarm {
     this.enter(s, 'search');
   }
 
+  /**
+   * Checking a weak source is useful negative information for the whole pack, not fourteen
+   * private failures in sequence. This is deliberately stronger than ordinary chatter: an empty
+   * source is a negative fact, and the radio would otherwise summon each territorial company in
+   * turn. Spiders with another, strong lead keep that lead; only the same weak pursuit disperses.
+   */
+  private reportEmptySource(s: Spider): void {
+    const t = this.tunables;
+    const x = s.belief.x;
+    const z = s.belief.z;
+    for (const o of this.spiders) {
+      if (!o.alive) continue;
+      this.markChecked(o, x, z);
+      if (!o.belief.inspect || Math.hypot(o.belief.x - x, o.belief.z - z) > t.pinnedRadius) continue;
+      o.belief.confidence = 0;
+      o.belief.pinnedFor = 0;
+      o.ledAt = this.time;
+      o.sweep += 0.7 + o.id * 0.41;
+      this.enter(o, 'search');
+      o.heard = `#${s.id}: empty source, pack searching`;
+      o.heardAt = this.time;
+    }
+  }
+
   /** Writes a place down as empty. The ring is short on purpose: this is forgetting, not mapping. */
-  private markChecked(s: Spider, x: number, z: number): void {
+  private markChecked(s: Spider, x: number, z: number, seconds = this.tunables.checkedSeconds): void {
     const t = this.tunables;
     for (const c of s.checked) {
       if (Math.hypot(c.x - x, c.z - z) < t.pinnedRadius) {
         c.x = x;
         c.z = z;
         c.at = this.time;
+        c.seconds = Math.max(c.seconds, seconds);
         return;
       }
     }
-    s.checked.push({ x, z, at: this.time });
+    s.checked.push({ x, z, at: this.time, seconds });
     if (s.checked.length > 3) s.checked.shift();
   }
 
   /**
-   * Has this spider written this place off? `refresh` keeps the mark alive for as long as the
-   * same dead noise keeps arriving from it, which is what stops a still-rattling prop from
-   * re-founding the club around itself the moment `checkedSeconds` runs out.
+   * Has this spider written this place off? The memory is finite by design: after the timer a
+   * quiet source can be worth checking again, but it cannot hold a company hostage forever.
    */
-  private isChecked(s: Spider, x: number, z: number, refresh: boolean): boolean {
+  private isChecked(s: Spider, x: number, z: number): boolean {
     const t = this.tunables;
     for (const c of s.checked) {
-      if (this.time - c.at >= t.checkedSeconds) continue;
+      if (this.time - c.at >= c.seconds) continue;
       if (Math.hypot(c.x - x, c.z - z) >= t.pinnedRadius) continue;
-      if (refresh) c.at = this.time;
       return true;
     }
     return false;
@@ -1388,6 +1466,10 @@ export class Swarm {
       // "выдал себя, стою — и они пришли": one noise gets them into the room, the search walks
       // them onto him, and the nose closes it.
       this.enter(s, this.time - s.ledAt < t.searchSeconds ? 'search' : 'idle');
+    } else if (b.inspect) {
+      // Weak evidence is not a player position to encircle forever. First verify it; only then
+      // is there a reason to spread through the surrounding room.
+      this.enter(s, 'investigate');
     } else if (this.packMode === 'commit' && s.courage > t.readyCourage * 0.6) {
       this.enter(s, 'commit');
     } else if (this.packMode === 'rally' && s.courage > t.readyCourage * 0.6) {
@@ -1427,12 +1509,27 @@ export class Swarm {
         }
         break;
       }
+      case 'investigate': {
+        speed = t.speedStalk;
+        gx = b.x;
+        gz = b.z;
+        if (
+          Math.hypot(s.pos.x - b.x, s.pos.z - b.z) < t.arriveRadius &&
+          Math.hypot(s.pos.x - this.player.x, s.pos.z - this.player.z) > t.strikeRange * 2
+        ) {
+          this.reportEmptySource(s);
+          return;
+        }
+        break;
+      }
       case 'search': {
         // A widening sweep about the point the trail went cold. Slow — it is feeling its way,
         // and a spider that ran the search would be a spider the player can hear coming.
         speed = t.speedCreep;
         const age = this.time - b.at;
-        const r = Math.min(t.searchRadius, 1.2 + age * 0.25);
+        // A checked point itself is empty. The company starts outside its immediate clutter and
+        // combs a broad 8–14 m annulus, so its search reads as a spread, not as a new huddle.
+        const r = Math.min(t.searchRadius, 8 + age * 0.25);
         // The sweep point walks at the spider's own pace, not at a fixed angular rate. With a
         // fixed rate the target ran round the circle faster than the spider could follow at any
         // useful radius, so fourteen searchers all spiralled into the middle and combed the one
@@ -1872,7 +1969,7 @@ export class Swarm {
       const d = Math.hypot(o.pos.x - s.pos.x, o.pos.z - s.pos.z);
       if (d > reach) continue;
       const quality = Math.max(0.1, 1 - d / reach) * t.weightChatter * s.belief.confidence * crossGroup;
-      this.updateBelief(o, s.belief.x, s.belief.z, quality, true);
+      this.updateBelief(o, s.belief.x, s.belief.z, quality, true, s.belief.source, s.belief.inspect);
       o.heard = `chatter #${s.id}`;
       o.heardAt = this.time;
     }
@@ -2154,7 +2251,33 @@ export class Swarm {
       phaseFor: s.hopT,
       alive: s.alive,
       hp: s.hp,
+      ignoreFor: this.checkedFor(s),
     }));
+  }
+
+  /** Shared checked-source zones, coalesced across the pack for the P debug overlay and e2e. */
+  checkedZones(): CheckedZoneSnapshot[] {
+    const zones = new Map<string, CheckedZoneSnapshot>();
+    for (const s of this.spiders) {
+      if (!s.alive) continue;
+      for (const c of s.checked) {
+        const remaining = c.seconds - (this.time - c.at);
+        if (remaining <= 0) continue;
+        const key = `${c.x.toFixed(2)}:${c.z.toFixed(2)}`;
+        const previous = zones.get(key);
+        if (previous === undefined || remaining > previous.remaining) {
+          zones.set(key, { groupId: null, x: c.x, z: c.z, remaining, radius: this.tunables.pinnedRadius });
+        }
+      }
+    }
+    return [...zones.values()].sort((a, b) => b.remaining - a.remaining);
+  }
+
+  /** Longest remaining conclusion, exposed only through `list()` for the AI overlay/check. */
+  private checkedFor(s: Spider): number {
+    let remaining = 0;
+    for (const c of s.checked) remaining = Math.max(remaining, c.seconds - (this.time - c.at));
+    return Math.max(0, remaining);
   }
 
   dispose(): void {
@@ -2164,7 +2287,7 @@ export class Swarm {
 }
 
 function emptyStateCounts(): Record<SpiderState, number> {
-  return { idle: 0, search: 0, stalk: 0, creep: 0, rally: 0, commit: 0, recoil: 0, flee: 0, panic: 0 };
+  return { idle: 0, investigate: 0, search: 0, stalk: 0, creep: 0, rally: 0, commit: 0, recoil: 0, flee: 0, panic: 0 };
 }
 
 function clamp01(v: number): number {
