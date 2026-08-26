@@ -77,6 +77,26 @@ export const PULSE_WAVE_FADE_START = 0.6;
 export const PULSE_WAVE_LAUNCH_FADE = 0.2;
 export const PULSE_POLY_SIDES = 12;
 export const PULSE_POLY_AXIS_DEFORM = 0.06;
+/**
+ * `trace` has one onset front. Loudness changes how quickly that front registers, continuously:
+ * quiet events take their time, while a rifle report opens almost immediately. These constants
+ * are exported for the focused numeric contract; the shader still has no source-specific branch.
+ */
+export const TRACE_LOUD_NORM_QUIET = 0.45;
+export const TRACE_LOUD_NORM_SHARP = 7.0;
+export const TRACE_ONSET_DURATION_SLOW = 1.2;
+export const TRACE_ONSET_DURATION_FAST = 0.22;
+export const TRACE_FRONT_RADIUS_START = 0.04;
+export const TRACE_FRONT_RADIUS_END = 0.92;
+export const TRACE_FRONT_HALF_WIDTH = 0.028;
+export const TRACE_FRONT_FEATHER = 0.065;
+export const TRACE_WARP_MAX = 0.2;
+export const TRACE_THICKNESS_MOD_MAX = 0.14;
+export const TRACE_GUARD_SCALE = 1.255;
+const TRACE_ALPHA_SUPPORT =
+  (TRACE_FRONT_RADIUS_END +
+    (TRACE_FRONT_HALF_WIDTH + TRACE_FRONT_FEATHER) * (1 + TRACE_THICKNESS_MOD_MAX)) *
+  (1 + TRACE_WARP_MAX);
 const PULSE_ALPHA_SUPPORT =
   (PULSE_FRONT_FADE_END +
     (PULSE_LINE_HALF_WIDTH + PULSE_LINE_FEATHER) * (1 + PULSE_THICKNESS_MOD_MAX)) *
@@ -168,8 +188,10 @@ const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number; kind: numb
  *  - `pulse-v1` the first answer to `pulse`, kept purely as the control for the before/after.
  *  - `pulse-poly` the same generator, palette and guard as `pulse`, sampled through a twelve-sided
  *                 radial metric so every wave is visibly made from straight broken segments.
+ *  - `trace` one deformed onset-front settling into a soft thermal residue. Loudness controls the
+ *            onset timing continuously, so a quiet tick unfolds and a rifle report snaps open.
  *
- * `pulse` is the default by the human's explicit choice.
+ * `trace` is the live experiment; `pulse` remains selectable as its control.
  */
 export type MarkerStyle =
   | 'ember'
@@ -180,7 +202,8 @@ export type MarkerStyle =
   | 'pulse'
   | 'bruise'
   | 'pulse-v1'
-  | 'pulse-poly';
+  | 'pulse-poly'
+  | 'trace';
 
 export const MARKER_STYLES: readonly MarkerStyle[] = [
   'echo',
@@ -192,6 +215,7 @@ export const MARKER_STYLES: readonly MarkerStyle[] = [
   'bloom',
   'pulse-v1',
   'pulse-poly',
+  'trace',
 ];
 
 const STYLE_INDEX: Record<MarkerStyle, number> = {
@@ -204,6 +228,7 @@ const STYLE_INDEX: Record<MarkerStyle, number> = {
   bruise: 6,
   'pulse-v1': 7,
   'pulse-poly': 8,
+  trace: 9,
 };
 
 export interface MarkerTunables {
@@ -313,10 +338,8 @@ export function defaultMarkerTunables(): MarkerTunables {
      */
     peak: 0.68,
     capOverlap: true,
-    /*
-     * The human explicitly chose the sequential-wave generator as the live baseline.
-     */
-    style: 'pulse',
+    // New live experiment. Sequential `pulse` remains selectable as the control.
+    style: 'trace',
   };
 }
 
@@ -348,6 +371,7 @@ const VERTEX = /* glsl */ `
   varying float vAge;
   varying float vKind;
   varying float vBurn;
+  varying float vLoudNorm;
   varying vec2  vQuad;
 
   void main() {
@@ -388,7 +412,7 @@ const VERTEX = /* glsl */ `
     // Fade: bright while the noise is news, then a long shallow tail.
     // Pulse owns local launch/fade envelopes per generation. A second event-age decay would make
     // late-born waves dim merely because their parent marker is old, so pulse stays neutral here.
-    bool pulseStyle = uStyle > 4.5 && uStyle < 5.5;
+    bool pulseStyle = (uStyle > 4.5 && uStyle < 5.5) || (uStyle > 7.5 && uStyle < 8.5);
     float decay = pulseStyle
       ? 1.0
       : pow(1.0 - t, 1.4) * (0.74 + 0.26 * exp(-age * 1.6));
@@ -407,6 +431,7 @@ const VERTEX = /* glsl */ `
      * loudest prop impact barely 0.2), a gunshot is all the way at 1.
      */
     vBurn = smoothstep(2.6, 7.0, norm);
+    vLoudNorm = norm;
     // Some anti-glare is still wanted: a mark that covers a third of the screen would otherwise
     // wash the frame out. It bites only well past the size of an ordinary mark, is measured in
     // the same reference pixels as the radius, and is capped so even a crater keeps half its
@@ -430,7 +455,10 @@ const VERTEX = /* glsl */ `
     // Pulse needs room past its nominal radius for the line filter and its fade. Both the quad
     // and its local coordinate grow together, so rr=1 remains the nominal radius in the fragment
     // shader while the physical edge moves out to PULSE_GUARD_SCALE.
-    float quadScale = pulseStyle ? ${PULSE_GUARD_SCALE.toFixed(3)} : 1.0;
+    bool traceStyle = uStyle > 8.5 && uStyle < 9.5;
+    float quadScale = pulseStyle
+      ? ${PULSE_GUARD_SCALE.toFixed(3)}
+      : (traceStyle ? ${TRACE_GUARD_SCALE.toFixed(3)} : 1.0);
     // The quad is a billboard in clip space: no gl_PointSize cap, and no centre-based culling
     // that would pop a big mark out of the frame as its origin crosses the edge.
     clip.xy += position.xy * quadScale * px * 2.0 / uViewport * clip.w;
@@ -452,6 +480,7 @@ const FRAGMENT = /* glsl */ `
   varying float vAge;
   varying float vKind;
   varying float vBurn;
+  varying float vLoudNorm;
   varying vec2  vQuad;
 
   /** The isotherm ramp: violet embers, red, orange, yellow, white. Temperature is loudness. */
@@ -538,7 +567,8 @@ const FRAGMENT = /* glsl */ `
      * so every blob has its own lopsided shape — a smear of heat rather than a UI circle. The
      * warp is small: it must never read as a shape claim about the object that made the noise.
      */
-    bool pulseStyle = (uStyle > 4.5 && uStyle < 5.5) || uStyle > 7.5;
+    bool pulseStyle = (uStyle > 4.5 && uStyle < 5.5) || (uStyle > 7.5 && uStyle < 8.5);
+    bool traceStyle = uStyle > 8.5 && uStyle < 9.5;
     float warp = 1.0;
     // Pulse owns a separate, time-varying deformation below. Do not pay for the two blob sines
     // on every pulse fragment as well.
@@ -559,11 +589,14 @@ const FRAGMENT = /* glsl */ `
      * out of it. The blob styles are unaffected: their "k" is clamped at zero from r >= 1
      * outwards, which is exactly where the discard used to be.
      */
-    float quadLimit = pulseStyle ? ${PULSE_GUARD_SCALE.toFixed(3)} : 1.0;
+    float quadLimit = pulseStyle
+      ? ${PULSE_GUARD_SCALE.toFixed(3)}
+      : (traceStyle ? ${TRACE_GUARD_SCALE.toFixed(3)} : 1.0);
     if (rr > quadLimit) discard;
     // The outer part of the guard is guaranteed transparent by the numeric contract. Reject it
     // before any per-shell phase work; the actual quad edge remains farther out at quadLimit.
     if (pulseStyle && rr > ${PULSE_ALPHA_SUPPORT.toFixed(6)}) discard;
+    if (traceStyle && rr > ${TRACE_ALPHA_SUPPORT.toFixed(6)}) discard;
     float k = max(0.0, 1.0 - r) * smoothstep(1.0, 0.82, rr);
 
     float a;
@@ -613,7 +646,7 @@ const FRAGMENT = /* glsl */ `
       vec3 alien = vec3(1.00, 0.28, 0.22);
       c = mix(bone, alien, step(1.5, vKind));
       c = mix(c * 0.72, c, core);
-    } else if (uStyle < 5.5 || uStyle > 7.5) {
+    } else if (uStyle < 5.5 || (uStyle > 7.5 && uStyle < 8.5)) {
       /*
        * pulse — the mark as an instrument *reading*, and the one style in the set that is not a
        * blob at all.
@@ -694,6 +727,65 @@ const FRAGMENT = /* glsl */ `
       a = shellOld * 0.85 + coreOld * (0.30 + 0.35 * vHeat);
       vec3 warm = mix(vColor, vec3(1.0, 0.86, 0.70), 0.4);
       c = mix(warm * 0.75, vec3(1.0, 0.95, 0.88), shellOld * 0.8);
+    } else if (uStyle < 9.5) {
+      /*
+       * trace — one uncertain acoustic registration, then memory.
+       *
+       * A single deformed front grows from the event point; it does not claim a measured circle
+       * and it never repeats. The front reveals a broad, low-frequency thermal residue behind it.
+       * Under max blending, nearby residues become one readable area of activity instead of a
+       * pile of crosshairs. This remains a billboard at the event point: it samples no geometry.
+       *
+       * Temporal character comes only from physical loudness. There is deliberately no gunshot,
+       * prop or spider branch here: the same smoothstep maps a quiet tick to a slow registration
+       * and the loud end to a sharp one.
+       */
+      // Acoustic range spans orders of magnitude; interpolate in log space so medium prop hits
+      // actually sit between a tiny click and a rifle instead of clustering at the quiet end.
+      float loudTempo = smoothstep(
+        ${Math.log(TRACE_LOUD_NORM_QUIET).toFixed(6)},
+        ${Math.log(TRACE_LOUD_NORM_SHARP).toFixed(6)},
+        log(max(${TRACE_LOUD_NORM_QUIET.toFixed(2)}, vLoudNorm))
+      );
+      float onsetDuration = mix(
+        ${TRACE_ONSET_DURATION_SLOW.toFixed(2)},
+        ${TRACE_ONSET_DURATION_FAST.toFixed(2)},
+        loudTempo
+      );
+      float onsetT = clamp(vAge / onsetDuration, 0.0, 1.0);
+      float onsetEase = smoothstep(0.0, 1.0, onsetT);
+
+      // Two drifting low-frequency modes: visibly organic, never granular, deterministic per mark.
+      float tracePhase = vSeed + vAge * 0.16;
+      float traceWarp = 1.0
+        + 0.13 * sin(ang * 2.0 + tracePhase)
+        + 0.07 * sin(ang * 3.0 - tracePhase * 1.37);
+      float traceR = rr / traceWarp;
+      float frontRadius = mix(
+        ${TRACE_FRONT_RADIUS_START.toFixed(2)},
+        ${TRACE_FRONT_RADIUS_END.toFixed(2)},
+        onsetEase
+      );
+      float widthMod = 1.0 + ${TRACE_THICKNESS_MOD_MAX.toFixed(2)} * sin(ang * 3.0 + tracePhase * 1.7);
+      float front = 1.0 - smoothstep(
+        ${TRACE_FRONT_HALF_WIDTH.toFixed(3)} * widthMod,
+        ${(TRACE_FRONT_HALF_WIDTH + TRACE_FRONT_FEATHER).toFixed(3)} * widthMod,
+        abs(traceR - frontRadius)
+      );
+      float frontEnvelope = smoothstep(0.0, 0.10, onsetT)
+        * (1.0 - smoothstep(0.64, 1.0, onsetT));
+
+      // The residue is a soft field, revealed behind the front and then left to the common decay.
+      float revealed = 1.0 - smoothstep(frontRadius - 0.10, frontRadius + 0.04, traceR);
+      float body = pow(max(0.0, 1.0 - traceR), 1.85);
+      float shoulder = exp(-pow((traceR - 0.42) / 0.38, 2.0));
+      float settle = smoothstep(0.08, 0.72, onsetT);
+      float residue = (body * 0.52 + shoulder * 0.18) * revealed * settle;
+
+      a = residue * (0.58 + 0.30 * vHeat) + front * frontEnvelope * (0.46 + 0.26 * vHeat);
+      vec3 read = vec3(0.58, 0.54, 0.68);
+      vec3 alien = vec3(1.00, 0.38, 0.32);
+      c = mix(read, alien, step(1.5, vKind));
     } else {
       // Unreachable for known styles; keep shader definite if a bad uniform slips through.
       a = 0.0;

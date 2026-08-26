@@ -552,7 +552,7 @@ notes.push(
 );
 
 // ===========================================================================
-// 7. The sound layer: `pulse` is the explicitly chosen default. The law that is easy
+// 7. The sound layer: the pulse comparison remains as its historical proof. The law that is easy
 //    to break here is law 2 — the layer draws
 //    events, it does not light the room — so the section ends by switching it
 //    off and proving the same frame is black.
@@ -618,7 +618,7 @@ check(
     `${(styleShots.pulse.lit * 100).toFixed(2)}% as rings`,
 );
 
-check('pulse is the style the game boots with', bootMarkerStyle === 'pulse', `booted as ${bootMarkerStyle}`);
+check('trace is the style the game boots with', bootMarkerStyle === 'trace', `booted as ${bootMarkerStyle}`);
 
 // The law. Same tick, same three collapsed stacks, the sound layer switched off: if any pixel
 // survives, something in this layer has been lighting the room.

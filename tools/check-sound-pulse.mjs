@@ -173,9 +173,9 @@ check(
   `1 quad/event, loop<=${count}, measured concurrent<=${concurrentMax}, guard bounding area +${(guardFillCost * 100).toFixed(2)}%`,
 );
 check(
-  'explicitly approved pulse is the boot style',
-  /style:\s*'pulse'/.test(source),
-  'defaultMarkerTunables().style = pulse',
+  'approved pulse experiment remains selectable at its original index',
+  /pulse:\s*5/.test(source) && source.includes("| 'pulse'"),
+  'pulse index=5/selectable (boot style is owned by the current visual experiment)',
 );
 
 if (failures.length > 0) {
