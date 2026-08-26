@@ -552,8 +552,8 @@ notes.push(
 );
 
 // ===========================================================================
-// 7. The sound layer: `echo` is his pick and is now the default, and `pulse` is
-//    finished. The law that is easy to break here is law 2 — the layer draws
+// 7. The sound layer: `pulse` is the explicitly chosen default. The law that is easy
+//    to break here is law 2 — the layer draws
 //    events, it does not light the room — so the section ends by switching it
 //    off and proving the same frame is black.
 // ===========================================================================
@@ -583,7 +583,7 @@ for (const [name, file, note] of [
   [
     'echo',
     '15-marks-echo.png',
-    'echo — his pick out of the seven, and the default from this commit on. Hue is identity and never quantity: everything the world ' +
+    'echo — the previous default, retained as a selectable comparison. Hue is identity and never quantity: everything the world ' +
       'does is one bone-white, anything alive that is not you is red, and loudness is carried by size and burn alone',
   ],
   [
@@ -595,8 +595,8 @@ for (const [name, file, note] of [
   [
     'pulse',
     '17-pulse-after.png',
-    'pulse, after. Hollow. Three thin shells leave the epicentre and cross the mark in about half a second, and behind them nothing is ' +
-      'left but a hard pinpoint at the exact point of the event. Nothing else in the set has a hollow middle, and a hollow ring is the ' +
+    'pulse, after. Hollow. A finite generator launches ten waves every 0.67 seconds; each successor follows a smooth smaller death radius, ' +
+      'so several generations overlap without a persistent centre pip. Nothing else in the set has a hollow middle, and a hollow ring is the ' +
       'strongest available statement that this is a reading and not a lamp: light fills, an instrument rings',
   ],
 ]) {
@@ -618,7 +618,7 @@ check(
     `${(styleShots.pulse.lit * 100).toFixed(2)}% as rings`,
 );
 
-check('echo is the style the game boots with', bootMarkerStyle === 'echo', `booted as ${bootMarkerStyle}`);
+check('pulse is the style the game boots with', bootMarkerStyle === 'pulse', `booted as ${bootMarkerStyle}`);
 
 // The law. Same tick, same three collapsed stacks, the sound layer switched off: if any pixel
 // survives, something in this layer has been lighting the room.

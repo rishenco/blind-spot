@@ -46,8 +46,41 @@ import * as THREE from 'three';
 import type { SoundEvent, SoundSource } from '../events/bus';
 import { isSoundPerceivableAt, soundPerceptionRange } from '../events/perception';
 
-/** One sprite per event. The blob is made in the fragment shader, not out of particles. */
+/** One sprite per event. The mark is made in the fragment shader, not out of particles. */
 const PER_MARKER = 1;
+
+/*
+ * Pulse's nominal radius is 1.0. Its instanced quad deliberately extends farther:
+ *
+ *   (front fade end + max filtered half-width) * (1 + maximum warp) + safety
+ *   (1.04 + (0.014 + 0.006) * 1.22) * 1.08 + 0.020448 = 1.17
+ *
+ * Therefore every non-zero sample is gone by 1.149552 and the last 0.020448 nominal radii of the
+ * quad are guaranteed transparent. This is a geometry guard band, not an edge mask: neither the
+ * compact filter kernel nor non-zero alpha can ever meet an instanced-quad edge.
+ *
+ * These are exported so the narrow numerical check can verify the contract without rendering a
+ * PNG or maintaining a second set of magic numbers.
+ */
+export const PULSE_FRONT_FADE_END = 1.04;
+export const PULSE_LINE_HALF_WIDTH = 0.014;
+export const PULSE_LINE_FEATHER = 0.006;
+export const PULSE_THICKNESS_MOD_MAX = 0.22;
+export const PULSE_WARP_MAX = 0.08;
+export const PULSE_GUARD_SCALE = 1.17;
+export const PULSE_WAVE_COUNT = 10;
+export const PULSE_WAVE_PERIOD = 0.67;
+export const PULSE_WAVE_SPEED = 0.32;
+export const PULSE_DEATH_RADIUS_FIRST = 1.04;
+export const PULSE_DEATH_RADIUS_LAST = 0.16;
+export const PULSE_WAVE_FADE_START = 0.6;
+export const PULSE_WAVE_LAUNCH_FADE = 0.2;
+export const PULSE_POLY_SIDES = 12;
+export const PULSE_POLY_AXIS_DEFORM = 0.06;
+const PULSE_ALPHA_SUPPORT =
+  (PULSE_FRONT_FADE_END +
+    (PULSE_LINE_HALF_WIDTH + PULSE_LINE_FEATHER) * (1 + PULSE_THICKNESS_MOD_MAX)) *
+  (1 + PULSE_WARP_MAX);
 
 /**
  * Per-source hot-core colour and weight. Everything lives in the warm half of the spectrum on
@@ -118,11 +151,12 @@ const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number; kind: numb
  *             something alive that is not you. Loudness is size and brightness alone — no hue
  *             ramp at all, so a crowd of marks never turns into a colour salad.
  *  - `pulse`  the instrument reading, and the only style in the set with a **hollow** middle.
- *             Three thin shells leave the epicentre, cross the mark in about half a second and
- *             dissolve at the rim, leaving a hard pinpoint and nothing else. Light fills; a
- *             reading rings — so a hollow expanding circle is the strongest available statement
- *             that this is not a lamp. Round one of it (one fat shell over a filled core) is
- *             kept as `pulse-v1` for the before/after.
+ *             A bounded generator launches ten thin waves from the centre. Each successor dies
+ *             at a smoothly smaller radius, so several organic generations overlap while the
+ *             readout contracts through its seven-second life. There is no persistent centre pip.
+ *             Light fills; a reading rings — so hollow expanding lines
+ *             are the strongest available statement that this is not a lamp. Round one of it
+ *             (one fat shell over a filled core) is kept as `pulse-v1` for the before/after.
  *  - `bruise` cold-side thermal: deep indigo body, magenta mid, hot pink core. Occupies the one
  *             part of the colour wheel neither the lidar (cyan) nor the muzzle flash (amber) uses,
  *             so it can never be mistaken for either.
@@ -132,8 +166,10 @@ const SOURCE_LOOK: Record<SoundSource, { color: number; gain: number; kind: numb
  *  - `bloom`  round one: no core at all, one soft monochrome haze. It was the default only
  *             because it was what he happened to be tuning with by hand.
  *  - `pulse-v1` the first answer to `pulse`, kept purely as the control for the before/after.
+ *  - `pulse-poly` the same generator, palette and guard as `pulse`, sampled through a twelve-sided
+ *                 radial metric so every wave is visibly made from straight broken segments.
  *
- * `echo` is the default: it is the one he picked out of the seven by eye.
+ * `pulse` is the default by the human's explicit choice.
  */
 export type MarkerStyle =
   | 'ember'
@@ -143,7 +179,8 @@ export type MarkerStyle =
   | 'echo'
   | 'pulse'
   | 'bruise'
-  | 'pulse-v1';
+  | 'pulse-v1'
+  | 'pulse-poly';
 
 export const MARKER_STYLES: readonly MarkerStyle[] = [
   'echo',
@@ -154,6 +191,7 @@ export const MARKER_STYLES: readonly MarkerStyle[] = [
   'coal',
   'bloom',
   'pulse-v1',
+  'pulse-poly',
 ];
 
 const STYLE_INDEX: Record<MarkerStyle, number> = {
@@ -165,6 +203,7 @@ const STYLE_INDEX: Record<MarkerStyle, number> = {
   pulse: 5,
   bruise: 6,
   'pulse-v1': 7,
+  'pulse-poly': 8,
 };
 
 export interface MarkerTunables {
@@ -275,11 +314,9 @@ export function defaultMarkerTunables(): MarkerTunables {
     peak: 0.68,
     capOverlap: true,
     /*
-     * `echo` is the human's pick out of the seven, made in the live game: "ехо визуал мне нрав".
-     * It is therefore the baseline now, and `bloom` — which was the baseline only because it was
-     * what he happened to be tuning with by hand — is one of the alternatives again.
+     * The human explicitly chose the sequential-wave generator as the live baseline.
      */
-    style: 'echo',
+    style: 'pulse',
   };
 }
 
@@ -292,6 +329,7 @@ const VERTEX = /* glsl */ `
   uniform float uMinRadius;
   uniform float uMaxRadius;
   uniform float uSpread;
+  uniform float uStyle;
   /** Drawing-buffer size in device pixels. Both halves of the resolution fix live here. */
   uniform vec2  uViewport;
 
@@ -348,7 +386,12 @@ const VERTEX = /* glsl */ `
     radius *= 0.62 + 0.42 * (1.0 - exp(-age * 11.0)) - 0.08 * t;
 
     // Fade: bright while the noise is news, then a long shallow tail.
-    float decay = pow(1.0 - t, 1.4) * (0.74 + 0.26 * exp(-age * 1.6));
+    // Pulse owns local launch/fade envelopes per generation. A second event-age decay would make
+    // late-born waves dim merely because their parent marker is old, so pulse stays neutral here.
+    bool pulseStyle = uStyle > 4.5 && uStyle < 5.5;
+    float decay = pulseStyle
+      ? 1.0
+      : pow(1.0 - t, 1.4) * (0.74 + 0.26 * exp(-age * 1.6));
     /*
      * Loudness drives brightness as well as size, and it is allowed to win. A loud thing has to
      * look loud even when it is close enough to fill the frame — "если я как слон, то тут
@@ -384,10 +427,14 @@ const VERTEX = /* glsl */ `
      * keyframe generator and the game disagree by exactly that factor.
      */
     float px = radius * max(1.0, uViewport.y) / 720.0;
+    // Pulse needs room past its nominal radius for the line filter and its fade. Both the quad
+    // and its local coordinate grow together, so rr=1 remains the nominal radius in the fragment
+    // shader while the physical edge moves out to PULSE_GUARD_SCALE.
+    float quadScale = pulseStyle ? ${PULSE_GUARD_SCALE.toFixed(3)} : 1.0;
     // The quad is a billboard in clip space: no gl_PointSize cap, and no centre-based culling
     // that would pop a big mark out of the frame as its origin crosses the edge.
-    clip.xy += position.xy * px * 2.0 / uViewport * clip.w;
-    vQuad = position.xy;
+    clip.xy += position.xy * quadScale * px * 2.0 / uViewport * clip.w;
+    vQuad = position.xy * quadScale;
     gl_Position = clip;
   }
 `;
@@ -421,11 +468,66 @@ const FRAGMENT = /* glsl */ `
    * it is invisible before it launches and gone once it has crossed the rim. The front smears
    * as it travels, the way a real reading loses confidence with distance.
    */
-  float shell(float rr, float t, float gain) {
-    if (t <= 0.0 || t > 1.25) return 0.0;
-    float w = 0.055 + 0.075 * t;
-    float ring = exp(-pow((rr - t) / w, 2.0));
-    return ring * gain * (1.0 - smoothstep(0.80, 1.20, t));
+  float pulseFieldPhase(float generation) {
+    return vSeed + generation * 0.55 + vAge * 0.34;
+  }
+
+  float pulseWarp(float ang, float generation, float phase) {
+    // One field sampled continuously in generation and time. Adjacent births inherit almost the
+    // same contour; the field flows instead of rolling a fresh wobble per ring.
+    float ampMix = 0.5 + 0.5 * sin(vSeed * 0.61 + generation * 0.80 + vAge * 0.17);
+    float a2 = mix(0.044, 0.052, ampMix);
+    float a3 = mix(0.028, 0.024, ampMix);
+    return 1.0 + a2 * sin(ang * 2.0 + phase) + a3 * sin(ang * 3.0 - phase * 0.7);
+  }
+
+  float pulseRadius(float rr, float ang, float generation, float phase, float polyMode) {
+    if (polyMode < 0.5) return rr / pulseWarp(ang, generation, phase);
+
+    // A regular polygon under a smoothly changing diagonal transform: its individual edges stay
+    // mathematically straight, while neighbouring generations inherit a gently evolving contour.
+    vec2 q = vec2(cos(ang), sin(ang)) * rr;
+    q *= vec2(
+      1.0 + ${PULSE_POLY_AXIS_DEFORM.toFixed(2)} * sin(phase),
+      1.0 + ${PULSE_POLY_AXIS_DEFORM.toFixed(2)} * cos(phase * 0.83 + 0.4)
+    );
+    float polygonAngle = atan(q.y, q.x) + 0.12 * sin(phase * 0.73);
+    float sector = 6.28318530718 / float(${PULSE_POLY_SIDES});
+    float edgeAngle = mod(polygonAngle + sector * 0.5, sector) - sector * 0.5;
+    float polygonRadius = cos(3.14159265359 / float(${PULSE_POLY_SIDES})) / cos(edgeAngle);
+    return length(q) / polygonRadius;
+  }
+
+  float pulseLine(
+    float rr,
+    float localAge,
+    float deathRadius,
+    float ang,
+    float generation,
+    float polyMode
+  ) {
+    // Every generation is the same continuous process at a different scale: born at r=0, move
+    // out at constant speed, then dissolve as its own front approaches its own death radius.
+    float front = ${PULSE_WAVE_SPEED.toFixed(2)} * max(0.0, localAge);
+    float progress = front / max(0.001, deathRadius);
+    float launch = smoothstep(0.0, ${PULSE_WAVE_LAUNCH_FADE.toFixed(2)}, localAge);
+    float fade = 1.0 - smoothstep(${PULSE_WAVE_FADE_START.toFixed(2)}, 1.0, progress);
+    float envelope = launch * fade;
+    // Both envelopes have reached exact zero before expensive organic phase work is skipped.
+    if (localAge <= 0.0 || progress >= 1.0 || envelope <= 0.0) return 0.0;
+    float phase = pulseFieldPhase(generation);
+    float warpedR = pulseRadius(rr, ang, generation, phase, polyMode);
+    // Thickness breathes around the ring but never reaches zero: modulation is bounded to
+    // 0.78..1.22. Its phase also drifts, so the same fat/thin spots do not stay painted in space.
+    float widthMod = 1.0
+      + 0.15 * sin(ang * 3.0 + phase * 1.3)
+      + 0.07 * sin(ang * 5.0 - phase * 1.9);
+    float line = 1.0 - smoothstep(
+      ${PULSE_LINE_HALF_WIDTH.toFixed(3)} * widthMod,
+      ${(PULSE_LINE_HALF_WIDTH + PULSE_LINE_FEATHER).toFixed(3)} * widthMod,
+      abs(warpedR - front)
+    );
+    return line * envelope;
   }
 
   void main() {
@@ -436,7 +538,13 @@ const FRAGMENT = /* glsl */ `
      * so every blob has its own lopsided shape — a smear of heat rather than a UI circle. The
      * warp is small: it must never read as a shape claim about the object that made the noise.
      */
-    float warp = 1.0 + 0.18 * sin(ang * 2.0 + vSeed) + 0.11 * sin(ang * 3.0 - vSeed * 2.3);
+    bool pulseStyle = (uStyle > 4.5 && uStyle < 5.5) || uStyle > 7.5;
+    float warp = 1.0;
+    // Pulse owns a separate, time-varying deformation below. Do not pay for the two blob sines
+    // on every pulse fragment as well.
+    if (!pulseStyle) {
+      warp += 0.18 * sin(ang * 2.0 + vSeed) + 0.11 * sin(ang * 3.0 - vSeed * 2.3);
+    }
     /*
      * The warp stretches the silhouette outwards, which can push the shape past the edge of the
      * quad — and a quad has corners, so a fat style came out with visible axis-aligned bites
@@ -451,7 +559,11 @@ const FRAGMENT = /* glsl */ `
      * out of it. The blob styles are unaffected: their "k" is clamped at zero from r >= 1
      * outwards, which is exactly where the discard used to be.
      */
-    if (rr > 1.0) discard;
+    float quadLimit = pulseStyle ? ${PULSE_GUARD_SCALE.toFixed(3)} : 1.0;
+    if (rr > quadLimit) discard;
+    // The outer part of the guard is guaranteed transparent by the numeric contract. Reject it
+    // before any per-shell phase work; the actual quad edge remains farther out at quadLimit.
+    if (pulseStyle && rr > ${PULSE_ALPHA_SUPPORT.toFixed(6)}) discard;
     float k = max(0.0, 1.0 - r) * smoothstep(1.0, 0.82, rr);
 
     float a;
@@ -501,7 +613,7 @@ const FRAGMENT = /* glsl */ `
       vec3 alien = vec3(1.00, 0.28, 0.22);
       c = mix(bone, alien, step(1.5, vKind));
       c = mix(c * 0.72, c, core);
-    } else if (uStyle < 5.5) {
+    } else if (uStyle < 5.5 || uStyle > 7.5) {
       /*
        * pulse — the mark as an instrument *reading*, and the one style in the set that is not a
        * blob at all.
@@ -513,15 +625,17 @@ const FRAGMENT = /* glsl */ `
        * i.e. a dimmer "echo". It is kept as "pulse-v1" for the before/after, and this is the
        * finished one.
        *
-       * What it is now: **hollow**. Three thin shells leave the epicentre 0.19 s apart, cross
-       * the mark in a little over half a second and dissolve at the rim; behind them nothing is
-       * left but a hard pinpoint at the exact point of the event. No style in this file has a
+       * What it is now: **hollow** and generative. Ten waves are born every 0.67 seconds. Each
+       * front grows continuously from zero at 0.32R/s; its death radius follows a smoothstep from
+       * 1.04R for generation zero to 0.16R for generation nine. Old waves therefore keep moving
+       * and dissolving while new small fronts appear at the origin, with no persistent pip and no
+       * discrete large/medium/small states. No style in this file has a
        * hollow interior, so a pulse mark cannot be mistaken for any of the others at any age,
        * and — the part that matters for law 2 — a hollow ring can never be read as something
        * glowing: light fills, a reading rings.
        *
-       * The shells are true circles while every blob style is a lopsided silhouette, which is
-       * the same argument from the other side: a device draws circles, matter does not.
+       * Rounded pulse uses an inherited organic field; pulse-poly samples the same lifecycle
+       * through a twelve-sided metric. Both remain waves rather than filled silhouettes.
        */
       /*
        * The shells run on a *lightly* warped radius — a third of the lopsidedness the blob
@@ -529,27 +643,27 @@ const FRAGMENT = /* glsl */ `
        * reading and start reading as a gunsight, which is the one association this game cannot
        * afford; a few percent of wobble is enough to break it while the shape stays a circle.
        */
-      float rw = rr / (1.0 + (warp - 1.0) * 0.34);
-      float travel = vAge / 0.56;
-      float shells =
-          shell(rw, travel, 1.00) +
-          shell(rw, travel - 0.34, 0.62) +
-          shell(rw, travel - 0.68, 0.38);
+      float shells = 0.0;
+      float polyMode = step(7.5, uStyle);
+      // Compile-time bounded: one fragment loop inside the existing one-quad-per-event instance.
+      for (int i = 0; i < ${PULSE_WAVE_COUNT}; i++) {
+        float generation = float(i) / float(${PULSE_WAVE_COUNT - 1});
+        float radiusEase = smoothstep(0.0, 1.0, generation);
+        float deathRadius = mix(
+          ${PULSE_DEATH_RADIUS_FIRST.toFixed(2)},
+          ${PULSE_DEATH_RADIUS_LAST.toFixed(2)},
+          radiusEase
+        );
+        float localAge = vAge - float(i) * ${PULSE_WAVE_PERIOD.toFixed(2)};
+        shells += pulseLine(rr, localAge, deathRadius, ang, generation, polyMode);
+      }
+      a = shells * (0.72 + 0.48 * vHeat);
       /*
-       * The residue. The layer is a decaying hit-map of the last few seconds, so a pulse mark
-       * still has to say "something happened *here*" long after it has stopped ringing — but as
-       * a pinpoint, not as an area, because an area is the thing that reads as illumination.
+       * Muted lilac-grey for self/world, deliberately outside both cyan lidar and amber muzzle
+       * light. The only identity split is the approved coral for spiders.
        */
-      float pip = exp(-pow(rr / 0.085, 2.0)) * (0.24 + 0.48 * vHeat);
-      a = shells * (0.70 + 0.55 * vHeat) + pip;
-      /*
-       * Near-monochrome, faintly cold, and deliberately not on the source hue ramp: the whole
-       * point of the style is that it is an instrument's opinion, and an instrument does not
-       * change colour according to what it heard. The one distinction it keeps is "echo"'s:
-       * something alive that is not you comes back on the red side.
-       */
-      vec3 read = vec3(0.84, 0.94, 0.90);
-      vec3 alien = vec3(1.00, 0.52, 0.46);
+      vec3 read = vec3(0.58, 0.54, 0.68);
+      vec3 alien = vec3(1.00, 0.38, 0.32);
       c = mix(read, alien, step(1.5, vKind));
     } else if (uStyle < 6.5) {
       /*
@@ -568,7 +682,7 @@ const FRAGMENT = /* glsl */ `
       a = body * 0.68 + core * 0.52 * vHeat;
       c = mix(deep, mid, smoothstep(0.0, 0.5, body));
       c = mix(c, hot, core * vHeat);
-    } else {
+    } else if (uStyle < 7.5) {
       /*
        * pulse-v1 — round one of "pulse", kept only so the before/after can be looked at in the
        * live game as well as in the keyframes. One fat shell over the first third of a second
@@ -580,6 +694,10 @@ const FRAGMENT = /* glsl */ `
       a = shellOld * 0.85 + coreOld * (0.30 + 0.35 * vHeat);
       vec3 warm = mix(vColor, vec3(1.0, 0.86, 0.70), 0.4);
       c = mix(warm * 0.75, vec3(1.0, 0.95, 0.88), shellOld * 0.8);
+    } else {
+      // Unreachable for known styles; keep shader definite if a bad uniform slips through.
+      a = 0.0;
+      c = vec3(0.0);
     }
 
     /*
