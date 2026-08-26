@@ -64,15 +64,6 @@ export interface Timbre {
    * the absolute level.
    */
   readonly ref: number;
-  /**
-   * How far this source carries, as a multiple of its own loudness radius. 1 for almost
-   * everything: the radius at which a noise "can be noticed" is also the radius at which the
-   * mixer lets it fade out. The chatter is the exception the concept asks for — it is the pack's
-   * one giveaway and the player has to be able to tell the hall is inhabited from across it, so
-   * it both rolls off more gently and is still faintly there past the radius the spiders' own
-   * hearing and the marker layer use. Nothing else on the bus is allowed this.
-   */
-  readonly reach?: number;
   /** Total lifetime, seconds. The voice is held this long. */
   readonly dur: number;
   readonly layers: readonly Layer[];
@@ -218,7 +209,7 @@ function chatter(seq: number): Timbre {
   // this the pack would have gone 9 dB quieter for reasons that have nothing to do with design.
   // The measured peak of a 3 m phrase is back where it was. Range (`loudness`) is untouched —
   // that number belongs to the spiders.
-  return { name: 'spider-chatter', gain: 1.75, ref: 12, reach: 2.6, dur: t + 0.26, layers, onsets };
+  return { name: 'spider-chatter', gain: 1.75, ref: 12, dur: t + 0.26, layers, onsets };
 }
 
 /**

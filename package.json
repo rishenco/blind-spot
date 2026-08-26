@@ -18,6 +18,8 @@
     "shots:radio": "npm run build && node tools/radio.mjs",
     "check:gate": "npm run build && node tools/gate.mjs",
     "check:spider-attention": "npm run build && node tools/check-spider-attention.mjs",
+    "check:sound-perception": "npm run build && node tools/check-sound-perception.mjs",
+    "check:spawn-lidar": "npm run build && node tools/check-spawn-lidar.mjs",
     "check:finale": "npm run build && node tools/check-finale.mjs"
   },
   "dependencies": {

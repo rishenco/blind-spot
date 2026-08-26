@@ -35,6 +35,7 @@
  * here — audio is a pure sink, so its presence or absence cannot change a frame.
  */
 import type { SoundEvent } from '../events/bus';
+import { isSoundPerceivableAt, soundCarry, soundDistance } from '../events/perception';
 import { applyDeafen, defaultDeafTunables, type DeafTunables } from './deafen';
 import { buildTimbre, loudnessGain, makeNoiseBuffer, timbreFor, type Timbre } from './voices';
 
@@ -306,16 +307,13 @@ export class AudioStage {
     // it would take a voice from something happening now.
     if (this.sceneTime - event.time > this.tunables.maxLatency) return;
 
-    const dx = event.x - this.lx;
-    const dy = event.y - this.ly;
-    const dz = event.z - this.lz;
-    const dist = Math.max(0.25, Math.hypot(dx, dy, dz));
+    const dist = Math.max(0.25, soundDistance(event, this.lx, this.ly, this.lz));
     const timbre = timbreFor(event);
     // Loudness is "metres at which this can be noticed" (bus contract), so past that range there
-    // is nothing to hear and no reason to spend a voice. `reach` widens it for the one source
-    // that is supposed to carry across the hall — see Timbre.reach.
-    const reach = timbre.reach ?? 1;
-    if (dist > event.loudness * 1.2 * reach) {
+    // is nothing to hear and no reason to spend a voice. The shared perception contract widens
+    // it for the one source that is supposed to carry across the hall: spider chatter.
+    const reach = soundCarry(event);
+    if (!this.accepts(event)) {
       this.stats.outOfRange++;
       return;
     }
@@ -328,7 +326,7 @@ export class AudioStage {
     }
 
     const t0 = ctx.currentTime + 0.005;
-    this.place(voice, event, t0, timbre.reach ?? 1);
+    this.place(voice, event, t0, reach);
     voice.gain.gain.cancelScheduledValues(t0);
     voice.gain.gain.setValueAtTime(1, t0);
 
@@ -342,6 +340,11 @@ export class AudioStage {
     voice.seq = event.seq;
     this.stats.played++;
     this.stats.last = timbre.name;
+  }
+
+  /** Pure distance decision shared with both tactical visualisations. */
+  accepts(event: SoundEvent): boolean {
+    return isSoundPerceivableAt(event, this.lx, this.ly, this.lz);
   }
 
   private place(voice: Voice, event: SoundEvent, t0: number, reach: number): void {

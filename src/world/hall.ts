@@ -46,8 +46,6 @@ export interface HallLayout {
   readonly wallThickness: number;
   /** Where the player starts, on the floor. */
   readonly spawn: THREE.Vector3;
-  /** Yaw the player starts facing, degrees. */
-  readonly spawnYawDeg: number;
 }
 
 /**
@@ -62,7 +60,6 @@ export const HALL: HallLayout = {
   height: 9,
   wallThickness: 0.5,
   spawn: new THREE.Vector3(-30, 0, -20),
-  spawnYawDeg: 35,
 };
 
 /** Named places, for the HUD's "nearest landmark" line and for the top-down debug view. */

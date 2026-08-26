@@ -44,6 +44,7 @@
 import * as THREE from 'three';
 
 import type { SoundEvent, SoundSource } from '../events/bus';
+import { isSoundPerceivableAt, soundPerceptionRange } from '../events/perception';
 
 /** One sprite per event. The blob is made in the fragment shader, not out of particles. */
 const PER_MARKER = 1;
@@ -620,8 +621,8 @@ const RING_VERTEX = /* glsl */ `
       gl_PointSize = 0.0;
       return;
     }
-    // The audibility radius is the loudness, in metres — one scale for the whole game, and in
-    // M4 this exact circle is the test a spider runs.
+    // aLoud holds the shared player-perception radius in metres. It starts from event loudness,
+    // then includes the same source carry and final rolloff margin as the audio/marker admission.
     vec3 p = position + vec3(cos(aPhase), 0.0, sin(aPhase)) * aLoud;
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     vColor = aTint * (1.0 - age / uLife) * 0.9;
@@ -643,6 +644,8 @@ export interface MarkerStats {
   alive: number;
   /** Marks written since the start. */
   written: number;
+  /** Events correctly rejected because the tactical ear was outside their notice radius. */
+  outOfRange: number;
   capacity: number;
 }
 
@@ -671,8 +674,13 @@ export class SoundMarkers {
 
   private cursor = 0;
   private written = 0;
+  private outOfRange = 0;
   private time = 0;
   private radiusOn = false;
+  /** Last rendered ear position. Marks are a tactical hearing readout, not an omniscient feed. */
+  private listenerX = 0;
+  private listenerY = 0;
+  private listenerZ = 0;
 
   constructor(
     readonly capacity = 3072,
@@ -822,6 +830,13 @@ export class SoundMarkers {
     this.ringMaterial.uniforms.uProjScale!.value = v;
   }
 
+  /** The same ear position used by the spatial mixer. No orientation is needed for range. */
+  setListener(x: number, y: number, z: number): void {
+    this.listenerX = x;
+    this.listenerY = y;
+    this.listenerZ = z;
+  }
+
   applyLook(): void {
     const t = this.tunables;
     const u = this.material.uniforms;
@@ -864,6 +879,13 @@ export class SoundMarkers {
 
   /** The bus subscriber. One event, one slot in the ring. No allocation. */
   handle(event: SoundEvent): void {
+    // The HUD localises what the player could hear. Previously every event in the whole hall was
+    // written, so the 22 px minimum radius turned inaudible spider footfalls into distant red
+    // beacons. A rejected event never claims a ring-buffer slot and cannot appear years later.
+    if (!this.accepts(event)) {
+      this.outOfRange++;
+      return;
+    }
     const slot = this.cursor;
     this.cursor = (this.cursor + 1) % this.capacity;
     this.written++;
@@ -904,7 +926,9 @@ export class SoundMarkers {
         this.ringPos[j * 3 + 1] = event.y + 0.03;
         this.ringPos[j * 3 + 2] = event.z;
         this.ringBirth[j] = event.time;
-        this.ringLoud[j] = event.loudness;
+        // The mandatory debug ring shows the same admission edge the ear, marks and compass use,
+        // including chatter's physical carry and the mixer's final inverse-rolloff margin.
+        this.ringLoud[j] = soundPerceptionRange(event);
         this.ringTint[j * 3] = r;
         this.ringTint[j * 3 + 1] = g;
         this.ringTint[j * 3 + 2] = b;
@@ -916,13 +940,18 @@ export class SoundMarkers {
     }
   }
 
+  /** Pure distance decision shared with audio and the off-screen compass. */
+  accepts(event: SoundEvent): boolean {
+    return isSoundPerceivableAt(event, this.listenerX, this.listenerY, this.listenerZ);
+  }
+
   getStats(): MarkerStats {
     let alive = 0;
     for (let s = 0; s < this.capacity; s++) {
       const b = this.birth[s * PER_MARKER]!;
       if (b > NEVER && this.time - b <= this.tunables.life) alive++;
     }
-    return { alive, written: this.written, capacity: this.capacity };
+    return { alive, written: this.written, outOfRange: this.outOfRange, capacity: this.capacity };
   }
 
   /**
@@ -948,6 +977,7 @@ export class SoundMarkers {
     upload(this.ringGeometry, 'aBirth', 0, this.ringBirth.length);
     this.cursor = 0;
     this.written = 0;
+    this.outOfRange = 0;
   }
 
   dispose(): void {

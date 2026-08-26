@@ -16,7 +16,7 @@ import { Loop } from './core/loop';
 import { AudioStage, defaultAudioTunables } from './audio/audio';
 import { renderAll as renderAudioScenes, phraseShapes } from './audio/offline';
 import { Concussion, defaultConcussionTunables } from './fx/concussion';
-import { SoundBus, type SoundSource } from './events/bus';
+import { SoundBus, type SoundSource, type SpiderSoundKind } from './events/bus';
 import { Hud, type HelpRow } from './debug/hud';
 import { Lidar, defaultLidarTunables } from './lidar/lidar';
 import { StructuredPaint, defaultStructuredTunables } from './lidar/structured';
@@ -31,6 +31,7 @@ import {
   type PlayerEvent,
 } from './player/controller';
 import { HALL, LANDMARKS, buildHall, crossedGate } from './world/hall';
+import { chooseSpawnHeading } from './world/spawn';
 import { PropWorld, defaultPropTunables, loadRapier } from './props/props';
 import { PropReveal } from './props/reveal';
 import { DynamicPaint } from './lidar/dynamic';
@@ -146,6 +147,11 @@ class App {
   private readonly hall = buildHall(this.seed);
   private readonly bus = new SoundBus();
   private readonly lidar = new Lidar(defaultLidarTunables());
+  private readonly spawnHeading = chooseSpawnHeading(this.hall.world, HALL.spawn.x, HALL.spawn.z, {
+    eyeY: 1.62,
+    coneAngleDeg: this.lidar.tunables.coneAngleDeg,
+    range: this.lidar.tunables.coneRange,
+  });
   private readonly paint: StructuredPaint;
   private readonly touch: TouchLayer;
   /** The left hand. Exists only once the prop world does — there is nothing to pick up before. */
@@ -284,7 +290,9 @@ class App {
     this.camera = new THREE.PerspectiveCamera(cameraTunables.fov, 1, 0.05, 260);
 
     this.player = new PlayerController(this.hall.world, defaultMovementTunables(), cameraTunables);
-    this.player.setSpawn(HALL.spawn, HALL.spawnYawDeg);
+    this.player.setSpawn(HALL.spawn, this.spawnHeading.yawDeg);
+    this.markers.setListener(this.player.eye.x, this.player.eye.y, this.player.eye.z);
+    this.compass.setListener(this.player.eye.x, this.player.eye.y, this.player.eye.z);
 
     this.paint = new StructuredPaint(this.hall.world, defaultAgeRamp(), defaultStructuredTunables());
     const t0 = performance.now();
@@ -803,6 +811,8 @@ class App {
       const f = c.getWorldDirection(this.scratchDir);
       this.audio.setEar(c.position.x, c.position.y, c.position.z);
       this.audio.setListener(c.position.x, c.position.y, c.position.z, f.x, f.y, f.z);
+      this.markers.setListener(c.position.x, c.position.y, c.position.z);
+      this.compass.setListener(c.position.x, c.position.y, c.position.z);
       this.radio.setListener(c.position.x, c.position.y, c.position.z, f.x, f.y, f.z);
     }
 
@@ -1868,9 +1878,20 @@ class App {
          * Deterministic AI probe: emits through the one real SoundBus, never a private brain
          * hook. Used by `check:spider-attention` to prove radio repetition and fresh evidence.
          */
-        noise: (source: SoundSource, x: number, z: number, loudness: number) => {
-          this.bus.emit({ source, x, y: 0.2, z, loudness });
+        noise: (source: SoundSource, x: number, z: number, loudness: number, kind?: SpiderSoundKind) => {
+          this.bus.emit({ source, x, y: 0.2, z, loudness, kind });
           return this.bus.lastEvent?.seq ?? -1;
+        },
+        /** Acceptance probe for the three player perception sinks; emits through the real bus. */
+        perception: (x: number, z: number, loudness: number, kind: SpiderSoundKind) => {
+          const beforeMarks = this.markers.getStats().written;
+          const beforeCompass = this.compass.count;
+          const event = this.bus.emit({ source: 'spider', x, y: 0.2, z, loudness, kind });
+          return {
+            audio: this.audio.accepts(event),
+            marker: this.markers.getStats().written === beforeMarks + 1,
+            compass: this.compass.count === beforeCompass + 1,
+          };
         },
         overlay: (on: boolean) => {
           this.spiderOverlay.setVisible(on);
@@ -1987,6 +2008,7 @@ class App {
           felt: this.rifleView.felt,
         },
         aim: { yawDeg: (this.player.yaw * 180) / Math.PI, pitchDeg: (this.player.pitch * 180) / Math.PI },
+        spawnHeading: { ...this.spawnHeading },
         dyn: this.dyn?.getStats() ?? null,
         spiders: this.spiders?.getStats() ?? null,
         propsMs: this.propsMs,

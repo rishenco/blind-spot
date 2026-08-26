@@ -28,6 +28,7 @@
  * the frame's own time, so it replays identically.
  */
 import type { SoundBus, SoundEvent, SoundSource } from '../events/bus';
+import { isSoundPerceivableAt } from '../events/perception';
 
 /** Sources the compass refuses to report, because they are always at the player himself. */
 const SELF: ReadonlySet<SoundSource> = new Set<SoundSource>(['player-step', 'player-land', 'gunshot', 'reload']);
@@ -117,6 +118,9 @@ export class NoiseCompass {
   private readonly unsubscribe: () => void;
   private time = 0;
   private readonly capacity: number;
+  private listenerX = 0;
+  private listenerY = 0;
+  private listenerZ = 0;
 
   constructor(bus: SoundBus, tunables: CompassTunables = defaultCompassTunables(), capacity = 64) {
     this.tunables = tunables;
@@ -130,6 +134,7 @@ export class NoiseCompass {
   private handle(event: SoundEvent): void {
     if (SELF.has(event.source)) return;
     if (event.loudness < this.tunables.minLoudness) return;
+    if (!this.accepts(event)) return;
     this.blips.push({
       x: event.x,
       y: event.y,
@@ -141,6 +146,17 @@ export class NoiseCompass {
       onScreen: false,
     });
     if (this.blips.length > this.capacity) this.blips.shift();
+  }
+
+  setListener(x: number, y: number, z: number): void {
+    this.listenerX = x;
+    this.listenerY = y;
+    this.listenerZ = z;
+  }
+
+  /** Distance admission only; source/min-loudness policy remains the compass's own concern. */
+  accepts(event: SoundEvent): boolean {
+    return isSoundPerceivableAt(event, this.listenerX, this.listenerY, this.listenerZ);
   }
 
   setTime(now: number): void {

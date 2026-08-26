@@ -19,6 +19,7 @@
 import type { SoundEvent, SoundSource, SpiderKind } from '../events/bus';
 import { MATERIALS, type MaterialName } from '../props/shapes';
 import { refDistanceFor } from './audio';
+import { isSoundPerceivableAt, soundCarry } from '../events/perception';
 import { applyDeafen, defaultDeafTunables } from './deafen';
 import { buildTimbre, hash01, loudnessGain, makeNoiseBuffer, timbreFor } from './voices';
 
@@ -355,8 +356,8 @@ export async function renderScene(scene: Scene, opts: RenderOptions = {}): Promi
     const dist = Math.max(0.25, Math.hypot(ev.x - ear.x, ev.y - ear.y, ev.z - ear.z));
     const t0 = se.t;
     const timbre = timbreFor(ev);
-    const reach = legacy ? 1 : timbre.reach ?? 1;
-    if (dist > ev.loudness * 1.2 * reach) {
+    const reach = legacy ? 1 : soundCarry(ev);
+    if (legacy ? dist > ev.loudness * 1.2 : !isSoundPerceivableAt(ev, ear.x, ear.y, ear.z)) {
       culled++;
       return;
     }
