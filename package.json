@@ -20,6 +20,7 @@
     "check:spider-attention": "npm run build && node tools/check-spider-attention.mjs",
     "check:sound-perception": "npm run build && node tools/check-sound-perception.mjs",
     "check:spawn-lidar": "npm run build && node tools/check-spawn-lidar.mjs",
+    "check:prop-touch": "node tools/check-prop-touch.mjs",
     "check:finale": "npm run build && node tools/check-finale.mjs"
   },
   "dependencies": {

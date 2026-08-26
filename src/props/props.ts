@@ -140,6 +140,17 @@ export function defaultPropTunables(): PropTunables {
   };
 }
 
+/**
+ * Minimum contact force worth asking Rapier to report for a body of `weightN` newtons.
+ *
+ * A fixed 90 N floor silently erased a hard-thrown 128 g can: its whole landing peaked at only
+ * 38 N. Heavy bodies retain the old 90 N floor; only sub-kilogram props scale down, and the
+ * existing speed/weight/loudness gates still reject resting support and powerless taps.
+ */
+export function impactForceThreshold(weightN: number, t: PropTunables): number {
+  return Math.min(t.quietForce, Math.max(t.quietForce * 0.1, Math.max(0, weightN) * 8));
+}
+
 export interface PropStats {
   bodies: number;
   awake: number;
@@ -152,6 +163,27 @@ export interface PropStats {
   stuck: number;
   stepMs: number;
   points: number;
+  /** Contact-force callbacks seen since settle; gate counters explain why a body stayed silent. */
+  contacts: number;
+  rejectedForce: number;
+  rejectedWeight: number;
+  rejectedSpeed: number;
+  rejectedGap: number;
+  rejectedLoudness: number;
+  maxForce: number;
+}
+
+/**
+ * Deterministic layout injection for focused physics/keyframe scenarios. Production omits it and
+ * keeps the procedural layout; a scenario can name exact archetype ids without searching a
+ * random warehouse through the gameplay selector.
+ */
+export interface PropPlacement {
+  readonly arch: number;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly rot?: { readonly x: number; readonly y: number; readonly z: number; readonly w: number };
 }
 
 
@@ -193,7 +225,11 @@ export class PropWorld {
   private rifle: RAPIER.RigidBody | null = null;
   private accumulator = 0;
   private time = 0;
-  private stats: PropStats = { bodies: 0, awake: 0, asleep: 0, impacts: 0, rescued: 0, stuck: 0, stepMs: 0, points: 0 };
+  private stats: PropStats = {
+    bodies: 0, awake: 0, asleep: 0, impacts: 0, rescued: 0, stuck: 0, stepMs: 0, points: 0,
+    contacts: 0, rejectedForce: 0, rejectedWeight: 0, rejectedSpeed: 0, rejectedGap: 0,
+    rejectedLoudness: 0, maxForce: 0,
+  };
   private readonly vec: RAPIER.Vector3;
 
   constructor(
@@ -202,6 +238,7 @@ export class PropWorld {
     private readonly bus: SoundBus,
     seed: number,
     tunables: PropTunables = defaultPropTunables(),
+    placements?: readonly PropPlacement[],
   ) {
     this.tunables = tunables;
     this.world = new R.World({ x: 0, y: -9.81, z: 0 });
@@ -243,7 +280,16 @@ export class PropWorld {
     }
 
     // --- the clutter itself ------------------------------------------------
-    const spots = layout(statics, seed, tunables.cap);
+    const spots: Spot[] = placements === undefined
+      ? layout(statics, seed, tunables.cap)
+      : placements.map((p) => ({
+          arch: p.arch,
+          x: p.x,
+          y: p.y,
+          z: p.z,
+          rot: p.rot ?? { x: 0, y: 0, z: 0, w: 1 },
+          radius: 0,
+        }));
     this.count = spots.length;
     this.arch = new Int32Array(this.count);
     this.pos = new Float32Array(this.count * 3);
@@ -306,6 +352,12 @@ export class PropWorld {
       this.bodies.push(body);
       // Weight in newtons, cached once: the contact that merely holds this thing up is not sound.
       this.weight[i] = body.mass() * 9.81;
+      // Contact events need the same mass-aware entrance gate as `drain`. Setting the old fixed
+      // 90 N threshold here meant the light can's real 38 N impact never reached our code at all.
+      const eventThreshold = impactForceThreshold(this.weight[i]!, tunables);
+      for (let c = 0; c < body.numColliders(); c++) {
+        body.collider(c).setContactForceEventThreshold(eventThreshold);
+      }
       const cb = colliderBounds(a.parts);
       // Mean half-extent: the lever arm that turns a body's spin into speed at its own surface.
       this.rollRadius[i] = ((cb[3]! - cb[0]!) + (cb[4]! - cb[1]!) + (cb[5]! - cb[2]!)) / 6;
@@ -497,7 +549,8 @@ export class PropWorld {
     const t = this.tunables;
     this.queue.drainContactForceEvents((e) => {
       const force = e.totalForceMagnitude();
-      if (force < t.quietForce) return;
+      this.stats.contacts++;
+      this.stats.maxForce = Math.max(this.stats.maxForce, force);
       /*
        * Both sides of the contact, not just whichever Rapier happened to list first. The gates
        * below ask "was this body moving a tick ago", so attributing a barrel landing on a
@@ -512,6 +565,11 @@ export class PropWorld {
       else if (b === undefined) i = a;
       else i = this.prevSpeed[a]! >= this.prevSpeed[b]! ? a : b;
       if (i === undefined) return;
+      const forceThreshold = impactForceThreshold(this.weight[i]!, t);
+      if (force < forceThreshold) {
+        this.stats.rejectedForce++;
+        return;
+      }
       /*
        * Two gates, and both of them exist because of one frame: with an absolute force threshold
        * alone the whole hall drew a permanent fog of sound markers over a thousand props that
@@ -524,10 +582,19 @@ export class PropWorld {
        * The floor of the loudness scale then subtracts the weight too: what is heard is the part
        * of the force that the fall put there, not the part gravity was always paying.
        */
-      const floor = t.quietForce + this.weight[i]! * t.weightSlack;
-      if (force < floor) return;
-      if (this.prevSpeed[i]! < t.impactSpeed) return;
-      if (this.time - this.lastSound[i]! < t.perBodyGap) return;
+      const floor = forceThreshold + this.weight[i]! * t.weightSlack;
+      if (force < floor) {
+        this.stats.rejectedWeight++;
+        return;
+      }
+      if (this.prevSpeed[i]! < t.impactSpeed) {
+        this.stats.rejectedSpeed++;
+        return;
+      }
+      if (this.time - this.lastSound[i]! < t.perBodyGap) {
+        this.stats.rejectedGap++;
+        return;
+      }
       this.lastSound[i] = this.time;
       const mat = MATERIALS[ARCHETYPES[this.arch[i]!]!.material];
       // Loudness in metres of notice, from the impulse and nothing else. Square-root because
@@ -536,7 +603,10 @@ export class PropWorld {
         t.maxLoudness,
         Math.sqrt((force - floor) / t.forcePerMetre) * 4.2 * mat.gain,
       );
-      if (loud < 0.6) return;
+      if (loud < 0.6) {
+        this.stats.rejectedLoudness++;
+        return;
+      }
       const body = this.bodies[i]!;
       const p = body.translation();
       this.stats.impacts++;
@@ -614,6 +684,13 @@ export class PropWorld {
     this.stats.impacts = 0;
     this.stats.stuck = 0;
     this.stats.rescued = 0;
+    this.stats.contacts = 0;
+    this.stats.rejectedForce = 0;
+    this.stats.rejectedWeight = 0;
+    this.stats.rejectedSpeed = 0;
+    this.stats.rejectedGap = 0;
+    this.stats.rejectedLoudness = 0;
+    this.stats.maxForce = 0;
     this.queue.clear();
   }
 
