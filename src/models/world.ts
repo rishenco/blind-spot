@@ -462,7 +462,7 @@ function buildMountain(rng: () => number): { mesh: THREE.Mesh; slopeSpots: Spot[
 
   const summitShade: Shade = (c) => jitter(fbm(c.x * 0.3 + 2, c.z * 0.3, 2) > 0.55 ? PALETTE.rimRock : PALETTE.summitRock, crng, 0.04);
   const mountainShade: Shade = (c, n) => {
-    if (c.y > -1.3) return jitter(PALETTE.rimRock, crng, 0.05);
+    if (c.y > -1.3) return jitter(crng() < 0.5 ? PALETTE.cliffC : PALETTE.summitRock, crng, 0.05);
     if (n.y > 0.5) {
       if (c.y < CLOUD_Y - 15) return jitter(n.y > 0.75 ? PALETTE.valleyGrass : PALETTE.moss, crng, 0.06);
       if (c.y < -18 && noise2(c.x * 0.08, c.z * 0.08 + c.y * 0.03) > 0.45) return jitter(PALETTE.snow, crng, 0.025);
@@ -564,6 +564,15 @@ function buildSummitDetail(rng: () => number): THREE.Mesh {
     const a = (i / 9) * Math.PI * 2 + rng() * 0.5;
     if (Math.abs(angDiff(a, LANE)) < 0.35) continue; // keep the main fall lane clean
     place(a, edgeRadius(a) + 0.55 + rng() * 0.35, 0.45 + rng() * 0.45, 0.75, 0.25);
+  }
+  // rock teeth on the lip that break the summit silhouette (outside the walkable area,
+  // away from +Z (the default gameplay view) and from the main fall lane)
+  for (const [a, h] of [[0.15, 2.2], [0.32, 1.3], [2.6, 1.8], [3.35, 2.6], [3.5, 1.4], [5.55, 1.6], [5.95, 2.4]] as const) {
+    e.set((rng() - 0.5) * 0.3, rng() * 3, (rng() - 0.5) * 0.3 - 0.15);
+    q.setFromEuler(e);
+    const s = 0.55 + rng() * 0.3;
+    m4.compose(P(a, edgeRadius(a) + 0.45 + s * 0.4, h * 0.35 - 0.4), q, new THREE.Vector3(s, h * 0.75, s * 0.8));
+    F.geometry(new THREE.OctahedronGeometry(1, 0), m4, rockShade);
   }
   // a few small stones just inside the rim
   for (let i = 0; i < 7; i++) {
