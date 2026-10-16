@@ -22,7 +22,31 @@ export const PALETTE = {
   cloud: 0xffffff,
   skyTop: 0x4d8fe0,
   skyHorizon: 0xffd2a0,
+  // --- world / environment ---
+  grassLight: 0x9cc75a,
+  grassDark: 0x6f9f40,
+  rimRock: 0xc2b6a6,
+  cliffA: 0xa08f80,
+  cliffB: 0x86776d,
+  cliffC: 0xb19e8a,
+  scree: 0xa39686,
+  moss: 0x67913f,
+  pine: 0x2f6e4c,
+  pineDark: 0x23573d,
+  trunk: 0x6b4a32,
+  valleyGrass: 0x86b852,
+  valleyDark: 0x5e9443,
+  lake: 0x5fb0de,
+  mountainRock: 0x7a7488,
+  mountainRockFar: 0x8f98bd,
+  skyZenith: 0x2a63c4,
+  skyMid: 0x86b6ec,
+  skyHorizonCool: 0xf3d0c8,
+  sunDisk: 0xfff6dc,
 } as const;
+
+/** Direction *towards* the sun (normalized). Low warm evening sun; the world's sky disk matches it. */
+export const SUN_DIR = new THREE.Vector3(0.78, 0.36, 0.5).normalize();
 
 const cache = new Map<string, THREE.Material>();
 
@@ -44,9 +68,9 @@ export function mat(color: number, opts: { emissive?: number; key?: string } = {
 
 // Default scene lighting: warm low sun + sky/ground fill. Used by the game and the viewer.
 export function setupLights(scene: THREE.Scene): THREE.DirectionalLight {
-  scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x6b5a48, 1.1));
-  const sun = new THREE.DirectionalLight(0xfff0d8, 2.4);
-  sun.position.set(30, 40, 20);
+  scene.add(new THREE.HemisphereLight(0xc4dcff, 0x7a6450, 1.15));
+  const sun = new THREE.DirectionalLight(0xffe2bc, 2.9);
+  sun.position.copy(SUN_DIR).multiplyScalar(60);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   const s = 25;

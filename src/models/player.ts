@@ -39,9 +39,9 @@ export const PLAYER_PARTS = [
 ] as const;
 export type PlayerPart = (typeof PLAYER_PARTS)[number];
 
-export const PLAYER_POSES = ['idle', 'run', 'dodge', 'kick', 'throw', 'tumble', 'fall', 'flex'] as const;
+export const PLAYER_POSES = ['idle', 'run', 'dodge', 'kick', 'bounce', 'tumble', 'fall', 'flex'] as const;
 /** Recommended durations (s) of the one-shot poses. */
-export const PLAYER_POSE_DURATION = { dodge: 0.35, kick: 0.35, throw: 0.6 } as const;
+export const PLAYER_POSE_DURATION = { dodge: 0.35, kick: 0.35, bounce: 0.4 } as const;
 
 const HIP_Y = 0.82; // body origin height (hip joints)
 
@@ -190,10 +190,10 @@ function buildTorso(hips: THREE.Object3D) {
 
   const chest = group('chest', torso, 0, 0.2, 0);
   // Big V-shaped ribcage/lats.
-  mesh(tbox(0.42, 0.8, 0.36, 0.28, 0.38), C.skin, 0, 0.18, -0.01, chest);
+  mesh(tbox(0.42, 0.8, 0.36, 0.3, 0.42), C.skin, 0, 0.18, -0.01, chest);
   // Lats flare (back), give the V from behind.
   for (const sx of [-1, 1]) {
-    const lat = mesh(tbox(0.06, 0.16, 0.3, 0.2, 0.26), C.skinShade, sx * 0.29, 0.16, -0.04, chest);
+    const lat = mesh(tbox(0.06, 0.16, 0.3, 0.2, 0.26), C.skin, sx * 0.29, 0.16, -0.04, chest);
     lat.rotation.z = sx * 0.28;
     // Shoulder blades.
     const sb = mesh(new THREE.BoxGeometry(0.2, 0.18, 0.06), C.skin, sx * 0.13, 0.24, -0.19, chest);
@@ -203,9 +203,9 @@ function buildTorso(hips: THREE.Object3D) {
   mesh(new THREE.BoxGeometry(0.035, 0.3, 0.02), C.skinShade, 0, 0.15, -0.205, chest);
   // Pecs: two slabs, bottom edge pushed out.
   for (const sx of [-1, 1]) {
-    const pec = mesh(tbox(0.26, 0.22, 0.17, 0.11, 0.06), C.skin, sx * 0.14, 0.24, 0.17, chest);
+    const pec = mesh(tbox(0.27, 0.23, 0.18, 0.13, 0.07), C.skin, sx * 0.14, 0.24, 0.185, chest);
     pec.rotation.set(0.1, sx * 0.18, 0);
-    mesh(new THREE.BoxGeometry(0.025, 0.025, 0.01), C.nipple, sx * 0.15, 0.21, 0.235, chest);
+    mesh(new THREE.BoxGeometry(0.025, 0.025, 0.01), C.nipple, sx * 0.15, 0.21, 0.255, chest);
   }
   // Traps: a slope from shoulders to neck.
   mesh(tbox(0.62, 0.22, 0.12, 0.3, 0.18), C.skin, 0, 0.42, -0.03, chest);
@@ -365,14 +365,14 @@ const poses: ModelDef['poses'] = {
     const back = seg(t, 0.25, 0.35);
     const k = (1 - back);
     // Kicking leg = right.
-    const thigh = lerp(lerp(0, -1.3, chamber), -1.65, snap) * k;
+    const thigh = lerp(lerp(0, -1.3, chamber), -1.5, snap) * k;
     const knee = lerp(lerp(0, 1.7, chamber), 0.0, snap) * k;
     leg(p, 'R', thigh, knee, lerp(0, -0.5 * snap, 1) * k + 0.6 * chamber * (1 - snap) * k);
     // Support leg bends, body leans back to counter.
     leg(p, 'L', 0.15 * k, 0.25 * k, -0.35 * k);
     p.body.position.y = HIP_Y - 0.05 * k;
     p.body.position.z = -0.08 * k;
-    p.body.rotation.x = -0.32 * snap * k - 0.08 * chamber * k;
+    p.body.rotation.x = -0.26 * snap * k - 0.08 * chamber * k;
     p.torso.rotation.x = 0.12 * snap * k;
     p.torso.rotation.y = -0.2 * snap * k;
     p.head.rotation.x = 0.25 * snap * k;
@@ -386,35 +386,33 @@ const poses: ModelDef['poses'] = {
     p.bandTail.rotation.x = -0.5 * snap * k;
   },
 
-  throw(root, t) {
-    // 0.6 s suplex: catch horns low in front (0–0.18), heave up and over the shoulder
-    // backwards (0.18–0.45), recover (0.45–0.6).
+  bounce(root, t) {
+    // 0.4 s: kicked a ram that didn't budge. The kicking (right) leg rebounds, he hops
+    // backwards on the left foot, leaning way back with arms windmilling, then catches himself.
     const p = reset(root);
-    const catchP = seg(t, 0, 0.12);
-    const heave = seg(t, 0.18, 0.42);
-    const rec = seg(t, 0.46, 0.6);
-    const hold = catchP * (1 - rec);
-    // Crouch → explode up onto toes, arch back.
-    const crouch = catchP * (1 - heave);
-    p.body.position.y = HIP_Y - 0.2 * crouch + 0.05 * heave * (1 - rec);
-    p.body.rotation.x = (0.35 * crouch - 0.55 * heave) * (1 - rec);
-    p.torso.rotation.x = (0.35 * crouch - 0.45 * heave) * (1 - rec);
-    p.head.rotation.x = (-0.3 * crouch - 0.35 * heave) * (1 - rec);
-    const lk = crouch * 1.2 + 0.25 * heave * (1 - rec);
-    leg(p, 'L', -0.7 * crouch + 0.15 * heave * (1 - rec), lk, -0.5 * crouch + 0.5 * heave * (1 - rec));
-    leg(p, 'R', -0.5 * crouch + 0.3 * heave * (1 - rec), lk * 0.9, -0.5 * crouch + 0.6 * heave * (1 - rec));
-    p.legL.rotation.z = 0.25 * crouch;
-    p.legR.rotation.z = -0.25 * crouch;
-    // Arms: forward to grab, then over the head and behind.
-    const armX = lerp(-1.25, -3.1, heave) * hold;
-    p.armL.rotation.x = armX;
-    p.armR.rotation.x = armX;
-    p.armL.rotation.z = lerp(0.32, 0.18, hold);
-    p.armR.rotation.z = lerp(-0.32, -0.18, hold);
-    p.forearmL.rotation.x = lerp(-0.25, -0.35, hold);
-    p.forearmR.rotation.x = lerp(-0.25, -0.35, hold);
-    p.chest.scale.setScalar(1 + 0.06 * heave * (1 - rec));
-    p.bandTail.rotation.x = -0.6 * heave * (1 - rec);
+    const u = clamp01(t / 0.4);
+    const rec = Math.sin(Math.PI * Math.min(1, u / 0.95)); // 0 → 1 → 0
+    const hit = 1 - seg(t, 0, 0.12); // leg still out at impact
+    p.body.position.y = HIP_Y + 0.08 * Math.abs(Math.sin(Math.PI * u * 2)) * (1 - u) - 0.04 * rec;
+    p.body.position.z = -0.18 * rec;
+    p.body.rotation.x = -0.5 * rec;
+    p.body.rotation.z = 0.12 * Math.sin(u * TAU * 1.5) * rec;
+    p.torso.rotation.x = -0.15 * rec;
+    p.head.rotation.x = 0.45 * rec;
+    p.head.rotation.y = 0.35 * Math.sin(t * 45) * rec;
+    // Rebounding kick leg and hopping support leg.
+    leg(p, 'R', lerp(-0.3 * rec, -1.5, hit), lerp(0.9 * rec, 0, hit), lerp(0, -0.5, hit));
+    leg(p, 'L', -0.15 * rec, 0.55 * rec, -0.3 * rec);
+    p.legR.rotation.z = -0.2 * rec;
+    // Arms windmill backwards, flung wide.
+    const w = TAU * 1.6 * u;
+    p.armL.rotation.z = 0.32 + 0.95 * rec;
+    p.armR.rotation.z = -0.32 - 0.95 * rec;
+    p.armL.rotation.x = -Math.sin(w) * 2.0 * rec - 0.6 * rec;
+    p.armR.rotation.x = -Math.sin(w + Math.PI * 0.7) * 2.0 * rec - 0.6 * rec;
+    p.forearmL.rotation.x = -0.25 - 0.5 * rec;
+    p.forearmR.rotation.x = -0.25 - 0.5 * rec;
+    p.bandTail.rotation.x = 0.7 * rec;
   },
 
   tumble(root, t) {
@@ -482,11 +480,11 @@ const poses: ModelDef['poses'] = {
     for (const [s, sg] of [['L', 1], ['R', -1]] as const) {
       const arm = p[`arm${s}`];
       const fore = p[`forearm${s}`];
-      arm.rotation.x = lerp(0, -0.25, db) + lerp(0, -0.55, mm);
+      arm.rotation.x = -0.25 * db - 0.45 * mm;
       arm.rotation.y = 0;
-      arm.rotation.z = sg * (0.32 + db * (1.3 + 0.05 * pulse) + mm * 0.05);
-      fore.rotation.x = -0.25 * (1 - enter) + db * -0.15 + mm * -0.9;
-      fore.rotation.z = sg * (db * (1.9 + 0.15 * pulse) + mm * 1.15);
+      arm.rotation.z = sg * (0.32 + db * (1.3 + 0.05 * pulse) + mm * (0.35 + 0.08 * pulse));
+      fore.rotation.x = -0.25 * (1 - enter) + db * -0.15 + mm * -0.75;
+      fore.rotation.z = sg * (db * (1.9 + 0.15 * pulse) - mm * (1.35 + 0.1 * pulse));
     }
     p.torso.rotation.x = 0.05 * db + 0.3 * mm;
     p.head.rotation.x = -0.1 * db - 0.15 * mm;
