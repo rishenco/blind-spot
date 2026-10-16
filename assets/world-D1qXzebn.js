@@ -1,0 +1,1 @@
+export{t as CLOUD_HOLES,n as CLOUD_Y,r as FALL_LANES,i as LANDING_SPOT,a as MAIN_FALL_LANE,o as PLATEAU_RADIUS,s as PLATEAU_TOP_Y,c as VALLEY_Y,l as cliffRadius,u as cliffRadiusAt,d as default,f as edgeRadius,p as onPlateau,m as valleyHeight}from"./world-C6KZXLFF.js";
