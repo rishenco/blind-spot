@@ -5,12 +5,18 @@ export class Input {
   mouseDX = 0;
   mouseDY = 0;
   locked = false;
+  /** Called synchronously inside user gestures (audio unlock, pointer lock must happen there). */
+  onGesture: (() => void) | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     addEventListener('keydown', (e) => {
       if (e.repeat) return;
       this.down.add(e.code);
       this.pressed.add(e.code);
+      if (e.code !== 'Escape') {
+        this.pressed.add('AnyKey');
+        this.onGesture?.();
+      }
       if (e.code === 'Space') e.preventDefault();
     });
     addEventListener('keyup', (e) => this.down.delete(e.code));
@@ -18,6 +24,7 @@ export class Input {
     canvas.addEventListener('mousedown', (e) => {
       this.pressed.add(`Mouse${e.button}`);
       this.pressed.add('AnyClick');
+      this.onGesture?.();
     });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     addEventListener('mousemove', (e) => {
@@ -31,8 +38,16 @@ export class Input {
     });
   }
 
-  lock(): void {
-    if (!this.locked) this.canvas.requestPointerLock?.()?.catch?.(() => {});
+  /** Request pointer lock; resolves false if the browser refuses. */
+  lock(): Promise<boolean> {
+    if (this.locked) return Promise.resolve(true);
+    try {
+      const r = this.canvas.requestPointerLock?.() as unknown as Promise<void> | undefined;
+      if (r && typeof r.then === 'function') return r.then(() => true, () => false);
+    } catch {
+      return Promise.resolve(false);
+    }
+    return Promise.resolve(true);
   }
 
   isDown(code: string): boolean {

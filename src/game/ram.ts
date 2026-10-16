@@ -67,6 +67,12 @@ export class Ram {
     this.stateTime = 0;
   }
 
+  /** Stop in place (used when the player's fall starts). */
+  freeze(): void {
+    this.vel.set(0, this.grounded ? 0 : this.vel.y, 0);
+    if (this.grounded && this.state !== 'out') this.set('recover');
+  }
+
   kicked(dir: THREE.Vector3, game: Game): void {
     this.vel.set(dir.x * RAM.kickH, RAM.kickV, dir.z * RAM.kickH);
     this.grounded = false;
@@ -94,6 +100,7 @@ export class Ram {
         break;
       case 'turn':
         this.anim.play('idle');
+        if (!fighting) break;
         this.turnTo(toPlayerYaw, RAM.turnSpeed, dt);
         if (Math.abs(angleDiff(toPlayerYaw, this.yaw)) < 0.12 || this.stateTime > 0.7) {
           this.set('paw');

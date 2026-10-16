@@ -50,6 +50,12 @@ export class Player {
     this.stateTime = 0;
   }
 
+  /** Stop in place on the plateau (used when the other character's fall starts). */
+  freeze(): void {
+    this.vel.set(0, this.grounded ? 0 : this.vel.y, 0);
+    if (this.grounded && this.state !== 'out') this.set('move');
+  }
+
   /** Called by the ram when it connects. */
   hit(dir: THREE.Vector3, game: Game): void {
     this.vel.set(dir.x * PLAYER.launchH, PLAYER.launchV, dir.z * PLAYER.launchH);
@@ -105,9 +111,14 @@ export class Player {
         this.vel.x = this.dodgeDir.x * speed;
         this.vel.z = this.dodgeDir.z * speed;
         if (this.stateTime > PLAYER.dodgeTime) {
-          this.vel.multiplyScalar(0.35);
+          this.vel.x *= 0.35;
+          this.vel.z *= 0.35;
           this.dodgeCooldown = PLAYER.dodgeCooldown;
-          this.set('move');
+          if (this.grounded) this.set('move');
+          else {
+            this.set('launched'); // dodged off the edge: keep air steering
+            this.stateTime = PLAYER.hitstun;
+          }
         }
         break;
       }
@@ -173,7 +184,7 @@ export class Player {
     const diff = Math.abs(angleDiff(Math.atan2(tmp2.x, tmp2.z), this.yaw));
     if (diff > Math.PI * 0.45) return;
     this.kickDone = true;
-    const dir = tmp2.normalize();
+    const dir = this.forward; // the ram flies the way you face (aim assist already turned you)
     if (ram.kickable) {
       ram.kicked(dir, game);
     } else if (ram.solid) {

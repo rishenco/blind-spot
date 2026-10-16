@@ -8,6 +8,7 @@ import { Input } from './input';
 import { Player } from './player';
 import { Ram } from './ram';
 import { FALL } from './tuning';
+import { edgeDistance } from './arena';
 
 export type Phase = 'title' | 'fight' | 'fall' | 'result';
 
@@ -197,8 +198,19 @@ export class Game {
       this.renderer.setSize(innerWidth, innerHeight);
     });
     document.addEventListener('pointerlockchange', () => {
-      if (!this.input.locked && this.phase === 'fight') this.setPaused(true);
+      if (this.phase !== 'fight') return;
+      if (!this.input.locked) this.setPaused(true);
+      else if (this.paused) this.setPaused(false);
     });
+    this.input.onGesture = () => {
+      this.audio.start();
+      if (this.phase !== 'fall') {
+        void this.input.lock().then((ok) => {
+          // Pointer lock refused (or unsupported): don't leave the player stuck on the pause screen.
+          if (!ok && this.paused) this.setPaused(false);
+        });
+      }
+    };
 
     this.resetFight();
     this.hud.showTitle(true);
@@ -222,6 +234,7 @@ export class Game {
     this.fall.start(who, f.pos, f.vel.y, this.camera);
     f.set('out');
     f.anim.play('fall', 0.15);
+    (who === 'player' ? this.ram : this.player).freeze();
     this.audio.scream();
     this.audio.musicOn = false;
     if (who === 'ram') this.audio.bleat(2);
@@ -257,8 +270,6 @@ export class Game {
   }
 
   private beginFight(): void {
-    this.audio.start();
-    this.input.lock();
     this.input.take('Mouse0'); // the click that starts the fight isn't a kick
     if (this.phase !== 'title') this.resetFight();
     this.setPhase('fight');
@@ -286,11 +297,12 @@ export class Game {
 
     // Clicks drive the flow.
     const click = input.take('AnyClick');
-    if (this.phase === 'title' && click) this.beginFight();
-    else if (this.phase === 'result' && click && this.phaseTime > 0.8) this.beginFight();
-    else if (this.phase === 'fight' && this.paused && click) {
-      input.lock();
-      this.setPaused(false);
+    const key = input.take('AnyKey');
+    if (this.phase === 'title' && (click || key)) this.beginFight();
+    else if (this.phase === 'result' && (click || key) && this.phaseTime > 0.8) this.beginFight();
+    else if (this.phase === 'fight' && this.paused) {
+      // Resuming happens on pointerlockchange; swallow everything pressed meanwhile.
+      input.endFrame();
     }
     if (this.phase === 'fight' && this.phaseTime > 6) this.hud.showControls(false);
 
@@ -316,11 +328,13 @@ export class Game {
         this.titleCamera(realDt);
         break;
       case 'fight':
-        this.player.update(dt, this);
-        this.ram.update(dt, this);
+        if (!this.paused) {
+          this.player.update(dt, this);
+          this.ram.update(dt, this);
+        }
         if (this.phase === 'fight') {
           this.cam.follow(realDt, this, this.camera);
-          this.camera.position.add(this.fx.shakeOffset(new THREE.Vector3()));
+          if (!this.paused) this.camera.position.add(this.fx.shakeOffset(new THREE.Vector3()));
         }
         break;
       case 'fall': {
@@ -361,6 +375,17 @@ export class Game {
     const faller = ramWon ? this.player : this.ram;
     faller.root.visible = false;
     faller.root.scale.set(1, 1, 1);
+    // Make sure the winner stands on the plateau for the victory shot.
+    const winner = ramWon ? this.ram : this.player;
+    winner.vel.set(0, 0, 0);
+    winner.pos.y = 0;
+    const ed = edgeDistance(winner.pos.x, winner.pos.z);
+    if (ed < 1) {
+      const r = Math.hypot(winner.pos.x, winner.pos.z) || 1;
+      winner.pos.multiplyScalar(Math.max(0, r - (1 - ed)) / r);
+      winner.pos.y = 0;
+    }
+    winner.root.position.copy(winner.pos);
     if (ramWon) {
       this.ram.set('gloat');
       this.audio.bleat(1.2);
