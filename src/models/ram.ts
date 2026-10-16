@@ -423,7 +423,7 @@ function charge(root: THREE.Object3D, t: number) {
   p.body.position.y += -0.06 + 0.07 * Math.abs(sin(w));
   p.body.scale.set(1, 0.97, 1.04);
   rot(p.neck, 0.45 + 0.08 * sin(w + 1), 0, 0);
-  rot(p.head, 0.1 - 0.06 * sin(w + 1.4), 0, 0);
+  rot(p.head, -0.02 - 0.06 * sin(w + 1.4), 0, 0);
   rot(p.jaw, 0.12 + 0.06 * sin(w));
   rot(p.tail, -1.1 + 0.25 * sin(w * 2));
   // gallop: big reach, knees fold on recovery
@@ -443,7 +443,7 @@ function skid(root: THREE.Object3D, t: number) {
   const p = reset(root);
   const k = ease(t / 0.15);
   const shake = sin(t * 90) * (1 - clamp01(t / 0.5)) * 0.04;
-  const pitch = 0.42 * k + shake;
+  const pitch = 0.5 * k + shake;
   rot(p.body, pitch, 0, shake);
   // front legs jammed forward stiff, butt flipping up
   const fa = -0.85 * k;
@@ -453,8 +453,8 @@ function skid(root: THREE.Object3D, t: number) {
   rot(p.legFR_low, -0.05 * k);
   p.body.position.y += groundHip(pitch, HIP_Y, 0.38, fa) - (BODY_Y - 0) ;
   // rear legs lifted and trailing
-  rot(p.legBL, 0.75 * k - pitch, 0, 0.1 * k);
-  rot(p.legBR, 0.6 * k - pitch, 0, -0.1 * k);
+  rot(p.legBL, 0.95 * k - pitch, 0, 0.12 * k);
+  rot(p.legBR, 0.8 * k - pitch, 0, -0.12 * k);
   rot(p.legBL_low, -0.5 * k);
   rot(p.legBR_low, -0.4 * k);
   // head snaps up in alarm, mouth agape
