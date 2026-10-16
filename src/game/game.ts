@@ -99,7 +99,7 @@ class FallDirector {
     const dts = realDt * (this.t < FALL.slowmoTime ? FALL.slowmo : 1);
     this.vy -= FALL.gravity * dts;
     this.y += this.vy * dts;
-    const rMin = cliffRadius(this.y) + 3;
+    const rMin = cliffRadius(this.y, this.angle) + 3;
     this.r += Math.max(0, rMin - this.r) * Math.min(1, dts * 5) + 2 * dts;
     this.pos.set(Math.cos(this.angle) * this.r, this.y, Math.sin(this.angle) * this.r);
     root.position.copy(this.pos);
