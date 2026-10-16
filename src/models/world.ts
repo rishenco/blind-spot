@@ -5,9 +5,10 @@ import { PALETTE, SUN_DIR } from '../style';
 // ============================================================================
 // RAMPAGE PEAK — the environment.
 //
-// A flat plateau (y = 0) on top of a ~300 m rock spire, a sea of clouds around
-// y = CLOUD_Y, a valley floor at y = VALLEY_Y, rings of snow-capped mountains
-// out to ~2.6 km and a gradient sky dome with a sun disk.
+// The arena is the rocky summit (y = 0) of a ~300 m horn-shaped peak that rises out of
+// a sea of clouds (y = CLOUD_Y, with holes showing the valley floor at y = VALLEY_Y),
+// a huge snowy hero peak toward +Z, rings of mountains out to ~2.9 km, and a
+// gradient sky dome with a sun disk.
 //
 // Angles: angle = Math.atan2(z, x)  (a point on the rim is (cos a * r, 0, sin a * r)).
 // Atmospheric haze is baked into every world material (a per-direction fog that
@@ -79,49 +80,116 @@ const smooth = (a: number, b: number, x: number) => {
 const lerp = THREE.MathUtils.lerp;
 
 // ---------------------------------------------------------------------------
-// cliff / valley shape (exported for gameplay & the fall cinematic)
+// summit mountain shape (exported for gameplay & the fall cinematic)
 // ---------------------------------------------------------------------------
+// The plateau is the summit of a horn-shaped peak: four uneven ridges (buttresses) that
+// spread wide toward the base, and steep faces between them. The faces are the "fall lanes":
+// right under the rim they drop almost vertically, so a body that leaves the rim falls clear.
 
-/** Average spire radius at height y (y <= 0), before ledges/outcrops. */
-function cliffBase(y: number): number {
-  const d = Math.max(0, -y);
-  return 8.6 + 0.085 * d + 0.00012 * d * d;
+const RIDGES = [
+  { a: 0.35, s: 1.05, w: 0.36 },
+  { a: 2.05, s: 0.8, w: 0.3 },
+  { a: 3.45, s: 1.25, w: 0.42 },
+  { a: 4.95, s: 0.75, w: 0.32 },
+];
+const FACE_SLOPE = 0.3;
+const angDiff = (a: number, b: number) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+
+/** 0 on the faces .. ~1.2 on a ridge crest. */
+function ridgeW(a: number): number {
+  let s = 0;
+  for (const r of RIDGES) {
+    const d = angDiff(a, r.a) / r.w;
+    s = Math.max(s, r.s * Math.exp(-d * d));
+  }
+  return s;
 }
+const slopeAt = (a: number) => FACE_SLOPE + ridgeW(a);
+/** Horizontal spread vs depth: ~0 right under the rim, growing fast lower down. */
+const spread = (d: number) => (d * d) / (d + 70);
 
-/** Smooth spire surface radius at (angle, y). */
-function cliffShape(a: number, y: number): number {
-  const d = -y;
-  const top = edgeRadius(a);
-  // Near the top the outline follows the rim with an undercut (overhang) a few m down.
-  const nearTop = top + lerp(0.35, -0.9, smooth(1, 12, d));
-  const n = fbm(Math.cos(a) * 1.6 + 7.3 + d * 0.012, Math.sin(a) * 1.6 - 3.1 + d * 0.004, 3) - 0.5;
-  const deep = cliffBase(y) * (1 + 0.32 * n) + (top - PLATEAU_RADIUS) * (1 - smooth(20, 120, d));
-  return lerp(nearTop, deep, smooth(8, 40, d));
+/** Smooth mountain surface radius at (angle, y), y <= 0 (before crags/jitter). */
+function mountainShape(a: number, y: number): number {
+  const d = Math.max(0, -y);
+  const top = edgeRadius(a) + lerp(0.5, -0.4, smooth(1, 8, d)); // lip, then a slight undercut
+  const n = fbm(Math.cos(a) * 1.7 + 7.3 + d * 0.008, Math.sin(a) * 1.7 - 3.1 + d * 0.005, 3) - 0.5;
+  return top + (FACE_SLOPE * spread(d) + (0.12 + ridgeW(a) * 0.5) * d * smooth(0, 5, d)) * (1 + 0.35 * n) + 4 * n * smooth(6, 40, d);
 }
 
 /**
- * Conservative outer radius of the spire (incl. ledges and outcrops) at height y.
- * Keep a falling body farther than this from the spire axis to avoid clipping the cliff.
+ * Conservative radius of the mountain (incl. crags) at angle = atan2(z, x) and height y.
+ * A falling body farther than this from the axis (at that angle) is clear of the rock.
  */
-export function cliffRadius(y: number): number {
+export function cliffRadiusAt(angle: number, y: number): number {
   if (y > 0) return 0;
-  let m = 0;
-  for (let i = 0; i < 48; i++) m = Math.max(m, cliffShape((i / 48) * Math.PI * 2, y));
-  return m + (y < -14 ? 6 : 1.2);
+  const d = -y;
+  return mountainShape(angle, y) + (d < 6 ? 0.8 : 2.5 + d * 0.02);
 }
 
-const FLAT_R = 190; // valley floor is exactly VALLEY_Y inside this radius
-const LAKE = { x: 120, z: -95, r: 34 };
+/**
+ * With an angle: same as cliffRadiusAt(angle, y). Without: the max over all angles
+ * (ridges included — very wide low down, ~285 m at the foot).
+ */
+export function cliffRadius(y: number, angle?: number): number {
+  if (angle !== undefined) return cliffRadiusAt(angle, y);
+  let m = 0;
+  for (let i = 0; i < 72; i++) m = Math.max(m, cliffRadiusAt((i / 72) * Math.PI * 2, y));
+  return m;
+}
 
-/** Valley ground height at (x, z). Flat (= VALLEY_Y) near the spire foot, rolling hills farther out. */
+/** Angles (atan2(z, x)) of the four steep faces between ridges — the cleanest lines for a fall. */
+export const FALL_LANES: number[] = RIDGES.map((r, i) => {
+  const n = RIDGES[(i + 1) % RIDGES.length];
+  let b = n.a;
+  if (b < r.a) b += Math.PI * 2;
+  let best = r.a, bs = Infinity;
+  for (let k = 1; k < 40; k++) {
+    const a = r.a + ((b - r.a) * k) / 40;
+    const s = slopeAt(a);
+    if (s < bs) { bs = s; best = a; }
+  }
+  return Math.atan2(Math.sin(best), Math.cos(best));
+});
+
+const FLAT_R = 420; // valley floor is exactly VALLEY_Y inside this radius
+
+/** Valley ground height at (x, z). Flat (= VALLEY_Y) around the mountain foot, rolling hills farther out. */
 export function valleyHeight(x: number, z: number): number {
   const r = Math.hypot(x, z);
-  const hills = (fbm(x * 0.006 + 11, z * 0.006 - 4, 3) - 0.35) * 70 + Math.pow(Math.max(0, r - FLAT_R) / 900, 2) * 260;
-  return VALLEY_Y + Math.min(110, Math.max(0, hills)) * smooth(FLAT_R, FLAT_R + 260, r);
+  const hills = (fbm(x * 0.005 + 11, z * 0.005 - 4, 3) - 0.35) * 80 + Math.pow(Math.max(0, r - FLAT_R) / 900, 2) * 260;
+  return VALLEY_Y + Math.min(120, Math.max(0, hills)) * smooth(FLAT_R, FLAT_R + 300, r);
 }
 
-/** A good BOOM landing point: open meadow at the spire foot (fallers off the rim land around here). */
-export const LANDING_SPOT = new THREE.Vector3(0, VALLEY_Y, 0); // use any (x,z) with 50 < r < 110 for a clean meadow
+/** Main fall lane: the sunlit face (the landing meadow and a cloud hole sit below it). */
+const SUN_AZ = Math.atan2(SUN_DIR.z, SUN_DIR.x);
+export const MAIN_FALL_LANE = FALL_LANES.reduce((b, a) => (Math.abs(angDiff(a, SUN_AZ)) < Math.abs(angDiff(b, SUN_AZ)) ? a : b));
+const LANE = MAIN_FALL_LANE;
+const footR = (a: number) => mountainShape(a, VALLEY_Y);
+/** A good BOOM landing point: open meadow at the foot of the main fall lane, visible through a cloud hole. */
+export const LANDING_SPOT = new THREE.Vector3(
+  Math.cos(LANE) * (footR(LANE) + 45),
+  VALLEY_Y,
+  Math.sin(LANE) * (footR(LANE) + 45),
+);
+
+/** Holes in the cloud sea (x, z, radius) — you can see the valley through them. */
+export const CLOUD_HOLES: { x: number; z: number; r: number }[] = [
+  // right next to the mountain, over the landing meadow (the fall lane passes through it)
+  { x: Math.cos(LANE) * (mountainShape(LANE, CLOUD_Y) + 75), z: Math.sin(LANE) * (mountainShape(LANE, CLOUD_Y) + 75), r: 85 },
+  // in the gameplay view, behind the ram, in front of the hero mountain
+  { x: Math.cos(1.5) * 780, z: Math.sin(1.5) * 780, r: 270 },
+  { x: Math.cos(0.4) * 580, z: Math.sin(0.4) * 580, r: 160 },
+  { x: Math.cos(2.75) * 820, z: Math.sin(2.75) * 820, r: 210 },
+  { x: Math.cos(4.1) * 500, z: Math.sin(4.1) * 500, r: 140 },
+  { x: Math.cos(5.4) * 1200, z: Math.sin(5.4) * 1200, r: 300 },
+  { x: Math.cos(2.05) * 1600, z: Math.sin(2.05) * 1600, r: 280 },
+];
+const inHole = (x: number, z: number, pad = 0) => CLOUD_HOLES.some((h) => Math.hypot(x - h.x, z - h.z) < h.r + pad);
+
+const LAKE = { x: Math.cos(LANE - 0.5) * 360, z: Math.sin(LANE - 0.5) * 360, r: 38 };
+
+/** Hero mountain: huge, snowy, toward +Z (behind the ram in the default gameplay view), lit by the sun. */
+const HERO = { a: 1.68, d: 1450, top: 820 };
 
 // ---------------------------------------------------------------------------
 // sky + haze (shared GLSL so distant geometry fades to exactly the sky color)
@@ -234,6 +302,8 @@ type Shade = (c: THREE.Vector3, n: THREE.Vector3) => THREE.Color;
 class Faces {
   pos: number[] = [];
   col: number[] = [];
+  /** Optional face filter (by centroid). */
+  keep: ((c: THREE.Vector3) => boolean) | null = null;
   private e1 = new THREE.Vector3();
   private e2 = new THREE.Vector3();
   private n = new THREE.Vector3();
@@ -247,6 +317,7 @@ class Faces {
     if (len < 1e-6) return;
     this.n.divideScalar(len);
     this.c.set((a.x + b.x + c.x) / 3, (a.y + b.y + c.y) / 3, (a.z + b.z + c.z) / 3);
+    if (this.keep && !this.keep(this.c)) return;
     const col = shade(this.c, this.n);
     this.pos.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
     for (let i = 0; i < 3; i++) this.col.push(col.r, col.g, col.b);
@@ -334,186 +405,187 @@ function jitter(hex: number, rng: () => number, amt = 0.06): THREE.Color {
 }
 
 // ---------------------------------------------------------------------------
-// plateau + spire
+// summit + mountain
 // ---------------------------------------------------------------------------
 const SEG = 64;
 const ANG = Array.from({ length: SEG }, (_, j) => (j / SEG) * Math.PI * 2);
-const CSEG = 26;
+const CSEG = 56;
 const CANG = Array.from({ length: CSEG }, (_, j) => (j / CSEG) * Math.PI * 2);
-const LEDGES = [-16, -31, -52, -74, -97, -141, -168, -197, -226, -258];
+const P = (a: number, r: number, y: number) => new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r);
 
-interface LedgeSpot { a: number; y: number; r: number; w: number }
+/** Gentle visual undulation of the summit top (|y| <= 0.08, 0 at the rim). */
+function summitHeight(x: number, z: number): number {
+  const rr = Math.hypot(x, z) / edgeRadius(Math.atan2(z, x));
+  return 0.08 * (fbm(x * 0.13 + 5, z * 0.13 + 1, 2) * 2 - 1) * (1 - smooth(0.75, 1, rr));
+}
+/** Where the lip beyond the rim is raised into a little rocky crest (0..0.35 m). */
+const lipRaise = (a: number) => Math.min(0.35, Math.max(0, (noise2(Math.cos(a) * 2.6 + 3, Math.sin(a) * 2.6 + 1) - 0.52) * 1.4));
 
-function buildSpire(rng: () => number): { mesh: THREE.Mesh; ledgeSpots: LedgeSpot[] } {
+interface Spot { x: number; y: number; z: number }
+
+function buildMountain(rng: () => number): { mesh: THREE.Mesh; slopeSpots: Spot[] } {
   const F = new Faces();
-  const rings: THREE.Vector3[][] = [];
-  const P = (a: number, r: number, y: number) => new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r);
+  const crng = mulberry32(77);
 
-  // --- flat top (y = 0 exactly): few big calm facets, stitched to the 64-seg rim ---
-  const topRings: THREE.Vector3[][] = [[new THREE.Vector3(0, 0, 0)]];
-  for (const [f, n] of [[0.4, 7], [0.78, 13], [0.9, 24]] as const) {
+  // --- summit top: big calm facets; color comes from the meadow patches laid on top ---
+  const topRings: THREE.Vector3[][] = [[new THREE.Vector3(0, summitHeight(0, 0), 0)]];
+  for (const [f, n] of [[0.3, 8], [0.58, 14], [0.8, 22], [0.93, 36]] as const) {
     const a0 = rng() * 0.3;
     topRings.push(Array.from({ length: n }, (_, k) => {
-      const a = a0 + ((k + (rng() - 0.5) * 0.3) / n) * Math.PI * 2;
-      return P(a, edgeRadius(a) * f, 0);
+      const a = a0 + ((k + (rng() - 0.5) * 0.35) / n) * Math.PI * 2;
+      const p = P(a, edgeRadius(a) * f * (1 + (rng() - 0.5) * 0.05), 0);
+      p.y = summitHeight(p.x, p.z);
+      return p;
     }));
   }
-  const rim = ANG.map((a) => P(a, edgeRadius(a), 0)); // the rim (walkable edge)
+  const rim = ANG.map((a) => P(a, edgeRadius(a), 0)); // the walkable edge
   topRings.push(rim);
-  rings.push(rim);
-  // --- lip: rounded break, then the drop ---
-  rings.push(ANG.map((a) => P(a, edgeRadius(a) + 0.32 + rng() * 0.1, -0.28 - rng() * 0.08)));
-  rings.push(ANG.map((a) => P(a, edgeRadius(a) + 0.42 + rng() * 0.15, -1.1 - rng() * 0.3)));
-  const upper = rings.splice(0, rings.length);
 
-  // --- cliff rings with ledges ---
-  const ledgeSpots: LedgeSpot[] = [];
-  let y = -2.6;
-  const ys: number[] = [];
-  while (y > -282) {
-    ys.push(y);
-    y -= y > -20 ? 3 + rng() * 3 : 8 + rng() * 9;
-  }
-  for (const ly of LEDGES) ys.push(ly);
-  ys.sort((a, b) => b - a);
-  for (const yy of ys) {
-    const isLedge = LEDGES.includes(yy);
-    const seed = rng() * 100;
-    const ring = CANG.map((a) => {
+  // --- lip: a broken rocky crest in places, then the drop ---
+  const upper: THREE.Vector3[][] = [rim];
+  upper.push(ANG.map((a) => { const h = lipRaise(a); return P(a, edgeRadius(a) + 0.3 + rng() * 0.12, h > 0 ? h + rng() * 0.08 : -0.2 - rng() * 0.1); }));
+  upper.push(ANG.map((a) => P(a, edgeRadius(a) + 0.5 + rng() * 0.2, lipRaise(a) * 0.5 - 0.9 - rng() * 0.4)));
+
+  // --- mountain body ---
+  const depths = [2.6, 5, 9, 14, 20, 28, 38, 50, 64, 80, 98, 118, 140, 165, 192, 222, 255, 285];
+  const rings: THREE.Vector3[][] = [];
+  depths.forEach((d, i) => {
+    const step = (depths[i + 1] ?? 300) - d;
+    rings.push(CANG.map((a) => {
       const aj = a + (rng() - 0.5) * 0.4 * (Math.PI * 2 / CSEG);
-      const rj = (rng() - 0.5) * (yy > -12 ? 0.3 : 0.9);
-      return P(aj, cliffShape(aj, yy) + rj, yy + (isLedge ? 0 : (rng() - 0.5) * (yy > -12 ? 0.6 : 2.4)));
-    });
-    rings.push(ring);
-    if (isLedge) {
-      // a partial shelf sticking out: same height, larger radius where noise says so
-      const out = ring.map((p, j) => {
-        const a = CANG[j];
-        const e = Math.max(0, (noise2(Math.cos(a) * 2.2 + seed, Math.sin(a) * 2.2) - 0.55) * 14);
-        const r = Math.hypot(p.x, p.z) + e;
-        if (e > 2.2 && j % 2 === 0) ledgeSpots.push({ a, y: yy, r: r - e * 0.5, w: e });
-        return P(Math.atan2(p.z, p.x), r, yy);
-      });
-      rings.push(out);
-      rings.push(out.map((p) => {
-        const r = Math.hypot(p.x, p.z);
-        return P(Math.atan2(p.z, p.x), r - 0.3, yy - 1.4);
-      }));
-    }
-  }
-  // --- foot: flare into a scree skirt on the valley floor ---
-  const base = rings[rings.length - 1];
-  for (const [dy, dr] of [[-293, 4], [-298, 13], [-300.6, 26]] as const) {
-    rings.push(base.map((p, j) => {
-      const a = CANG[j];
-      const r = Math.hypot(p.x, p.z) + dr * (0.8 + 0.4 * noise2(Math.cos(a) * 3, Math.sin(a) * 3 + dr));
-      return P(Math.atan2(p.z, p.x) + (rng() - 0.5) * 0.04, r, dy + (rng() - 0.5) * 0.6);
+      const dj = d + (d > 8 ? (rng() - 0.5) * Math.min(step * 0.5, 10) : (rng() - 0.5) * 0.6);
+      return P(aj, mountainShape(aj, -dj) + (rng() - 0.5) * (0.5 + dj * 0.04), -dj);
     }));
-  }
+  });
+  rings.push(CANG.map((a) => P(a, mountainShape(a, VALLEY_Y), VALLEY_Y + 0.2)));
+  rings.push(CANG.map((a) => P(a, mountainShape(a, VALLEY_Y) + 14 + rng() * 8, VALLEY_Y - 1.5)));
 
-  const crng = mulberry32(77);
-  const cliffShade: Shade = (c, n) => {
-    if (c.y > -0.02 && n.y > 0.97) {
-      // plateau top
-      const ang = Math.atan2(c.z, c.x);
-      const rr = Math.hypot(c.x, c.z) / edgeRadius(ang);
-      if (rr > 0.895) return jitter(PALETTE.rimRock, crng, 0.025);
-      return jitter(PALETTE.grassLight, crng, 0.025);
+  const summitShade: Shade = (c) => jitter(fbm(c.x * 0.3 + 2, c.z * 0.3, 2) > 0.55 ? PALETTE.rimRock : PALETTE.summitRock, crng, 0.04);
+  const mountainShade: Shade = (c, n) => {
+    if (c.y > -1.3) return jitter(PALETTE.rimRock, crng, 0.05);
+    if (n.y > 0.5) {
+      if (c.y < CLOUD_Y - 15) return jitter(n.y > 0.75 ? PALETTE.valleyGrass : PALETTE.moss, crng, 0.06);
+      if (c.y < -18 && noise2(c.x * 0.08, c.z * 0.08 + c.y * 0.03) > 0.45) return jitter(PALETTE.snow, crng, 0.025);
+      return jitter(PALETTE.moss, crng, 0.06);
     }
-    if (c.y > -1.6) return jitter(PALETTE.rimRock, crng, 0.06);
-    if (c.y < -290) return n.y > 0.75 ? jitter(PALETTE.valleyGrass, crng, 0.05) : jitter(PALETTE.scree, crng, 0.06);
-    if (n.y > 0.6) return jitter(c.y < -6 ? PALETTE.moss : PALETTE.grass, crng, 0.08);
     const ang = Math.atan2(c.z, c.x);
-    const band = Math.floor((c.y + 9 * Math.sin(ang * 2 + c.y * 0.01)) / 24);
-    const strata = [PALETTE.cliffA, PALETTE.cliffB, PALETTE.cliffC, PALETTE.cliffA, PALETTE.cliffB][((band % 5) + 5) % 5];
-    return jitter(strata, crng, 0.06);
+    const t = fbm(Math.cos(ang) * 2 + 4 + c.y * 0.004, Math.sin(ang) * 2 + c.y * 0.009, 2);
+    const base = t < 0.42 ? PALETTE.cliffB : t < 0.6 ? PALETTE.cliffA : PALETTE.cliffC;
+    return jitter(base, crng, 0.05);
   };
-  for (let i = 0; i < topRings.length - 1; i++) F.stitch(topRings[i], topRings[i + 1], cliffShade);
-  F.rings(upper, cliffShade);
-  F.stitch(upper[upper.length - 1], rings[0], cliffShade);
-  F.rings(rings, cliffShade);
+  for (let i = 0; i < topRings.length - 1; i++) F.stitch(topRings[i], topRings[i + 1], summitShade);
+  F.rings(upper, mountainShade);
+  F.stitch(upper[upper.length - 1], rings[0], mountainShade);
+  F.rings(rings, mountainShade);
 
-  // --- outcrops: chunky rocks sticking out of the face (things to rush past in the fall) ---
+  // --- crags along the ridges (big angular buttress blocks) ---
   const ico = new THREE.IcosahedronGeometry(1, 0);
-  const box = new THREE.BoxGeometry(1, 1, 1);
   const m4 = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const e = new THREE.Euler();
-  for (let i = 0; i < 20; i++) {
-    const oy = -6 - Math.pow(rng(), 0.8) * 270;
-    const a = rng() * Math.PI * 2;
-    const s = 1.6 + rng() * 3.5 + -oy * 0.012;
-    const r = cliffShape(a, oy) + s * (0.15 + rng() * 0.35);
-    e.set(rng() * 0.6, rng() * Math.PI, rng() * 0.6);
+  const cragShade: Shade = () => jitter(crng() < 0.5 ? PALETTE.cliffB : PALETTE.cliffA, crng, 0.05);
+  for (let i = 0; i < 12; i++) {
+    const R = RIDGES[i % RIDGES.length];
+    const d = 18 + Math.pow(rng(), 0.9) * 110;
+    const a = R.a + (rng() - 0.5) * R.w * 0.5;
+    const s = 3 + d * 0.05 + rng() * 3;
+    const r = mountainShape(a, -d) - s * 0.35;
+    e.set((rng() - 0.5) * 0.5, a, (rng() - 0.5) * 0.5);
     q.setFromEuler(e);
-    m4.compose(
-      new THREE.Vector3(Math.cos(a) * r, oy, Math.sin(a) * r),
-      q,
-      new THREE.Vector3(s * (0.8 + rng() * 0.6), s * (1.2 + rng() * 1.6), s * (0.8 + rng() * 0.6)),
-    );
-    F.geometry(rng() < 0.6 ? ico : box, m4, cliffShade);
+    m4.compose(P(a, r, -d + s * 0.3), q, new THREE.Vector3(s * (0.8 + rng() * 0.5), s * (1.4 + rng() * 1.2), s * (0.7 + rng() * 0.5)));
+    F.geometry(ico, m4, cragShade);
+  }
+
+  // spots for pines on the gentle lower ridges (below the clouds)
+  const slopeSpots: Spot[] = [];
+  for (let i = 0; i < 2000 && slopeSpots.length < 260; i++) {
+    const a = rng() * Math.PI * 2;
+    if (ridgeW(a) < 0.35) continue;
+    const d = 150 + rng() * 145;
+    const r = mountainShape(a, -d) - 1.5;
+    if (fbm(Math.cos(a) * 6, Math.sin(a) * 6 + d * 0.02, 2) < 0.45) continue;
+    slopeSpots.push({ x: Math.cos(a) * r, y: -d, z: Math.sin(a) * r });
   }
 
   const mesh = new THREE.Mesh(F.build(), vcMat('rock'));
-  mesh.name = 'spire';
-  return { mesh, ledgeSpots };
+  mesh.name = 'mountain';
+  return { mesh, slopeSpots };
 }
 
-// small stuff on the plateau rim (no gameplay collision intended — all < 0.5 m)
-function buildRimDecor(rng: () => number): THREE.Mesh {
+// alpine-meadow patches on the summit + rim boulders (no gameplay collision intended)
+function buildSummitDetail(rng: () => number): THREE.Mesh {
   const F = new Faces();
+  const drng = mulberry32(5);
+
+  // meadow patches: organic blobs a few cm above the rock, kept away from the rim
+  const patches: [number, number, number, number][] = [
+    // x, z, radius, color
+    [-1.6, 1.2, 4.3, PALETTE.grassLight],
+    [2.6, -1.4, 3.6, PALETTE.grassLight],
+    [1.4, 4.4, 2.4, PALETTE.grass],
+    [-4.4, -3.6, 2.1, PALETTE.grass],
+    [5.4, 3.0, 1.5, PALETTE.grass],
+    [-1.0, -5.2, 1.4, PALETTE.grassLight],
+    [-6.2, 2.4, 1.1, PALETTE.grass],
+  ];
+  patches.forEach(([px, pz, pr, col], i) => {
+    const n = 18;
+    const ph = rng() * 10;
+    const lift = 0.045 + i * 0.006;
+    const ring: THREE.Vector3[] = [];
+    for (let k = 0; k < n; k++) {
+      const a = (k / n) * Math.PI * 2 + (rng() - 0.5) * 0.25;
+      let r = pr * (0.62 + 0.6 * fbm(Math.cos(a) * 1.3 + ph, Math.sin(a) * 1.3 + ph, 2) + (rng() - 0.5) * 0.08);
+      // never closer than 0.9 m to the rim
+      const x0 = px + Math.cos(a) * r, z0 = pz + Math.sin(a) * r;
+      const lim = edgeRadius(Math.atan2(z0, x0)) - 0.9;
+      const rr = Math.hypot(x0, z0);
+      if (rr > lim) r *= Math.max(0.2, 1 - (rr - lim) / r);
+      const x = px + Math.cos(a) * r, z = pz + Math.sin(a) * r;
+      ring.push(new THREE.Vector3(x, summitHeight(x, z) + lift, z));
+    }
+    const c = new THREE.Vector3(px, summitHeight(px, pz) + lift, pz);
+    F.rings([ring.map(() => c), ring], () => jitter(col, drng, 0.03));
+  });
+
   const rock = new THREE.DodecahedronGeometry(1, 0);
-  const blade = new THREE.ConeGeometry(0.07, 0.42, 3);
   const m4 = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const e = new THREE.Euler();
-  const drng = mulberry32(5);
-  const rockShade: Shade = (_c, n) => jitter(n.y > 0.7 ? PALETTE.rimRock : PALETTE.rock, drng, 0.07);
-  const tuftShade: Shade = () => jitter(drng() < 0.5 ? PALETTE.grassDark : PALETTE.grass, drng, 0.06);
-
-  // pebbles & small rocks hugging the rim
-  for (let i = 0; i < 9; i++) {
-    const a = rng() * Math.PI * 2;
-    const big = i < 5;
-    const s = big ? 0.3 + rng() * 0.25 : 0.1 + rng() * 0.14;
-    const r = edgeRadius(a) + (big ? 0.15 + rng() * 0.2 : -0.15 - rng() * 0.5);
-    e.set(rng() * 3, rng() * 3, rng() * 3);
+  const rockShade: Shade = (_c, n) => jitter(n.y > 0.6 ? PALETTE.rimRock : PALETTE.rock, drng, 0.06);
+  const place = (a: number, r: number, s: number, sy: number, sink: number) => {
+    e.set(rng() * 0.5, rng() * 3, rng() * 0.5);
     q.setFromEuler(e);
-    m4.compose(new THREE.Vector3(Math.cos(a) * r, s * 0.25 - (big ? 0.12 : 0), Math.sin(a) * r), q,
-      new THREE.Vector3(s * 1.3, s * 0.7, s));
+    m4.compose(P(a, r, s * sy * 0.5 - sink), q, new THREE.Vector3(s * (1 + rng() * 0.4), s * sy, s * (0.8 + rng() * 0.3)));
     F.geometry(rock, m4, rockShade);
+  };
+  // boulders sitting on the lip, just beyond the walkable edge
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2 + rng() * 0.5;
+    if (Math.abs(angDiff(a, LANE)) < 0.35) continue; // keep the main fall lane clean
+    place(a, edgeRadius(a) + 0.55 + rng() * 0.35, 0.45 + rng() * 0.45, 0.75, 0.25);
   }
-  // grass tufts
-  for (let i = 0; i < 0; i++) {
+  // a few small stones just inside the rim
+  for (let i = 0; i < 7; i++) {
     const a = rng() * Math.PI * 2;
-    const r = edgeRadius(a) * (0.35 + rng() * 0.52);
-    const cx = Math.cos(a) * r, cz = Math.sin(a) * r;
-    const n = 3 + Math.floor(rng() * 3);
-    for (let k = 0; k < n; k++) {
-      e.set((rng() - 0.5) * 0.7, 0, (rng() - 0.5) * 0.7);
-      q.setFromEuler(e);
-      const h = 0.7 + rng() * 0.7;
-      m4.compose(new THREE.Vector3(cx + (rng() - 0.5) * 0.25, 0.18 * h, cz + (rng() - 0.5) * 0.25), q,
-        new THREE.Vector3(1, h, 1));
-      F.geometry(blade, m4, tuftShade);
-    }
+    place(a, edgeRadius(a) - 0.3 - rng() * 0.6, 0.12 + rng() * 0.1, 0.6, 0.03);
   }
-  // a little summit cairn right at the rim
+  // little summit cairn at the rim
   {
     const a = 2.35;
-    const r = edgeRadius(a) - 0.35;
+    const r = edgeRadius(a) - 0.4;
     let yy = 0;
     for (let k = 0; k < 4; k++) {
       const s = 0.26 - k * 0.05;
       e.set(0, rng() * 3, 0);
       q.setFromEuler(e);
-      m4.compose(new THREE.Vector3(Math.cos(a) * r, yy + s * 0.45, Math.sin(a) * r), q, new THREE.Vector3(s * 1.2, s * 0.55, s));
+      m4.compose(P(a, r, yy + s * 0.45), q, new THREE.Vector3(s * 1.2, s * 0.55, s));
       F.geometry(rock, m4, rockShade);
       yy += s * 0.9;
     }
   }
   const mesh = new THREE.Mesh(F.build(), vcMat('rock'));
-  mesh.name = 'rimDecor';
+  mesh.name = 'summitDetail';
   return mesh;
 }
 
@@ -532,7 +604,7 @@ function pineGeometry(): THREE.BufferGeometry {
   return F.build();
 }
 
-function buildTrees(rng: () => number, ledgeSpots: LedgeSpot[]): THREE.InstancedMesh {
+function buildTrees(rng: () => number, slopeSpots: Spot[]): THREE.InstancedMesh {
   const spots: THREE.Matrix4[] = [];
   const cols: THREE.Color[] = [];
   const q = new THREE.Quaternion();
@@ -544,19 +616,20 @@ function buildTrees(rng: () => number, ledgeSpots: LedgeSpot[]): THREE.Instanced
     const k = 0.85 + rng() * 0.3;
     cols.push(new THREE.Color(k, k * (0.95 + rng() * 0.1), k));
   };
-  // forests in the valley (clustered by noise), keeping a clear meadow around the spire foot
+  // forests in the valley (clustered by noise), keeping the meadow at the mountain foot open
   let tries = 0;
-  while (spots.length < 1100 && tries++ < 20000) {
+  while (spots.length < 1300 && tries++ < 30000) {
     const a = rng() * Math.PI * 2;
-    const r = 80 + Math.pow(rng(), 0.7) * 1100;
+    const r = 60 + Math.pow(rng(), 0.7) * 1300;
     const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (r < footR(a) + 25) continue;
     if (Math.hypot(x - LAKE.x, z - LAKE.z) < LAKE.r + 8) continue;
-    const f = fbm(x * 0.012 + 50, z * 0.012, 2);
-    if (f < 0.5 - Math.min(0.12, (r - 80) / 2000)) continue;
-    add(x, valleyHeight(x, z), z, 2.2 + rng() * 1.8);
+    if (Math.hypot(x - LANDING_SPOT.x, z - LANDING_SPOT.z) < 55) continue;
+    const f = fbm(x * 0.011 + 50, z * 0.011, 2);
+    if (f < 0.48) continue;
+    add(x, valleyHeight(x, z), z, 2.4 + rng() * 2);
   }
-  // a few hardy pines on the cliff ledges
-  for (const l of ledgeSpots.slice(0, 18)) add(Math.cos(l.a) * l.r, l.y, Math.sin(l.a) * l.r, 0.8 + rng() * 0.7);
+  for (const s of slopeSpots) add(s.x, s.y, s.z, 2.2 + rng() * 1.6);
 
   const im = new THREE.InstancedMesh(pineGeometry(), vcMat('tree'), spots.length);
   spots.forEach((m, i) => {
@@ -578,10 +651,10 @@ function buildValley(rng: () => number): THREE.Group {
   const F = new Faces();
   const N = 96;
   const radii = [0];
-  let r = 30;
-  while (r < 2300) {
+  let r = 40;
+  while (r < 2400) {
     radii.push(r);
-    r *= r < 300 ? 1.25 : 1.13;
+    r *= r < 400 ? 1.22 : 1.12;
   }
   const rings = radii.map((rr, i) => {
     const out: THREE.Vector3[] = [];
@@ -595,10 +668,10 @@ function buildValley(rng: () => number): THREE.Group {
   });
   const vrng = mulberry32(31);
   F.rings(rings, (c, n) => {
-    if (n.y < 0.82) return jitter(PALETTE.rock, vrng, 0.06);
-    const f = fbm(c.x * 0.012 + 50, c.z * 0.012, 2);
-    if (f > 0.52) return jitter(PALETTE.valleyDark, vrng, 0.05);
-    return jitter(vrng() < 0.5 ? PALETTE.valleyGrass : 0x93c25c, vrng, 0.04);
+    if (n.y < 0.82) return jitter(PALETTE.rock, vrng, 0.05);
+    const f = fbm(c.x * 0.011 + 50, c.z * 0.011, 2);
+    if (f > 0.5) return jitter(PALETTE.valleyDark, vrng, 0.03);
+    return jitter(PALETTE.valleyGrass, vrng, 0.03);
   });
   const ground = new THREE.Mesh(F.build(), vcMat('ground'));
   ground.name = 'valleyGround';
@@ -607,10 +680,9 @@ function buildValley(rng: () => number): THREE.Group {
 
   // a small lake in the meadow
   const LF = new Faces();
-  const lr = LAKE.r;
   const lring = Array.from({ length: 14 }, (_, j) => {
     const a = (j / 14) * Math.PI * 2;
-    const rr = lr * (0.75 + 0.45 * noise2(Math.cos(a) * 1.5 + 3, Math.sin(a) * 1.5));
+    const rr = LAKE.r * (0.75 + 0.45 * noise2(Math.cos(a) * 1.5 + 3, Math.sin(a) * 1.5));
     return new THREE.Vector3(LAKE.x + Math.cos(a) * rr, VALLEY_Y + 0.25, LAKE.z + Math.sin(a) * rr);
   });
   const lc = new THREE.Vector3(LAKE.x, VALLEY_Y + 0.25, LAKE.z);
@@ -623,22 +695,23 @@ function buildValley(rng: () => number): THREE.Group {
 }
 
 // ---------------------------------------------------------------------------
-// background mountains
+// background mountains (+ the hero peak)
 // ---------------------------------------------------------------------------
-function peakRings(rng: () => number, cx: number, cz: number, baseY: number, h: number, rad: number): THREE.Vector3[][] {
-  const S = 9 + Math.floor(rng() * 4);
-  const K = 7;
-  const apex = new THREE.Vector3(cx + (rng() - 0.5) * rad * 0.35, baseY + h, cz + (rng() - 0.5) * rad * 0.35);
+function peakRings(
+  rng: () => number, cx: number, cz: number, baseY: number, h: number, rad: number,
+  S = 9 + Math.floor(rng() * 4), K = 7, ridgeAmt = 0.85,
+): THREE.Vector3[][] {
+  const apex = new THREE.Vector3(cx + (rng() - 0.5) * rad * 0.3, baseY + h, cz + (rng() - 0.5) * rad * 0.3);
   const rings: THREE.Vector3[][] = [Array.from({ length: S }, () => apex)];
-  const ridge = Array.from({ length: S }, () => 0.55 + rng() * 0.75);
+  const ridge = Array.from({ length: S }, () => 0.5 + rng() * 0.8);
   const a0 = rng() * Math.PI * 2;
   for (let k = 1; k <= K; k++) {
     const f = k / K; // 0 at apex .. 1 at base
     const y = baseY + h * Math.pow(1 - f, 1.5) + (k < K ? (rng() - 0.5) * h * 0.03 : 0);
     const ring: THREE.Vector3[] = [];
     for (let j = 0; j < S; j++) {
-      const a = a0 + (j / S) * Math.PI * 2 + (rng() - 0.5) * 0.35;
-      const rr = rad * Math.pow(f, 0.9) * lerp(1, ridge[j], 0.85) * (0.7 + rng() * 0.6);
+      const a = a0 + (j / S) * Math.PI * 2 + (rng() - 0.5) * 0.3;
+      const rr = rad * Math.pow(f, 0.9) * lerp(1, ridge[j], ridgeAmt) * (0.75 + rng() * 0.5);
       ring.push(new THREE.Vector3(cx + Math.cos(a) * rr, y, cz + Math.sin(a) * rr));
     }
     rings.push(ring);
@@ -649,36 +722,51 @@ function peakRings(rng: () => number, cx: number, cz: number, baseY: number, h: 
 function buildMountains(rng: () => number): THREE.Mesh {
   const F = new Faces();
   const mrng = mulberry32(123);
-  const ringsDef = [
-    // dist range, count, summit range (y), rock color, snowline
-    { d: [620, 950], n: 14, top: [-100, 10], rock: PALETTE.mountainRock, snow: -40 },
-    { d: [1150, 1650], n: 18, top: [0, 200], rock: PALETTE.mountainRock, snow: 40 },
-    { d: [2000, 2900], n: 22, top: [200, 650], rock: PALETTE.mountainRockFar, snow: 160 },
-  ];
   const baseY = VALLEY_Y - 40;
+  const snowShade = (snowY: number, h: number, rock: number): Shade => (c, n) => {
+    const sn = snowY + (noise2(c.x * 0.02, c.z * 0.02) - 0.5) * h * 0.22;
+    if (c.y > sn && n.y > 0.22) return jitter(PALETTE.snow, mrng, 0.03);
+    if (c.y > sn - h * 0.08 && n.y > 0.55) return jitter(PALETTE.snow, mrng, 0.03);
+    return jitter(rock, mrng, 0.06);
+  };
+
+  // the hero peak: towering, snowy, broad
+  {
+    const cx = Math.cos(HERO.a) * HERO.d, cz = Math.sin(HERO.a) * HERO.d;
+    const h = HERO.top - baseY;
+    const shade = snowShade(HERO.top - h * 0.42, h, PALETTE.mountainRock);
+    F.rings(peakRings(rng, cx, cz, baseY, h, h * 0.62, 16, 11, 0.9), shade);
+    // shoulders and a sub-summit for a ranged, asymmetric silhouette
+    const sh: [number, number, number][] = [[-0.16, 120, 0.68], [0.13, -60, 0.55], [0.26, 160, 0.42], [-0.3, 220, 0.38]];
+    for (const [da, dd, k] of sh) {
+      const a = HERO.a + da, d = HERO.d + dd;
+      F.rings(peakRings(rng, Math.cos(a) * d, Math.sin(a) * d, baseY, h * k, h * k * 0.75, 12, 8), shade);
+    }
+  }
+
+  const ringsDef = [
+    // dist range, count, summit range (y), rock color
+    { d: [650, 950], n: 13, top: [-40, 150], rock: PALETTE.mountainRock },
+    { d: [1150, 1700], n: 17, top: [80, 380], rock: PALETTE.mountainRock },
+    { d: [2100, 2900], n: 22, top: [250, 700], rock: PALETTE.mountainRockFar },
+  ];
   for (const R of ringsDef) {
     const off = rng() * Math.PI * 2;
     for (let i = 0; i < R.n; i++) {
       const a = off + (i / R.n) * Math.PI * 2 + (rng() - 0.5) * (Math.PI * 2 / R.n) * 0.7;
       const d = lerp(R.d[0], R.d[1], rng());
       const top = lerp(R.top[0], R.top[1], Math.pow(rng(), 0.8));
+      if (R.d[0] < 2000 && Math.abs(angDiff(a, HERO.a)) < 0.4) continue; // keep the hero peak clear
       const h = top - baseY;
-      const rad = h * (0.9 + Math.pow(rng(), 2) * 1.2);
+      const rad = h * (0.75 + Math.pow(rng(), 2) * 0.9);
       const cx = Math.cos(a) * d, cz = Math.sin(a) * d;
-      const snowY = Math.max(R.snow, top - h * 0.3);
-      const shade: Shade = (c, n) => {
-        const sn = snowY + (noise2(c.x * 0.02, c.z * 0.02) - 0.5) * h * 0.25;
-        if (c.y > sn && n.y > 0.28) return jitter(PALETTE.snow, mrng, 0.03);
-        if (c.y > sn - h * 0.06 && n.y > 0.55) return jitter(PALETTE.snow, mrng, 0.03);
-        return jitter(R.rock, mrng, 0.07);
-      };
+      const shade = snowShade(top - h * 0.3, h, R.rock);
       F.rings(peakRings(rng, cx, cz, baseY, h, rad), shade);
-      // shoulder peaks for a ranged silhouette
-      const sh = 1 + Math.floor(rng() * 2);
-      for (let s = 0; s < sh; s++) {
+      const nsh = 1 + Math.floor(rng() * 2);
+      for (let s = 0; s < nsh; s++) {
         const sa = a + (rng() < 0.5 ? -1 : 1) * (0.04 + rng() * 0.08) * (900 / d);
         const sd = d + (rng() - 0.5) * 120;
-        const h2 = h * (0.55 + rng() * 0.3);
+        const h2 = h * (0.5 + rng() * 0.3);
         F.rings(peakRings(rng, Math.cos(sa) * sd, Math.sin(sa) * sd, baseY, h2, h2 * (0.8 + rng() * 0.4)), shade);
       }
     }
@@ -690,7 +778,7 @@ function buildMountains(rng: () => number): THREE.Mesh {
 }
 
 // ---------------------------------------------------------------------------
-// clouds (instanced puffs) — the cloud sea and a few high clouds
+// clouds (instanced puffs) — the cloud sea with holes, and a few high clouds
 // ---------------------------------------------------------------------------
 const cloudMat = () =>
   hazed(new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: false, roughness: 1, metalness: 0, emissive: 0x6a6e86 }));
@@ -716,17 +804,19 @@ function puffMesh(puffs: Puff[], detail: number, name: string, material: THREE.M
   return im;
 }
 
-/** A mound of puffs: big in the middle, smaller around, flattened. */
+/** A mound of puffs: big in the middle, smaller around, flattened. Puffs never poke into a hole. */
 function cluster(out: Puff[], rng: () => number, x: number, y: number, z: number, size: number, n: number) {
   for (let k = 0; k < n; k++) {
     const a = rng() * Math.PI * 2;
     const rr = Math.sqrt(rng()) * size * 1.1;
     const fall = 1 - rr / (size * 1.3);
     const s = size * (0.45 + 0.55 * fall) * (0.7 + rng() * 0.5);
+    const px = x + Math.cos(a) * rr, pz = z + Math.sin(a) * rr;
+    if (inHole(px, pz, s * 1.15)) continue;
     out.push({
-      x: x + Math.cos(a) * rr,
+      x: px,
       y: y + s * 0.25 * fall + (rng() - 0.5) * size * 0.1,
-      z: z + Math.sin(a) * rr,
+      z: pz,
       sx: s * (1 + rng() * 0.3),
       sy: s * (0.38 + rng() * 0.14),
       sz: s * (1 + rng() * 0.3),
@@ -739,8 +829,14 @@ function cluster(out: Puff[], rng: () => number, x: number, y: number, z: number
 function buildClouds(rng: () => number): { sea: THREE.Group; high: THREE.Group } {
   const near: Puff[] = [];
   const far: Puff[] = [];
-  // rings of clusters from hugging the spire out to the horizon
-  let r = cliffBase(CLOUD_Y) + 10;
+  const seaY = (x: number, z: number) => CLOUD_Y + (fbm(x * 0.004 + 9, z * 0.004, 2) - 0.5) * 22;
+  const put = (x: number, z: number, size: number, r: number) => {
+    const a = Math.atan2(z, x);
+    if (r < mountainShape(a, CLOUD_Y) + size * 0.4) return; // don't bury the mountain
+    cluster(r < 420 ? near : far, rng, x, seaY(x, z), z, size, r < 420 ? 5 : 2);
+  };
+  // rings of clusters from hugging the mountain out to the horizon
+  let r = 24;
   while (r < 3600) {
     const spacing = r < 420 ? 20 + r * 0.08 : r * 0.13;
     const n = Math.max(6, Math.floor((Math.PI * 2 * r) / spacing));
@@ -748,11 +844,20 @@ function buildClouds(rng: () => number): { sea: THREE.Group; high: THREE.Group }
     for (let i = 0; i < n; i++) {
       const a = off + (i / n) * Math.PI * 2 + (rng() - 0.5) * 0.5 * (Math.PI * 2 / n);
       const rr = r + (rng() - 0.5) * spacing * 0.6;
-      const size = spacing * (0.95 + rng() * 0.5);
-      const y = CLOUD_Y + (fbm(Math.cos(a) * rr * 0.004 + 9, Math.sin(a) * rr * 0.004, 2) - 0.5) * 22;
-      cluster(rr < 420 ? near : far, rng, Math.cos(a) * rr, y, Math.sin(a) * rr, size, rr < 420 ? 5 : 2);
+      put(Math.cos(a) * rr, Math.sin(a) * rr, spacing * (0.95 + rng() * 0.5), rr);
     }
     r += spacing * 0.85;
+  }
+  // soft walls around each hole (bigger, puffier banks)
+  for (const h of CLOUD_HOLES) {
+    const size = Math.min(70, Math.max(18, h.r * 0.3));
+    const n = Math.max(8, Math.floor((Math.PI * 2 * h.r) / (size * 1.1)));
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + (rng() - 0.5) * 0.2;
+      const rr = h.r + size * (1.2 + rng() * 0.3);
+      const x = h.x + Math.cos(a) * rr, z = h.z + Math.sin(a) * rr;
+      put(x, z, size * (0.9 + rng() * 0.4), Math.hypot(x, z));
+    }
   }
   const material = cloudMat();
   const sea = new THREE.Group();
@@ -760,17 +865,18 @@ function buildClouds(rng: () => number): { sea: THREE.Group; high: THREE.Group }
   sea.add(puffMesh(near, 1, 'cloudsNear', material));
   sea.add(puffMesh(far, 1, 'cloudsFar', material));
 
-  // a soft cloud "floor" just under the puffs so the sea never shows holes
+  // a flat cloud "floor" under the puffs so the sea has no accidental gaps (cut at the holes)
   const F = new Faces();
   const fr = mulberry32(99);
-  const radii = [60, 90, 130, 190, 270, 380, 520, 720, 1000, 1400, 1900, 2600, 3600, 4400];
-  const N = 72;
+  const radii: number[] = [];
+  for (let rr = 30; rr < 4400; rr *= 1.07) radii.push(rr);
+  const N = 150;
   const rings = radii.map((rr) => Array.from({ length: N }, (_, j) => {
-    const a = (j / N) * Math.PI * 2 + (fr() - 0.5) * 0.03;
+    const a = (j / N) * Math.PI * 2 + (fr() - 0.5) * 0.01;
     return new THREE.Vector3(Math.cos(a) * rr, CLOUD_Y - 8, Math.sin(a) * rr);
   }));
-  // ring order is center→out, so faces point up (top of the sea); render both sides (seen from below too)
-  F.rings(rings, () => jitter(0xf2f2fa, fr, 0.03));
+  F.keep = (c) => !inHole(c.x, c.z, 4) && Math.hypot(c.x, c.z) > mountainShape(Math.atan2(c.z, c.x), CLOUD_Y - 8) - 2;
+  F.rings(rings, () => jitter(0xf2f2fa, fr, 0.02));
   const floor = new THREE.Mesh(F.build(), vcMat('cloudFloor', { side: THREE.DoubleSide, emissive: 0x9a9eb4, roughness: 1 }));
   floor.name = 'cloudFloor';
   noShadowCast(floor);
@@ -781,15 +887,16 @@ function buildClouds(rng: () => number): { sea: THREE.Group; high: THREE.Group }
   const spots: [number, number, number, number][] = [
     // angle, dist, y, size
     [0.6, 140, -28, 14],
-    [2.2, 210, 14, 18],
+    [2.4, 210, 14, 18],
     [3.5, 110, -48, 10],
     [4.4, 300, 40, 26],
     [5.4, 180, -12, 15],
-    [1.4, 420, 70, 34],
+    [0.9, 420, 70, 34],
     [2.9, 520, 95, 40],
     [5.0, 650, 120, 50],
     [0.2, 760, 60, 46],
     [3.9, 900, 150, 60],
+    [1.95, 1050, 260, 70], // drifting across the hero peak
   ];
   for (const [a, d, y, s] of spots) {
     cluster(hi, rng, Math.cos(a) * d, y, Math.sin(a) * d, s, 6 + Math.floor(rng() * 4));
@@ -809,11 +916,11 @@ const def: ModelDef = {
     const root = new THREE.Group();
     root.name = 'world';
     root.add(buildSky());
-    const { mesh: spire, ledgeSpots } = buildSpire(rng);
-    root.add(spire);
-    root.add(buildRimDecor(rng));
+    const { mesh: mountain, slopeSpots } = buildMountain(rng);
+    root.add(mountain);
+    root.add(buildSummitDetail(rng));
     root.add(buildValley(rng));
-    root.add(buildTrees(rng, ledgeSpots));
+    root.add(buildTrees(rng, slopeSpots));
     root.add(buildMountains(rng));
     const { sea, high } = buildClouds(rng);
     root.add(sea, high);
@@ -821,15 +928,12 @@ const def: ModelDef = {
   },
   poses: {
     idle(root, t) {
+      // the sea only breathes (holes stay put over the valley); the high clouds drift
       const sea = root.getObjectByName('cloudSea');
       const high = root.getObjectByName('cloudsHigh');
-      if (sea) {
-        sea.rotation.y = t * 0.0025;
-        sea.position.y = Math.sin(t * 0.25) * 0.8;
-      }
+      if (sea) sea.position.y = Math.sin(t * 0.25) * 0.8;
       if (high) high.rotation.y = t * 0.012;
     },
   },
 };
 export default def;
-

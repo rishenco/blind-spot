@@ -26,6 +26,7 @@ export const PALETTE = {
   grassLight: 0x9cc75a,
   grassDark: 0x6f9f40,
   rimRock: 0xc2b6a6,
+  summitRock: 0xbcae9a,
   cliffA: 0xa89c92,
   cliffB: 0x8e8279,
   cliffC: 0xbcae9e,

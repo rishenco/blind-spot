@@ -1,3 +1,5 @@
-// Game entry — built after the models are designed.
-document.body.style.color = '#fff';
-document.body.textContent = 'Rampage Peak — work in progress. See viewer.html';
+import { Game } from './game/game';
+
+const game = new Game();
+// Debug/test handle (used by scripts/play.mjs).
+(window as unknown as { __game: Game }).__game = game;
