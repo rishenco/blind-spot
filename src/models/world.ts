@@ -18,15 +18,15 @@ import { PALETTE, SUN_DIR } from '../style';
 export const PLATEAU_TOP_Y = 0;
 export const CLOUD_Y = -120;
 export const VALLEY_Y = -300;
-/** Nominal plateau radius (the real rim is edgeRadius(angle), between ~8.0 and ~10.0). */
-export const PLATEAU_RADIUS = 9;
+/** Nominal plateau radius (the real rim is edgeRadius(angle), between ~5.8 and ~7.2). */
+export const PLATEAU_RADIUS = 6.5;
 
 const EDGE_TERMS: [number, number, number][] = [
-  [2, 0.32, 0.6],
-  [3, 0.38, 1.3],
-  [5, 0.24, 4.1],
-  [7, 0.13, 2.2],
-  [11, 0.07, 5.5],
+  [2, 0.23, 0.6],
+  [3, 0.27, 1.3],
+  [5, 0.17, 4.1],
+  [7, 0.09, 2.2],
+  [11, 0.05, 5.5],
 ];
 
 /** Walkable rim radius (m from the plateau center) at angle = atan2(z, x). */

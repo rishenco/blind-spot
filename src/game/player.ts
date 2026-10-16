@@ -5,7 +5,7 @@ import { edgeDistance, outward } from './arena';
 import { GRAVITY, PLAYER } from './tuning';
 import type { Game } from './game';
 
-export type PlayerState = 'move' | 'dodge' | 'kick' | 'bounce' | 'launched' | 'land' | 'flex' | 'falling' | 'out';
+export type PlayerState = 'move' | 'dodge' | 'launched' | 'land' | 'falling' | 'out';
 
 const tmp = new THREE.Vector3();
 const tmp2 = new THREE.Vector3();
@@ -19,7 +19,6 @@ export class Player {
   stateTime = 0;
   grounded = true;
   private dodgeCooldown = 0;
-  private kickDone = false;
   private dodgeDir = new THREE.Vector3();
 
   get root(): THREE.Object3D {
@@ -87,10 +86,8 @@ export class Player {
     if (wish.lengthSq() > 1) wish.normalize();
 
     switch (this.state) {
-      case 'move':
-      case 'flex': {
-        if (this.state === 'flex' && (wish.lengthSq() > 0 || this.stateTime > 4)) this.set('move');
-        this.groundMove(wish, this.state === 'flex' ? 0 : PLAYER.runSpeed, dt);
+      case 'move': {
+        this.groundMove(wish, PLAYER.runSpeed, dt);
         if (wish.lengthSq() > 0.01) this.turnTo(Math.atan2(wish.x, wish.z), 14, dt);
         if (!controllable) break;
         if (input.take('Space') && this.dodgeCooldown <= 0 && this.grounded) {
@@ -98,10 +95,6 @@ export class Player {
           this.yaw = Math.atan2(this.dodgeDir.x, this.dodgeDir.z);
           this.set('dodge');
           game.audio.whoosh();
-        } else if (input.take('Mouse0') && this.grounded) {
-          this.startKick(game);
-        } else if (input.take('KeyF') && this.state !== 'flex' && this.grounded) {
-          this.set('flex');
         }
         break;
       }
@@ -122,17 +115,6 @@ export class Player {
         }
         break;
       }
-      case 'kick': {
-        this.groundMove(wish, 0, dt);
-        const [a, b] = PLAYER.kickActive;
-        if (!this.kickDone && this.stateTime >= a && this.stateTime <= b) this.tryKickHit(game);
-        if (this.stateTime > PLAYER.kickTime) this.set('move');
-        break;
-      }
-      case 'bounce':
-        this.groundMove(wish, 0, dt, 8);
-        if (this.stateTime > PLAYER.bounceTime) this.set('move');
-        break;
       case 'land':
         this.groundMove(wish, 0, dt, 18);
         if (this.stateTime > PLAYER.landTime) this.set('move');
@@ -158,44 +140,6 @@ export class Player {
     this.updatePose(dt);
   }
 
-  private startKick(game: Game): void {
-    // Aim assist: snap toward the ram if it's roughly in front and close.
-    const ram = game.ram;
-    tmp2.subVectors(ram.pos, this.pos).setY(0);
-    const d = tmp2.length();
-    if (d < PLAYER.kickAssistRange) {
-      const toRam = Math.atan2(tmp2.x, tmp2.z);
-      const diff = Math.abs(angleDiff(toRam, this.yaw));
-      if (diff < Math.PI * 0.6) this.yaw = toRam;
-    } else {
-      this.yaw = game.cam.yaw;
-    }
-    this.kickDone = false;
-    this.set('kick');
-    this.anim.play('kick', 0.05, true);
-    game.audio.whoosh();
-  }
-
-  private tryKickHit(game: Game): void {
-    const ram = game.ram;
-    tmp2.subVectors(ram.pos, this.pos).setY(0);
-    const d = tmp2.length();
-    if (d > PLAYER.kickRange || Math.abs(ram.pos.y - this.pos.y) > 1.2) return;
-    const diff = Math.abs(angleDiff(Math.atan2(tmp2.x, tmp2.z), this.yaw));
-    if (diff > Math.PI * 0.45) return;
-    this.kickDone = true;
-    const dir = this.forward; // the ram flies the way you face (aim assist already turned you)
-    if (ram.kickable) {
-      ram.kicked(dir, game);
-    } else if (ram.solid) {
-      // Ram doesn't budge — bounce off it.
-      this.vel.set(-dir.x * PLAYER.bounceSpeed, 0, -dir.z * PLAYER.bounceSpeed);
-      this.set('bounce');
-      game.audio.bonk();
-      game.fx.shake = Math.max(game.fx.shake, 0.4);
-    }
-  }
-
   private groundMove(wish: THREE.Vector3, speed: number, dt: number, accel = PLAYER.groundAccel): void {
     if (!this.grounded) return;
     const tx = wish.x * speed;
@@ -218,7 +162,7 @@ export class Player {
     if (this.grounded && !inside) {
       this.grounded = false; // walked / dodged / slid off the edge
       this.vel.y = 0;
-      if (this.state === 'move' || this.state === 'flex' || this.state === 'land' || this.state === 'kick' || this.state === 'bounce') {
+      if (this.state === 'move' || this.state === 'land') {
         this.set('launched');
         this.stateTime = PLAYER.hitstun; // can still steer
       }
@@ -264,18 +208,10 @@ export class Player {
       case 'dodge':
         a.play('dodge', 0.04);
         break;
-      case 'kick':
-        break; // started in startKick
-      case 'bounce':
-        a.play('bounce', 0.05);
-        break;
       case 'land':
         break;
       case 'launched':
         a.play('tumble', 0.08);
-        break;
-      case 'flex':
-        a.play('flex', 0.2);
         break;
       case 'falling':
         break;

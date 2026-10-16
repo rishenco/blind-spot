@@ -417,6 +417,48 @@ function charge(root: THREE.Object3D, t: number) {
   leg(p.legBR, p.legBR_low, Math.PI + 0.8, false);
 }
 
+/** Slow menacing walk (circling the player): head low, horns aimed, diagonal-pair gait. */
+function stalk(root: THREE.Object3D, t: number) {
+  const p = reset(root);
+  const w = t * TAU * 1.5;
+  rot(p.body, 0.04 + 0.02 * sin(w * 2), 0, 0.04 * sin(w));
+  p.body.position.y += -0.04 + 0.025 * Math.abs(sin(w));
+  rot(p.neck, 0.42 + 0.05 * sin(w * 2 + 0.5), 0.06 * sin(w * 0.5), 0);
+  rot(p.head, 0.05, 0, -0.05 * sin(w));
+  rot(p.jaw, 0.04);
+  rot(p.tail, -0.5 + 0.15 * sin(w * 2));
+  const leg = (hip: THREE.Object3D, knee: THREE.Object3D, ph: number, front: boolean) => {
+    const s = sin(w + ph);
+    rot(hip, 0.35 * s + (front ? -0.03 : 0.05));
+    const lift = Math.max(0, cos(w + ph));
+    rot(knee, front ? 0.8 * lift : -0.6 * lift);
+  };
+  leg(p.legFL, p.legFL_low, 0, true);
+  leg(p.legBR, p.legBR_low, 0.15, false);
+  leg(p.legFR, p.legFR_low, Math.PI, true);
+  leg(p.legBL, p.legBL_low, Math.PI + 0.15, false);
+}
+
+/** Stopped right at the rim: leaning over the drop, front legs braced, rear end flailing for balance. */
+function teeter(root: THREE.Object3D, t: number) {
+  const p = reset(root);
+  const k = ease(t / 0.2);
+  const wob = sin(t * TAU * 2.6);
+  const pitch = (0.32 + 0.1 * wob) * k;
+  rot(p.body, pitch, 0, 0.12 * sin(t * TAU * 1.7) * k);
+  rot(p.legFL, -0.55 * k - pitch);
+  rot(p.legFR, -0.5 * k - pitch);
+  p.body.position.y += 0.05 * k;
+  rot(p.legBL, (0.6 + 0.5 * sin(t * TAU * 3.1)) * k - pitch, 0, 0.2 * k);
+  rot(p.legBR, (0.6 + 0.5 * sin(t * TAU * 3.1 + 2)) * k - pitch, 0, -0.2 * k);
+  rot(p.legBL_low, -0.6 * k);
+  rot(p.legBR_low, -0.6 * k);
+  rot(p.neck, (-0.2 + 0.2 * wob) * k - pitch, 0.3 * sin(t * TAU * 1.3) * k, 0);
+  rot(p.head, -0.15 * k);
+  rot(p.jaw, (0.35 + 0.2 * Math.abs(wob)) * k);
+  rot(p.tail, (-1.2 + 0.5 * sin(t * TAU * 6)) * k);
+}
+
 function skid(root: THREE.Object3D, t: number) {
   const p = reset(root);
   const k = ease(t / 0.15);
@@ -531,7 +573,7 @@ function headbang(root: THREE.Object3D, t: number) {
 const def: ModelDef = {
   name: 'ram',
   build,
-  poses: { idle, paw, charge, skid, stunned, thrown, fall, headbang },
+  poses: { idle, stalk, paw, charge, skid, teeter, stunned, thrown, fall, headbang },
   viewDistance: 4.5,
 };
 export default def;
