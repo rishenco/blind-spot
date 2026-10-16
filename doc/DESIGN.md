@@ -13,8 +13,7 @@ Background: low-poly mountain ranges, sea of clouds below, gradient sky, low sun
 | Mouse | camera |
 | WASD | move |
 | Space | dodge (quick dash, can't be hit — and can take you off the cliff) |
-| LMB | kick — shoves the ram a short way; a long way if it's stunned |
-| RMB | grab — press just as the charging ram reaches you: you flip it over your shoulder, it flies the way you face. Wrong timing = you get hit |
+| LMB | kick — sends a stunned ram flying the way you face. A ram that isn't stunned doesn't budge: you bounce off it |
 | F | flex (just for fun) |
 
 When the ram hits you, you fly. You can steer a little in the air (WASD). Land on the plateau = fine. Miss = fall.
@@ -22,12 +21,11 @@ When the ram hits you, you fly. You can steer a little in the air (WASD). Land o
 ## The ram
 One loop: **paw the ground (≈1 s warning) → charge in a straight line → if it misses, skid and stand stunned ≈1.5 s → turn → repeat.**
 It brakes when it sees the edge, but late: dodge at the last moment near the edge and it skids off.
-Gets a little faster over the fight.
+Escalates every charge: shorter wind-up, faster charge. Target fight length 30–90 s.
 
 ## Ways to win
 1. Dodge a charge near the edge — it skids off.
 2. Kick it off while it's stunned near the edge.
-3. Grab-flip it at the edge.
 
 ## The fall (either character, ~4 s, skippable)
 Slow-mo at the lip → camera follows the faller down the cliff face → through the cloud sea →
