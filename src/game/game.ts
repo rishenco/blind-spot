@@ -1,13 +1,15 @@
 import * as THREE from 'three';
-import worldDef, { CLOUD_Y, cliffRadius, valleyHeight } from '../models/world';
-import { setupLights } from '../style';
+import worldDef, { CLOUD_Y, VALLEY_Y, cliffRadiusAt, edgeRadius, valleyHeight } from '../models/world';
+import { SUN_DIR, setupLights } from '../style';
+import type { Animator } from './animator';
 import { Audio } from './audio';
 import { Fx } from './fx';
 import { Hud } from './hud';
 import { Input } from './input';
 import { Player } from './player';
+import { ObstacleMap } from './landing';
+import { PLAYER_JOINTS, RAM_JOINTS, Ragdoll } from './ragdoll';
 import { Ram } from './ram';
-import { FALL } from './tuning';
 import { edgeDistance } from './arena';
 
 export type Phase = 'title' | 'fight' | 'fall' | 'result';
@@ -51,103 +53,428 @@ class CameraRig {
   }
 }
 
-/** Scripted fall: slow-mo at the lip, follow the faller down through the clouds, BOOM. */
+/** Fall cinematic tuning (local to the presentation; gameplay tuning lives in tuning.ts). */
+const FALL_CFG = {
+  /** Real seconds of slow-mo right after leaving the lip, and its time scale. */
+  slowmoTime: 0.6,
+  slowmo: 0.3,
+  gravity: 40,
+  /** Bounce off rock: normal restitution, tangential friction, minimum outward speed after. */
+  restitution: 0.5,
+  friction: 0.7,
+  minOut: 7,
+  /** After this many impacts (or this much sim time / depth) the body is sent clear to the valley. */
+  maxImpacts: 3,
+  upperTime: 2.3,
+  launchDepth: -100,
+  boomHold: 1.6,
+};
+
+type Faller = { root: THREE.Object3D; pos: THREE.Vector3; vel: THREE.Vector3; anim: Animator };
+
+const UP = new THREE.Vector3(0, 1, 0);
+const _v = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+
+/**
+ * Physical fall: the faller keeps its momentum off the rim and falls under gravity, colliding with
+ * the mountain (cliffRadiusAt). The 'fall' pose is held frozen until the first impact; from then on
+ * the body tumbles as a rigid body and the limbs flop (Ragdoll). After a few bounces (or a time /
+ * depth limit, or if it gets stuck) it is sent on a ballistic arc that clears the rock all the way
+ * down through the clouds to the valley: BOOM.
+ */
 class FallDirector {
   who: 'player' | 'ram' = 'player';
   t = 0;
-  private angle = 0;
-  private r = 0;
-  private y = 0;
-  private vy = 0;
-  private boomT = -1;
+  /** Center of mass of the faller (world). */
   readonly pos = new THREE.Vector3();
+  private readonly vel = new THREE.Vector3();
+  private readonly quat = new THREE.Quaternion();
+  private readonly angVel = new THREE.Vector3();
+  private com = 1;
+  private simT = 0;
+  private impacts = 0;
+  private lastImpact = -1;
+  private slowContact = 0;
+  private launched = false;
+  private gravity = FALL_CFG.gravity;
+  /** Landing ground height (valid once launched). */
+  private groundY = VALLEY_Y;
+  private landX = 0;
+  private landZ = 0;
+  private hitstop = 0;
+  private boomT = -1;
+  private ragdoll: Ragdoll | null = null;
+  private readonly ragdolls = new Map<THREE.Object3D, Ragdoll>();
+  // camera
+  private readonly camOff = new THREE.Vector3();
   private readonly camPos = new THREE.Vector3();
-  private readonly camStart = new THREE.Vector3();
+  private camSide = 1;
   private frozen = false;
-  private readonly out = new THREE.Vector3();
 
-  start(who: 'player' | 'ram', from: THREE.Vector3, vy: number, cam: THREE.Camera): void {
+  start(who: 'player' | 'ram', f: Faller, cam: THREE.Camera): void {
     this.who = who;
     this.t = 0;
-    this.angle = Math.atan2(from.z, from.x);
-    this.r = Math.hypot(from.x, from.z);
-    this.y = from.y;
-    this.vy = Math.min(vy, 0);
+    this.simT = 0;
+    this.impacts = 0;
+    this.lastImpact = -1;
+    this.slowContact = 0;
+    this.launched = false;
+    this.gravity = FALL_CFG.gravity;
+    this.groundY = VALLEY_Y;
+    this.hitstop = 0;
     this.boomT = -1;
-    this.camPos.copy(cam.position);
-    this.camStart.copy(cam.position);
     this.frozen = false;
-    this.out.set(Math.cos(this.angle), 0, Math.sin(this.angle));
+    this.com = who === 'player' ? 1.0 : 0.75;
+
+    this.pos.copy(f.pos).setY(f.pos.y + this.com);
+    this.quat.copy(f.root.quaternion);
+    // Keep the momentum off the rim (capped), but make sure it actually goes outward.
+    const out = this.outward(_v);
+    this.vel.copy(f.vel);
+    this.vel.y = Math.min(this.vel.y, 0);
+    const h = Math.hypot(this.vel.x, this.vel.z);
+    if (h > 6) {
+      this.vel.x *= 6 / h;
+      this.vel.z *= 6 / h;
+    }
+    const vo = this.vel.x * out.x + this.vel.z * out.z;
+    if (vo < 1.5) this.vel.addScaledVector(out, 1.5 - vo);
+    // A slow topple outward (the pose itself is frozen).
+    this.angVel.crossVectors(UP, out).multiplyScalar(0.9);
+    this.angVel.y = (Math.random() - 0.5) * 0.6;
+
+    let rd = this.ragdolls.get(f.root);
+    if (!rd) {
+      rd = new Ragdoll(f.root, who === 'player' ? PLAYER_JOINTS : RAM_JOINTS);
+      this.ragdolls.set(f.root, rd);
+    }
+    rd.stop();
+    this.ragdoll = rd;
+    ObstacleMap.of(f.root.parent ?? f.root); // build once, during the slow-mo
+
+    void cam;
+    // Pick the side that keeps the sun behind the camera (faller lit), looking out from the mountain.
+    const sun = new THREE.Vector3(SUN_DIR.x, 0, SUN_DIR.z).normalize();
+    this.camSide = this.viewDir(1, _v).dot(sun) < this.viewDir(-1, new THREE.Vector3()).dot(sun) ? 1 : -1;
+    // Hard cut to the fall camera (blending from the gameplay camera drags it through the rim crags).
+    this.camOff.copy(this.viewDir(this.camSide, _v)).multiplyScalar(-5.4 * (who === 'ram' ? 1.1 : 1)).setY(-2.2);
   }
 
   get landed(): boolean {
     return this.boomT >= 0;
   }
 
+  private outward(out: THREE.Vector3, p = this.pos): THREE.Vector3 {
+    const r = Math.hypot(p.x, p.z) || 1;
+    return out.set(p.x / r, 0, p.z / r);
+  }
+
+  /** Horizontal camera view direction: mostly outward from the mountain, angled to one side. */
+  private viewDir(side: number, out: THREE.Vector3, th = 0.95): THREE.Vector3 {
+    // th: angle off the outward direction (~55° while near the rock, less once clear of it)
+    const a = Math.atan2(this.pos.z, this.pos.x);
+    return out.set(
+      Math.cos(a) * Math.cos(th) - Math.sin(a) * side * Math.sin(th),
+      0,
+      Math.sin(a) * Math.cos(th) + Math.cos(a) * side * Math.sin(th),
+    );
+  }
+
   /** Returns true when finished. */
   update(realDt: number, game: Game): boolean {
     this.t += realDt;
-    const faller = this.who === 'player' ? game.player : game.ram;
+    const faller: Faller = this.who === 'player' ? game.player : game.ram;
     const root = faller.root;
+    const rd = this.ragdoll!;
 
     if (this.boomT >= 0) {
       this.boomT += realDt;
       game.hud.setFlash(1 - this.boomT * 3);
-      this.aimCamera(game, realDt, true);
-      return this.boomT > FALL.boomHold;
+      this.aimCamera(game, realDt);
+      return this.boomT > FALL_CFG.boomHold;
     }
 
-    const dts = realDt * (this.t < FALL.slowmoTime ? FALL.slowmo : 1);
-    this.vy -= FALL.gravity * dts;
-    this.y += this.vy * dts;
-    const rMin = cliffRadius(this.y, this.angle) + 3;
-    this.r += Math.max(0, rMin - this.r) * Math.min(1, dts * 5) + 2 * dts;
-    this.pos.set(Math.cos(this.angle) * this.r, this.y, Math.sin(this.angle) * this.r);
-    root.position.copy(this.pos);
-    root.rotation.y += dts * 1.5;
-
-    const ground = valleyHeight(this.pos.x, this.pos.z);
-    if (this.y <= ground) {
-      this.pos.y = ground;
-      root.position.copy(this.pos);
-      root.scale.set(1.5, 0.18, 1.5); // pancake
-      root.rotation.set(0, root.rotation.y, 0);
-      this.boomT = 0;
-      game.audio.boom();
-      game.fx.shake = 2.2;
-      game.fx.dust(this.pos.clone().setY(ground + 1), 36, { speed: 26, size: 3.2, up: 6, life: 2.6 });
-      game.fx.dust(this.pos.clone().setY(ground + 4), 14, { speed: 6, size: 5, up: 14, life: 3 });
+    let scale = this.t < FALL_CFG.slowmoTime ? FALL_CFG.slowmo : 1;
+    if (this.hitstop > 0) {
+      this.hitstop -= realDt;
+      scale = 0;
     }
-    this.aimCamera(game, realDt, false);
+    const dts = realDt * scale;
+
+    // Pose: hold the 'fall' pose frozen (only let its blend-in finish) until the first impact.
+    if (!rd.active) {
+      if (faller.anim.time < 0.2) faller.anim.update(realDt);
+    } else rd.update(dts, 0.12);
+
+    const n = 4;
+    for (let i = 0; i < n && this.boomT < 0; i++) this.step(dts / n, game);
+
+    if (this.boomT < 0) {
+      root.quaternion.copy(this.quat);
+      root.position.copy(this.pos).sub(_v.set(0, this.com, 0).applyQuaternion(this.quat));
+    }
+    this.aimCamera(game, realDt);
     return false;
   }
 
-  private aimCamera(game: Game, dt: number, landed: boolean): void {
+  private step(dt: number, game: Game): void {
+    if (dt <= 0) return;
+    this.simT += dt;
+    this.vel.y -= this.gravity * dt;
+    if (!this.launched && this.impacts === 0) {
+      const drag = Math.exp(-0.9 * dt);
+      this.vel.x *= drag;
+      this.vel.z *= drag;
+    }
+    this.pos.addScaledVector(this.vel, dt);
+    const w = this.angVel.length();
+    if (w > 1e-4) {
+      _q.setFromAxisAngle(_v.copy(this.angVel).divideScalar(w), w * dt);
+      this.quat.premultiply(_q).normalize();
+    }
+
+    this.collide(dt, game);
+
+    if (!this.launched && (this.simT > FALL_CFG.upperTime + (this.impacts ? 0 : 0.6) || this.pos.y < FALL_CFG.launchDepth || this.slowContact > 0.3)) {
+      this.launch(game);
+    }
+
+    const ground = this.launched ? this.groundY : valleyHeight(this.pos.x, this.pos.z);
+    if (this.pos.y - this.com * 0.5 <= ground) this.boom(game, ground);
+  }
+
+  private collide(dt: number, game: Game): void {
+    const p = this.pos;
+    if (p.y > -0.05) return;
+    const a = Math.atan2(p.z, p.x);
+    const r = Math.hypot(p.x, p.z);
+    const pad = 0.15;
+    const R = cliffRadiusAt(a, p.y) + pad;
+    // Skimming down the face without really hitting it reads badly: count it like a scrape.
+    if (r < R + 2.5 && this.simT > 0.3) this.slowContact += dt * 0.7;
+    if (r >= R) return;
+    const rh = this.outward(new THREE.Vector3());
+    // Grace period at the lip: ease out over the conservative lip radius instead of "hitting" it.
+    if (this.simT < 0.3 && !this.launched) {
+      p.addScaledVector(rh, (R - r) * Math.min(1, dt * 12));
+      return;
+    }
+    // Surface normal of r = R(angle, y) by finite differences.
+    const hy = 1.5;
+    const dRdy = (cliffRadiusAt(a, Math.min(-0.01, p.y + hy)) - cliffRadiusAt(a, p.y - hy)) / (Math.min(-0.01, p.y + hy) - (p.y - hy));
+    const dRda = (cliffRadiusAt(a + 0.02, p.y) - cliffRadiusAt(a - 0.02, p.y)) / 0.04;
+    const th = new THREE.Vector3(-Math.sin(a), 0, Math.cos(a));
+    const nrm = new THREE.Vector3().copy(rh).addScaledVector(UP, -dRdy).addScaledVector(th, -dRda / Math.max(1, r)).normalize();
+    p.addScaledVector(rh, R - r);
+
+    const vn = this.vel.dot(nrm);
+    if (this.launched) {
+      // Safety only: never pass into the rock, no more bounces.
+      if (vn < 0) this.vel.addScaledVector(nrm, -vn);
+      const vo = this.vel.dot(rh);
+      if (vo < 6) this.vel.addScaledVector(rh, 6 - vo);
+      return;
+    }
+    // Scraping along the rock (or stuck on a ledge) for a while: send it off.
+    this.slowContact += this.vel.length() < 5 ? dt * 2 : dt;
+    if (vn >= 0) return;
+    // Bounce: reflect the normal part, scrub the tangential part, and always pop outward.
+    const vt = _v.copy(this.vel).addScaledVector(nrm, -vn);
+    this.vel.copy(vt).multiplyScalar(FALL_CFG.friction).addScaledVector(nrm, -vn * FALL_CFG.restitution);
+    const vo = this.vel.dot(rh);
+    // Out faster than the face spreads at this fall speed, so it really leaves the rock.
+    const minOut = Math.max(FALL_CFG.minOut + this.impacts * 2, -dRdy * Math.max(0, -this.vel.y) + 9);
+    if (vo < minOut) this.vel.addScaledVector(rh, minOut - vo);
+    if (-vn > 2.5 && this.simT - this.lastImpact > 0.15) this.impact(game, nrm, -vn);
+  }
+
+  private impact(game: Game, nrm: THREE.Vector3, speed: number): void {
+    this.impacts++;
+    this.lastImpact = this.simT;
+    const s = THREE.MathUtils.clamp(speed / 22, 0.25, 1);
+    const rd = this.ragdoll!;
+    if (!rd.active) rd.begin();
+    rd.impulse(s);
+    // Tumble: random spin plus a cartwheel away from the wall.
+    const rnd = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    this.angVel.addScaledVector(rnd, 3 + 6 * s).add(_v.crossVectors(nrm, UP).multiplyScalar(-(2 + 4 * s)));
+    if (this.angVel.length() > 13) this.angVel.setLength(13);
+
+    game.audio.thud(s);
+    if (this.who === 'ram') {
+      if (this.impacts === 1 || Math.random() < 0.6) game.audio.bleat(1.5 + Math.random() * 0.6);
+    } else {
+      game.audio.grunt();
+    }
+    const contact = this.pos.clone().addScaledVector(nrm, -0.6);
+    game.fx.dust(contact, Math.round(10 + 14 * s), { speed: 4 + 6 * s, size: 0.5 + 0.7 * s, up: 2.5, life: 1.1, color: 0xc9b9a0 });
+    game.fx.shake = Math.max(game.fx.shake, 0.5 + 0.9 * s);
+    this.hitstop = 0.04 + 0.06 * s;
+    if (this.impacts >= FALL_CFG.maxImpacts) this.launch(game);
+  }
+
+  /**
+   * Final drop: a ballistic arc (stronger gravity, so it's snappy) to a landing spot on open valley
+   * floor (checked with a raycast: no trees, foothills or scree), chosen so the path clears the rock
+   * all the way down through the clouds.
+   */
+  private launch(game: Game): void {
+    if (this.launched) return;
+    this.launched = true;
+    this.slowContact = 0;
+    const p = this.pos;
+    const a = Math.atan2(p.z, p.x);
+    const vy = Math.min(this.vel.y, 4);
+    const map = ObstacleMap.of(game.scene);
+    const foot = cliffRadiusAt(a, VALLEY_Y + 1);
+
+    // Ballistic solution to (x, z, groundY); null if the path would hit the rock.
+    const solve = (x: number, z: number, groundY: number, strict: boolean) => {
+      const h = Math.max(1, p.y - (groundY + this.com * 0.5));
+      const T = 0.9 + h / 230; // ~2.1 s from the top
+      const g = Math.max(FALL_CFG.gravity, (2 * (h + vy * T)) / (T * T));
+      const Tact = (vy + Math.sqrt(vy * vy + 2 * g * h)) / g;
+      const vx = (x - p.x) / Tact;
+      const vz = (z - p.z) / Tact;
+      for (let i = 1; i <= 24; i++) {
+        const ti = (Tact * i) / 24;
+        const xi = p.x + vx * ti, zi = p.z + vz * ti;
+        const yi = p.y + vy * ti - 0.5 * g * ti * ti;
+        if (Math.hypot(xi, zi) < cliffRadiusAt(Math.atan2(zi, xi), Math.min(-0.01, yi)) + (i < 3 ? 2 : 14)) return null;
+        if (strict && i < 24 && yi < map.height(xi, zi) + 4) return null; // foothills / trees on the way
+      }
+      return { g, vx, vz, groundY, x, z };
+    };
+
+    let sol: ReturnType<typeof solve> = null;
+    // Nearest open meadow (no rock, foothill or trees) roughly below, whose arc clears everything;
+    // then relax the foothill check; last resort: straight out onto whatever is there.
+    search: for (const strict of [true, false]) {
+      for (const da of [0, 0.08, -0.08, 0.16, -0.16, 0.25, -0.25, 0.35, -0.35, 0.5, -0.5, 0.65, -0.65, 0.8, -0.8]) {
+        for (let k = 0; k < 20; k++) {
+          const la = a + da;
+          const rr = Math.max(foot, cliffRadiusAt(la, VALLEY_Y + 1)) + 45 + k * 16;
+          const x = Math.cos(la) * rr, z = Math.sin(la) * rr;
+          if (!map.isMeadow(x, z)) continue;
+          sol = solve(x, z, valleyHeight(x, z), strict);
+          if (sol) break search;
+        }
+      }
+    }
+    for (let rr = foot + 60; !sol && rr < 900; rr += 40) {
+      const x = Math.cos(a) * rr, z = Math.sin(a) * rr;
+      sol = solve(x, z, map.height(x, z), false);
+    }
+    if (!sol) {
+      const x = Math.cos(a) * 900, z = Math.sin(a) * 900;
+      sol = { g: FALL_CFG.gravity * 2, vx: (x - p.x) / 2.5, vz: (z - p.z) / 2.5, groundY: map.height(x, z), x, z };
+    }
+    this.gravity = sol.g;
+    this.groundY = sol.groundY;
+    this.landX = sol.x;
+    this.landZ = sol.z;
+    this.vel.set(sol.vx, vy, sol.vz);
+  }
+
+  private boom(game: Game, ground: number): void {
+    const faller: Faller = this.who === 'player' ? game.player : game.ram;
+    const root = faller.root;
+    this.pos.y = ground;
+    this.boomT = 0;
+    this.ragdoll?.stop();
+    // Pancake, flat on the ground, keeping only the heading.
+    const e = new THREE.Euler().setFromQuaternion(this.quat, 'YXZ');
+    root.rotation.set(0, e.y, 0);
+    root.position.set(this.pos.x, ground, this.pos.z);
+    root.scale.set(1.5, 0.18, 1.5);
+    game.audio.boom();
+    game.fx.shake = 2.2;
+    game.fx.dust(this.pos.clone().setY(ground + 1), 36, { speed: 26, size: 3.2, up: 6, life: 2.6 });
+    game.fx.dust(this.pos.clone().setY(ground + 4), 14, { speed: 6, size: 5, up: 14, life: 3 });
+  }
+
+  /** Fixed camera over the landing spot: try a few bearings, keep the first with a clear view. */
+  private placeLandingCamera(game: Game, ground: number): void {
+    const map = ObstacleMap.of(game.scene);
+    const land = new THREE.Vector3(this.landX, ground + 1, this.landZ);
+    const base = this.viewDir(this.camSide, new THREE.Vector3()).negate();
+    const dist = 26;
+    const end = new THREE.Vector3();
+    let best = -1;
+    search: for (const elev of [1.0, 1.3, 0.7]) {
+      for (const turn of [0, 0.5, -0.5, 1, -1, 1.6, -1.6, 2.4, -2.4, Math.PI]) {
+        const dir = base.clone().applyAxisAngle(UP, turn).multiplyScalar(Math.cos(elev)).setY(Math.sin(elev)).normalize();
+        const free = map.clearDistance(land, end.copy(land).addScaledVector(dir, dist)) - 2;
+        if (free > best) {
+          best = free;
+          this.camPos.copy(land).addScaledVector(dir, Math.max(6, free));
+        }
+        if (free >= dist - 2) break search;
+      }
+    }
+  }
+
+  private aimCamera(game: Game, dt: number): void {
     const cam = game.camera;
-    const ground = valleyHeight(this.pos.x, this.pos.z);
-    // Close follow: just outside, beside and above the faller so they stay big in frame and the
-    // cliff rushes past behind them. Near the ground the camera stops and watches the impact below.
+    const landed = this.boomT >= 0;
+    const ground = this.launched ? this.groundY : valleyHeight(this.pos.x, this.pos.z);
     if (!this.frozen) {
-      const side = new THREE.Vector3(-this.out.z, 0, this.out.x);
-      const follow = new THREE.Vector3()
-        .copy(this.pos)
-        .addScaledVector(this.out, 6.5)
-        .addScaledVector(side, 2.5)
-        .add(new THREE.Vector3(0, 2.2, 0));
-      // Ease in from the gameplay camera during the slow-mo.
-      const b = THREE.MathUtils.smoothstep(this.t, 0, FALL.slowmoTime + 0.4);
-      this.camPos.lerpVectors(this.camStart, follow, b);
-      if (this.y < ground + 40) {
+      // Beside the faller, a bit closer to the mountain, looking OUT past them: the background is sky,
+      // the cloud sea and distant peaks, never the rock face. Slightly below while bouncing (sky behind),
+      // above on the final drop (the cloud sea rushing up).
+      const big = this.who === 'ram' ? 1.1 : 1;
+      const below = THREE.MathUtils.smoothstep(CLOUD_Y - 10 - this.pos.y, 0, 40);
+      const dist = (this.launched ? 7.5 - 2 * below : 5.4) * big;
+      // Below the clouds (no sky left), look steeply down onto the valley floor, not at the foothills.
+      const hgt = this.launched ? 2.6 + 16 * below : -3.6;
+      const desired = this.viewDir(this.camSide, new THREE.Vector3(), this.launched ? 0.4 : 0.95).multiplyScalar(-dist).setY(hgt);
+      this.camOff.lerp(desired, 1 - Math.exp(-4 * dt));
+      this.camPos.copy(this.pos).add(this.camOff);
+      // Never inside (or tucked behind the crags of) the mountain, and never farther in than the faller,
+      // so the line of sight runs outside the rock.
+      const ca = Math.atan2(this.camPos.z, this.camPos.x);
+      const cr = Math.hypot(this.camPos.x, this.camPos.z);
+      if (this.camPos.y < 1 || cr > edgeRadius(ca) - 0.5) {
+        const cy = Math.min(-0.01, this.camPos.y);
+        let min = cliffRadiusAt(ca, cy) + (cy > -15 ? 3 : 1.5);
+        if (!this.launched) min = Math.max(min, Math.hypot(this.pos.x, this.pos.z) + 1.2);
+        if (cr < min) {
+          const k = this.t < 0.05 ? 1 : Math.min(1, 14 * dt);
+          const nr = cr + (min - cr) * k;
+          this.camPos.x *= nr / cr;
+          this.camPos.z *= nr / cr;
+          // hard floor: the rock itself
+          const hard = cliffRadiusAt(ca, cy) + 1;
+          if (nr < hard) {
+            this.camPos.x *= hard / nr;
+            this.camPos.z *= hard / nr;
+          }
+          this.camOff.copy(this.camPos).sub(this.pos);
+        }
+      }
+      // Above the foothills and trees down in the valley.
+      if (this.camPos.y < CLOUD_Y) {
+        const floor = ObstacleMap.of(game.scene).height(this.camPos.x, this.camPos.z) + 3;
+        if (this.camPos.y < floor) {
+          this.camPos.y = floor;
+          this.camOff.copy(this.camPos).sub(this.pos);
+        }
+      }
+      // Near the valley the camera stops and watches the impact from above, with a clear view.
+      if (this.pos.y < ground + 32) {
         this.frozen = true;
-        this.camPos.y += 6;
+        this.placeLandingCamera(game, ground);
       }
     }
     cam.position.copy(this.camPos).add(game.fx.shakeOffset(new THREE.Vector3()));
-    cam.lookAt(this.pos.x, this.pos.y + (landed ? 1.5 : 0.5), this.pos.z);
+    // While bouncing, aim a little outward of the faller: more sky, less rock in frame.
+    const lead = this.launched || this.frozen ? 0 : 2.5;
+    const out = this.outward(new THREE.Vector3());
+    cam.lookAt(this.pos.x + out.x * lead, this.pos.y + (landed ? 1.0 : 0.1), this.pos.z + out.z * lead);
     // Whiteout while the camera is inside the cloud layer.
     const inCloud = 1 - THREE.MathUtils.smoothstep(Math.abs(cam.position.y - CLOUD_Y + 4), 6, 18);
     game.hud.setWhiteout(inCloud * 0.9);
-    void dt;
   }
 }
 
@@ -231,7 +558,7 @@ export class Game {
     if (this.phase !== 'fight') return;
     this.setPhase('fall');
     const f = who === 'player' ? this.player : this.ram;
-    this.fall.start(who, f.pos, f.vel.y, this.camera);
+    this.fall.start(who, f, this.camera);
     f.set('out');
     f.anim.play('fall', 0.15);
     (who === 'player' ? this.ram : this.player).freeze();
@@ -338,13 +665,8 @@ export class Game {
         }
         break;
       case 'fall': {
-        if (this.fall.who === 'player') {
-          if (input.take('KeyF') || input.take('Space')) this.player.anim.play(this.player.anim.pose === 'flex' ? 'fall' : 'flex', 0.1);
-        }
         const other = this.fall.who === 'player' ? this.ram : this.player;
         other.update(realDt, this);
-        const faller = this.fall.who === 'player' ? this.player : this.ram;
-        faller.anim.update(this.fall.landed ? 0 : realDt);
         const skip = click && this.phaseTime > 1 && !this.fall.landed;
         if (this.fall.update(realDt, this) || skip) this.showResult();
         break;
@@ -399,6 +721,7 @@ export class Game {
   }
 
   private titleCamera(dt: number): void {
+    ObstacleMap.of(this.scene); // one-off ~50 ms build for the fall, done while nothing moves
     this.titleAngle += dt * 0.12;
     const r = 15;
     this.camera.position.set(Math.sin(this.titleAngle) * r, 6, Math.cos(this.titleAngle) * r - 1);

@@ -140,8 +140,8 @@ export class Audio {
     if (!this.ctx) return;
     const t = this.now;
     const p = this.rand(0.85, 1.15);
-    this.tone({ t, dur: 0.13, peak: loud * 1.1, f0: 105 * p, f1: 38 * p, attack: 0.002 });
-    this.noise({ t, dur: 0.07, peak: loud * 0.7, type: 'lowpass', f0: 420 * p, q: 0.7, attack: 0.002 });
+    this.tone({ t, dur: 0.16, peak: loud * 1.6, f0: 110 * p, f1: 36 * p, attack: 0.002 });
+    this.noise({ t, dur: 0.08, peak: loud * 0.9, type: 'lowpass', f0: 420 * p, q: 0.7, attack: 0.002 });
     this.noise({ t, dur: 0.025, peak: loud * 0.35, type: 'highpass', f0: 2600, q: 0.7, attack: 0.001 });
     // a few pebbles skittering
     if (loud > 0.4) this.noise({ t: t + 0.03, dur: 0.06, peak: loud * 0.12, f0: 4200, q: 4, attack: 0.002 });
@@ -201,9 +201,11 @@ export class Audio {
    * pushed through "AA" vowel formants and a little grit. pitch > 1 = more panicked.
    */
   bleat(pitch = 1): void {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const t = this.now;
+    if (this.ctx) this.bleatAt(this.now, pitch);
+  }
+
+  private bleatAt(t: number, pitch: number): void {
+    const ctx = this.ctx!;
     const dur = 0.75 / Math.sqrt(pitch);
     const f = 230 * pitch * this.rand(0.95, 1.05);
     const voice = ctx.createGain();
@@ -258,8 +260,12 @@ export class Audio {
     pre.gain.value = 0.5;
     voice.connect(pre).connect(shaped).connect(lips).connect(trem);
     // "AA" formants in parallel
+    // Sustained envelope: "BAAAA" holds, then trails off into "...h".
     const out = ctx.createGain();
-    this.env(out, t, 0.5, 0.03, dur);
+    out.gain.setValueAtTime(0.0001, t);
+    out.gain.exponentialRampToValueAtTime(0.5, t + 0.035);
+    out.gain.linearRampToValueAtTime(0.38, t + dur * 0.75);
+    out.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     for (const [ff, q, gain] of [
       [760, 6, 1.0],
       [1250, 7, 0.75],
@@ -291,7 +297,7 @@ export class Audio {
     if (!this.ctx) return;
     const t = this.now;
     this.snort();
-    setTimeout(() => this.bleat(0.85), 160);
+    this.bleatAt(t + 0.3, 0.85);
     // rising rumble: low noise swelling + a sub that climbs
     this.noise({ t, dur: 1.0, peak: 0.45, type: 'lowpass', f0: 160, f1: 600, q: 1.2, attack: 0.35 });
     this.tone({ t, dur: 0.9, peak: 0.35, f0: 42, f1: 75, type: 'triangle', attack: 0.3 });

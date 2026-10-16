@@ -235,7 +235,7 @@ export class Ram {
     this.noticeTimer = -1;
     this.seenEarly = false;
     this.set('charge');
-    game.audio.bleat(0.9);
+    game.audio.chargeStart();
     game.audio.bpm = 118 + Math.min(40, this.charges * 4);
   }
 
@@ -262,7 +262,7 @@ export class Ram {
     if (this.feint && this.noticeTimer < 0 && this.traveled > RAM.feintDistance && along > 2.6) {
       this.charges++;
       this.startBrake('feint');
-      game.audio.snort();
+      game.audio.skid();
       return;
     }
     // Out of the line? It notices after its reaction time, then brakes as hard as it can.
@@ -278,6 +278,7 @@ export class Ram {
         if (!this.seenEarly && player.state === 'dodge' && along > -2.5) game.slowmo(0.35, 0.3);
         this.charges++;
         this.startBrake('miss');
+        game.audio.skid();
         game.audio.bleat(1.5);
       }
     }
