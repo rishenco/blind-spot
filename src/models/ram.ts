@@ -80,7 +80,7 @@ function limb(rTop: number, rBot: number, len: number, seg = 6) {
 
 /** Tapering, ridged tube along a curl — the ram horn. s = +1 (ram's left, +X) or -1. */
 function hornGeo(s: number) {
-  const N = 26;
+  const N = 18;
   const RAD = 6;
   const pts: THREE.Vector3[] = [];
   // spiral centred beside the ear; starts on top of the skull, sweeps back, down under the
@@ -103,7 +103,7 @@ function hornGeo(s: number) {
     const u = i / N;
     curve.getPointAt(u, P);
     let rad = 0.115 * Math.pow(1 - u, 0.8) + 0.012;
-    if (i % 2 === 1 && i < N - 2) rad *= 1.12; // growth ridges
+    if (i % 2 === 1 && i < N - 2) rad *= 1.07; // subtle growth ridges
     if (i === N) rad = 0.004;
     const nrm = frames.normals[i], bin = frames.binormals[i];
     for (let j = 0; j < RAD; j++) {
@@ -150,15 +150,14 @@ function buildLeg(body: THREE.Object3D, name: string, x: number, z: number, fron
   const s = Math.sign(x);
   // woolly shoulder / thigh so the joint never gaps out of the fleece
   const fluff = mesh(
-    lumpy(front ? 0.15 : 0.17, 0, 1, front ? 1.4 : 1.5, front ? 1.1 : 1.2, 0.12, seed),
-    front ? C.wool : C.woolShade,
+    lumpy(front ? 0.15 : 0.17, 0, 1, front ? 1.4 : 1.5, front ? 1.1 : 1.2, 0.05, seed),
+    C.wool,
   );
   fluff.position.set(s * 0.02, front ? -0.06 : -0.08, front ? 0.01 : -0.02);
   hip.add(fluff);
   const upper = mesh(limb(front ? 0.095 : 0.11, 0.068, UPPER + 0.02), C.ramFace);
   hip.add(upper);
   const knee = pivot(name + '_low', 0, -UPPER, 0, hip);
-  knee.add(mesh(new THREE.IcosahedronGeometry(0.062, 0), C.ramFace));
   const lower = mesh(limb(0.062, 0.05, LOWER + 0.01, 5), C.ramFace);
   knee.add(lower);
   const hoof = mesh(new THREE.CylinderGeometry(0.052, 0.072, HOOF, 6).translate(0, -HOOF / 2, 0), C.hoof);
@@ -187,7 +186,7 @@ function buildHead(neck: THREE.Object3D) {
     head.add(n);
   }
   // forehead boss — a hard battering block between the horns
-  const boss = mesh(lumpy(0.13, 0, 1.25, 0.65, 1, 0.08, 7), C.faceDark);
+  const boss = mesh(lumpy(0.13, 0, 1.25, 0.65, 1, 0.03, 7), C.faceDark);
   boss.position.set(0, 0.1, 0.06);
   head.add(boss);
   // glowing rage eyes + furious V brows (big enough to read head-on)
@@ -201,11 +200,6 @@ function buildHead(neck: THREE.Object3D) {
     brow.position.set(s * 0.1, 0.095, 0.22);
     brow.rotation.set(-0.25, s * 0.35, s * 0.5);
     head.add(brow);
-    // ears tucked under the horn curl
-    const ear = mesh(taperBox(0.05, 0.03, 0.14, 0.6, 0.4).rotateY(s * (Math.PI / 2 + 0.3)), C.faceDark);
-    ear.position.set(s * 0.17, -0.04, -0.02);
-    ear.rotation.z = s * -0.35;
-    head.add(ear);
   }
   // mouth interior (visible when the jaw drops)
   const mouth = mesh(new THREE.BoxGeometry(0.13, 0.04, 0.3), C.mouth);
@@ -216,10 +210,6 @@ function buildHead(neck: THREE.Object3D) {
   const jawM = mesh(taperBox(0.2, 0.07, 0.36, 0.7, 0.8, 0.005), C.ramFace);
   jawM.position.set(0, -0.03, 0.18);
   jaw.add(jawM);
-  // scruffy goatee
-  const beard = mesh(lumpy(0.06, 0, 1, 1.6, 1, 0.15, 11), C.woolShade);
-  beard.position.set(0, -0.09, 0.12);
-  jaw.add(beard);
 
   // THE HORNS
   for (const s of [-1, 1]) {
@@ -249,36 +239,24 @@ function build(): THREE.Object3D {
   const body = pivot('body', 0, BODY_Y, 0, root);
 
   // fleece: main barrel, chest, rump and a crop of tufts
-  const barrel = mesh(lumpy(1, 1, 0.42, 0.31, 0.62, 0.07, 1), C.wool);
+  const barrel = mesh(lumpy(1, 1, 0.44, 0.33, 0.64, 0.035, 1), C.wool);
   barrel.position.set(0, 0.05, -0.08);
   body.add(barrel);
-  const chest = mesh(lumpy(0.37, 1, 1.05, 1, 0.9, 0.08, 2), C.wool);
+  const chest = mesh(lumpy(0.37, 1, 1.05, 1, 0.9, 0.035, 2), C.wool);
   chest.position.set(0, 0.09, 0.3);
   body.add(chest);
-  const belly = mesh(lumpy(1, 1, 0.33, 0.18, 0.5, 0.08, 3), C.woolShade);
+  const belly = mesh(lumpy(1, 0, 0.33, 0.18, 0.5, 0.03, 3), C.woolShade);
   belly.position.set(0, -0.12, -0.05);
   body.add(belly);
-  const rump = mesh(lumpy(0.34, 1, 1.05, 0.95, 0.8, 0.08, 4), C.wool);
+  const rump = mesh(lumpy(0.34, 1, 1.05, 0.95, 0.8, 0.035, 4), C.wool);
   rump.position.set(0, 0.06, -0.42);
   body.add(rump);
-  const rand = rng(99);
-  for (let i = 0; i < 16; i++) {
-    const a = rand() * Math.PI * 2;
-    const zz = -0.6 + rand() * 1.05;
-    const r = 0.08 + rand() * 0.05;
-    const tuft = mesh(lumpy(r, 0, 1, 0.7, 1, 0.15, 20 + i), rand() < 0.3 ? C.woolShade : C.wool);
-    const ang = (0.35 + rand() * 0.5) * Math.PI * (i % 2 ? 1 : -1); // flanks, off the spine & belly
-    tuft.position.set(Math.sin(ang) * 0.38, 0.05 + Math.cos(ang) * 0.27, zz);
-    tuft.rotation.set(a, a * 2, 0);
-    body.add(tuft);
-  }
-
   // neck / mane
   const neck = pivot('neck', 0, 0.2, 0.42, body);
-  const mane = mesh(lumpy(0.2, 1, 1, 1.1, 1.2, 0.1, 5), C.wool);
+  const mane = mesh(lumpy(0.2, 1, 1, 1.1, 1.2, 0.04, 5), C.wool);
   mane.position.set(0, 0.04, 0.1);
   neck.add(mane);
-  const throat = mesh(lumpy(0.15, 0, 1, 1.3, 1, 0.1, 6), C.woolShade);
+  const throat = mesh(lumpy(0.15, 0, 1, 1.3, 1, 0.04, 6), C.wool);
   throat.position.set(0, -0.06, 0.18);
   neck.add(throat);
   buildHead(neck);
@@ -290,7 +268,7 @@ function build(): THREE.Object3D {
 
   const tail = pivot('tail', 0, 0.14, -0.7, body);
   tail.rotation.x = -0.5;
-  const tm = mesh(lumpy(0.075, 0, 1, 1.7, 1, 0.15, 40), C.wool);
+  const tm = mesh(lumpy(0.08, 0, 1, 1.6, 1, 0.05, 40), C.wool);
   tm.position.set(0, -0.08, -0.02);
   tail.add(tm);
 

@@ -48,28 +48,47 @@ const HIP_Y = 0.82; // body origin height (hip joints)
 // Local colors (materials still come from mat()).
 const C = {
   skin: PALETTE.skin,
-  skinShade: PALETTE.skinShade,
   hair: PALETTE.hair,
   band: PALETTE.headband,
   shorts: PALETTE.shorts,
-  shortsDark: 0x1a3290,
   shoe: PALETTE.shoe,
   sole: 0x3a3a44,
-  sock: 0xffffff,
-  eye: 0x1a1210,
-  nipple: 0xa0603c,
 };
 
 // ---------------------------------------------------------------- geometry helpers
+// Design rule: few, big, clean chunks. One prism per muscle mass, no small detail pieces.
+
+/**
+ * Tapered prism with a flat face toward +Z: bottom radius rb, top radius rt, height h,
+ * depth squashed by zs. `segs` = number of sides (6 = hexagonal, 8 = rounder).
+ */
+function prism(rb: number, rt: number, h: number, zs = 1, segs = 6): THREE.BufferGeometry {
+  const g = new THREE.CylinderGeometry(rt, rb, h, segs, 1, false, Math.PI / segs);
+  g.scale(1, 1, zs);
+  return g;
+}
+
+/**
+ * Faceted "muscle" solid of revolution with a flat face toward +Z. `pts` = [radius, y] profile
+ * from bottom to top (closed at both ends automatically); depth squashed by zs.
+ */
+function lathe(pts: [number, number][], zs = 1, segs = 6): THREE.BufferGeometry {
+  const v = pts.map(([r, y]) => new THREE.Vector2(r, y));
+  v.unshift(new THREE.Vector2(0, pts[0][1]));
+  v.push(new THREE.Vector2(0, pts[pts.length - 1][1]));
+  const g = new THREE.LatheGeometry(v, segs, Math.PI / segs);
+  g.scale(1, 1, zs);
+  return g;
+}
 
 /** Box whose bottom face is (wb x db) and top face is (wt x dt); height h, centered. */
-function tbox(wb: number, wt: number, h: number, db: number, dt: number, zShiftTop = 0): THREE.BufferGeometry {
+function tbox(wb: number, wt: number, h: number, db: number, dt: number): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(1, h, 1);
   const p = g.attributes.position as THREE.BufferAttribute;
   for (let i = 0; i < p.count; i++) {
     const top = p.getY(i) > 0;
     p.setX(i, p.getX(i) * (top ? wt : wb));
-    p.setZ(i, p.getZ(i) * (top ? dt : db) + (top ? zShiftTop : 0));
+    p.setZ(i, p.getZ(i) * (top ? dt : db));
   }
   g.computeVertexNormals();
   return g;
@@ -90,126 +109,58 @@ function group(name: string, parent: THREE.Object3D, x = 0, y = 0, z = 0): THREE
   return g;
 }
 
-function blob(r: number, sx: number, sy: number, sz: number, color: number, x: number, y: number, z: number, parent: THREE.Object3D) {
-  const m = mesh(new THREE.IcosahedronGeometry(r, 0), color, x, y, z, parent);
-  m.scale.set(sx, sy, sz);
-  return m;
-}
-
 // ---------------------------------------------------------------- build
 
 function buildArm(side: 1 | -1, torso: THREE.Object3D) {
   const s = side === 1 ? 'L' : 'R';
-  const arm = group('arm' + s, torso, 0.43 * side, 0.55, -0.01);
-  // Deltoid cap: a big faceted ball.
-  blob(0.16, 1.05, 0.95, 1.0, C.skin, 0.01 * side, -0.01, 0, arm);
-  // Upper arm.
-  mesh(tbox(0.15, 0.19, 0.3, 0.16, 0.19), C.skin, 0, -0.17, 0, arm);
-  // Biceps (front) and triceps (back) bulges.
-  blob(0.1, 1.0, 1.25, 1.0, C.skin, 0, -0.17, 0.07, arm);
-  blob(0.09, 1.0, 1.3, 0.9, C.skinShade, 0, -0.15, -0.07, arm);
-
-  const fore = group('forearm' + s, arm, 0, -0.32, 0);
-  blob(0.085, 1.0, 1.0, 1.0, C.skin, 0, 0, 0, fore); // elbow
-  // Popeye forearm: fat near elbow, thin at wrist.
-  mesh(tbox(0.1, 0.17, 0.27, 0.1, 0.16), C.skin, 0, -0.14, 0.01, fore);
-  const hand = group('hand' + s, fore, 0, -0.32, 0.01);
-  // Fist + thumb.
-  mesh(new THREE.BoxGeometry(0.13, 0.13, 0.14), C.skin, 0, 0, 0, hand);
-  mesh(new THREE.BoxGeometry(0.04, 0.06, 0.07), C.skinShade, -0.07 * side, 0.01, 0.03, hand);
-  // Wrist band (red, matches headband).
-  mesh(new THREE.BoxGeometry(0.12, 0.05, 0.12), C.band, 0, 0.08, 0, hand);
+  const arm = group('arm' + s, torso, 0.42 * side, 0.55, -0.01);
+  // Upper arm: one big chunk, fattest at the shoulder (doubles as the deltoid), overlaps the elbow.
+  mesh(lathe([[0.085, -0.36], [0.155, -0.17], [0.165, -0.02], [0.11, 0.08]], 0.95), C.skin, 0.01 * side, 0, 0, arm);
+  const fore = group('forearm' + s, arm, 0, -0.33, 0);
+  // Forearm: fat near the elbow, thin at the wrist; starts above the elbow so bends don't gap.
+  mesh(lathe([[0.065, -0.29], [0.115, -0.08], [0.085, 0.05]]), C.skin, 0, 0, 0, fore);
+  const hand = group('hand' + s, fore, 0, -0.33, 0.01);
+  mesh(new THREE.BoxGeometry(0.15, 0.14, 0.15), C.skin, 0, 0, 0, hand); // fist
 }
 
 function buildLeg(side: 1 | -1, hips: THREE.Object3D) {
   const s = side === 1 ? 'L' : 'R';
-  const leg = group('leg' + s, hips, 0.12 * side, 0, 0);
-  // Shorts leg (a bit flared).
-  mesh(tbox(0.2, 0.19, 0.17, 0.21, 0.2), C.shorts, 0.005 * side, -0.07, 0, leg);
-  mesh(tbox(0.205, 0.205, 0.025, 0.215, 0.215), C.shortsDark, 0.005 * side, -0.16, 0, leg);
-  // Skinny thigh.
-  mesh(tbox(0.09, 0.13, 0.26, 0.1, 0.14), C.skin, 0, -0.27, 0.005, leg);
+  const leg = group('leg' + s, hips, 0.115 * side, 0, 0);
+  mesh(prism(0.115, 0.11, 0.18, 1), C.shorts, 0.005 * side, -0.07, 0, leg); // shorts leg
+  mesh(prism(0.05, 0.07, 0.3, 1, 5), C.skin, 0, -0.27, 0, leg); // skinny thigh
   const shin = group('shin' + s, leg, 0, -0.4, 0);
-  blob(0.06, 1, 1, 1, C.skin, 0, 0, 0.01, shin); // knee
-  mesh(tbox(0.07, 0.1, 0.3, 0.08, 0.11), C.skin, 0, -0.17, 0, shin);
-  // Sock.
-  mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.06, 6), C.sock, 0, -0.32, 0, shin);
+  mesh(prism(0.04, 0.052, 0.4, 1, 5), C.skin, 0, -0.16, 0, shin); // shin, overlaps knee
   const foot = group('foot' + s, shin, 0, -0.36, 0);
-  // Chunky sneaker.
-  mesh(tbox(0.15, 0.13, 0.09, 0.3, 0.24, 0.0), C.shoe, 0, 0.0, 0.05, foot);
+  // Chunky sneaker + dark sole.
+  mesh(tbox(0.15, 0.13, 0.09, 0.3, 0.24), C.shoe, 0, 0.0, 0.05, foot);
   mesh(new THREE.BoxGeometry(0.155, 0.03, 0.31), C.sole, 0, -0.045, 0.05, foot);
-  mesh(new THREE.BoxGeometry(0.155, 0.025, 0.06), C.band, 0, 0.0, -0.075, foot); // heel stripe
 }
 
 function buildHead(torso: THREE.Object3D) {
-  // Neck (thick, merges into traps).
-  mesh(new THREE.CylinderGeometry(0.085, 0.11, 0.14, 6), C.skin, 0, 0.62, 0.0, torso);
-  const head = group('head', torso, 0, 0.66, 0.01);
-  // Skull: small, with a big square jaw (wider at the bottom).
-  mesh(tbox(0.21, 0.19, 0.12, 0.21, 0.21), C.skin, 0, 0.05, 0.0, head); // jaw
-  mesh(tbox(0.19, 0.18, 0.12, 0.21, 0.2), C.skin, 0, 0.17, -0.005, head); // cranium
-  // Chin.
-  mesh(new THREE.BoxGeometry(0.1, 0.05, 0.04), C.skin, 0, 0.02, 0.1, head);
-  // Nose.
-  mesh(tbox(0.05, 0.03, 0.06, 0.06, 0.02, 0), C.skinShade, 0, 0.12, 0.115, head);
-  // Eyes (angry little slits) + brow.
-  mesh(new THREE.BoxGeometry(0.04, 0.02, 0.02), C.eye, 0.045, 0.155, 0.105, head);
-  mesh(new THREE.BoxGeometry(0.04, 0.02, 0.02), C.eye, -0.045, 0.155, 0.105, head);
-  mesh(new THREE.BoxGeometry(0.16, 0.025, 0.03), C.skinShade, 0, 0.18, 0.105, head);
-  // Big mustache.
-  const stache = mesh(tbox(0.15, 0.1, 0.04, 0.03, 0.03), C.hair, 0, 0.085, 0.115, head);
-  stache.rotation.x = -0.15;
-  mesh(new THREE.BoxGeometry(0.025, 0.06, 0.03), C.hair, 0.07, 0.06, 0.112, head);
-  mesh(new THREE.BoxGeometry(0.025, 0.06, 0.03), C.hair, -0.07, 0.06, 0.112, head);
-  // Ears.
-  mesh(new THREE.BoxGeometry(0.03, 0.06, 0.05), C.skinShade, 0.1, 0.13, -0.01, head);
-  mesh(new THREE.BoxGeometry(0.03, 0.06, 0.05), C.skinShade, -0.1, 0.13, -0.01, head);
-  // Flat-top haircut.
-  mesh(new THREE.BoxGeometry(0.2, 0.08, 0.215), C.hair, 0, 0.26, -0.01, head);
-  mesh(new THREE.BoxGeometry(0.2, 0.08, 0.04), C.hair, 0, 0.19, -0.105, head); // back of head
-  // Headband.
-  mesh(new THREE.BoxGeometry(0.205, 0.045, 0.225), C.band, 0, 0.215, -0.005, head);
-  const tail = group('bandTail', head, 0, 0.215, -0.115);
-  const t1 = mesh(new THREE.BoxGeometry(0.035, 0.03, 0.16), C.band, 0.025, -0.02, -0.07, tail);
-  t1.rotation.set(0.5, 0.25, 0);
-  const t2 = mesh(new THREE.BoxGeometry(0.035, 0.03, 0.13), C.band, -0.025, -0.03, -0.055, tail);
-  t2.rotation.set(0.7, -0.3, 0);
-  mesh(new THREE.BoxGeometry(0.05, 0.05, 0.03), C.band, 0, 0, 0, tail); // knot
+  const head = group('head', torso, 0, 0.64, 0.01);
+  // One tapered block: wide jaw at the bottom, narrower skull on top.
+  mesh(prism(0.135, 0.115, 0.27, 0.95), C.skin, 0, 0.12, 0, head);
+  // Flat-top + headband: two plain slabs on top.
+  mesh(prism(0.12, 0.12, 0.07, 0.97), C.hair, 0, 0.285, -0.005, head);
+  mesh(prism(0.125, 0.125, 0.05, 0.97), C.band, 0, 0.225, -0.005, head);
+  // Brow strip (reads as angry eyes) and a big mustache.
+  mesh(new THREE.BoxGeometry(0.15, 0.025, 0.02), C.hair, 0, 0.165, 0.11, head);
+  mesh(tbox(0.17, 0.11, 0.045, 0.035, 0.035), C.hair, 0, 0.085, 0.115, head);
+  // Headband tails.
+  const tail = group('bandTail', head, 0, 0.22, -0.11);
+  const t1 = mesh(new THREE.BoxGeometry(0.06, 0.035, 0.18), C.band, 0, -0.03, -0.08, tail);
+  t1.rotation.x = 0.55;
 }
 
 function buildTorso(hips: THREE.Object3D) {
   const torso = group('torso', hips, 0, 0.1, 0);
-  // Narrow waist / abdomen.
-  mesh(tbox(0.3, 0.38, 0.2, 0.22, 0.25), C.skin, 0, 0.1, 0.0, torso);
-  // Six-pack.
-  for (let r = 0; r < 3; r++)
-    for (const sx of [-1, 1]) {
-      const a = mesh(new THREE.BoxGeometry(0.075, 0.055, 0.04), C.skin, sx * 0.045, 0.05 + r * 0.065, 0.115 + r * 0.01, torso);
-      a.rotation.y = sx * 0.15;
-    }
-
+  // Tiny waist.
+  mesh(prism(0.17, 0.22, 0.24, 0.8), C.skin, 0, 0.1, 0, torso);
   const chest = group('chest', torso, 0, 0.2, 0);
-  // Big V-shaped ribcage/lats.
-  mesh(tbox(0.42, 0.8, 0.36, 0.3, 0.42), C.skin, 0, 0.18, -0.01, chest);
-  // Lats flare (back), give the V from behind.
-  for (const sx of [-1, 1]) {
-    const lat = mesh(tbox(0.06, 0.16, 0.3, 0.2, 0.26), C.skin, sx * 0.29, 0.16, -0.04, chest);
-    lat.rotation.z = sx * 0.28;
-    // Shoulder blades.
-    const sb = mesh(new THREE.BoxGeometry(0.2, 0.18, 0.06), C.skin, sx * 0.13, 0.24, -0.19, chest);
-    sb.rotation.set(-0.1, sx * -0.3, sx * 0.15);
-  }
-  // Spine groove (darker strip).
-  mesh(new THREE.BoxGeometry(0.035, 0.3, 0.02), C.skinShade, 0, 0.15, -0.205, chest);
-  // Pecs: two slabs, bottom edge pushed out.
-  for (const sx of [-1, 1]) {
-    const pec = mesh(tbox(0.27, 0.23, 0.18, 0.13, 0.07), C.skin, sx * 0.14, 0.24, 0.185, chest);
-    pec.rotation.set(0.1, sx * 0.18, 0);
-    mesh(new THREE.BoxGeometry(0.025, 0.025, 0.01), C.nipple, sx * 0.15, 0.21, 0.255, chest);
-  }
-  // Traps: a slope from shoulders to neck.
-  mesh(tbox(0.62, 0.22, 0.12, 0.3, 0.18), C.skin, 0, 0.42, -0.03, chest);
-
+  // The V: one big flat-fronted wedge, flaring from the waist to the shoulders.
+  mesh(lathe([[0.22, -0.04], [0.5, 0.3], [0.4, 0.42]], 0.6), C.skin, 0, 0, -0.01, chest);
+  // Traps: a low slab sloping up into the head (no visible neck).
+  mesh(prism(0.3, 0.12, 0.16, 0.6), C.skin, 0, 0.44, -0.02, chest);
   buildHead(torso);
   buildArm(1, torso);
   buildArm(-1, torso);
@@ -220,9 +171,7 @@ function build(): THREE.Object3D {
   root.name = 'player';
   const body = group('body', root, 0, HIP_Y, 0);
   const hips = group('hips', body);
-  // Shorts / pelvis.
-  mesh(tbox(0.36, 0.33, 0.2, 0.25, 0.23), C.shorts, 0, 0.0, 0, hips);
-  mesh(tbox(0.335, 0.33, 0.04, 0.235, 0.23), C.shortsDark, 0, 0.11, 0, hips); // waistband
+  mesh(prism(0.2, 0.19, 0.22, 0.68), C.shorts, 0, 0.0, 0, hips); // shorts
   buildTorso(hips);
   buildLeg(1, hips);
   buildLeg(-1, hips);

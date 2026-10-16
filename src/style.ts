@@ -26,9 +26,9 @@ export const PALETTE = {
   grassLight: 0x9cc75a,
   grassDark: 0x6f9f40,
   rimRock: 0xc2b6a6,
-  cliffA: 0xa08f80,
-  cliffB: 0x86776d,
-  cliffC: 0xb19e8a,
+  cliffA: 0xa89c92,
+  cliffB: 0x8e8279,
+  cliffC: 0xbcae9e,
   scree: 0xa39686,
   moss: 0x67913f,
   pine: 0x2f6e4c,
@@ -41,12 +41,12 @@ export const PALETTE = {
   mountainRockFar: 0x8f98bd,
   skyZenith: 0x2a63c4,
   skyMid: 0x86b6ec,
-  skyHorizonCool: 0xf3d0c8,
+  skyHorizonCool: 0xcfdcf0,
   sunDisk: 0xfff6dc,
 } as const;
 
 /** Direction *towards* the sun (normalized). Low warm evening sun; the world's sky disk matches it. */
-export const SUN_DIR = new THREE.Vector3(0.78, 0.36, 0.5).normalize();
+export const SUN_DIR = new THREE.Vector3(-0.78, 0.45, -0.5).normalize();
 
 const cache = new Map<string, THREE.Material>();
 
