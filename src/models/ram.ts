@@ -194,7 +194,7 @@ function buildHead(neck: THREE.Object3D) {
   for (const s of [-1, 1]) {
     const eye = mesh(new THREE.OctahedronGeometry(0.068, 0).scale(0.9, 0.65, 1), C.eyeRage, { emissive: C.eyeRage });
     eye.name = s > 0 ? 'eyeL' : 'eyeR';
-    eye.position.set(s * 0.135, 0.03, 0.2);
+    eye.position.set(s * 0.135, 0.03, 0.215);
     eye.rotation.y = s * 0.5;
     head.add(eye);
     const brow = mesh(new THREE.BoxGeometry(0.15, 0.045, 0.09), C.brow);
@@ -443,7 +443,7 @@ function skid(root: THREE.Object3D, t: number) {
   const p = reset(root);
   const k = ease(t / 0.15);
   const shake = sin(t * 90) * (1 - clamp01(t / 0.5)) * 0.04;
-  const pitch = 0.32 * k + shake;
+  const pitch = 0.42 * k + shake;
   rot(p.body, pitch, 0, shake);
   // front legs jammed forward stiff, butt flipping up
   const fa = -0.85 * k;
