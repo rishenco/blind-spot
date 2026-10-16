@@ -254,9 +254,9 @@ export class Game {
   }
 
   private resetFight(): void {
-    this.player.reset(0, -5, 0);
+    this.player.reset(0, -2.5, 0);
     this.player.root.scale.set(1, 1, 1);
-    this.ram.reset(0, 4, Math.PI);
+    this.ram.reset(0, 3, Math.PI);
     this.ram.root.scale.set(1, 1, 1);
     this.cam.yaw = 0;
     this.cam.pitch = 0.33;
