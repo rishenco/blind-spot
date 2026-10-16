@@ -37,7 +37,7 @@ export const PALETTE = {
   valleyGrass: 0x86b852,
   valleyDark: 0x5e9443,
   lake: 0x5fb0de,
-  mountainRock: 0x7a7488,
+  mountainRock: 0x6c6888,
   mountainRockFar: 0x8f98bd,
   skyZenith: 0x2a63c4,
   skyMid: 0x86b6ec,
@@ -68,7 +68,7 @@ export function mat(color: number, opts: { emissive?: number; key?: string } = {
 
 // Default scene lighting: warm low sun + sky/ground fill. Used by the game and the viewer.
 export function setupLights(scene: THREE.Scene): THREE.DirectionalLight {
-  scene.add(new THREE.HemisphereLight(0xc4dcff, 0x7a6450, 1.15));
+  scene.add(new THREE.HemisphereLight(0xc4dcff, 0x8a7460, 1.6));
   const sun = new THREE.DirectionalLight(0xffe2bc, 2.9);
   sun.position.copy(SUN_DIR).multiplyScalar(60);
   sun.castShadow = true;

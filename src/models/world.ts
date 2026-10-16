@@ -85,7 +85,7 @@ const lerp = THREE.MathUtils.lerp;
 /** Average spire radius at height y (y <= 0), before ledges/outcrops. */
 function cliffBase(y: number): number {
   const d = Math.max(0, -y);
-  return 8.6 + 0.05 * d + 0.00007 * d * d;
+  return 8.6 + 0.085 * d + 0.00012 * d * d;
 }
 
 /** Smooth spire surface radius at (angle, y). */
@@ -150,7 +150,7 @@ vec3 rpSkyColor(vec3 d) {
 }
 `;
 
-const HAZE_DENSITY = 0.00042;
+const HAZE_DENSITY = 0.0003;
 const HAZE_START = 180;
 
 function hazed<T extends THREE.Material>(m: T): T {
@@ -389,7 +389,7 @@ function buildSpire(rng: () => number): { mesh: THREE.Mesh; ledgeSpots: LedgeSpo
       // a partial shelf sticking out: same height, larger radius where noise says so
       const out = ring.map((p, j) => {
         const a = CANG[j];
-        const e = Math.max(0, (noise2(Math.cos(a) * 2.2 + seed, Math.sin(a) * 2.2) - 0.42) * 11);
+        const e = Math.max(0, (noise2(Math.cos(a) * 2.2 + seed, Math.sin(a) * 2.2) - 0.55) * 14);
         const r = Math.hypot(p.x, p.z) + e;
         if (e > 2.2 && j % 2 === 0) ledgeSpots.push({ a, y: yy, r: r - e * 0.5, w: e });
         return P(Math.atan2(p.z, p.x), r, yy);
@@ -628,7 +628,7 @@ function buildValley(rng: () => number): THREE.Group {
 function peakRings(rng: () => number, cx: number, cz: number, baseY: number, h: number, rad: number): THREE.Vector3[][] {
   const S = 9 + Math.floor(rng() * 4);
   const K = 7;
-  const apex = new THREE.Vector3(cx + (rng() - 0.5) * rad * 0.1, baseY + h, cz + (rng() - 0.5) * rad * 0.1);
+  const apex = new THREE.Vector3(cx + (rng() - 0.5) * rad * 0.35, baseY + h, cz + (rng() - 0.5) * rad * 0.35);
   const rings: THREE.Vector3[][] = [Array.from({ length: S }, () => apex)];
   const ridge = Array.from({ length: S }, () => 0.55 + rng() * 0.75);
   const a0 = rng() * Math.PI * 2;
@@ -638,7 +638,7 @@ function peakRings(rng: () => number, cx: number, cz: number, baseY: number, h: 
     const ring: THREE.Vector3[] = [];
     for (let j = 0; j < S; j++) {
       const a = a0 + (j / S) * Math.PI * 2 + (rng() - 0.5) * 0.35;
-      const rr = rad * Math.pow(f, 0.9) * lerp(1, ridge[j], 0.85) * (0.85 + rng() * 0.3);
+      const rr = rad * Math.pow(f, 0.9) * lerp(1, ridge[j], 0.85) * (0.7 + rng() * 0.6);
       ring.push(new THREE.Vector3(cx + Math.cos(a) * rr, y, cz + Math.sin(a) * rr));
     }
     rings.push(ring);
@@ -651,9 +651,9 @@ function buildMountains(rng: () => number): THREE.Mesh {
   const mrng = mulberry32(123);
   const ringsDef = [
     // dist range, count, summit range (y), rock color, snowline
-    { d: [560, 820], n: 14, top: [-95, 30], rock: PALETTE.mountainRock, snow: -40 },
-    { d: [1000, 1450], n: 18, top: [0, 220], rock: PALETTE.mountainRock, snow: 40 },
-    { d: [1800, 2700], n: 22, top: [180, 600], rock: PALETTE.mountainRockFar, snow: 160 },
+    { d: [620, 950], n: 14, top: [-100, 10], rock: PALETTE.mountainRock, snow: -40 },
+    { d: [1150, 1650], n: 18, top: [0, 200], rock: PALETTE.mountainRock, snow: 40 },
+    { d: [2000, 2900], n: 22, top: [200, 650], rock: PALETTE.mountainRockFar, snow: 160 },
   ];
   const baseY = VALLEY_Y - 40;
   for (const R of ringsDef) {
@@ -663,9 +663,9 @@ function buildMountains(rng: () => number): THREE.Mesh {
       const d = lerp(R.d[0], R.d[1], rng());
       const top = lerp(R.top[0], R.top[1], Math.pow(rng(), 0.8));
       const h = top - baseY;
-      const rad = h * (1.0 + rng() * 0.6);
+      const rad = h * (0.9 + Math.pow(rng(), 2) * 1.2);
       const cx = Math.cos(a) * d, cz = Math.sin(a) * d;
-      const snowY = R.snow + (top - R.snow) * 0.15;
+      const snowY = Math.max(R.snow, top - h * 0.3);
       const shade: Shade = (c, n) => {
         const sn = snowY + (noise2(c.x * 0.02, c.z * 0.02) - 0.5) * h * 0.25;
         if (c.y > sn && n.y > 0.28) return jitter(PALETTE.snow, mrng, 0.03);
@@ -693,7 +693,7 @@ function buildMountains(rng: () => number): THREE.Mesh {
 // clouds (instanced puffs) — the cloud sea and a few high clouds
 // ---------------------------------------------------------------------------
 const cloudMat = () =>
-  hazed(new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: true, roughness: 1, metalness: 0, emissive: 0x6a6e86 }));
+  hazed(new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: false, roughness: 1, metalness: 0, emissive: 0x6a6e86 }));
 
 interface Puff { x: number; y: number; z: number; sx: number; sy: number; sz: number; ry: number; tint: number }
 
@@ -742,7 +742,7 @@ function buildClouds(rng: () => number): { sea: THREE.Group; high: THREE.Group }
   // rings of clusters from hugging the spire out to the horizon
   let r = cliffBase(CLOUD_Y) + 10;
   while (r < 3600) {
-    const spacing = 14 + r * 0.075;
+    const spacing = r < 420 ? 20 + r * 0.08 : r * 0.13;
     const n = Math.max(6, Math.floor((Math.PI * 2 * r) / spacing));
     const off = rng() * Math.PI * 2;
     for (let i = 0; i < n; i++) {
@@ -750,7 +750,7 @@ function buildClouds(rng: () => number): { sea: THREE.Group; high: THREE.Group }
       const rr = r + (rng() - 0.5) * spacing * 0.6;
       const size = spacing * (0.95 + rng() * 0.5);
       const y = CLOUD_Y + (fbm(Math.cos(a) * rr * 0.004 + 9, Math.sin(a) * rr * 0.004, 2) - 0.5) * 22;
-      cluster(rr < 700 ? near : far, rng, Math.cos(a) * rr, y, Math.sin(a) * rr, size, rr < 700 ? 5 : 3);
+      cluster(rr < 420 ? near : far, rng, Math.cos(a) * rr, y, Math.sin(a) * rr, size, rr < 420 ? 5 : 2);
     }
     r += spacing * 0.85;
   }
@@ -758,7 +758,7 @@ function buildClouds(rng: () => number): { sea: THREE.Group; high: THREE.Group }
   const sea = new THREE.Group();
   sea.name = 'cloudSea';
   sea.add(puffMesh(near, 1, 'cloudsNear', material));
-  sea.add(puffMesh(far, 0, 'cloudsFar', material));
+  sea.add(puffMesh(far, 1, 'cloudsFar', material));
 
   // a soft cloud "floor" just under the puffs so the sea never shows holes
   const F = new Faces();
@@ -767,11 +767,11 @@ function buildClouds(rng: () => number): { sea: THREE.Group; high: THREE.Group }
   const N = 72;
   const rings = radii.map((rr) => Array.from({ length: N }, (_, j) => {
     const a = (j / N) * Math.PI * 2 + (fr() - 0.5) * 0.03;
-    return new THREE.Vector3(Math.cos(a) * rr, CLOUD_Y - 9 + (fr() - 0.5) * 6, Math.sin(a) * rr);
+    return new THREE.Vector3(Math.cos(a) * rr, CLOUD_Y - 8, Math.sin(a) * rr);
   }));
   // ring order is center→out, so faces point up (top of the sea); render both sides (seen from below too)
   F.rings(rings, () => jitter(0xf2f2fa, fr, 0.03));
-  const floor = new THREE.Mesh(F.build(), vcMat('cloudFloor', { side: THREE.DoubleSide, emissive: 0x6a6e86, roughness: 1 }));
+  const floor = new THREE.Mesh(F.build(), vcMat('cloudFloor', { side: THREE.DoubleSide, emissive: 0x9a9eb4, roughness: 1 }));
   floor.name = 'cloudFloor';
   noShadowCast(floor);
   sea.add(floor);
