@@ -21,7 +21,7 @@ class CameraRig {
 
   follow(dt: number, game: Game, cam: THREE.PerspectiveCamera): void {
     const input = game.input;
-    if (input.locked) {
+    if (!game.paused) {
       this.yaw -= input.mouseDX * 0.0025;
       this.pitch = THREE.MathUtils.clamp(this.pitch + input.mouseDY * 0.0022, -0.15, 1.15);
     }
@@ -167,7 +167,7 @@ export class Game {
   private readonly sun: THREE.DirectionalLight;
   phase: Phase = 'title';
   private phaseTime = 0;
-  private paused = false;
+  paused = false;
   private timeScale = 1;
   private slowmoLeft = 0;
   private hitstopLeft = 0;

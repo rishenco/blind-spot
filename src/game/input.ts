@@ -27,8 +27,8 @@ export class Input {
       this.onGesture?.();
     });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    // Deltas are tracked even without pointer lock, so the camera still works where lock is refused.
     addEventListener('mousemove', (e) => {
-      if (!this.locked) return;
       this.mouseDX += e.movementX;
       this.mouseDY += e.movementY;
     });

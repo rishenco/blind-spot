@@ -28,8 +28,8 @@ const KEYS = `
 <div class="keys">
   <div class="key"><span class="cap">W</span><span class="cap">A</span><span class="cap">S</span><span class="cap">D</span></div>
   <div class="key"><span class="cap">SPACE</span> DODGE</div>
-  <div class="key"><span class="cap">🖱 L</span> KICK</div>
-  <div class="key"><span class="cap">F</span> 💪</div>
+  <div class="key"><span class="cap">CLICK</span> KICK</div>
+  <div class="key"><span class="cap">F</span> FLEX</div>
 </div>`;
 
 export class Hud {
